@@ -1,0 +1,16 @@
+use std.runtime;
+use std.types.string.str;
+
+pub val VERSION: str = "0.0.0";
+
+fwd quic.packet.packet;
+fwd quic.crypto.keys;
+fwd quic.recovery.recovery;
+fwd quic.congestion.controller;
+fwd quic.stream.stream;
+fwd quic.transport;
+
+test "quic: version is present" {
+    if (VERSION[0] == 0) { ret 1; }
+    ret 0;
+}

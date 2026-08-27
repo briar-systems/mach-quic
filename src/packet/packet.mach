@@ -1,0 +1,38 @@
+use std.types.size.usize;
+
+pub val PACKET_INITIAL: u8 = 1;
+pub val PACKET_ZERO_RTT: u8 = 2;
+pub val PACKET_HANDSHAKE: u8 = 3;
+pub val PACKET_RETRY: u8 = 4;
+pub val PACKET_ONE_RTT: u8 = 5;
+
+pub val SPACE_INITIAL: u8 = 1;
+pub val SPACE_HANDSHAKE: u8 = 2;
+pub val SPACE_APPLICATION: u8 = 3;
+
+pub rec ConnectionId {
+    data: *u8;
+    len: usize;
+}
+
+pub rec Header {
+    kind: u8;
+    version: u32;
+    destination: ConnectionId;
+    source: ConnectionId;
+    packet_number: u64;
+    packet_number_len: u8;
+}
+
+pub fun number_space(kind: u8) u8 {
+    if (kind == PACKET_INITIAL) { ret SPACE_INITIAL; }
+    if (kind == PACKET_HANDSHAKE) { ret SPACE_HANDSHAKE; }
+    ret SPACE_APPLICATION;
+}
+
+test "quic.packet.packet: packet types map to number spaces" {
+    if (number_space(PACKET_INITIAL) != SPACE_INITIAL) { ret 1; }
+    if (number_space(PACKET_HANDSHAKE) != SPACE_HANDSHAKE) { ret 1; }
+    if (number_space(PACKET_ONE_RTT) != SPACE_APPLICATION) { ret 1; }
+    ret 0;
+}

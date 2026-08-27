@@ -1,0 +1,60 @@
+use quic.packet.packet;
+use quic.recovery.recovery;
+use congestion: quic.congestion.controller;
+
+use std.types.bool.bool;
+use std.types.size.usize;
+use std.types.string.str;
+
+pub val ROLE_CLIENT: u8 = 1;
+pub val ROLE_SERVER: u8 = 2;
+
+pub val CONNECTION_NEW: u8 = 1;
+pub val CONNECTION_HANDSHAKING: u8 = 2;
+pub val CONNECTION_ACTIVE: u8 = 3;
+pub val CONNECTION_DRAINING: u8 = 4;
+pub val CONNECTION_CLOSED: u8 = 5;
+
+pub rec DatagramResult {
+    status: u8;
+    count: usize;
+    error: str;
+}
+
+pub def RecvFun: fun(ptr, *u8, usize, u64) DatagramResult;
+pub def SendFun: fun(ptr, *u8, usize, u64) DatagramResult;
+pub def CompleteFun: fun(ptr, u64) DatagramResult;
+pub def CancelFun: fun(ptr, u64) bool;
+
+pub rec DatagramTransport {
+    ctx: ptr;
+    f_recv: RecvFun;
+    f_send: SendFun;
+    f_complete: CompleteFun;
+    f_cancel: CancelFun;
+}
+
+pub rec Config {
+    role: u8;
+    max_idle_timeout_ns: u64;
+    max_udp_payload: usize;
+    initial_max_data: u64;
+    initial_max_stream_data: u64;
+    initial_max_streams_bidi: u64;
+    initial_max_streams_uni: u64;
+}
+
+pub rec Connection {
+    state: u8;
+    local_id: packet.ConnectionId;
+    peer_id: packet.ConnectionId;
+    recovery_state: recovery.Recovery;
+    congestion_state: congestion.State;
+}
+
+pub fun init() Connection {
+    var c: Connection;
+    c.state = CONNECTION_NEW;
+    c.recovery_state = recovery.init();
+    ret c;
+}

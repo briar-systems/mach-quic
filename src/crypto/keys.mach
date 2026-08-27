@@ -1,0 +1,27 @@
+use std.types.bool.bool;
+use std.types.size.usize;
+use std.types.string.str;
+
+pub val LEVEL_INITIAL: u8 = 1;
+pub val LEVEL_EARLY: u8 = 2;
+pub val LEVEL_HANDSHAKE: u8 = 3;
+pub val LEVEL_APPLICATION: u8 = 4;
+
+pub rec ProtectResult {
+    ok: bool;
+    count: usize;
+    error: str;
+}
+
+pub def SealFun: fun(ptr, u8, u64, *u8, usize, *u8, usize, *u8, usize) ProtectResult;
+pub def OpenFun: fun(ptr, u8, u64, *u8, usize, *u8, usize, *u8, usize) ProtectResult;
+pub def HeaderMaskFun: fun(ptr, u8, *u8, usize, *u8) bool;
+pub def DiscardFun: fun(ptr, u8) bool;
+
+pub rec Provider {
+    ctx: ptr;
+    f_seal: SealFun;
+    f_open: OpenFun;
+    f_header_mask: HeaderMaskFun;
+    f_discard: DiscardFun;
+}

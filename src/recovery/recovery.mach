@@ -1,0 +1,36 @@
+use std.types.bool.bool;
+use std.types.size.usize;
+
+pub rec Rtt {
+    latest_ns: u64;
+    minimum_ns: u64;
+    smoothed_ns: u64;
+    variance_ns: u64;
+}
+
+pub rec SentPacket {
+    number: u64;
+    sent_at_ns: u64;
+    bytes: usize;
+    ack_eliciting: bool;
+    in_flight: bool;
+}
+
+pub rec Recovery {
+    largest_acked: u64;
+    loss_time_ns: u64;
+    probe_time_ns: u64;
+    probe_count: u32;
+    rtt: Rtt;
+}
+
+pub fun init() Recovery {
+    var r: Recovery;
+    r.rtt.minimum_ns = -1::u64;
+    ret r;
+}
+
+test "quic.recovery.recovery: minimum RTT begins unset" {
+    if (init().rtt.minimum_ns != -1::u64) { ret 1; }
+    ret 0;
+}

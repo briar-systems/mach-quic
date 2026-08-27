@@ -1,0 +1,31 @@
+use std.types.bool.bool;
+
+pub val STREAM_OPEN: u8 = 1;
+pub val STREAM_SEND_CLOSED: u8 = 2;
+pub val STREAM_RECV_CLOSED: u8 = 3;
+pub val STREAM_CLOSED: u8 = 4;
+pub val STREAM_RESET: u8 = 5;
+
+pub rec Stream {
+    id: u64;
+    state: u8;
+    send_offset: u64;
+    recv_offset: u64;
+    send_limit: u64;
+    recv_limit: u64;
+}
+
+pub fun initiated_by_server(id: u64) bool {
+    ret (id & 1) != 0;
+}
+
+pub fun unidirectional(id: u64) bool {
+    ret (id & 2) != 0;
+}
+
+test "quic.stream.stream: stream id bits expose ownership and direction" {
+    if (initiated_by_server(0)) { ret 1; }
+    if (!initiated_by_server(1)) { ret 1; }
+    if (!unidirectional(2)) { ret 1; }
+    ret 0;
+}

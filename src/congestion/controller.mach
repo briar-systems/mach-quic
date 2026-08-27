@@ -1,0 +1,25 @@
+pub val ALGORITHM_NEW_RENO: u8 = 1;
+pub val ALGORITHM_CUBIC: u8 = 2;
+
+pub rec State {
+    algorithm: u8;
+    congestion_window: u64;
+    slow_start_threshold: u64;
+    bytes_in_flight: u64;
+    recovery_start_ns: u64;
+}
+
+pub fun allowance(c: *State) u64 {
+    if (c.bytes_in_flight >= c.congestion_window) { ret 0; }
+    ret c.congestion_window - c.bytes_in_flight;
+}
+
+test "quic.congestion.controller: allowance is bounded by the window" {
+    var c: State;
+    c.congestion_window = 12000;
+    c.bytes_in_flight = 3000;
+    if (allowance(?c) != 9000) { ret 1; }
+    c.bytes_in_flight = 12000;
+    if (allowance(?c) != 0) { ret 1; }
+    ret 0;
+}
