@@ -25,7 +25,7 @@ The full production roadmap and validation requirements are tracked in Hedge.
 
 ## Development
 
-Dependencies use local paths while the repositories are being developed together.
+Dependencies use pinned Git tags.
 
 ```sh
 mach dep pull .
@@ -33,6 +33,4 @@ mach build .
 mach test .
 ```
 
-Build products are written to `../.mach-out/quic` so generated files stay outside
-this repository.
-
+Build products are written to Mach's default `out/` directory.
