@@ -734,7 +734,8 @@ pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: b
     if ((stream.reset_pending || (probe && stream.reset_inflight > 0 && !stream.reset_acked)) &&
         stream.reset_inflight < 255) {
         kind = SEND_RESET;
-    } or ((stream.stop_pending || (probe && stream.stop_inflight > 0 && !stream.stop_acked)) &&
+    } or (!stream.reset_received &&
+        (stream.stop_pending || (probe && stream.stop_inflight > 0 && !stream.stop_acked)) &&
         stream.stop_inflight < 255) {
         kind = SEND_STOP;
     } or (!stream.send_cancelled && stream.can_send && maximum_bytes > 0) {
@@ -940,7 +941,7 @@ pub fun on_terminal(manager: *Manager, value: AttemptToken, terminal: u8) Operat
         if (terminal == TERMINAL_ACKED) {
             stream.stop_acked = true;
             stream.stop_pending = false;
-        } or (!manager.closing && !stream.stop_acked && stream.stop_inflight == 0) {
+        } or (!manager.closing && !stream.reset_received && !stream.stop_acked && stream.stop_inflight == 0) {
             stream.stop_pending = true;
         }
     }
@@ -1137,6 +1138,7 @@ pub fun receive_reset(manager: *Manager, id: u64, error_code: u64, final_size: u
     stream.receive_highest = final_size;
     if (!stream.reset_received) { stream.receive_error = error_code; }
     stream.reset_received = true;
+    stream.stop_pending = false;
     manager.receive_committed = manager.receive_committed + delta;
     if (stream.receive_cancelled) {
         grant_connection(manager, delta);
@@ -1192,7 +1194,7 @@ pub fun receive_stop(manager: *Manager, id: u64, error_code: u64) ReceiveResult 
     if (!stream.can_send) { ret receive_error(ERROR_DIRECTION); }
     if (!stream.stop_received && !stream.send_closed) {
         stream.stop_received = true;
-        cancel_send_inner(stream, error_code);
+        if (!stream.send_cancelled) { cancel_send_inner(stream, error_code); }
     }
     var result: ReceiveResult;
     result.ok = true;
@@ -1240,8 +1242,10 @@ pub fun read(manager: *Manager, value: Handle, output: *u8, capacity: usize) Rea
     stream.receive_read = stream.receive_read + count::u64;
     if (count > 0) {
         grant_connection(manager, count::u64);
-        stream.receive_limit = minimum(varint.MAX,
-            stream.receive_limit + minimum(count::u64, varint.MAX - stream.receive_limit));
+        if (!stream.final_known) {
+            stream.receive_limit = minimum(varint.MAX,
+                stream.receive_limit + minimum(count::u64, varint.MAX - stream.receive_limit));
+        }
     }
     if (stream.final_known && stream.receive_read == stream.final_size) {
         stream.receive_closed = true;

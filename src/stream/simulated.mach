@@ -202,9 +202,11 @@ test "quic.stream.simulated: reset, stop-sending, and cancellation close both di
 
     val next: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
     if (stream.cancel_receive(?manager, next.handle, 9).status != stream.STATUS_OK ||
-        stream.cancel_send(?manager, next.handle, 10).status != stream.STATUS_OK) { ret 1; }
+        stream.cancel_send(?manager, next.handle, 10).status != stream.STATUS_OK ||
+        !stream.receive_stop(?manager, next.handle.id, 42).ok) { ret 1; }
     var control: stream.Prepared = stream.prepare(?manager, next.handle, 8, false);
-    if (control.kind != stream.SEND_RESET || stream.publish(?manager, control).status != stream.STATUS_OK ||
+    if (control.kind != stream.SEND_RESET || control.application_error != 10 ||
+        stream.publish(?manager, control).status != stream.STATUS_OK ||
         stream.on_terminal(?manager, control.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
     control = stream.prepare(?manager, next.handle, 8, false);
     if (control.kind != stream.SEND_STOP || stream.publish(?manager, control).status != stream.STATUS_OK ||
