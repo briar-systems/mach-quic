@@ -47,11 +47,11 @@ output. Protocol fields accept the non-minimal varint encodings allowed by RFC
 
 HTTP/3 will consume QUIC streams and the version-neutral message contracts from
 `mach-http`. It does not belong in the QUIC transport layer. QPACK and HTTP/3 frame
-processing will be added with the HTTP/3 engine once the transport is implemented.
+processing will be added with the HTTP/3 engine once the connection core is implemented.
 
-The remaining connection, protection, and transport engine work is tracked
-separately from these completed wire, recovery, congestion, path, stream, and
-datagram primitives.
+The remaining handshake, connection-core, and packet-protection work is tracked
+separately from the completed wire, recovery, congestion, path, stream, datagram,
+and public driver layers.
 
 ## Recovery contracts
 
@@ -265,6 +265,65 @@ payloads until their owners release or cancel them. The DATAGRAM form without a
 Length field consumes the remainder of a QUIC packet and must therefore be
 selected only for the final frame. The length-bearing form can be composed with
 later frames.
+
+## Connection driver contracts
+
+`transport.Driver` is the version-neutral client and server boundary. HTTP/3 can
+open, accept, read, write, finish, cancel, inspect, and release streams through
+driver-owned public handles. It can send and receive QUIC DATAGRAM values and
+inspect connection state without importing packet, crypto, recovery, congestion,
+path, or stream implementation modules. The future connection core plugs into the
+serialized `Protocol` callback boundary behind this API.
+
+The driver, its stream and DATAGRAM managers, protocol context, cancellation
+scope, output slots, and every buffer referenced by an active output token have
+fixed caller-owned addresses. They are not moved or reclaimed before
+`finish_close` succeeds. The driver allocates nothing. Every public handle and
+generated-datagram token carries a source, index, and generation. Capacity
+exhaustion is reported before the protocol generator runs, and invalid, stale,
+early, oversized, or backward-time operations publish no ownership change.
+The caller assigns a nonzero source unique among simultaneously live drivers.
+
+Incoming UDP payloads are borrowed only for the synchronous `receive_datagram`
+callback. `receive_native` maps a completed `std.net.async.types.Packet` into the
+same contract, including destination-address and interface metadata. Stream writes
+and application DATAGRAM sends copy their inputs before returning. Stream reads
+copy into application storage. Received application DATAGRAM views remain borrowed
+until their exact `DatagramToken` is released.
+
+`generate` writes one protected QUIC datagram into caller storage and transfers
+that buffer to its generation-tagged token. The caller may submit it with any
+descendant of the connection cancellation scope through `submit_native`, use
+another UDP adapter, or cancel it before submission. Exactly one successful
+`complete_send`, `complete_native`, or `cancel_send` returns buffer ownership and
+settles the protocol core's opaque recovery owner. UDP success is atomic and must
+report the full datagram length. Failures, cancellation, and timeout report zero
+bytes. Duplicate and foreign completions are stale and cannot settle a reused
+slot. Native completion routing additionally verifies the mach-std runtime token,
+so a delayed completion cannot target a later generation.
+
+Timers are absolute monotonic deadlines carrying the driver source and protocol
+generation. `on_timeout` revalidates both the deadline and generation before
+advancing driver time. Early and obsolete observations do not affect later work.
+Protocol callbacks are invoked under the connection lock and cannot reenter the
+same driver. They must be transactional on non-OK returns. Successful generation
+owns exactly one opaque send owner until its terminal callback.
+
+The connection cancellation scope may be a child of a process or listener scope.
+Cancellation and deadline propagation begin abortive close under the same lock as
+input, output completion, timers, and application operations. Graceful close stops
+new application work while continuing protocol input, timed work, and final
+generated datagrams. Abortive close stops new generation. In both modes, existing
+output tokens and delivered application DATAGRAM views retain their storage until
+terminal completion or release.
+
+Close is two-phase. `begin_close` borrows its reason only for the protocol callback,
+which must copy anything it needs. `close_ready` preflights protocol ownership and
+`finish_close` is idempotent after readiness. The driver then detaches cancellation
+and invalidates stream and DATAGRAM storage only after all generated datagrams,
+stream attempts, prepared DATAGRAM sends, and delivered DATAGRAM views have drained.
+The initiating close cause and a later abortive terminal cause are preserved
+separately.
 
 ## Development
 
