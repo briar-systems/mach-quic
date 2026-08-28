@@ -38,15 +38,18 @@ output. Protocol fields accept the non-minimal varint encodings allowed by RFC
   and retransmission ownership.
 - `congestion` owns NewReno, CUBIC, send allowance, and pacing independently of
   recovery and stream flow-control policy.
-- `stream` owns per-stream flow control and lifecycle state.
+- `stream.stream` owns stream creation, ordered byte delivery, independent
+  connection and stream flow control, cancellation, and recovery ownership.
+- `stream.datagram` owns optional RFC 9221 send and receive queues.
 - `transport` composes the parts into a connection without owning HTTP semantics.
 
 HTTP/3 will consume QUIC streams and the version-neutral message contracts from
 `mach-http`. It does not belong in the QUIC transport layer. QPACK and HTTP/3 frame
 processing will be added with the HTTP/3 engine once the transport is implemented.
 
-The remaining connection, protection, stream, and transport engine
-work is tracked separately from these completed wire and recovery primitives.
+The remaining connection, protection, path, and transport engine work is tracked
+separately from these completed wire, recovery, congestion, stream, and datagram
+primitives.
 
 ## Recovery contracts
 
@@ -119,6 +122,57 @@ flow-control credit. The driver combines that credit with `controller.admit`, th
 asks the pacer to schedule the fully encoded packet size. This keeps stream
 fairness, congestion blocking, flow-control blocking, PTO exemption, and pacing
 as distinct decisions rather than collapsing them into one writable-byte count.
+
+## Stream contracts
+
+The stream manager is allocation-free. The caller supplies stable stream slots,
+per-stream send and receive rings, byte state, and transmission-attempt records.
+Initialization rejects any advertised receive window that exceeds those physical
+bounds. Local and peer bidirectional and unidirectional stream limits are tracked
+independently. An incoming frame that implicitly opens peer streams preflights the
+entire range before publishing any stream or consuming flow-control credit.
+
+Handles and transmission attempts carry a source tag, storage index, and
+generation. Reusing a slot therefore cannot make an old application or recovery
+token valid. `write` copies bytes into a bounded ring and charges connection and
+stream credit exactly once when the bytes are accepted. Its result separately
+reports connection, stream, and storage backpressure. `prepare` reserves a stable
+borrowed range without mutating retransmission state. The connection either calls
+`cancel_prepared` or copies the range into a packet and calls `publish`.
+Publication transfers the attempt token to recovery. Each ACK or loss is returned
+exactly once through `on_terminal`. Probe attempts can duplicate an in-flight
+range, and the ring remains pinned until every duplicate terminates.
+
+Receive processing charges only increases in a stream's highest offset. Duplicate
+and reordered bytes do not consume connection credit twice. Conflicting overlap,
+flow-control violations, stream exhaustion, invalid direction, and inconsistent
+final sizes publish no state. `read` copies only the contiguous prefix and returns
+the exact new MAX_DATA and MAX_STREAM_DATA values after consumption. RESET_STREAM,
+STOP_SENDING, application cancellation, and FIN each retain their distinct
+terminal and retransmission ownership.
+
+The manager is serialized by the connection driver. `begin_close` prevents new
+application work and cancels unsent work, while published and prepared attempt
+tokens remain valid. Recovery completes published attempts and the packet builder
+cancels prepared attempts before `finish_close` can invalidate storage. This is a
+two-phase ownership boundary, not a best-effort drain.
+
+## Datagram contracts
+
+RFC 9221 DATAGRAM support is negotiated with `max_datagram_frame_size`. Disabled
+mode needs no queue storage. Enabled mode uses caller-owned fixed-capacity send and
+receive queues and copies every payload at admission, so application buffers can
+be released immediately. Send publication frees a datagram only after its frame
+has been copied into a successfully published packet. DATAGRAM frames are never
+given retransmission ownership.
+
+The receive queue rejects admission with an explicit capacity result before
+copying when it is full. Delivery borrows the queue's copied payload until
+`release`. Two-phase close preserves delivered receive payloads and prepared send
+payloads until their owners release or cancel them. The DATAGRAM form without a
+Length field consumes the remainder of a QUIC packet and must therefore be
+selected only for the final frame. The length-bearing form can be composed with
+later frames.
 
 ## Development
 
