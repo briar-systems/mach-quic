@@ -208,9 +208,10 @@ pub fun decode(d: *binary.Decoder, final: bool, limits: Limits, storage: Storage
     var frame: Frame;
     var ack_encoded: binary.Decoder;
     var ack_pending: bool = false;
-    var kind: u64 = 0;
-    val type_result: DecodeResult = value_or_missing(?cursor, final, ?kind);
-    if (type_result.status != STATUS_DONE) { ret type_result; }
+    val decoded_type: varint.Decoded = varint.read(?cursor, true);
+    if (decoded_type.status == varint.STATUS_MORE) { ret missing(final, 1); }
+    if (decoded_type.status != varint.STATUS_DONE) { ret failed(ERROR_ENCODING); }
+    val kind: u64 = decoded_type.value;
     if (!valid_type(kind)) { ret failed(ERROR_UNKNOWN_TYPE); }
     frame.kind = kind;
 
@@ -715,7 +716,8 @@ test "quic.frame.frame: fragmentation and failures never publish" {
     if (decode(?d, true, default_limits(), storage, ?out).error != ERROR_ACK_RANGE || d.pos != 0 || out.kind != 0xff) { ret 1; }
     val nonminimal_ping: [2]u8 = [2]u8{0x40, 0x01};
     d = binary.decoder(?nonminimal_ping[0], 2, binary.BIG);
-    if (decode(?d, true, default_limits(), storage, ?out).status != STATUS_DONE || out.kind != PING) { ret 1; }
+    out.kind = 0xff;
+    if (decode(?d, true, default_limits(), storage, ?out).error != ERROR_ENCODING || d.pos != 0 || out.kind != 0xff) { ret 1; }
     var overflow: Frame;
     overflow.kind = CRYPTO;
     overflow.offset = varint.MAX;

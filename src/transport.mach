@@ -51,10 +51,3 @@ pub rec Connection {
     recovery_state: recovery.Recovery;
     congestion_state: congestion.State;
 }
-
-pub fun init() Connection {
-    var c: Connection;
-    c.state = CONNECTION_NEW;
-    c.recovery_state = recovery.init();
-    ret c;
-}

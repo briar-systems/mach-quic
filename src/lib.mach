@@ -9,6 +9,7 @@ fwd quic.wire.varint;
 fwd quic.transport_parameters;
 fwd quic.crypto.keys;
 fwd quic.recovery.recovery;
+fwd quic.recovery.ack;
 fwd quic.congestion.controller;
 fwd quic.stream.stream;
 fwd quic.transport;
