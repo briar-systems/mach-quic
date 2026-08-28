@@ -143,9 +143,9 @@ pub fun packet_number_width(number: u64, largest_acked: u64) u8 {
         if (number <= largest_acked) { ret 0; }
         outstanding = number - largest_acked;
     }
-    if (outstanding < 128) { ret 1; }
-    if (outstanding < 32768) { ret 2; }
-    if (outstanding < 8388608) { ret 3; }
+    if (outstanding <= 128) { ret 1; }
+    if (outstanding <= 32768) { ret 2; }
+    if (outstanding <= 8388608) { ret 3; }
     ret 4;
 }
 
@@ -603,6 +603,8 @@ test "quic.packet.packet: RFC packet number reconstruction vectors" {
     if (packet_number_width(0xabe8bc, 0xabe8b3) != 1) { ret 1; }
     if (truncate_packet_number(0xabe8bc, 1) != 0xbc) { ret 1; }
     if (packet_number_width(0, 0 - 1::u64) != 1) { ret 1; }
+    if (packet_number_width(128, 0) != 1) { ret 1; }
+    if (packet_number_width(129, 0) != 2) { ret 1; }
     ret 0;
 }
 
