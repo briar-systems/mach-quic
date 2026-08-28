@@ -250,7 +250,8 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
         receive_present: ?fixture.receive_present[0], receive_state_length: 1024,
         receive_stride: 32, attempts: ?fixture.attempts[0], attempt_capacity: 64
     };
-    fixture.streams = stream_api.init(stream_config(source, role), stream_storage);
+    if (!stream_api.initialize(?fixture.streams,
+        stream_config(source, role), stream_storage)) { ret false; }
     val datagram_storage: datagram_api.Storage = datagram_api.Storage{
         send_entries: ?fixture.send_entries[0], send_capacity: 8,
         send_bytes: ?fixture.datagram_send_data[0], send_bytes_length: 512,
@@ -258,8 +259,9 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
         receive_capacity: 8, receive_bytes: ?fixture.datagram_receive_data[0],
         receive_bytes_length: 512, receive_stride: 64
     };
-    fixture.datagrams = datagram_api.init(datagram_api.Config{source: source,
-        peer_max_frame_size: 65, local_max_frame_size: 65, enabled: true}, datagram_storage);
+    if (!datagram_api.initialize(?fixture.datagrams,
+        datagram_api.Config{source: source, peer_max_frame_size: 65,
+        local_max_frame_size: 65, enabled: true}, datagram_storage)) { ret false; }
     fixture.core.streams = ?fixture.streams;
     fixture.core.datagrams = ?fixture.datagrams;
     fixture.core.next_owner = 1;

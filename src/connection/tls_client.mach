@@ -27,10 +27,11 @@ pub val ERROR_DEADLINE: u64 = handshake_api.PROVIDER_BINDING_DEADLINE;
 pub val ERROR_STATE: u64 = handshake_api.PROVIDER_BINDING_STATE;
 pub val ERROR_EVENT: u64 = handshake_api.PROVIDER_BINDING_EVENT;
 
-pub fun init(adapter_config: handshake_api.Config,
-             storage: handshake_api.Storage, value: *client.Client,
-             configuration: Config) handshake_api.Adapter {
-    ret handshake_api.init_tls_client(adapter_config, storage, value,
+pub fun initialize(adapter: *handshake_api.Adapter,
+                   adapter_config: handshake_api.Config,
+                   storage: handshake_api.Storage, value: *client.Client,
+                   configuration: Config) bool {
+    ret handshake_api.initialize_tls_client(adapter, adapter_config, storage, value,
         configuration.verification_time_unix, configuration.deadline_ns);
 }
 
@@ -105,7 +106,8 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
             data: contracts.Bytes{data: ?local_parameters[0], len: 4}},
         client.QUIC_TRANSPORT_PARAMETERS)) { ret 1; }
-    var adapter: handshake_api.Adapter = init(
+    var adapter: handshake_api.Adapter;
+    if (!initialize(?adapter,
         handshake_api.Config{source: 77, max_crypto_per_level: 4096,
             max_event_data: 4096, max_peer_identity: 4096},
         handshake_api.Storage{receive_data: ?adapter_receive[0],
@@ -116,7 +118,9 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
             send_inflight: ?adapter_send_inflight[0], send_length: 16384,
             send_stride: 4096, attempts: ?adapter_attempts[0],
             attempt_capacity: 8}, ?tls_value,
-            Config{verification_time_unix: 1800000000, deadline_ns: 1000});
+            Config{verification_time_unix: 1800000000, deadline_ns: 1000})) {
+        ret 2;
+    }
     var start: handshake_api.Start;
     start.role = handshake_api.CLIENT;
     start.version = packet.VERSION_1;
@@ -201,7 +205,8 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
             data: contracts.Bytes{data: ?local_parameters[0], len: 4}},
         client.QUIC_TRANSPORT_PARAMETERS)) { ret 13; }
-    var deadline_adapter: handshake_api.Adapter = init(
+    var deadline_adapter: handshake_api.Adapter;
+    if (!initialize(?deadline_adapter,
         handshake_api.Config{source: 78, max_crypto_per_level: 4096,
             max_event_data: 4096, max_peer_identity: 4096},
         handshake_api.Storage{receive_data: ?adapter_receive[0],
@@ -212,7 +217,7 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
             send_inflight: ?adapter_send_inflight[0], send_length: 16384,
             send_stride: 4096, attempts: ?adapter_attempts[0],
             attempt_capacity: 8}, ?tls_value,
-        Config{verification_time_unix: 1800000000, deadline_ns: 10});
+        Config{verification_time_unix: 1800000000, deadline_ns: 10})) { ret 14; }
     start.now_ns = 5;
     if (!deadline_adapter.initialized ||
         handshake_api.start(?deadline_adapter, ?start).status !=

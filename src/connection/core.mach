@@ -6,6 +6,7 @@ use congestion_api: quic.congestion.controller;
 use datagram_api: quic.stream.datagram;
 use handshake_api: quic.connection.handshake;
 use negotiation_api: quic.connection.negotiation;
+use quic.connection.ownership;
 use pacer_api: quic.congestion.pacer;
 use path_api: quic.path.path;
 use quic.crypto.protection;
@@ -85,6 +86,7 @@ pub rec Config {
     local: ip.Endpoint;
     peer: ip.Endpoint;
     original_destination: packet.ConnectionId;
+    retry_source: packet.ConnectionId;
     initial_secret_destination: packet.ConnectionId;
     local_source: packet.ConnectionId;
     peer_destination: packet.ConnectionId;
@@ -95,6 +97,7 @@ pub rec Config {
     max_idle_timeout_ns: u64;
     drain_timeout_ns: u64;
     peer_validated: bool;
+    retry_source_present: bool;
     enable_early_data: bool;
 }
 
@@ -111,6 +114,7 @@ pub rec Owner {
     handshake: handshake_api.AttemptToken;
     stream: stream_api.AttemptToken;
     datagram: datagram_api.Token;
+    path: path_api.Handle;
     path_send: path_api.SendToken;
     path_challenge: path_api.ChallengeToken;
     path_response: path_api.ResponseToken;
@@ -120,6 +124,7 @@ pub rec Owner {
     ack_largest: u64;
     ack_eliciting: bool;
     in_flight: bool;
+    growth_permitted: bool;
     pto_probe: bool;
     include_ping: bool;
     minimum_datagram_size: u16;
@@ -148,6 +153,8 @@ pub rec Storage {
     owner_capacity: usize;
     peer_extensions: *transport_parameters.Parameter;
     peer_extension_capacity: usize;
+    local_extensions: *transport_parameters.Parameter;
+    local_extension_capacity: usize;
     received_token: *u8;
     received_token_capacity: usize;
     send_token: *u8;
@@ -188,6 +195,8 @@ pub rec Snapshot {
     peer_parameters_ready: bool;
     peer_authenticated: bool;
     handshake_confirmed: bool;
+    initial_keys_discarded: bool;
+    provider_error: u64;
     closing: bool;
     destroyed: bool;
 }
@@ -202,9 +211,9 @@ pub rec Core {
     negotiation: negotiation_api.Client;
     recovery_state: recovery.Recovery;
     acknowledgements: ack_api.Tracker;
-    congestion: congestion_api.State;
-    pacer: pacer_api.State;
     peer_parameters: transport_parameters.Parameters;
+    local_parameters: transport_parameters.Parameters;
+    retry_source_connection_id: packet.ConnectionId;
     packet_numbers: [3]u64;
     expected_packet_numbers: [3]u64;
     ack_prepared: [3]bool;
@@ -222,6 +231,7 @@ pub rec Core {
     close_error: u64;
     close_frame_type: u64;
     close_reason_length: usize;
+    last_provider_error: u64;
     timer_generation: u64;
     timer_deadline_ns: u64;
     timer_recovery_generation: u64;
@@ -237,8 +247,10 @@ pub rec Core {
     probe_space: u8;
     probe_owner: u64;
     peer_parameters_ready: bool;
+    retry_source_present: bool;
     peer_authenticated: bool;
     handshake_confirmed: bool;
+    initial_keys_discarded: bool;
     close_queued: bool;
     handshake_done_queued: bool;
     peer_close_received: bool;
@@ -342,16 +354,103 @@ fun path_endpoint(local: ip.Endpoint, peer: ip.Endpoint) path_api.Endpoint {
 
 fun core_result(core: *Core, status: transport_api.Status,
                 error: u64) transport_api.CoreResult {
-    ret transport_api.CoreResult{status: status, error: error, state: core.state};
+    ret transport_api.CoreResult{status: status, error: error,
+        provider_error: core.last_provider_error, state: core.state};
+}
+
+fun core_record_valid(core: *Core) bool {
+    ret core != nil && ownership.bytes((?core.config)::*u8, $size_of(Core),
+        ownership.ZERO_FORBIDDEN).valid;
+}
+
+fun secret_record_valid(secrets: *Secrets) bool {
+    if (secrets == nil) { ret false; }
+    val address: usize = (?secrets.initialized)::usize;
+    val offset: usize = $offset_of(Secrets, initialized);
+    ret address >= offset && ownership.bytes((address - offset)::*u8,
+        $size_of(Secrets), ownership.ZERO_FORBIDDEN).valid;
+}
+
+fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
+    if (!borrowed.valid) { ret false; }
+    var owned: [19]ownership.Range;
+    owned[0] = ownership.bytes(core.storage.receive_header,
+        core.storage.receive_header_capacity, ownership.ZERO_FORBIDDEN);
+    owned[1] = ownership.bytes(core.storage.receive_decoded,
+        core.storage.receive_decoded_capacity, ownership.ZERO_FORBIDDEN);
+    owned[2] = ownership.bytes(core.storage.send_plaintext,
+        core.storage.send_plaintext_capacity, ownership.ZERO_FORBIDDEN);
+    owned[3] = ownership.bytes(core.storage.close_reason,
+        core.storage.close_reason_capacity, ownership.ZERO_FORBIDDEN);
+    owned[4] = ownership.array(core.storage.frame_ack_ranges::*u8,
+        core.storage.frame_ack_capacity, $size_of(frame.AckRange),
+        ownership.ZERO_FORBIDDEN);
+    owned[5] = ownership.array(core.storage.recovery_events::*u8,
+        core.storage.recovery_event_capacity, $size_of(recovery.Event),
+        ownership.ZERO_FORBIDDEN);
+    owned[6] = ownership.array(core.storage.recovery_initial.packets::*u8,
+        core.storage.recovery_initial.capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_FORBIDDEN);
+    owned[7] = ownership.array(core.storage.recovery_handshake.packets::*u8,
+        core.storage.recovery_handshake.capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_FORBIDDEN);
+    owned[8] = ownership.array(core.storage.recovery_application.packets::*u8,
+        core.storage.recovery_application.capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_FORBIDDEN);
+    owned[9] = ownership.array(core.storage.ack_initial.ranges::*u8,
+        core.storage.ack_initial.capacity, $size_of(ack_api.Range),
+        ownership.ZERO_FORBIDDEN);
+    owned[10] = ownership.array(core.storage.ack_handshake.ranges::*u8,
+        core.storage.ack_handshake.capacity, $size_of(ack_api.Range),
+        ownership.ZERO_FORBIDDEN);
+    owned[11] = ownership.array(core.storage.ack_application.ranges::*u8,
+        core.storage.ack_application.capacity, $size_of(ack_api.Range),
+        ownership.ZERO_FORBIDDEN);
+    owned[12] = ownership.array(core.storage.owners::*u8,
+        core.storage.owner_capacity, $size_of(Owner), ownership.ZERO_FORBIDDEN);
+    owned[13] = ownership.array(core.storage.peer_extensions::*u8,
+        core.storage.peer_extension_capacity,
+        $size_of(transport_parameters.Parameter), ownership.ZERO_ALLOWED);
+    owned[14] = ownership.array(core.storage.local_extensions::*u8,
+        core.storage.local_extension_capacity,
+        $size_of(transport_parameters.Parameter), ownership.ZERO_ALLOWED);
+    owned[15] = ownership.bytes(core.storage.received_token,
+        core.storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
+    owned[16] = ownership.bytes(core.storage.send_token,
+        core.storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
+    owned[17] = ownership.bytes(core.storage.negotiation.retry_token,
+        core.storage.negotiation.retry_token_capacity, ownership.ZERO_ALLOWED);
+    owned[18] = ownership.bytes(core.storage.negotiation.retry_pseudo,
+        core.storage.negotiation.retry_pseudo_capacity, ownership.ZERO_ALLOWED);
+    var i: usize = 0;
+    for (i < 19) {
+        if (!ownership.disjoint(borrowed, owned[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun handshake_failure(core: *Core, value: handshake_api.Result) u64 {
+    if (value.error == handshake_api.ERROR_PROVIDER) {
+        core.last_provider_error = value.provider_error;
+        ret INTERNAL_ERROR;
+    }
+    if (value.error == handshake_api.ERROR_BUFFER ||
+        value.error == handshake_api.ERROR_LIMIT ||
+        value.error == handshake_api.ERROR_OFFSET ||
+        value.error == handshake_api.ERROR_OVERFLOW) {
+        ret CRYPTO_BUFFER_EXCEEDED;
+    }
+    ret INTERNAL_ERROR;
 }
 
 fun begin_application_close(core: *Core) bool {
     if (!core.streams.closing &&
-        stream_api.begin_close(core.streams).status != stream_api.STATUS_OK) {
+        stream_api.begin_close_scoped(core.streams, core.config.source).status != stream_api.STATUS_OK) {
         ret false;
     }
     if (!core.datagrams.closing &&
-        datagram_api.begin_close(core.datagrams).status != datagram_api.STATUS_OK) {
+        datagram_api.begin_close_scoped(core.datagrams, core.config.source).status != datagram_api.STATUS_OK) {
         ret false;
     }
     ret true;
@@ -372,30 +471,332 @@ fun fail(core: *Core, error: u64, now_ns: u64) transport_api.CoreResult {
     ret core_result(core, transport_api.STATUS_ERROR, error);
 }
 
-fun storage_valid(storage: *Storage, secret_storage: *SecretStorage,
-                  max_udp_payload: usize) bool {
-    ret storage != nil && storage.receive_header != nil &&
-        storage.receive_header_capacity >= max_udp_payload &&
-        secret_storage != nil && secret_storage.receive_plaintext != nil &&
-        secret_storage.receive_plaintext_capacity >= max_udp_payload &&
-        secret_storage.send_plaintext != nil &&
-        secret_storage.send_plaintext_capacity >= max_udp_payload &&
-        storage.receive_decoded != nil &&
-        storage.receive_decoded_capacity >= max_udp_payload &&
-        storage.send_plaintext != nil &&
-        storage.send_plaintext_capacity >= max_udp_payload &&
-        storage.close_reason != nil && storage.close_reason_capacity > 0 &&
-        storage.frame_ack_ranges != nil && storage.frame_ack_capacity > 0 &&
-        storage.ack_initial.capacity > 0 && storage.ack_handshake.capacity > 0 &&
-        storage.ack_application.capacity > 0 &&
-        storage.frame_ack_capacity >= storage.ack_initial.capacity - 1 &&
-        storage.frame_ack_capacity >= storage.ack_handshake.capacity - 1 &&
-        storage.frame_ack_capacity >= storage.ack_application.capacity - 1 &&
-        storage.recovery_events != nil &&
-        storage.recovery_event_capacity >= storage.owner_capacity &&
-        storage.owners != nil && storage.owner_capacity > 0 &&
-        storage.received_token != nil && storage.received_token_capacity > 0 &&
-        storage.send_token != nil && storage.send_token_capacity > 0;
+fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
+                  storage: *Storage, secret_storage: *SecretStorage) bool {
+    if (core == nil || secrets == nil || config == nil || storage == nil ||
+        secret_storage == nil) { ret false; }
+    val secret_state_address: usize = (?secrets.initialized)::usize;
+    val secret_state_offset: usize = $offset_of(Secrets, initialized);
+    if (secret_state_address < secret_state_offset ||
+        secret_storage.receive_plaintext == nil ||
+        secret_storage.send_plaintext == nil ||
+        secret_storage.receive_plaintext == secret_storage.send_plaintext ||
+        secret_storage.receive_plaintext_capacity < config.max_udp_payload ||
+        secret_storage.send_plaintext_capacity < config.max_udp_payload ||
+        storage.receive_header_capacity < config.max_udp_payload ||
+        storage.receive_decoded_capacity < config.max_udp_payload ||
+        storage.send_plaintext_capacity < config.max_udp_payload ||
+        storage.close_reason_capacity == 0 || storage.frame_ack_capacity == 0 ||
+        storage.ack_initial.capacity == 0 ||
+        storage.ack_handshake.capacity == 0 ||
+        storage.ack_application.capacity == 0 ||
+        storage.frame_ack_capacity < storage.ack_initial.capacity - 1 ||
+        storage.frame_ack_capacity < storage.ack_handshake.capacity - 1 ||
+        storage.frame_ack_capacity < storage.ack_application.capacity - 1 ||
+        storage.recovery_event_capacity < storage.owner_capacity ||
+        storage.owner_capacity == 0 || storage.received_token_capacity == 0 ||
+        storage.send_token_capacity == 0) { ret false; }
+    var zero_negotiation: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    var zero_versions: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (config.role == transport_api.SERVER) {
+        zero_negotiation = ownership.ZERO_ALLOWED;
+        zero_versions = ownership.ZERO_ALLOWED;
+    }
+    var ranges: [21]ownership.Range;
+    ranges[0] = ownership.bytes((?core.config)::*u8, $size_of(Core),
+        ownership.ZERO_FORBIDDEN);
+    ranges[1] = ownership.bytes((secret_state_address - secret_state_offset)::*u8,
+        $size_of(Secrets), ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.bytes(storage.receive_header,
+        storage.receive_header_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.bytes(storage.receive_decoded,
+        storage.receive_decoded_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[4] = ownership.bytes(storage.send_plaintext,
+        storage.send_plaintext_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[5] = ownership.bytes(storage.close_reason,
+        storage.close_reason_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[6] = ownership.array(storage.frame_ack_ranges::*u8,
+        storage.frame_ack_capacity, $size_of(frame.AckRange),
+        ownership.ZERO_FORBIDDEN);
+    ranges[7] = ownership.array(storage.recovery_events::*u8,
+        storage.recovery_event_capacity, $size_of(recovery.Event),
+        ownership.ZERO_FORBIDDEN);
+    ranges[8] = ownership.array(storage.recovery_initial.packets::*u8,
+        storage.recovery_initial.capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_FORBIDDEN);
+    ranges[9] = ownership.array(storage.recovery_handshake.packets::*u8,
+        storage.recovery_handshake.capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_FORBIDDEN);
+    ranges[10] = ownership.array(storage.recovery_application.packets::*u8,
+        storage.recovery_application.capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_FORBIDDEN);
+    ranges[11] = ownership.array(storage.ack_initial.ranges::*u8,
+        storage.ack_initial.capacity, $size_of(ack_api.Range),
+        ownership.ZERO_FORBIDDEN);
+    ranges[12] = ownership.array(storage.ack_handshake.ranges::*u8,
+        storage.ack_handshake.capacity, $size_of(ack_api.Range),
+        ownership.ZERO_FORBIDDEN);
+    ranges[13] = ownership.array(storage.ack_application.ranges::*u8,
+        storage.ack_application.capacity, $size_of(ack_api.Range),
+        ownership.ZERO_FORBIDDEN);
+    ranges[14] = ownership.array(storage.owners::*u8, storage.owner_capacity,
+        $size_of(Owner), ownership.ZERO_FORBIDDEN);
+    ranges[15] = ownership.array(storage.peer_extensions::*u8,
+        storage.peer_extension_capacity, $size_of(transport_parameters.Parameter),
+        ownership.ZERO_ALLOWED);
+    ranges[16] = ownership.array(storage.local_extensions::*u8,
+        storage.local_extension_capacity, $size_of(transport_parameters.Parameter),
+        ownership.ZERO_ALLOWED);
+    ranges[17] = ownership.bytes(storage.received_token,
+        storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[18] = ownership.bytes(storage.send_token,
+        storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[19] = ownership.bytes(storage.negotiation.retry_token,
+        storage.negotiation.retry_token_capacity, zero_negotiation);
+    ranges[20] = ownership.bytes(storage.negotiation.retry_pseudo,
+        storage.negotiation.retry_pseudo_capacity, zero_negotiation);
+    if (!ownership.all_disjoint(?ranges[0], 21)) { ret false; }
+    var borrowed: [4]ownership.Range;
+    borrowed[0] = ownership.bytes(config.alpn.data, config.alpn.length,
+        ownership.ZERO_FORBIDDEN);
+    borrowed[1] = ownership.bytes(config.server_name.data,
+        config.server_name.length, ownership.ZERO_ALLOWED);
+    borrowed[2] = ownership.bytes(config.local_transport_parameters.data,
+        config.local_transport_parameters.length, ownership.ZERO_FORBIDDEN);
+    borrowed[3] = ownership.array(config.supported_versions::*u8,
+        config.supported_version_count, $size_of(u32), zero_versions);
+    var i: usize = 0;
+    for (i < 4) {
+        if (!borrowed[i].valid) { ret false; }
+        var j: usize = 0;
+        for (j < 21) {
+            if (!ownership.disjoint(borrowed[i], ranges[j])) { ret false; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun local_parameter_role(role: transport_api.Role) u8 {
+    if (role == transport_api.CLIENT) { ret transport_parameters.ROLE_CLIENT; }
+    ret transport_parameters.ROLE_SERVER;
+}
+
+fun validate_local_parameters(config: Config, parameters: *transport_parameters.Parameters,
+                              cids: *cid_api.Manager, paths: *path_api.Manager,
+                              streams: *stream_api.Manager,
+                              datagrams: *datagram_api.Queue) bool {
+    if (!packet.connection_id_equal(?parameters.initial_source_connection_id,
+            ?config.local_source) ||
+        parameters.max_udp_payload_size::usize != config.max_udp_payload ||
+        saturated_multiply(parameters.max_idle_timeout, 1000000) !=
+            config.max_idle_timeout_ns ||
+        parameters.initial_max_data != streams.config.receive_max_data ||
+        parameters.initial_max_stream_data_bidi_local !=
+            streams.config.receive_local_bidirectional_limit ||
+        parameters.initial_max_stream_data_bidi_remote !=
+            streams.config.receive_peer_bidirectional_limit ||
+        parameters.initial_max_stream_data_uni !=
+            streams.config.receive_unidirectional_limit ||
+        parameters.initial_max_streams_bidi !=
+            streams.config.peer_bidirectional_limit ||
+        parameters.initial_max_streams_uni !=
+            streams.config.peer_unidirectional_limit ||
+        parameters.active_connection_id_limit::usize !=
+            cids.config.peer_active_limit ||
+        parameters.disable_active_migration == paths.config.allow_peer_active_migration ||
+        parameters.max_datagram_frame_size::usize !=
+            datagrams.config.local_max_frame_size) { ret false; }
+    if (config.role == transport_api.SERVER &&
+        !packet.connection_id_equal(?parameters.original_destination_connection_id,
+            ?config.original_destination)) { ret false; }
+    if (config.role == transport_api.SERVER) {
+        if (config.retry_source_present) {
+            if (!transport_parameters.has(parameters,
+                    transport_parameters.RETRY_SOURCE_CONNECTION_ID) ||
+                !packet.connection_id_equal(?parameters.retry_source_connection_id,
+                    ?config.retry_source)) { ret false; }
+        } or (transport_parameters.has(parameters,
+            transport_parameters.RETRY_SOURCE_CONNECTION_ID)) { ret false; }
+    }
+    ret true;
+}
+
+fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
+                            storage: *Storage,
+                            handshake: *handshake_api.Adapter,
+                            cids: *cid_api.Manager, paths: *path_api.Manager,
+                            streams: *stream_api.Manager,
+                            datagrams: *datagram_api.Queue) bool {
+    if (handshake == nil || cids == nil || paths == nil || streams == nil ||
+        datagrams == nil) { ret false; }
+    var ranges: [51]ownership.Range;
+    ranges[0] = ownership.bytes((?core.config)::*u8, $size_of(Core),
+        ownership.ZERO_FORBIDDEN);
+    val secret_state_address: usize = (?secrets.initialized)::usize;
+    val secret_state_offset: usize = $offset_of(Secrets, initialized);
+    if (secret_state_address < secret_state_offset) { ret false; }
+    ranges[1] = ownership.bytes((secret_state_address - secret_state_offset)::*u8,
+        $size_of(Secrets), ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.bytes(storage.receive_header,
+        storage.receive_header_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.bytes(storage.receive_decoded,
+        storage.receive_decoded_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[4] = ownership.bytes(storage.send_plaintext,
+        storage.send_plaintext_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[5] = ownership.bytes(storage.close_reason,
+        storage.close_reason_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[6] = ownership.array(storage.frame_ack_ranges::*u8,
+        storage.frame_ack_capacity, $size_of(frame.AckRange),
+        ownership.ZERO_FORBIDDEN);
+    ranges[7] = ownership.array(storage.recovery_events::*u8,
+        storage.recovery_event_capacity, $size_of(recovery.Event),
+        ownership.ZERO_FORBIDDEN);
+    ranges[8] = ownership.array(storage.recovery_initial.packets::*u8,
+        storage.recovery_initial.capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_FORBIDDEN);
+    ranges[9] = ownership.array(storage.recovery_handshake.packets::*u8,
+        storage.recovery_handshake.capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_FORBIDDEN);
+    ranges[10] = ownership.array(storage.recovery_application.packets::*u8,
+        storage.recovery_application.capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_FORBIDDEN);
+    ranges[11] = ownership.array(storage.ack_initial.ranges::*u8,
+        storage.ack_initial.capacity, $size_of(ack_api.Range),
+        ownership.ZERO_FORBIDDEN);
+    ranges[12] = ownership.array(storage.ack_handshake.ranges::*u8,
+        storage.ack_handshake.capacity, $size_of(ack_api.Range),
+        ownership.ZERO_FORBIDDEN);
+    ranges[13] = ownership.array(storage.ack_application.ranges::*u8,
+        storage.ack_application.capacity, $size_of(ack_api.Range),
+        ownership.ZERO_FORBIDDEN);
+    ranges[14] = ownership.array(storage.owners::*u8, storage.owner_capacity,
+        $size_of(Owner), ownership.ZERO_FORBIDDEN);
+    ranges[15] = ownership.array(storage.peer_extensions::*u8,
+        storage.peer_extension_capacity, $size_of(transport_parameters.Parameter),
+        ownership.ZERO_ALLOWED);
+    ranges[16] = ownership.array(storage.local_extensions::*u8,
+        storage.local_extension_capacity, $size_of(transport_parameters.Parameter),
+        ownership.ZERO_ALLOWED);
+    ranges[17] = ownership.bytes(storage.received_token,
+        storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[18] = ownership.bytes(storage.send_token,
+        storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
+    var zero_negotiation: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (config.role == transport_api.SERVER) {
+        zero_negotiation = ownership.ZERO_ALLOWED;
+    }
+    ranges[19] = ownership.bytes(storage.negotiation.retry_token,
+        storage.negotiation.retry_token_capacity, zero_negotiation);
+    ranges[20] = ownership.bytes(storage.negotiation.retry_pseudo,
+        storage.negotiation.retry_pseudo_capacity, zero_negotiation);
+
+    # public first-field anchors validate mixed records before field access
+    ranges[21] = ownership.bytes((?handshake.config)::*u8,
+        $size_of(handshake_api.Adapter), ownership.ZERO_FORBIDDEN);
+    ranges[22] = ownership.bytes((?cids.config)::*u8,
+        $size_of(cid_api.Manager), ownership.ZERO_FORBIDDEN);
+    ranges[23] = ownership.bytes((?paths.config)::*u8,
+        $size_of(path_api.Manager), ownership.ZERO_FORBIDDEN);
+    ranges[24] = ownership.bytes((?streams.config)::*u8,
+        $size_of(stream_api.Manager), ownership.ZERO_FORBIDDEN);
+    ranges[25] = ownership.bytes((?datagrams.config)::*u8,
+        $size_of(datagram_api.Queue), ownership.ZERO_FORBIDDEN);
+    if (!ownership.all_disjoint(?ranges[0], 26)) { ret false; }
+
+    ranges[26] = ownership.bytes(handshake.storage.receive_data,
+        handshake.storage.receive_length, ownership.ZERO_FORBIDDEN);
+    ranges[27] = ownership.array(handshake.storage.receive_present::*u8,
+        handshake.storage.receive_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[28] = ownership.bytes(handshake.storage.send_data,
+        handshake.storage.send_length, ownership.ZERO_FORBIDDEN);
+    ranges[29] = ownership.array(handshake.storage.send_pending::*u8,
+        handshake.storage.send_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[30] = ownership.array(handshake.storage.send_acked::*u8,
+        handshake.storage.send_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[31] = ownership.array(handshake.storage.send_inflight::*u8,
+        handshake.storage.send_length, $size_of(u16),
+        ownership.ZERO_FORBIDDEN);
+    ranges[32] = ownership.array(handshake.storage.attempts::*u8,
+        handshake.storage.attempt_capacity, $size_of(handshake_api.Attempt),
+        ownership.ZERO_FORBIDDEN);
+    ranges[33] = ownership.array(cids.storage.local::*u8,
+        cids.storage.local_capacity, $size_of(cid_api.Entry),
+        ownership.ZERO_FORBIDDEN);
+    ranges[34] = ownership.array(cids.storage.peer::*u8,
+        cids.storage.peer_capacity, $size_of(cid_api.Entry),
+        ownership.ZERO_FORBIDDEN);
+    ranges[35] = ownership.array(paths.storage.paths::*u8,
+        paths.storage.path_capacity, $size_of(path_api.Path),
+        ownership.ZERO_FORBIDDEN);
+    ranges[36] = ownership.array(paths.storage.challenges::*u8,
+        paths.storage.challenge_capacity, $size_of(path_api.Challenge),
+        ownership.ZERO_FORBIDDEN);
+    ranges[37] = ownership.array(paths.storage.responses::*u8,
+        paths.storage.response_capacity, $size_of(path_api.Response),
+        ownership.ZERO_FORBIDDEN);
+    ranges[38] = ownership.array(paths.storage.sends::*u8,
+        paths.storage.send_capacity, $size_of(path_api.SendReservation),
+        ownership.ZERO_FORBIDDEN);
+    ranges[39] = ownership.array(streams.storage.streams::*u8,
+        streams.storage.stream_capacity, $size_of(stream_api.Stream),
+        ownership.ZERO_FORBIDDEN);
+    ranges[40] = ownership.array(streams.storage.attempts::*u8,
+        streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
+        ownership.ZERO_FORBIDDEN);
+    ranges[41] = ownership.bytes(streams.storage.send_data,
+        streams.storage.send_data_length, ownership.ZERO_FORBIDDEN);
+    ranges[42] = ownership.array(streams.storage.send_pending::*u8,
+        streams.storage.send_state_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[43] = ownership.array(streams.storage.send_acked::*u8,
+        streams.storage.send_state_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[44] = ownership.bytes(streams.storage.send_inflight,
+        streams.storage.send_state_length, ownership.ZERO_FORBIDDEN);
+    ranges[45] = ownership.bytes(streams.storage.receive_data,
+        streams.storage.receive_data_length, ownership.ZERO_FORBIDDEN);
+    ranges[46] = ownership.array(streams.storage.receive_present::*u8,
+        streams.storage.receive_state_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
+    ranges[47] = ownership.array(datagrams.storage.send_entries::*u8,
+        datagrams.storage.send_capacity, $size_of(datagram_api.Entry), datagram_zero);
+    ranges[48] = ownership.bytes(datagrams.storage.send_bytes,
+        datagrams.storage.send_bytes_length, datagram_zero);
+    ranges[49] = ownership.array(datagrams.storage.receive_entries::*u8,
+        datagrams.storage.receive_capacity, $size_of(datagram_api.Entry), datagram_zero);
+    ranges[50] = ownership.bytes(datagrams.storage.receive_bytes,
+        datagrams.storage.receive_bytes_length, datagram_zero);
+    if (!ownership.all_disjoint(?ranges[0], 51)) { ret false; }
+
+    var borrowed: [4]ownership.Range;
+    borrowed[0] = ownership.bytes(config.alpn.data, config.alpn.length,
+        ownership.ZERO_FORBIDDEN);
+    borrowed[1] = ownership.bytes(config.server_name.data, config.server_name.length,
+        ownership.ZERO_ALLOWED);
+    borrowed[2] = ownership.bytes(config.local_transport_parameters.data,
+        config.local_transport_parameters.length, ownership.ZERO_FORBIDDEN);
+    var zero_versions: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (config.role == transport_api.SERVER) { zero_versions = ownership.ZERO_ALLOWED; }
+    borrowed[3] = ownership.array(config.supported_versions::*u8,
+        config.supported_version_count, $size_of(u32), zero_versions);
+    var i: usize = 0;
+    for (i < 4) {
+        if (!borrowed[i].valid) { ret false; }
+        var j: usize = 21;
+        for (j < 51) {
+            if (!ownership.disjoint(borrowed[i], ranges[j])) { ret false; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    ret true;
 }
 
 fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
@@ -403,7 +804,12 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
                cids: *cid_api.Manager,
                paths: *path_api.Manager, streams: *stream_api.Manager,
                datagrams: *datagram_api.Queue, now_ns: u64) bool {
-    if (core == nil || !valid_role(config.role) || config.source == 0 ||
+    if (!storage_valid(core, secrets, ?config, ?storage,
+        ?secret_storage)) { ret false; }
+    if (!component_storage_valid(core, secrets, ?config, ?storage, handshake,
+        cids, paths, streams, datagrams)) { ret false; }
+    if (core.initialized || core.destroyed ||
+        !valid_role(config.role) || config.source == 0 ||
         (config.version != packet.VERSION_1 && config.version != packet.VERSION_2) ||
         config.max_udp_payload < 1200 || config.max_udp_payload > 65527 ||
         config.drain_timeout_ns == 0 || config.local_source.len == 0 ||
@@ -411,14 +817,21 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         config.original_destination.len == 0 || config.alpn.data == nil ||
         config.alpn.length == 0 || config.local_transport_parameters.data == nil ||
         config.local_transport_parameters.length == 0 ||
-        secrets == nil || secrets.initialized ||
-        !storage_valid(?storage, ?secret_storage, config.max_udp_payload) || handshake == nil ||
-        !handshake.initialized || handshake.started ||
+        secrets.initialized || secrets.destroyed || handshake == nil ||
+        !handshake.initialized || handshake.started || handshake.core_lease != 0 ||
         handshake.config.source != config.source ||
-        cids == nil || !cids.initialized || cids.config.source != config.source ||
-        paths == nil || paths.config.source != config.source ||
-        !paths.valid || streams == nil || !streams.valid || datagrams == nil ||
+        cids == nil || !cids.initialized || cids.core_lease != 0 ||
+        cids.config.source != config.source ||
+        paths == nil || paths.config.source != config.source || paths.core_lease != 0 ||
+        !paths.valid || streams == nil || !streams.valid || streams.core_lease != 0 ||
+        datagrams == nil || datagrams.core_lease != 0 ||
         !datagrams.valid || streams.config.source != config.source ||
+        streams.send_max_data != 0 ||
+        streams.config.local_bidirectional_limit != 0 ||
+        streams.config.local_unidirectional_limit != 0 ||
+        streams.config.send_local_bidirectional_limit != 0 ||
+        streams.config.send_peer_bidirectional_limit != 0 ||
+        streams.config.send_unidirectional_limit != 0 ||
         datagrams.config.source != config.source ||
         (config.role == transport_api.CLIENT &&
         (paths.config.role != path_api.ROLE_CLIENT ||
@@ -439,54 +852,56 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
             ?config.peer_destination) ||
         !path_api.endpoint_equal(paths.storage.paths[current_path.handle.index].endpoint,
             path_endpoint(config.local, config.peer))) { ret false; }
-    core.config = config;
-    core.storage = storage;
-    secrets.storage = secret_storage;
-    secrets.handshake = handshake;
-    core.cids = cids;
-    core.paths = paths;
-    core.streams = streams;
-    core.datagrams = datagrams;
-    core.role = config.role;
-    core.state = transport_api.HANDSHAKING;
-    core.next_owner = 1;
-    core.last_activity_ns = now_ns;
-    core.last_received_ns = now_ns;
-    core.last_now_ns = now_ns;
-    core.timer_generation = 1;
-    core.send_max_udp_payload = config.max_udp_payload;
-    core.idle_timeout_ns = config.max_idle_timeout_ns;
-    core.idle_timer_enabled = config.max_idle_timeout_ns != 0;
+    var local_parameters: transport_parameters.Parameters;
+    val local_decoded: transport_parameters.DecodeResult =
+        transport_parameters.decode(config.local_transport_parameters.data,
+            config.local_transport_parameters.length, true,
+            local_parameter_role(config.role), transport_parameters.default_limits(),
+            transport_parameters.Storage{extensions: storage.local_extensions,
+                extension_capacity: storage.local_extension_capacity},
+            ?local_parameters);
+    if (local_decoded.status != transport_parameters.STATUS_DONE ||
+        !validate_local_parameters(config, ?local_parameters, cids, paths, streams,
+            datagrams)) { ret false; }
+    var candidate: Core;
+    var candidate_secrets: Secrets;
+    candidate.config = config;
+    candidate.storage = storage;
+    candidate_secrets.storage = secret_storage;
+    candidate_secrets.handshake = handshake;
+    candidate.cids = cids;
+    candidate.paths = paths;
+    candidate.streams = streams;
+    candidate.datagrams = datagrams;
+    candidate.local_parameters = local_parameters;
+    candidate.role = config.role;
+    candidate.state = transport_api.HANDSHAKING;
+    candidate.next_owner = 1;
+    candidate.last_activity_ns = now_ns;
+    candidate.last_received_ns = now_ns;
+    candidate.last_now_ns = now_ns;
+    candidate.timer_generation = 1;
+    candidate.send_max_udp_payload = config.max_udp_payload;
+    candidate.idle_timeout_ns = config.max_idle_timeout_ns;
+    candidate.idle_timer_enabled = config.max_idle_timeout_ns != 0;
 
-    core.recovery_state = recovery.init(storage.recovery_initial,
+    candidate.recovery_state = recovery.init(storage.recovery_initial,
         storage.recovery_handshake, storage.recovery_application,
         recovery.default_config());
-    if (!core.recovery_state.valid || !recovery.set_peer_address_validated(
-        ?core.recovery_state, config.peer_validated, now_ns).ok) { ret false; }
-    core.acknowledgements = ack_api.init(storage.ack_initial,
-        storage.ack_handshake, storage.ack_application, 25000000, 3);
-    if (!core.acknowledgements.valid) { ret false; }
-    val initial_mtu: u64 = paths.storage.paths[current_path.handle.index].current_mtu::u64;
-    core.congestion = congestion_api.init(congestion_api.default_config(
-        congestion_api.ALGORITHM_CUBIC, initial_mtu), now_ns);
-    if (!core.congestion.valid) { ret false; }
-    core.pacer = pacer_api.init(pacer_api.default_config(initial_mtu,
-        core.congestion.congestion_window), core.congestion.congestion_window,
-        core.recovery_state.rtt.smoothed_ns, now_ns);
-    if (!core.pacer.valid) { ret false; }
-    var i: usize = 0;
-    for (i < storage.owner_capacity) {
-        storage.owners[i].state = OWNER_FREE;
-        storage.owners[i].generation = next_generation(storage.owners[i].generation);
-        i = i + 1;
-    }
+    if (!candidate.recovery_state.valid || !recovery.set_peer_address_validated(
+        ?candidate.recovery_state, config.peer_validated, now_ns).ok) { ret false; }
+    candidate.acknowledgements = ack_api.init(storage.ack_initial,
+        storage.ack_handshake, storage.ack_application,
+        saturated_multiply(local_parameters.max_ack_delay, 1000000),
+        local_parameters.ack_delay_exponent::u8);
+    if (!candidate.acknowledgements.valid) { ret false; }
     if (config.role == transport_api.CLIENT) {
-        core.negotiation = negotiation_api.init(negotiation_api.Config{
+        if (!negotiation_api.initialize(?candidate.negotiation,
+            negotiation_api.Config{
             supported_versions: config.supported_versions,
             supported_version_count: config.supported_version_count},
             storage.negotiation, config.version, config.original_destination,
-            config.local_source);
-        if (!core.negotiation.initialized) { ret false; }
+            config.local_source)) { ret false; }
     }
     var start: handshake_api.Start;
     start.role = role_handshake(config.role);
@@ -499,17 +914,70 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         length: config.local_transport_parameters.length};
     start.now_ns = now_ns;
     start.enable_early_data = config.enable_early_data;
-    if (protection.derive_initial(?secrets.initial_keys, config.version,
+    if (!handshake_api.lease_core(handshake, config.source)) { ret false; }
+    if (!cid_api.lease_core(cids, config.source)) {
+        handshake_api.release_core(handshake, config.source);
+        ret false;
+    }
+    if (!path_api.lease_core(paths, config.source)) {
+        cid_api.release_core(cids, config.source);
+        handshake_api.release_core(handshake, config.source);
+        ret false;
+    }
+    if (!stream_api.lease_core(streams, config.source)) {
+        path_api.release_core(paths, config.source);
+        cid_api.release_core(cids, config.source);
+        handshake_api.release_core(handshake, config.source);
+        ret false;
+    }
+    if (!datagram_api.lease_core(datagrams, config.source)) {
+        stream_api.release_core(streams, config.source);
+        path_api.release_core(paths, config.source);
+        cid_api.release_core(cids, config.source);
+        handshake_api.release_core(handshake, config.source);
+        ret false;
+    }
+    if (protection.derive_initial(?candidate_secrets.initial_keys, config.version,
         contracts.Bytes{data: ?config.initial_secret_destination.data[0],
             len: config.initial_secret_destination.len::usize}) != protection.OK) {
+        datagram_api.release_core(datagrams, config.source);
+        stream_api.release_core(streams, config.source);
+        path_api.release_core(paths, config.source);
+        cid_api.release_core(cids, config.source);
+        handshake_api.release_core(handshake, config.source);
         ret false;
     }
-    if (handshake_api.start(handshake, ?start).status != handshake_api.STATUS_OK) {
-        protection.destroy_initial(?secrets.initial_keys);
+    if (path_api.configure_transport_scoped(paths, config.source, current_path.handle,
+        candidate.recovery_state.rtt.smoothed_ns,
+        now_ns).status != path_api.STATUS_OK) {
+        datagram_api.release_core(datagrams, config.source);
+        stream_api.release_core(streams, config.source);
+        path_api.release_core(paths, config.source);
+        cid_api.release_core(cids, config.source);
+        handshake_api.release_core(handshake, config.source);
+        protection.destroy_initial(?candidate_secrets.initial_keys);
         ret false;
     }
-    secrets.initialized = true;
-    core.initialized = true;
+    if (handshake_api.start_scoped(handshake, config.source, ?start).status != handshake_api.STATUS_OK) {
+        path_api.unconfigure_transport_scoped(paths, config.source, current_path.handle);
+        datagram_api.release_core(datagrams, config.source);
+        stream_api.release_core(streams, config.source);
+        path_api.release_core(paths, config.source);
+        cid_api.release_core(cids, config.source);
+        handshake_api.release_core(handshake, config.source);
+        protection.destroy_initial(?candidate_secrets.initial_keys);
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < storage.owner_capacity) {
+        storage.owners[i].state = OWNER_FREE;
+        storage.owners[i].generation = next_generation(storage.owners[i].generation);
+        i = i + 1;
+    }
+    candidate_secrets.initialized = true;
+    candidate.initialized = true;
+    secrets[0] = candidate_secrets;
+    core[0] = candidate;
     ret true;
 }
 
@@ -580,11 +1048,11 @@ fun validate_peer_parameters(core: *Core, parameters: *transport_parameters.Para
     if (core.role == transport_api.CLIENT) {
         if (!packet.connection_id_equal(?parameters.original_destination_connection_id,
             ?core.config.original_destination)) { ret false; }
-        if (core.retry_count > 0) {
+        if (core.retry_source_present) {
             if (!transport_parameters.has(parameters,
                 transport_parameters.RETRY_SOURCE_CONNECTION_ID) ||
                 !packet.connection_id_equal(?parameters.retry_source_connection_id,
-                    ?core.config.peer_destination)) { ret false; }
+                    ?core.retry_source_connection_id)) { ret false; }
         } or (transport_parameters.has(parameters,
             transport_parameters.RETRY_SOURCE_CONNECTION_ID)) { ret false; }
     }
@@ -600,19 +1068,25 @@ fun accept_parameters(core: *Core, event: *handshake_api.Event) bool {
             extension_capacity: core.storage.peer_extension_capacity}, ?parameters);
     if (decoded.status != transport_parameters.STATUS_DONE ||
         !validate_peer_parameters(core, ?parameters)) { ret false; }
+    if (transport_parameters.has(?parameters,
+        transport_parameters.STATELESS_RESET_TOKEN) &&
+        cid_api.install_initial_peer_reset_token_scoped(core.cids,
+            core.config.source,
+            parameters.stateless_reset_token).status != cid_api.STATUS_OK) {
+        ret false;
+    }
     core.peer_parameters = parameters;
     core.peer_parameters_ready = true;
     core.paths.config.peer_disabled_active_migration =
         parameters.disable_active_migration;
-    if (stream_api.update_max_data(core.streams,
-        parameters.initial_max_data).status == stream_api.STATUS_ERROR ||
-        stream_api.update_max_streams(core.streams,
-            stream_api.DIRECTION_BIDIRECTIONAL,
-            parameters.initial_max_streams_bidi).status == stream_api.STATUS_ERROR ||
-        stream_api.update_max_streams(core.streams,
-            stream_api.DIRECTION_UNIDIRECTIONAL,
+    if (stream_api.apply_peer_limits_scoped(core.streams, core.config.source,
+            parameters.initial_max_data,
+            parameters.initial_max_stream_data_bidi_local,
+            parameters.initial_max_stream_data_bidi_remote,
+            parameters.initial_max_stream_data_uni,
+            parameters.initial_max_streams_bidi,
             parameters.initial_max_streams_uni).status == stream_api.STATUS_ERROR ||
-        cid_api.update_local_limit(core.cids,
+        cid_api.update_local_limit_scoped(core.cids, core.config.source,
             parameters.active_connection_id_limit).status != cid_api.STATUS_OK) {
         ret false;
     }
@@ -637,28 +1111,38 @@ fun accept_parameters(core: *Core, event: *handshake_api.Event) bool {
     ret true;
 }
 
-fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
-    if (core.handshake_confirmed) { ret true; }
+fun discard_initial_keys(core: *Core, secrets: *Secrets) bool {
+    if (core.initial_keys_discarded) { ret true; }
     val initial_index: usize = space_index(packet.SPACE_INITIAL);
-    val handshake_index: usize = space_index(packet.SPACE_HANDSHAKE);
     if (core.recovery_state.spaces[initial_index].len >
-        core.storage.recovery_event_capacity ||
-        core.recovery_state.spaces[handshake_index].len >
-        core.storage.recovery_event_capacity -
-        core.recovery_state.spaces[initial_index].len) { ret false; }
-    if (!recovery.confirm_handshake(?core.recovery_state,
-        core.last_now_ns).ok ||
-        path_api.confirm_handshake(core.paths).status != path_api.STATUS_OK ||
-        protection.confirm_handshake_send(?secrets.application_send) != protection.OK ||
-        protection.confirm_handshake_receive(?secrets.application_receive) != protection.OK) {
-        ret false;
-    }
+        core.storage.recovery_event_capacity) { ret false; }
     val before: u64 = core.recovery_state.bytes_in_flight::u64;
     val initial: recovery.DiscardResult = recovery.discard_space(
         ?core.recovery_state, packet.SPACE_INITIAL, core.last_now_ns,
         core.storage.recovery_events, core.storage.recovery_event_capacity);
     if (!initial.ok || !apply_recovery_events(core, secrets,
         initial.event_count, core.last_now_ns, false, false, before)) { ret false; }
+    protection.destroy_initial(?secrets.initial_keys);
+    if (!ack_api.discard_space(?core.acknowledgements, packet.SPACE_INITIAL)) {
+        ret false;
+    }
+    core.initial_keys_discarded = true;
+    ret true;
+}
+
+fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
+    if (core.handshake_confirmed) { ret true; }
+    val handshake_index: usize = space_index(packet.SPACE_HANDSHAKE);
+    if (core.recovery_state.spaces[handshake_index].len >
+        core.storage.recovery_event_capacity ||
+        !recovery.confirm_handshake(?core.recovery_state,
+            core.last_now_ns).ok ||
+        path_api.confirm_handshake_scoped(core.paths, core.config.source).status != path_api.STATUS_OK ||
+        protection.confirm_handshake_send(?secrets.application_send) != protection.OK ||
+        protection.confirm_handshake_receive(?secrets.application_receive) != protection.OK ||
+        !discard_initial_keys(core, secrets)) {
+        ret false;
+    }
     val handshake_before: u64 = core.recovery_state.bytes_in_flight::u64;
     val handshake_discarded: recovery.DiscardResult = recovery.discard_space(
         ?core.recovery_state, packet.SPACE_HANDSHAKE, core.last_now_ns,
@@ -666,10 +1150,8 @@ fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
     if (!handshake_discarded.ok || !apply_recovery_events(core, secrets,
         handshake_discarded.event_count, core.last_now_ns, false, false,
         handshake_before)) { ret false; }
-    protection.destroy_initial(?secrets.initial_keys);
     protection.destroy(?secrets.handshake_send);
     protection.destroy(?secrets.handshake_receive);
-    ack_api.discard_space(?core.acknowledgements, packet.SPACE_INITIAL);
     ack_api.discard_space(?core.acknowledgements, packet.SPACE_HANDSHAKE);
     core.handshake_confirmed = true;
     core.state = transport_api.ACTIVE;
@@ -682,9 +1164,15 @@ fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
 fun pump_handshake(core: *Core, secrets: *Secrets) u64 {
     var count: usize = 0;
     for (count < 64) {
-        val event: handshake_api.Event = handshake_api.next_event(secrets.handshake);
+        val event: handshake_api.Event = handshake_api.next_event_scoped(
+            secrets.handshake, core.config.source);
         if (event.status == handshake_api.STATUS_EMPTY) { ret NO_ERROR; }
-        if (event.status != handshake_api.STATUS_OK) { ret CRYPTO_ERROR_BASE; }
+        if (event.status != handshake_api.STATUS_OK) {
+            if (event.error == handshake_api.ERROR_PROVIDER) {
+                core.last_provider_error = event.provider_error;
+            }
+            ret INTERNAL_ERROR;
+        }
         var accepted: bool = true;
         var rejected_error: u64 = CRYPTO_ERROR_BASE;
         if (event.kind == handshake_api.EVENT_TRAFFIC_SECRET) {
@@ -709,8 +1197,14 @@ fun pump_handshake(core: *Core, secrets: *Secrets) u64 {
         if (event.kind == handshake_api.EVENT_ALERT) {
             core.close_error = CRYPTO_ERROR_BASE + event.alert;
         }
-        if (handshake_api.complete_event(secrets.handshake, event.token,
-            accepted).status != handshake_api.STATUS_OK) { ret INTERNAL_ERROR; }
+        val completed: handshake_api.Result = handshake_api.complete_event_scoped(
+            secrets.handshake, core.config.source, event.token, accepted);
+        if (completed.status != handshake_api.STATUS_OK) {
+            if (!accepted && completed.error == handshake_api.ERROR_REJECTED) {
+                ret rejected_error;
+            }
+            ret handshake_failure(core, completed);
+        }
         if (!accepted) { ret rejected_error; }
         if (event.kind == handshake_api.EVENT_HANDSHAKE_COMPLETE) {
             if (core.role == transport_api.SERVER) {
@@ -856,7 +1350,8 @@ fun free_owner(value: *Owner) {
 }
 
 fun terminal_owner(core: *Core, secrets: *Secrets,
-                   event: *recovery.Event, now_ns: u64) bool {
+                   event: *recovery.Event, now_ns: u64,
+                   persistent: bool) bool {
     val owner: *Owner = owner_by_id(core, event.owner);
     if (owner == nil || owner.state != OWNER_SENT || owner.packet_number != event.number ||
         owner.space != event.space) { ret false; }
@@ -870,20 +1365,21 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
             protection.note_acknowledged(?secrets.application_send, event.number);
         }
     }
-    if (owner.kind == OWNER_CRYPTO && handshake_api.on_terminal(secrets.handshake,
-        owner.handshake, terminal).status != handshake_api.STATUS_OK) { ret false; }
-    if (owner.kind == OWNER_STREAM && stream_api.on_terminal(core.streams,
+    if (owner.kind == OWNER_CRYPTO && handshake_api.on_terminal_scoped(secrets.handshake, core.config.source, owner.handshake, terminal).status != handshake_api.STATUS_OK) { ret false; }
+    if (owner.kind == OWNER_STREAM && stream_api.on_terminal_scoped(core.streams, core.config.source,
         owner.stream, stream_terminal).status != stream_api.STATUS_OK) { ret false; }
     if (owner.kind == OWNER_ACK && event.kind == recovery.EVENT_ACKED &&
         !ack_api.on_ack_packet_acked(?core.acknowledgements, owner.space,
             owner.ack_largest)) { ret false; }
     if (owner.kind == OWNER_CID_RETIREMENT &&
-        cid_api.retirement_terminal(core.cids, owner.cid_retirement,
+        cid_api.retirement_terminal_scoped(core.cids, core.config.source,
+            owner.cid_retirement,
             event.kind == recovery.EVENT_ACKED).status != cid_api.STATUS_OK) {
         ret false;
     }
     if (owner.kind == OWNER_NEW_CID &&
-        cid_api.advertisement_terminal(core.cids, owner.cid_retirement,
+        cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
+            owner.cid_retirement,
             event.kind == recovery.EVENT_ACKED).status != cid_api.STATUS_OK) {
         ret false;
     }
@@ -902,40 +1398,67 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
     val path_handle: path_api.Handle = path_api.Handle{
         source: owner.path_send.source, index: owner.path_send.path_index,
         generation: owner.path_send.path_generation};
+    if (path_handle.source == 0 || path_handle.index >=
+            core.paths.storage.path_capacity ||
+        !core.paths.storage.paths[path_handle.index].valid ||
+        core.paths.storage.paths[path_handle.index].generation !=
+            path_handle.generation) { ret false; }
+    val transport_path: *path_api.Path =
+        ?core.paths.storage.paths[path_handle.index];
+    val updated: congestion_api.UpdateResult = congestion_api.on_recovery(
+        ?transport_path.congestion, congestion_api.Signals{
+            events: event, event_count: 1,
+            bytes_in_flight_before: transport_path.recovery_bytes_in_flight,
+            now_ns: now_ns,
+            smoothed_rtt_ns: core.recovery_state.rtt.smoothed_ns,
+            ecn_congestion: false,
+            ecn_sent_at_ns: 0,
+            persistent_congestion: persistent &&
+                event.kind == recovery.EVENT_LOST,
+            growth_permitted: owner.growth_permitted,
+            retry: event.kind == recovery.EVENT_RETRY});
+    if (!updated.ok) { ret false; }
     if (owner.kind == OWNER_MTU_PROBE) {
         var terminal: u8 = path_api.MTU_TERMINAL_LOST;
         if (event.kind == recovery.EVENT_ACKED) {
             terminal = path_api.MTU_TERMINAL_ACKED;
         }
-        val mtu: path_api.MtuResult = path_api.on_mtu_terminal(core.paths,
+        val mtu: path_api.MtuResult = path_api.on_mtu_terminal_scoped(core.paths, core.config.source,
             owner.mtu_probe, terminal);
         if (mtu.status != path_api.STATUS_OK) { ret false; }
         if (mtu.reconfigure_congestion &&
-            !congestion_api.set_max_datagram_size(?core.congestion,
+            !congestion_api.set_max_datagram_size(?transport_path.congestion,
                 mtu.current_mtu::u64, now_ns).ok) { ret false; }
-        if (mtu.reconfigure_pacer && !pacer_api.reconfigure(?core.pacer,
+        if (mtu.reconfigure_pacer && !pacer_api.reconfigure(?transport_path.pacer,
             pacer_api.default_config(mtu.current_mtu::u64,
-                core.congestion.congestion_window), now_ns,
-            core.congestion.congestion_window,
+                transport_path.congestion.congestion_window), now_ns,
+            transport_path.congestion.congestion_window,
             core.recovery_state.rtt.smoothed_ns).ok) { ret false; }
     } or (owner.path_send.source != 0) {
         if (event.kind == recovery.EVENT_ACKED) {
-            if (path_api.on_packet_acked(core.paths, path_handle,
+            if (path_api.on_packet_acked_scoped(core.paths, core.config.source, path_handle,
                 owner.bytes::u16).status != path_api.STATUS_OK) { ret false; }
         } or (event.kind == recovery.EVENT_LOST) {
-            val mtu: path_api.MtuResult = path_api.on_large_packet_lost(
-                core.paths, path_handle, owner.bytes::u16);
+            val mtu: path_api.MtuResult = path_api.on_large_packet_lost_scoped(
+                core.paths, core.config.source, path_handle, owner.bytes::u16);
             if (mtu.status != path_api.STATUS_OK) { ret false; }
             if (mtu.reconfigure_congestion &&
-                !congestion_api.set_max_datagram_size(?core.congestion,
+                !congestion_api.set_max_datagram_size(?transport_path.congestion,
                     mtu.current_mtu::u64, now_ns).ok) { ret false; }
-            if (mtu.reconfigure_pacer && !pacer_api.reconfigure(?core.pacer,
+            if (mtu.reconfigure_pacer && !pacer_api.reconfigure(?transport_path.pacer,
                 pacer_api.default_config(mtu.current_mtu::u64,
-                    core.congestion.congestion_window), now_ns,
-                core.congestion.congestion_window,
+                    transport_path.congestion.congestion_window), now_ns,
+                transport_path.congestion.congestion_window,
                 core.recovery_state.rtt.smoothed_ns).ok) { ret false; }
         }
     }
+    if (path_api.recovery_terminal_scoped(core.paths, core.config.source, path_handle,
+            owner.bytes::u64).status != path_api.STATUS_OK ||
+        !pacer_api.sync(?transport_path.pacer, now_ns,
+            transport_path.congestion.congestion_window,
+            core.recovery_state.rtt.smoothed_ns).ok ||
+        path_api.release_recovery_scoped(core.paths, core.config.source,
+            path_handle).status != path_api.STATUS_OK) { ret false; }
     free_owner(owner);
     ret true;
 }
@@ -946,24 +1469,23 @@ fun apply_recovery_events(core: *Core, secrets: *Secrets, count: usize, now_ns: 
     var i: usize = 0;
     for (i < count) {
         if (!terminal_owner(core, secrets, ?core.storage.recovery_events[i],
-            now_ns)) { ret false; }
+            now_ns, persistent)) { ret false; }
         i = i + 1;
     }
-    if (retry_event) {
-        if (!congestion_api.reset(?core.congestion, now_ns).ok) { ret false; }
-        ret pacer_api.reset(?core.pacer, core.congestion.congestion_window,
-            core.recovery_state.rtt.smoothed_ns, now_ns).ok;
+    if (retry_event && count == 0) {
+        val selected: path_api.PathResult = path_api.selected(core.paths);
+        if (selected.status != path_api.STATUS_OK ||
+            path_api.configure_transport_scoped(core.paths, core.config.source, selected.handle,
+                core.recovery_state.rtt.smoothed_ns,
+                now_ns).status != path_api.STATUS_OK) { ret false; }
+        val retry_path: *path_api.Path =
+            ?core.paths.storage.paths[selected.handle.index];
+        if (!congestion_api.reset(?retry_path.congestion, now_ns).ok ||
+            !pacer_api.reset(?retry_path.pacer,
+                retry_path.congestion.congestion_window,
+                core.recovery_state.rtt.smoothed_ns, now_ns).ok) { ret false; }
     }
-    val updated: congestion_api.UpdateResult = congestion_api.on_recovery(
-        ?core.congestion, congestion_api.Signals{
-            events: core.storage.recovery_events, event_count: count,
-            bytes_in_flight_before: bytes_before, now_ns: now_ns,
-            smoothed_rtt_ns: core.recovery_state.rtt.smoothed_ns,
-            persistent_congestion: persistent, growth_permitted: true,
-            retry: false});
-    if (!updated.ok) { ret false; }
-    ret pacer_api.sync(?core.pacer, now_ns, core.congestion.congestion_window,
-        core.recovery_state.rtt.smoothed_ns).ok;
+    ret true;
 }
 
 fun handle_ack(core: *Core, secrets: *Secrets, space: u8, value: *frame.Frame,
@@ -981,16 +1503,25 @@ fun apply_path_signals(core: *Core, reset_congestion: bool,
                        reset_rtt: bool, rotate_connection_id: bool,
                        now_ns: u64) bool {
     if (rotate_connection_id &&
-        cid_api.rotate_peer(core.cids).status == cid_api.STATUS_ERROR) {
+        cid_api.rotate_peer_scoped(core.cids,
+            core.config.source).status == cid_api.STATUS_ERROR) {
         ret false;
     }
     if (reset_rtt && !recovery.reset_path(?core.recovery_state, now_ns).ok) {
         ret false;
     }
+    val selected: path_api.PathResult = path_api.selected(core.paths);
+    if (selected.status != path_api.STATUS_OK ||
+        path_api.configure_transport_scoped(core.paths, core.config.source, selected.handle,
+            core.recovery_state.rtt.smoothed_ns,
+            now_ns).status != path_api.STATUS_OK) { ret false; }
+    val current: *path_api.Path =
+        ?core.paths.storage.paths[selected.handle.index];
     if (reset_congestion &&
-        !congestion_api.reset(?core.congestion, now_ns).ok) { ret false; }
+        !congestion_api.reset(?current.congestion, now_ns).ok) { ret false; }
     if ((reset_congestion || reset_rtt) &&
-        !pacer_api.reset(?core.pacer, core.congestion.congestion_window,
+        !pacer_api.reset(?current.pacer,
+            current.congestion.congestion_window,
             core.recovery_state.rtt.smoothed_ns, now_ns).ok) { ret false; }
     ret true;
 }
@@ -1018,7 +1549,9 @@ fun stateless_reset(core: *Core, data: *u8, length: usize) bool {
     for (i < core.cids.storage.peer_capacity) {
         val entry: *cid_api.Entry = ?core.cids.storage.peer[i];
         var valid: u8 = 0;
-        if (entry.state != cid_api.ENTRY_FREE && entry.sequence != 0) { valid = 1; }
+        if (entry.state != cid_api.ENTRY_FREE && entry.reset_token_present) {
+            valid = 1;
+        }
         var difference: u8 = 0;
         var j: usize = 0;
         for (j < 16) {
@@ -1063,21 +1596,42 @@ fun frame_allowed(core: *Core, level: handshake_api.Level,
     ret true;
 }
 
+fun stream_failure(core: *Core, error: u8) bool {
+    if (error == stream_api.ERROR_STREAM_LIMIT) {
+        core.close_error = STREAM_LIMIT_ERROR;
+    } or (error == stream_api.ERROR_FLOW_CONTROL) {
+        core.close_error = FLOW_CONTROL_ERROR;
+    } or (error == stream_api.ERROR_FINAL_SIZE) {
+        core.close_error = FINAL_SIZE_ERROR;
+    } or (error == stream_api.ERROR_DIRECTION) {
+        core.close_error = STREAM_STATE_ERROR;
+    } or (error == stream_api.ERROR_CAPACITY ||
+        error == stream_api.ERROR_STATE || error == stream_api.ERROR_TOKEN) {
+        core.close_error = INTERNAL_ERROR;
+    } or {
+        core.close_error = PROTOCOL_VIOLATION;
+    }
+    ret false;
+}
+
 fun process_frame(core: *Core, secrets: *Secrets,
                   level: handshake_api.Level, space: u8,
                   receive_path: path_api.Handle, value: *frame.Frame,
-                  now_ns: u64) bool {
-    if (!frame_allowed(core, level, value)) { ret false; }
+                  encoded_frame_size: usize, now_ns: u64) bool {
+    if (!frame_allowed(core, level, value)) {
+        core.close_error = PROTOCOL_VIOLATION;
+        ret false;
+    }
     if (value.kind == frame.PADDING || value.kind == frame.PING) { ret true; }
     if (value.kind == frame.ACK || value.kind == frame.ACK_ECN) {
         ret handle_ack(core, secrets, space, value, now_ns);
     }
     if (value.kind == frame.CRYPTO) {
-        val received: handshake_api.Result = handshake_api.receive(
-            secrets.handshake, level, value.offset, value.data.data,
+        val received: handshake_api.Result = handshake_api.receive_scoped(
+            secrets.handshake, core.config.source, level, value.offset, value.data.data,
             value.data.len, now_ns);
         if (received.status == handshake_api.STATUS_ERROR) {
-            core.close_error = CRYPTO_ERROR_BASE;
+            core.close_error = handshake_failure(core, received);
             ret false;
         }
         val handshake_error: u64 = pump_handshake(core, secrets);
@@ -1088,47 +1642,73 @@ fun process_frame(core: *Core, secrets: *Secrets,
         ret true;
     }
     if (value.kind == frame.NEW_TOKEN) {
-        if (core.role != transport_api.CLIENT ||
-            value.data.len > core.storage.received_token_capacity) { ret false; }
+        if (core.role != transport_api.CLIENT) {
+            core.close_error = PROTOCOL_VIOLATION;
+            ret false;
+        }
+        if (value.data.len > core.storage.received_token_capacity) {
+            core.close_error = INTERNAL_ERROR;
+            ret false;
+        }
         memory.copy[u8](core.storage.received_token, value.data.data, value.data.len);
         core.received_token_length = value.data.len;
         ret true;
     }
     if (frame.is_stream(value.kind)) {
-        ret stream_api.receive_stream(core.streams, value.stream_id, value.offset,
-            value.data.data, value.data.len, value.fin).ok;
+        val received: stream_api.ReceiveResult = stream_api.receive_stream_scoped(
+            core.streams, core.config.source, value.stream_id, value.offset, value.data.data,
+            value.data.len, value.fin);
+        if (received.ok) { ret true; }
+        ret stream_failure(core, received.error);
     }
     if (value.kind == frame.RESET_STREAM) {
-        ret stream_api.receive_reset(core.streams, value.stream_id, value.error_code,
-            value.final_size).ok;
+        val received: stream_api.ReceiveResult = stream_api.receive_reset_scoped(
+            core.streams, core.config.source, value.stream_id, value.error_code,
+            value.final_size);
+        if (received.ok) { ret true; }
+        ret stream_failure(core, received.error);
     }
     if (value.kind == frame.STOP_SENDING) {
-        ret stream_api.receive_stop(core.streams, value.stream_id,
-            value.error_code).ok;
+        val received: stream_api.ReceiveResult = stream_api.receive_stop_scoped(
+            core.streams, core.config.source, value.stream_id, value.error_code);
+        if (received.ok) { ret true; }
+        ret stream_failure(core, received.error);
     }
     if (value.kind == frame.MAX_DATA) {
-        ret stream_api.update_max_data(core.streams, value.maximum).status !=
-            stream_api.STATUS_ERROR;
+        val received: stream_api.OperationResult = stream_api.update_max_data_scoped(
+            core.streams, core.config.source, value.maximum);
+        if (received.status != stream_api.STATUS_ERROR) { ret true; }
+        ret stream_failure(core, received.error);
     }
     if (value.kind == frame.MAX_STREAM_DATA) {
-        ret stream_api.receive_max_stream_data(core.streams, value.stream_id,
-            value.maximum).ok;
+        val received: stream_api.ReceiveResult =
+            stream_api.receive_max_stream_data_scoped(core.streams, core.config.source, value.stream_id,
+                value.maximum);
+        if (received.ok) { ret true; }
+        ret stream_failure(core, received.error);
     }
     if (value.kind == frame.MAX_STREAMS_BIDI || value.kind == frame.MAX_STREAMS_UNI) {
         var direction: u8 = stream_api.DIRECTION_UNIDIRECTIONAL;
         if (value.kind == frame.MAX_STREAMS_BIDI) {
             direction = stream_api.DIRECTION_BIDIRECTIONAL;
         }
-        ret stream_api.update_max_streams(core.streams, direction,
-            value.maximum).status != stream_api.STATUS_ERROR;
+        val received: stream_api.OperationResult = stream_api.update_max_streams_scoped(
+            core.streams, core.config.source, direction, value.maximum);
+        if (received.status != stream_api.STATUS_ERROR) { ret true; }
+        ret stream_failure(core, received.error);
     }
     if (value.kind == frame.DATA_BLOCKED) {
-        ret stream_api.receive_data_blocked(core.streams, value.maximum).status !=
-            stream_api.STATUS_ERROR;
+        val received: stream_api.OperationResult =
+            stream_api.receive_data_blocked_scoped(core.streams, core.config.source, value.maximum);
+        if (received.status != stream_api.STATUS_ERROR) { ret true; }
+        ret stream_failure(core, received.error);
     }
     if (value.kind == frame.STREAM_DATA_BLOCKED) {
-        ret stream_api.receive_stream_data_blocked(core.streams, value.stream_id,
-            value.maximum).ok;
+        val received: stream_api.ReceiveResult =
+            stream_api.receive_stream_data_blocked_scoped(core.streams, core.config.source,
+                value.stream_id, value.maximum);
+        if (received.ok) { ret true; }
+        ret stream_failure(core, received.error);
     }
     if (value.kind == frame.STREAMS_BLOCKED_BIDI ||
         value.kind == frame.STREAMS_BLOCKED_UNI) {
@@ -1136,38 +1716,77 @@ fun process_frame(core: *Core, secrets: *Secrets,
         if (value.kind == frame.STREAMS_BLOCKED_BIDI) {
             direction = stream_api.DIRECTION_BIDIRECTIONAL;
         }
-        ret stream_api.receive_streams_blocked(core.streams, direction,
-            value.maximum).status != stream_api.STATUS_ERROR;
+        val received: stream_api.OperationResult =
+            stream_api.receive_streams_blocked_scoped(core.streams, core.config.source, direction,
+                value.maximum);
+        if (received.status != stream_api.STATUS_ERROR) { ret true; }
+        ret stream_failure(core, received.error);
     }
     if (value.kind == frame.DATAGRAM || value.kind == frame.DATAGRAM_LEN) {
-        ret datagram_api.receive(core.datagrams, value.data.data, value.data.len,
-            value.data.len).ok;
+        val received: datagram_api.QueueResult = datagram_api.receive_scoped(core.datagrams, core.config.source,
+            value.data.data, value.data.len, encoded_frame_size);
+        if (received.ok || received.error == datagram_api.ERROR_CAPACITY) { ret true; }
+        core.close_error = INTERNAL_ERROR;
+        if (received.error == datagram_api.ERROR_DISABLED ||
+            received.error == datagram_api.ERROR_LIMIT) {
+            core.close_error = PROTOCOL_VIOLATION;
+        }
+        ret false;
     }
     if (value.kind == frame.NEW_CONNECTION_ID) {
-        ret cid_api.receive_new(core.cids, value.sequence, value.retire_prior_to,
-            value.connection_id, value.stateless_reset_token).status != cid_api.STATUS_ERROR;
+        val received: cid_api.Result = cid_api.receive_new_scoped(core.cids,
+            core.config.source,
+            value.sequence, value.retire_prior_to, value.connection_id,
+            value.stateless_reset_token);
+        if (received.status == cid_api.STATUS_OK ||
+            received.status == cid_api.STATUS_DUPLICATE ||
+            received.status == cid_api.STATUS_STALE) { ret true; }
+        if (received.error == cid_api.ERROR_LIMIT) {
+            core.close_error = CONNECTION_ID_LIMIT_ERROR;
+        } or (received.status == cid_api.STATUS_BLOCKED ||
+            received.error == cid_api.ERROR_CAPACITY) {
+            core.close_error = INTERNAL_ERROR;
+        } or { core.close_error = PROTOCOL_VIOLATION; }
+        ret false;
     }
     if (value.kind == frame.RETIRE_CONNECTION_ID) {
-        ret cid_api.receive_retire(core.cids, value.sequence).status != cid_api.STATUS_ERROR;
+        val received: cid_api.Result = cid_api.receive_retire_scoped(core.cids,
+            core.config.source, value.sequence);
+        if (received.status != cid_api.STATUS_ERROR) { ret true; }
+        if (received.error == cid_api.ERROR_CAPACITY ||
+            received.error == cid_api.ERROR_STATE) {
+            core.close_error = INTERNAL_ERROR;
+        } or { core.close_error = PROTOCOL_VIOLATION; }
+        ret false;
     }
     if (value.kind == frame.PATH_CHALLENGE) {
-        ret receive_path.source != 0 &&
-            path_api.queue_response(core.paths, receive_path,
-                value.path_data).status == path_api.STATUS_OK;
+        if (receive_path.source != 0 &&
+            path_api.queue_response_scoped(core.paths, core.config.source, receive_path,
+                value.path_data).status == path_api.STATUS_OK) { ret true; }
+        core.close_error = INTERNAL_ERROR;
+        ret false;
     }
     if (value.kind == frame.PATH_RESPONSE) {
-        val validated: path_api.ValidationResult = path_api.receive_response(
-            core.paths, value.path_data, now_ns);
-        ret validated.status != path_api.STATUS_ERROR &&
+        val validated: path_api.ValidationResult = path_api.receive_response_scoped(
+            core.paths, core.config.source, value.path_data, now_ns);
+        if (validated.status != path_api.STATUS_ERROR &&
             apply_path_signals(core, validated.reset_congestion,
-                validated.reset_rtt, false, now_ns);
+                validated.reset_rtt, false, now_ns)) { ret true; }
+        core.close_error = INTERNAL_ERROR;
+        ret false;
     }
     if (value.kind == frame.CONNECTION_CLOSE_TRANSPORT ||
         value.kind == frame.CONNECTION_CLOSE_APPLICATION) {
         ret close_from_peer(core, value, now_ns);
     }
     if (value.kind == frame.HANDSHAKE_DONE) {
-        ret core.role == transport_api.CLIENT && confirm_handshake(core, secrets);
+        if (core.role != transport_api.CLIENT) {
+            core.close_error = PROTOCOL_VIOLATION;
+            ret false;
+        }
+        if (confirm_handshake(core, secrets)) { ret true; }
+        core.close_error = INTERNAL_ERROR;
+        ret false;
     }
     ret true;
 }
@@ -1196,6 +1815,7 @@ fun apply_plaintext(core: *Core, secrets: *Secrets,
                     length: usize, now_ns: u64) bool {
     var decoder: binary.Decoder = binary.decoder(plaintext, length, binary.BIG);
     for (decoder.pos < decoder.len) {
+        val frame_begin: usize = decoder.pos;
         var value: frame.Frame;
         val decoded: frame.DecodeResult = frame.decode(?decoder, true,
             frame.default_limits(), frame.Storage{
@@ -1203,7 +1823,8 @@ fun apply_plaintext(core: *Core, secrets: *Secrets,
                 ack_capacity: core.storage.frame_ack_capacity}, ?value);
         if (decoded.status != frame.STATUS_DONE ||
             !process_frame(core, secrets, level, space, receive_path,
-                ?value, now_ns)) { ret false; }
+                ?value, decoder.pos - frame_begin, now_ns)) { ret false; }
+        if (core.peer_close_received) { brk; }
     }
     ret true;
 }
@@ -1225,18 +1846,20 @@ fun restart_client(core: *Core, secrets: *Secrets, value: negotiation_api.Result
         false, true, before)) { ret false; }
     if (value.restart == negotiation_api.RESTART_RETRY) {
         core.retry_count = core.retry_count + 1;
+        core.retry_source_connection_id = value.peer_destination;
+        core.retry_source_present = true;
         core.config.peer_destination = value.peer_destination;
         core.config.initial_secret_destination = value.peer_destination;
-        if (cid_api.replace_initial_peer(core.cids,
+        if (cid_api.replace_initial_peer_scoped(core.cids, core.config.source,
             value.peer_destination).status != cid_api.STATUS_OK ||
-            handshake_api.on_retry(secrets.handshake, value.version,
+            handshake_api.on_retry_scoped(secrets.handshake, core.config.source, value.version,
                 now_ns).status != handshake_api.STATUS_OK) { ret false; }
     } or {
         core.version_restart_count = core.version_restart_count + 1;
         core.config.version = value.version;
         protection.destroy(?secrets.early_send);
         protection.destroy(?secrets.early_receive);
-        if (handshake_api.on_version_negotiation(secrets.handshake, value.version,
+        if (handshake_api.on_version_negotiation_scoped(secrets.handshake, core.config.source, value.version,
             now_ns).status != handshake_api.STATUS_OK) { ret false; }
     }
     protection.destroy_initial(?secrets.initial_keys);
@@ -1246,7 +1869,9 @@ fun restart_client(core: *Core, secrets: *Secrets, value: negotiation_api.Result
         ret false;
     }
     core.acknowledgements = ack_api.init(core.storage.ack_initial,
-        core.storage.ack_handshake, core.storage.ack_application, 25000000, 3);
+        core.storage.ack_handshake, core.storage.ack_application,
+        saturated_multiply(core.local_parameters.max_ack_delay, 1000000),
+        core.local_parameters.ack_delay_exponent::u8);
     core.probes_remaining = 0;
     core.probe_space = 0;
     core.probe_owner = 0;
@@ -1366,22 +1991,23 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     if (core.role == transport_api.CLIENT && core.authenticated_packets == 0 &&
         value.source.len > 0 && !packet.connection_id_equal(?value.source,
             ?core.config.peer_destination)) {
-        if (cid_api.replace_initial_peer(core.cids, value.source).status !=
+        if (cid_api.replace_initial_peer_scoped(core.cids, core.config.source,
+            value.source).status !=
             cid_api.STATUS_OK) { ret fail(core, PROTOCOL_VIOLATION,
                 input.received_at_ns); }
         core.config.peer_destination = value.source;
     }
-    val observed: path_api.Observation = path_api.observe(core.paths,
+    val observed: path_api.Observation = path_api.observe_scoped(core.paths, core.config.source,
         path_endpoint(input.local, input.peer), opened.packet_number,
         value.length::u64, non_probing, true, true,
         cid_api.snapshot(core.cids).peer_active > 1, input.received_at_ns);
     if (observed.status == path_api.STATUS_ERROR) {
         ret fail(core, NO_VIABLE_PATH, input.received_at_ns);
     }
-    if (opened.packet_number == packet.MAX_PACKET_NUMBER) {
-        ret fail(core, PROTOCOL_VIOLATION, input.received_at_ns);
+    val expected_next: u64 = opened.packet_number + 1;
+    if (expected_next > core.expected_packet_numbers[space_index(space)]) {
+        core.expected_packet_numbers[space_index(space)] = expected_next;
     }
-    core.expected_packet_numbers[space_index(space)] = opened.packet_number + 1;
     core.authenticated_packets = core.authenticated_packets + 1;
     core.last_activity_ns = input.received_at_ns;
     core.last_received_ns = input.received_at_ns;
@@ -1391,7 +2017,7 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     }
     if (core.role == transport_api.SERVER &&
         level == handshake_api.HANDSHAKE) {
-        if (path_api.validate_address(core.paths,
+        if (path_api.validate_address_scoped(core.paths, core.config.source,
             observed.handle).status != path_api.STATUS_OK ||
             !recovery.set_peer_address_validated(?core.recovery_state, true,
                 input.received_at_ns).ok) {
@@ -1412,6 +2038,10 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         if (core.close_error != NO_ERROR) { failure = core.close_error; }
         ret fail(core, failure, input.received_at_ns);
     }
+    if (core.role == transport_api.CLIENT && level == handshake_api.HANDSHAKE &&
+        !discard_initial_keys(core, secrets)) {
+        ret fail(core, INTERNAL_ERROR, input.received_at_ns);
+    }
     if (core.closing) { ret core_result(core, transport_api.STATUS_OK, 0); }
     val handshake_error: u64 = pump_handshake(core, secrets);
     if (handshake_error != NO_ERROR) {
@@ -1422,15 +2052,26 @@ fun receive_protected(core: *Core, secrets: *Secrets,
 
 pub fun receive(core: *Core, secrets: *Secrets,
                 input: *transport_api.Datagram) transport_api.CoreResult {
-    if (core == nil || secrets == nil || input == nil || !core.initialized ||
+    if (!core_record_valid(core) || !secret_record_valid(secrets) ||
+        !ownership.bytes(input::*u8, $size_of(transport_api.Datagram),
+            ownership.ZERO_FORBIDDEN).valid) {
+        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
+            error: INTERNAL_ERROR, state: transport_api.DRAINING};
+    }
+    val input_range: ownership.Range = ownership.bytes(input.data,
+        input.length, ownership.ZERO_FORBIDDEN);
+    if (!core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
-        input.data == nil || input.length == 0 ||
+        !borrowed_disjoint(core, input_range) ||
         input.length > core.config.max_udp_payload ||
         input.received_at_ns < core.last_now_ns) {
         ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
             error: INTERNAL_ERROR, state: transport_api.DRAINING};
     }
     if (core.state == transport_api.CLOSED) {
+        ret core_result(core, transport_api.STATUS_CLOSED, 0);
+    }
+    if (core.closing) {
         ret core_result(core, transport_api.STATUS_CLOSED, 0);
     }
     core.last_now_ns = input.received_at_ns;
@@ -1466,9 +2107,11 @@ pub fun receive(core: *Core, secrets: *Secrets,
 }
 
 pub fun queue_new_token(core: *Core, data: *u8, length: usize) bool {
-    if (core == nil || !core.initialized || core.destroyed || core.closing ||
+    val input: ownership.Range = ownership.bytes(data, length,
+        ownership.ZERO_FORBIDDEN);
+    if (!core_record_valid(core) || !core.initialized || core.destroyed || core.closing ||
         core.role != transport_api.SERVER || !core.handshake_confirmed ||
-        data == nil || length == 0 || length > core.storage.send_token_capacity ||
+        !borrowed_disjoint(core, input) || length > core.storage.send_token_capacity ||
         core.send_token_queued || core.send_token_prepared) { ret false; }
     memory.copy[u8](core.storage.send_token, data, length);
     core.send_token_length = length;
@@ -1478,7 +2121,7 @@ pub fun queue_new_token(core: *Core, data: *u8, length: usize) bool {
 
 pub fun received_token(core: *Core) View {
     var result: View;
-    if (core == nil || !core.initialized || core.destroyed ||
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
         core.role != transport_api.CLIENT || core.received_token_length == 0) {
         ret result;
     }
@@ -1489,7 +2132,7 @@ pub fun received_token(core: *Core) View {
 
 pub fun poll_handshake(core: *Core, secrets: *Secrets,
                        now_ns: u64) transport_api.CoreResult {
-    if (core == nil || secrets == nil || !core.initialized ||
+    if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
         now_ns < core.last_now_ns) {
         ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
@@ -1497,10 +2140,10 @@ pub fun poll_handshake(core: *Core, secrets: *Secrets,
     }
     if (core.closing) { ret core_result(core, transport_api.STATUS_CLOSED, 0); }
     core.last_now_ns = now_ns;
-    val polled: handshake_api.Result = handshake_api.poll(
-        secrets.handshake, now_ns);
+    val polled: handshake_api.Result = handshake_api.poll_scoped(
+        secrets.handshake, core.config.source, now_ns);
     if (polled.status == handshake_api.STATUS_ERROR) {
-        ret fail(core, CRYPTO_ERROR_BASE, now_ns);
+        ret fail(core, handshake_failure(core, polled), now_ns);
     }
     val handshake_error: u64 = pump_handshake(core, secrets);
     if (handshake_error != NO_ERROR) { ret fail(core, handshake_error, now_ns); }
@@ -1509,7 +2152,7 @@ pub fun poll_handshake(core: *Core, secrets: *Secrets,
 
 pub fun snapshot(core: *Core) Snapshot {
     var result: Snapshot;
-    if (core == nil) { ret result; }
+    if (!core_record_valid(core)) { ret result; }
     result.state = core.state;
     result.version = core.config.version;
     result.authenticated_packets = core.authenticated_packets;
@@ -1520,6 +2163,8 @@ pub fun snapshot(core: *Core) Snapshot {
     result.peer_parameters_ready = core.peer_parameters_ready;
     result.peer_authenticated = core.peer_authenticated;
     result.handshake_confirmed = core.handshake_confirmed;
+    result.initial_keys_discarded = core.initial_keys_discarded;
+    result.provider_error = core.last_provider_error;
     result.closing = core.closing;
     result.destroyed = core.destroyed;
     var i: usize = 0;
@@ -1577,32 +2222,33 @@ fun cancel_payload(core: *Core, secrets: *Secrets, owner: *Owner) bool {
         core.ack_prepared[space_index(owner.space)] = false;
     }
     if (owner.kind == OWNER_CRYPTO) {
-        ok = handshake_api.cancel_prepared(secrets.handshake,
-            owner.handshake).status == handshake_api.STATUS_OK;
+        ok = handshake_api.cancel_prepared_scoped(secrets.handshake, core.config.source, owner.handshake).status == handshake_api.STATUS_OK;
     }
     if (owner.kind == OWNER_STREAM) {
-        ok = stream_api.cancel_prepared(core.streams, stream_api.Prepared{
+        ok = stream_api.cancel_prepared_scoped(core.streams, core.config.source, stream_api.Prepared{
             ok: true, token: owner.stream}).status == stream_api.STATUS_OK;
     }
     if (owner.kind == OWNER_DATAGRAM) {
-        ok = datagram_api.cancel_prepared(core.datagrams,
+        ok = datagram_api.cancel_prepared_scoped(core.datagrams, core.config.source,
             datagram_api.Prepared{ok: true, token: owner.datagram}).status ==
             datagram_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_CHALLENGE) {
-        ok = path_api.cancel_challenge(core.paths,
+        ok = path_api.cancel_challenge_scoped(core.paths, core.config.source,
             owner.path_challenge).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_RESPONSE) {
-        ok = path_api.cancel_response(core.paths,
+        ok = path_api.cancel_response_scoped(core.paths, core.config.source,
             owner.path_response).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_CID_RETIREMENT) {
-        ok = cid_api.retirement_terminal(core.cids, owner.cid_retirement,
+        ok = cid_api.retirement_terminal_scoped(core.cids, core.config.source,
+            owner.cid_retirement,
             false).status == cid_api.STATUS_OK;
     }
     if (owner.kind == OWNER_NEW_CID) {
-        ok = cid_api.advertisement_terminal(core.cids, owner.cid_retirement,
+        ok = cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
+            owner.cid_retirement,
             false).status == cid_api.STATUS_OK;
     }
     if (owner.kind == OWNER_CLOSE) { core.close_queued = true; }
@@ -1615,22 +2261,32 @@ fun cancel_payload(core: *Core, secrets: *Secrets, owner: *Owner) bool {
     }
     if (owner.kind == OWNER_MTU_PROBE) {
         if (owner.path_send.source != 0) {
-            ok = path_api.cancel_send(core.paths,
+            ok = path_api.cancel_send_scoped(core.paths, core.config.source,
                 owner.path_send).status == path_api.STATUS_OK && ok;
             owner.path_send.source = 0;
         }
-        ok = path_api.cancel_mtu_probe(core.paths,
+        ok = path_api.cancel_mtu_probe_scoped(core.paths, core.config.source,
             owner.mtu_probe).status == path_api.STATUS_OK && ok;
     }
     if (owner.pto_probe && core.probes_remaining < 255) {
         core.probes_remaining = core.probes_remaining + 1;
     }
     if (owner.path_send.source != 0) {
-        ok = path_api.cancel_send(core.paths,
+        ok = path_api.cancel_send_scoped(core.paths, core.config.source,
             owner.path_send).status == path_api.STATUS_OK && ok;
     }
     if (owner.pacer.ok) {
-        ok = pacer_api.cancel(?core.pacer, owner.pacer).ok && ok;
+        if (owner.path.source == 0 ||
+            owner.path.index >= core.paths.storage.path_capacity ||
+            !core.paths.storage.paths[owner.path.index].valid ||
+            core.paths.storage.paths[owner.path.index].generation !=
+                owner.path.generation) {
+            ok = false;
+        } or {
+            ok = pacer_api.cancel(
+                ?core.paths.storage.paths[owner.path.index].pacer,
+                owner.pacer).ok && ok;
+        }
     }
     free_owner(owner);
     ret ok;
@@ -1665,6 +2321,7 @@ fun level_for_space(core: *Core, secrets: *Secrets, space: u8) handshake_api.Lev
 }
 
 fun app_send_level(core: *Core, secrets: *Secrets) handshake_api.Level {
+    if (!core.peer_parameters_ready) { ret 0; }
     if (level_available(core, secrets, handshake_api.APPLICATION)) {
         ret handshake_api.APPLICATION;
     }
@@ -1716,6 +2373,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
         core.close_queued = false;
         ret true;
     }
+    if (core.closing) { ret false; }
 
     var space: u8 = packet.SPACE_INITIAL;
     for (space <= packet.SPACE_APPLICATION) {
@@ -1748,11 +2406,9 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                 probe_owner.kind == OWNER_CRYPTO &&
                 probe_owner.level == level) {
                 probing = true;
-                prepared = handshake_api.prepare_probe(secrets.handshake,
-                    level, maximum);
+                prepared = handshake_api.prepare_probe_scoped(secrets.handshake, core.config.source, level, maximum);
             } or {
-                prepared = handshake_api.prepare(secrets.handshake,
-                    level, maximum);
+                prepared = handshake_api.prepare_scoped(secrets.handshake, core.config.source, level, maximum);
             }
             if (prepared.status == handshake_api.STATUS_OK) {
                 output.kind = frame.CRYPTO;
@@ -1799,7 +2455,8 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
     if (application == handshake_api.APPLICATION) {
         val advertisement: cid_api.Selected = cid_api.next_advertisement(core.cids);
         if (advertisement.status == cid_api.STATUS_OK) {
-            if (cid_api.advertisement_sent(core.cids,
+            if (cid_api.advertisement_sent_scoped(core.cids,
+                core.config.source,
                 advertisement.handle).status != cid_api.STATUS_OK) { ret false; }
             output.kind = frame.NEW_CONNECTION_ID;
             output.sequence = advertisement.handle.sequence;
@@ -1813,7 +2470,8 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
         }
         val retirement: cid_api.Result = cid_api.next_retirement(core.cids);
         if (retirement.status == cid_api.STATUS_OK) {
-            if (cid_api.retirement_sent(core.cids,
+            if (cid_api.retirement_sent_scoped(core.cids,
+                core.config.source,
                 retirement.handle).status != cid_api.STATUS_OK) { ret false; }
             output.kind = frame.RETIRE_CONNECTION_ID;
             output.sequence = retirement.handle.sequence;
@@ -1830,7 +2488,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                     source: core.paths.config.source, index: path_index,
                     generation: core.paths.storage.paths[path_index].generation};
                 val response: path_api.PreparedResponse =
-                    path_api.prepare_response(core.paths, handle);
+                    path_api.prepare_response_scoped(core.paths, core.config.source, handle);
                 if (response.status == path_api.STATUS_OK) {
                     output.kind = frame.PATH_RESPONSE;
                     output.path_data = response.data;
@@ -1843,7 +2501,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                     ret true;
                 }
                 val challenge: path_api.PreparedChallenge =
-                    path_api.prepare_challenge(core.paths, handle);
+                    path_api.prepare_challenge_scoped(core.paths, core.config.source, handle);
                 if (challenge.status == path_api.STATUS_OK) {
                     output.kind = frame.PATH_CHALLENGE;
                     output.path_data = challenge.data;
@@ -1857,7 +2515,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             }
             path_index = path_index + 1;
         }
-        val mtu: path_api.MtuPrepared = path_api.prepare_mtu_probe(core.paths,
+        val mtu: path_api.MtuPrepared = path_api.prepare_mtu_probe_scoped(core.paths, core.config.source,
             selected.handle);
         if (mtu.status == path_api.STATUS_OK) {
             output.kind = frame.PING;
@@ -1870,6 +2528,32 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
         }
     }
 
+    val control: stream_api.Prepared = stream_api.prepare_control_scoped(core.streams, core.config.source);
+    if (control.status == stream_api.STATUS_OK) {
+        if (control.kind == stream_api.SEND_MAX_DATA) {
+            output.kind = frame.MAX_DATA;
+            output.maximum = control.maximum;
+        }
+        if (control.kind == stream_api.SEND_MAX_STREAM_DATA) {
+            output.kind = frame.MAX_STREAM_DATA;
+            output.stream_id = control.handle.id;
+            output.maximum = control.maximum;
+        }
+        if (control.kind == stream_api.SEND_MAX_STREAMS_BIDI) {
+            output.kind = frame.MAX_STREAMS_BIDI;
+            output.maximum = control.maximum;
+        }
+        if (control.kind == stream_api.SEND_MAX_STREAMS_UNI) {
+            output.kind = frame.MAX_STREAMS_UNI;
+            output.maximum = control.maximum;
+        }
+        owner.kind = OWNER_STREAM;
+        owner.level = application;
+        owner.stream = control.token;
+        ret true;
+    }
+    if (control.status == stream_api.STATUS_ERROR) { ret false; }
+
     var stream_index: usize = 0;
     for (stream_index < core.streams.storage.stream_capacity) {
         val stream: *stream_api.Stream = ?core.streams.storage.streams[stream_index];
@@ -1877,7 +2561,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             val handle: stream_api.Handle = stream_api.Handle{
                 source: core.streams.config.source, index: stream_index,
                 generation: stream.generation, id: stream.id};
-            val prepared: stream_api.Prepared = stream_api.prepare(core.streams,
+            val prepared: stream_api.Prepared = stream_api.prepare_scoped(core.streams, core.config.source,
                 handle, maximum, core.probes_remaining > 0);
             if (prepared.status == stream_api.STATUS_OK) {
                 if (prepared.kind == stream_api.SEND_STREAM) {
@@ -1914,7 +2598,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
         stream_index = stream_index + 1;
     }
 
-    val datagram: datagram_api.Prepared = datagram_api.prepare(core.datagrams, true);
+    val datagram: datagram_api.Prepared = datagram_api.prepare_scoped(core.datagrams, core.config.source, true);
     if (datagram.status == datagram_api.STATUS_OK) {
         output.kind = frame.DATAGRAM_LEN;
         output.data = datagram.data;
@@ -1962,9 +2646,12 @@ fun endpoint_for(core: *Core, value: path_api.Handle,
 pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
                  capacity: usize, now_ns: u64) transport_api.CoreDatagram {
     var result: transport_api.CoreDatagram;
-    if (core == nil || secrets == nil || !core.initialized ||
+    val output_range: ownership.Range = ownership.bytes(output, capacity,
+        ownership.ZERO_FORBIDDEN);
+    if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
-        output == nil || capacity < 1200 || now_ns < core.last_now_ns) {
+        capacity < 1200 || !borrowed_disjoint(core, output_range) ||
+        now_ns < core.last_now_ns) {
         result.status = transport_api.STATUS_ERROR;
         result.error = INTERNAL_ERROR;
         ret result;
@@ -1974,12 +2661,19 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.status = transport_api.STATUS_CLOSED;
         ret result;
     }
-    val polled: transport_api.CoreResult = poll_handshake(core, secrets, now_ns);
-    if (polled.status == transport_api.STATUS_ERROR) {
-        result.status = polled.status;
-        result.error = polled.error;
-        result.state = polled.state;
+    if (core.closing && !core.close_queued) {
+        result.status = transport_api.STATUS_CLOSED;
         ret result;
+    }
+    if (!core.closing) {
+        val polled: transport_api.CoreResult = poll_handshake(core, secrets, now_ns);
+        if (polled.status == transport_api.STATUS_ERROR) {
+            result.status = polled.status;
+            result.error = polled.error;
+            result.provider_error = polled.provider_error;
+            result.state = polled.state;
+            ret result;
+        }
     }
     if (has_prepared_owner(core)) {
         result.status = transport_api.STATUS_BLOCKED;
@@ -2002,6 +2696,15 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.status = transport_api.STATUS_EMPTY;
         ret result;
     }
+    if (path_api.configure_transport_scoped(core.paths, core.config.source, path,
+        core.recovery_state.rtt.smoothed_ns,
+        now_ns).status != path_api.STATUS_OK) {
+        cancel_payload(core, secrets, owner);
+        result.status = transport_api.STATUS_ERROR;
+        result.error = INTERNAL_ERROR;
+        ret result;
+    }
+    owner.path = path;
     var plaintext: binary.Builder = binary.builder(
         core.storage.send_plaintext, core.storage.send_plaintext_capacity,
         binary.BIG);
@@ -2127,8 +2830,10 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.status = transport_api.STATUS_BLOCKED;
         ret result;
     }
+    val transport_path: *path_api.Path =
+        ?core.paths.storage.paths[path.index];
     val admitted: congestion_api.Admission = congestion_api.admit(
-        ?core.congestion, core.recovery_state.bytes_in_flight::u64,
+        ?transport_path.congestion, transport_path.recovery_bytes_in_flight,
         0 - 1::u64, packet_size::u64, 0, in_flight,
         owner.pto_probe || owner.kind == OWNER_PROBE);
     if (!admitted.ok || !admitted.permitted) {
@@ -2136,8 +2841,9 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.status = transport_api.STATUS_BLOCKED;
         ret result;
     }
-    owner.pacer = pacer_api.schedule(?core.pacer, now_ns,
-        core.congestion.congestion_window, core.recovery_state.rtt.smoothed_ns,
+    owner.pacer = pacer_api.schedule(?transport_path.pacer, now_ns,
+        transport_path.congestion.congestion_window,
+        core.recovery_state.rtt.smoothed_ns,
         packet_size::u64, !ack_eliciting);
     if (!owner.pacer.ok || !owner.pacer.ready) {
         cancel_payload(core, secrets, owner);
@@ -2146,10 +2852,10 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     }
     var reserved: path_api.SendResult;
     if (owner.kind == OWNER_MTU_PROBE) {
-        reserved = path_api.reserve_mtu_send(core.paths, path,
+        reserved = path_api.reserve_mtu_send_scoped(core.paths, core.config.source, path,
             packet_size::u64, true, owner.mtu_probe);
     } or {
-        reserved = path_api.reserve_send(core.paths, path,
+        reserved = path_api.reserve_send_scoped(core.paths, core.config.source, path,
             packet_size::u64, owner.include_ping ||
             (value.kind != frame.PATH_CHALLENGE &&
             value.kind != frame.PATH_RESPONSE));
@@ -2188,6 +2894,10 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     owner.space = space;
     owner.ack_eliciting = ack_eliciting;
     owner.in_flight = in_flight;
+    owner.growth_permitted = in_flight &&
+        (owner.pto_probe || packet_size::u64 >=
+        transport_path.congestion.congestion_window -
+        transport_path.recovery_bytes_in_flight);
     var endpoint: path_api.Endpoint;
     if (!endpoint_for(core, path, ?endpoint)) {
         cancel_payload(core, secrets, owner);
@@ -2212,27 +2922,26 @@ fun publish_payload(core: *Core, secrets: *Secrets, owner: *Owner,
             owner.ack_generation);
     }
     if (owner.kind == OWNER_CRYPTO) {
-        ret handshake_api.publish(secrets.handshake,
-            owner.handshake).status == handshake_api.STATUS_OK;
+        ret handshake_api.publish_scoped(secrets.handshake, core.config.source, owner.handshake).status == handshake_api.STATUS_OK;
     }
     if (owner.kind == OWNER_STREAM) {
-        ret stream_api.publish(core.streams, stream_api.Prepared{
+        ret stream_api.publish_scoped(core.streams, core.config.source, stream_api.Prepared{
             ok: true, token: owner.stream}).status == stream_api.STATUS_OK;
     }
     if (owner.kind == OWNER_DATAGRAM) {
-        ret datagram_api.publish(core.datagrams, datagram_api.Prepared{
+        ret datagram_api.publish_scoped(core.datagrams, core.config.source, datagram_api.Prepared{
             ok: true, token: owner.datagram}).status == datagram_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_CHALLENGE) {
-        ret path_api.publish_challenge(core.paths, owner.path_challenge,
+        ret path_api.publish_challenge_scoped(core.paths, core.config.source, owner.path_challenge,
             now_ns).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_RESPONSE) {
-        ret path_api.publish_response(core.paths,
+        ret path_api.publish_response_scoped(core.paths, core.config.source,
             owner.path_response).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_MTU_PROBE) {
-        ret path_api.publish_mtu_probe(core.paths,
+        ret path_api.publish_mtu_probe_scoped(core.paths, core.config.source,
             owner.mtu_probe).status == path_api.STATUS_OK;
     }
     ret true;
@@ -2241,7 +2950,7 @@ fun publish_payload(core: *Core, secrets: *Secrets, owner: *Owner,
 pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
                       status: transport_api.SendStatus, count: usize,
                       now_ns: u64) transport_api.CoreResult {
-    if (core == nil || secrets == nil || !core.initialized ||
+    if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
         now_ns < core.last_now_ns) {
         ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
@@ -2264,10 +2973,19 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
         }
         ret fail(core, INTERNAL_ERROR, now_ns);
     }
-    if (pacer_api.publish(?core.pacer, owner.pacer, now_ns,
-            core.congestion.congestion_window,
+    if (owner.path.source == 0 || owner.path.index >=
+            core.paths.storage.path_capacity ||
+        !core.paths.storage.paths[owner.path.index].valid ||
+        core.paths.storage.paths[owner.path.index].generation !=
+            owner.path.generation) {
+        ret fail(core, INTERNAL_ERROR, now_ns);
+    }
+    val transport_path: *path_api.Path =
+        ?core.paths.storage.paths[owner.path.index];
+    if (pacer_api.publish(?transport_path.pacer, owner.pacer, now_ns,
+            transport_path.congestion.congestion_window,
             core.recovery_state.rtt.smoothed_ns).status != pacer_api.PUBLISH_OK ||
-        path_api.publish_send(core.paths,
+        path_api.publish_send_scoped(core.paths, core.config.source,
             owner.path_send).status != path_api.STATUS_OK ||
         !publish_payload(core, secrets, owner, now_ns)) {
         ret fail(core, INTERNAL_ERROR, now_ns);
@@ -2283,13 +3001,35 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
         free_owner(owner);
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
+    val recovery_path: path_api.Handle = path_api.Handle{
+        source: owner.path_send.source, index: owner.path_send.path_index,
+        generation: owner.path_send.path_generation};
+    if (path_api.retain_recovery_scoped(core.paths, core.config.source,
+        recovery_path).status != path_api.STATUS_OK) {
+        ret fail(core, INTERNAL_ERROR, now_ns);
+    }
+    if (path_api.recovery_sent_scoped(core.paths, core.config.source, recovery_path,
+        owner.bytes::u64).status != path_api.STATUS_OK) {
+        path_api.release_recovery_scoped(core.paths, core.config.source, recovery_path);
+        ret fail(core, INTERNAL_ERROR, now_ns);
+    }
     val sent: recovery.OperationResult = recovery.on_packet_sent(
         ?core.recovery_state, owner.space, recovery.SentPacket{
             number: owner.packet_number, sent_at_ns: now_ns,
             bytes: owner.bytes, owner: owner.owner, ecn: 0,
             ack_eliciting: owner.ack_eliciting, in_flight: owner.in_flight});
-    if (!sent.ok) { ret fail(core, INTERNAL_ERROR, now_ns); }
+    if (!sent.ok) {
+        path_api.recovery_terminal_scoped(core.paths, core.config.source, recovery_path,
+            owner.bytes::u64);
+        path_api.release_recovery_scoped(core.paths, core.config.source, recovery_path);
+        ret fail(core, INTERNAL_ERROR, now_ns);
+    }
     owner.state = OWNER_SENT;
+    if (core.role == transport_api.SERVER &&
+        owner.level == handshake_api.HANDSHAKE &&
+        !discard_initial_keys(core, secrets)) {
+        ret fail(core, INTERNAL_ERROR, now_ns);
+    }
     ret core_result(core, transport_api.STATUS_OK, 0);
 }
 
@@ -2305,7 +3045,7 @@ fun timer_candidate(armed: *bool, deadline: *u64, kind: *u8,
 
 pub fun timer(core: *Core) transport_api.CoreTimer {
     var result: transport_api.CoreTimer;
-    if (core == nil || !core.initialized || core.destroyed ||
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
         core.state == transport_api.CLOSED) { ret result; }
     var armed: bool = false;
     var deadline: u64 = 0;
@@ -2378,11 +3118,12 @@ fun terminal_drain(core: *Core, secrets: *Secrets, now_ns: u64) bool {
     i = 0;
     for (i < discarded.event_count) {
         if (!terminal_owner(core, secrets,
-            ?core.storage.recovery_events[i], now_ns)) { ret false; }
+            ?core.storage.recovery_events[i], now_ns, false)) { ret false; }
         i = i + 1;
     }
-    if ((!core.cids.closing && !cid_api.begin_close(core.cids)) ||
-        (!core.paths.closing && path_api.begin_close(core.paths).status !=
+    if ((!core.cids.closing && !cid_api.begin_close_scoped(core.cids,
+            core.config.source)) ||
+        (!core.paths.closing && path_api.begin_close_scoped(core.paths, core.config.source).status !=
             path_api.STATUS_OK)) { ret false; }
     core.state = transport_api.CLOSED;
     ret true;
@@ -2398,7 +3139,7 @@ fun apply_path_timeout(core: *Core, value: path_api.TimeoutResult,
 
 pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
                    now_ns: u64) transport_api.CoreResult {
-    if (core == nil || secrets == nil || !core.initialized ||
+    if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
         now_ns < core.last_now_ns) {
         ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
@@ -2456,7 +3197,7 @@ pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
         }
     }
     if (fired_kind == TIMER_PATH && !apply_path_timeout(core,
-        path_api.on_timeout(core.paths, now_ns), now_ns)) {
+        path_api.on_timeout_scoped(core.paths, core.config.source, now_ns), now_ns)) {
         ret fail(core, NO_VIABLE_PATH, now_ns);
     }
     ret core_result(core, transport_api.STATUS_OK, 0);
@@ -2465,11 +3206,13 @@ pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
 pub fun begin_close(core: *Core, secrets: *Secrets, abortive: bool,
                     application_error: u64, reason: *u8,
                     reason_length: usize, now_ns: u64) transport_api.CoreResult {
-    if (core == nil || secrets == nil || !core.initialized ||
+    val reason_range: ownership.Range = ownership.bytes(reason, reason_length,
+        ownership.ZERO_ALLOWED);
+    if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
         now_ns < core.last_now_ns ||
         reason_length > core.storage.close_reason_capacity ||
-        (reason_length > 0 && reason == nil)) {
+        !borrowed_disjoint(core, reason_range)) {
         ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
             error: INTERNAL_ERROR, state: transport_api.DRAINING};
     }
@@ -2515,7 +3258,7 @@ pub fun begin_close(core: *Core, secrets: *Secrets, abortive: bool,
 }
 
 pub fun close_ready(core: *Core) bool {
-    if (core == nil || !core.initialized || core.destroyed ||
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
         core.state != transport_api.CLOSED || !core.cids.closing ||
         !core.paths.closing || !core.streams.closing ||
         !core.datagrams.closing || core.streams.active_attempts != 0 ||
@@ -2531,14 +3274,14 @@ pub fun close_ready(core: *Core) bool {
 }
 
 pub fun finish_close(core: *Core, secrets: *Secrets) bool {
-    if (!close_ready(core) || secrets == nil || !secrets.initialized ||
+    if (!close_ready(core) || !secret_record_valid(secrets) || !secrets.initialized ||
         secrets.destroyed) { ret false; }
     val handshake_snapshot: handshake_api.Snapshot =
         handshake_api.snapshot(secrets.handshake);
     if (handshake_snapshot.event_active) { ret false; }
-    if (!handshake_snapshot.closing && handshake_api.close(secrets.handshake,
-        0, core.last_now_ns).status != handshake_api.STATUS_OK) { ret false; }
-    if (!handshake_api.destroy(secrets.handshake)) { ret false; }
+    if (!handshake_snapshot.closing && handshake_api.close_scoped(secrets.handshake, core.config.source, 0, core.last_now_ns).status != handshake_api.STATUS_OK) { ret false; }
+    if (!handshake_api.destroy_scoped(secrets.handshake,
+        core.config.source)) { ret false; }
     protection.destroy_initial(?secrets.initial_keys);
     protection.destroy(?secrets.early_send);
     protection.destroy(?secrets.early_receive);
@@ -2550,10 +3293,10 @@ pub fun finish_close(core: *Core, secrets: *Secrets) bool {
         secrets.storage.receive_plaintext_capacity);
     ct.zeroize(secrets.storage.send_plaintext,
         secrets.storage.send_plaintext_capacity);
-    if (!cid_api.finish_close(core.cids) ||
-        path_api.finish_close(core.paths).status != path_api.STATUS_OK ||
-        stream_api.finish_close(core.streams).status != stream_api.STATUS_OK ||
-        datagram_api.finish_close(core.datagrams).status != datagram_api.STATUS_OK) {
+    if (!cid_api.finish_close_scoped(core.cids, core.config.source) ||
+        path_api.finish_close_scoped(core.paths, core.config.source).status != path_api.STATUS_OK ||
+        stream_api.finish_close_scoped(core.streams, core.config.source).status != stream_api.STATUS_OK ||
+        datagram_api.finish_close_scoped(core.datagrams, core.config.source).status != datagram_api.STATUS_OK) {
         ret false;
     }
     secrets.initialized = false;

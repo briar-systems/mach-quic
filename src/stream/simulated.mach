@@ -4,6 +4,13 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 
+fun initialize_manager(config: stream.Config,
+                       storage: stream.Storage) stream.Manager {
+    var manager: stream.Manager;
+    stream.initialize(?manager, config, storage);
+    ret manager;
+}
+
 fun config(source: u64, streams: u64, data: u64) stream.Config {
     var value: stream.Config;
     value.source = source;
@@ -45,7 +52,7 @@ test "quic.stream.simulated: stream creation, implicit peer streams, and ordered
     limits.receive_local_bidirectional_limit = 16;
     limits.receive_peer_bidirectional_limit = 16;
     limits.receive_unidirectional_limit = 16;
-    var manager: stream.Manager = stream.init(limits, storage);
+    var manager: stream.Manager = initialize_manager(limits, storage);
     val local_bidi: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
     val local_uni: stream.CreateResult = stream.open(?manager, stream.DIRECTION_UNIDIRECTIONAL);
     if (local_bidi.status != stream.STATUS_OK || local_bidi.handle.id != 0 ||
@@ -90,7 +97,7 @@ test "quic.stream.simulated: final size, overlap, and connection flow failures a
     limits.receive_local_bidirectional_limit = 16;
     limits.receive_peer_bidirectional_limit = 16;
     limits.receive_unidirectional_limit = 16;
-    var manager: stream.Manager = stream.init(limits, storage);
+    var manager: stream.Manager = initialize_manager(limits, storage);
     var data: [6]u8 = [6]u8{1, 2, 3, 4, 5, 6};
     val received: stream.ReceiveResult = stream.receive_stream(?manager, 1, 0, ?data[0], 6, false);
     if (!received.ok || manager.receive_committed != 6 || manager.active_streams != 1) { ret 1; }
@@ -131,7 +138,7 @@ test "quic.stream.simulated: exact send budgets and duplicate transmissions reta
     var limits: stream.Config = config(13, 2, 6);
     limits.send_local_bidirectional_limit = 4;
     limits.receive_max_data = 16;
-    var manager: stream.Manager = stream.init(limits, storage);
+    var manager: stream.Manager = initialize_manager(limits, storage);
     val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
     var data: [8]u8 = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
     val first_write: stream.WriteResult = stream.write(?manager, opened.handle, ?data[0], 8);
@@ -184,7 +191,7 @@ test "quic.stream.simulated: reset, stop-sending, and cancellation close both di
     limits.receive_local_bidirectional_limit = 8;
     limits.receive_peer_bidirectional_limit = 8;
     limits.receive_unidirectional_limit = 8;
-    var manager: stream.Manager = stream.init(limits, storage);
+    var manager: stream.Manager = initialize_manager(limits, storage);
     val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
     var data: [3]u8 = [3]u8{1, 2, 3};
     stream.write(?manager, opened.handle, ?data[0], 3);
@@ -244,7 +251,7 @@ test "quic.stream.simulated: connection and stream flow budgets remain independe
     limits.receive_local_bidirectional_limit = 4;
     limits.receive_peer_bidirectional_limit = 4;
     limits.receive_unidirectional_limit = 4;
-    var manager: stream.Manager = stream.init(limits, storage);
+    var manager: stream.Manager = initialize_manager(limits, storage);
     val first: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
     val second: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
     var data: [8]u8 = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
@@ -293,7 +300,7 @@ test "quic.stream.simulated: unidirectional streams enforce ownership and ordere
     limits.receive_local_bidirectional_limit = 8;
     limits.receive_peer_bidirectional_limit = 8;
     limits.receive_unidirectional_limit = 8;
-    var manager: stream.Manager = stream.init(limits, storage);
+    var manager: stream.Manager = initialize_manager(limits, storage);
     val local: stream.CreateResult = stream.open(?manager, stream.DIRECTION_UNIDIRECTIONAL);
     var data: [4]u8 = [4]u8{1, 2, 3, 4};
     if (local.handle.id != 2 || stream.receive_stream(?manager, 2, 0, ?data[0], 1, false).error != stream.ERROR_DIRECTION ||
@@ -338,7 +345,7 @@ test "quic.stream.simulated: close pins reserved stream payloads until cancellat
         receive_present: ?receive_present[0], receive_state_length: 4, receive_stride: 4,
         attempts: ?attempts[0], attempt_capacity: 1
     };
-    var manager: stream.Manager = stream.init(config(18, 1, 4), storage);
+    var manager: stream.Manager = initialize_manager(config(18, 1, 4), storage);
     val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
     var data: [1]u8 = [1]u8{6};
     stream.write(?manager, opened.handle, ?data[0], 1);
@@ -374,7 +381,7 @@ test "quic.stream.simulated: flow-control frames create only permitted peer stre
     limits.receive_local_bidirectional_limit = 8;
     limits.receive_peer_bidirectional_limit = 8;
     limits.receive_unidirectional_limit = 8;
-    var manager: stream.Manager = stream.init(limits, storage);
+    var manager: stream.Manager = initialize_manager(limits, storage);
     val maximum: stream.ReceiveResult = stream.receive_max_stream_data(?manager, 5, 12);
     if (!maximum.ok || maximum.new_streams != 2 || records[maximum.handle.index].send_limit != 12 ||
         stream.accept(?manager).handle.id != 1 || stream.accept(?manager).handle.id != 5) { ret 1; }
@@ -412,7 +419,7 @@ test "quic.stream.simulated: stream exhaustion and two-phase teardown are bounde
     limits.receive_local_bidirectional_limit = 8;
     limits.receive_peer_bidirectional_limit = 8;
     limits.receive_unidirectional_limit = 8;
-    var manager: stream.Manager = stream.init(limits, storage);
+    var manager: stream.Manager = initialize_manager(limits, storage);
     var data: [1]u8 = [1]u8{1};
     if (stream.receive_stream(?manager, 9, 0, ?data[0], 1, false).error != stream.ERROR_CAPACITY ||
         manager.active_streams != 0 || manager.peer_bidirectional_opened != 0) { ret 1; }
@@ -425,5 +432,69 @@ test "quic.stream.simulated: stream exhaustion and two-phase teardown are bounde
     if (stream.on_terminal(?manager, prepared.token, stream.TERMINAL_LOST).status != stream.STATUS_OK ||
         stream.finish_close(?manager).status != stream.STATUS_OK) { ret 1; }
     if (stream.snapshot(?manager, opened.handle).ok) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: consumed credit frames survive loss and stream release" {
+    var records: [1]stream.Stream;
+    var send_data: [8]u8;
+    var send_pending: [8]bool;
+    var send_acked: [8]bool;
+    var send_inflight: [8]u8;
+    var receive_data: [8]u8;
+    var receive_present: [8]bool;
+    var attempts: [4]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 1,
+        send_data: ?send_data[0], send_data_length: 8,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 8, send_stride: 8,
+        receive_data: ?receive_data[0], receive_data_length: 8,
+        receive_present: ?receive_present[0], receive_state_length: 8,
+        receive_stride: 8, attempts: ?attempts[0], attempt_capacity: 4};
+    var limits: stream.Config = config(20, 1, 8);
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit = 8;
+    limits.receive_unidirectional_limit = 8;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    var input: [4]u8 = [4]u8{1, 2, 3, 4};
+    if (!stream.receive_stream(?manager, 1, 0, ?input[0], 4, false).ok) {
+        ret 1;
+    }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    var output: [4]u8;
+    if (stream.read(?manager, accepted.handle, ?output[0], 4).count != 4) {
+        ret 1;
+    }
+    var control: stream.Prepared = stream.prepare_control(?manager);
+    if (control.kind != stream.SEND_MAX_DATA || control.maximum != 12 ||
+        stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token,
+            stream.TERMINAL_LOST).status != stream.STATUS_OK) { ret 1; }
+    control = stream.prepare_control(?manager);
+    if (control.kind != stream.SEND_MAX_DATA ||
+        stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token,
+            stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
+    control = stream.prepare_control(?manager);
+    if (control.kind != stream.SEND_MAX_STREAM_DATA || control.maximum != 12 ||
+        stream.cancel_prepared(?manager, control).status != stream.STATUS_OK) {
+        ret 1;
+    }
+    control = stream.prepare_control(?manager);
+    if (stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token,
+            stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
+        !stream.receive_stream(?manager, 1, 4, nil, 0, true).ok) { ret 1; }
+    records[accepted.handle.index].send_closed = true;
+    if (stream.release(?manager, accepted.handle).status != stream.STATUS_OK) {
+        ret 1;
+    }
+    control = stream.prepare_control(?manager);
+    if (control.kind != stream.SEND_MAX_STREAMS_BIDI || control.maximum != 2 ||
+        stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token,
+            stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
+        stream.prepare_control(?manager).status != stream.STATUS_EMPTY) { ret 1; }
     ret 0;
 }

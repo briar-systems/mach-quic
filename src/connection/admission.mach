@@ -1,5 +1,7 @@
 # bounded server connection admission before expensive allocation
 
+use quic.connection.ownership;
+
 use std.memory;
 use std.net.ip;
 use std.types.bool.bool;
@@ -69,6 +71,7 @@ pub rec Manager {
     reserved: usize;
     next_peer: usize;
     next_charge: usize;
+    listener_lease: u64;
     initialized: bool;
     closing: bool;
 }
@@ -123,15 +126,40 @@ pub fun peer_equal(left: PeerKey, right: PeerKey) bool {
     ret true;
 }
 
-pub fun init(config: Config, storage: Storage) Manager {
-    var manager: Manager;
+fun physical(manager: *Manager) bool {
+    if (!ownership.bytes(manager::*u8, $size_of(Manager),
+            ownership.ZERO_FORBIDDEN).valid) { ret false; }
+    val peers: ownership.Range = ownership.array(manager.storage.peers::*u8,
+        manager.storage.peer_capacity, $size_of(PeerSlot),
+        ownership.ZERO_FORBIDDEN);
+    val charges: ownership.Range = ownership.array(manager.storage.charges::*u8,
+        manager.storage.charge_capacity, $size_of(ChargeSlot),
+        ownership.ZERO_FORBIDDEN);
+    var ranges: [3]ownership.Range;
+    ranges[0] = ownership.bytes(manager::*u8, $size_of(Manager),
+        ownership.ZERO_FORBIDDEN);
+    ranges[1] = peers;
+    ranges[2] = charges;
+    ret ownership.all_disjoint(?ranges[0], 3);
+}
+
+pub fun initialize(manager: *Manager, config: Config, storage: Storage) bool {
     if (config.source == 0 || config.max_connections == 0 ||
         config.max_connections_per_peer == 0 ||
         config.max_connections_per_peer > config.max_connections ||
         storage.peers == nil || storage.peer_capacity == 0 ||
         storage.charges == nil || storage.charge_capacity < config.max_connections) {
-        ret manager;
+        ret false;
     }
+    val manager_range: ownership.Range = ownership.bytes(manager::*u8,
+        $size_of(Manager), ownership.ZERO_FORBIDDEN);
+    val peer_range: ownership.Range = ownership.array(storage.peers::*u8,
+        storage.peer_capacity, $size_of(PeerSlot), ownership.ZERO_FORBIDDEN);
+    val charge_range: ownership.Range = ownership.array(storage.charges::*u8,
+        storage.charge_capacity, $size_of(ChargeSlot), ownership.ZERO_FORBIDDEN);
+    var ranges: [3]ownership.Range = [3]ownership.Range{
+        manager_range, peer_range, charge_range};
+    if (!ownership.all_disjoint(?ranges[0], 3) || manager.initialized) { ret false; }
     var i: usize = 0;
     for (i < storage.peer_capacity) {
         storage.peers[i].active = 0;
@@ -147,8 +175,33 @@ pub fun init(config: Config, storage: Storage) Manager {
     }
     manager.config = config;
     manager.storage = storage;
+    manager.active = 0;
+    manager.reserved = 0;
+    manager.next_peer = 0;
+    manager.next_charge = 0;
+    manager.listener_lease = 0;
+    manager.closing = false;
     manager.initialized = true;
-    ret manager;
+    ret true;
+}
+
+fun scope_allowed(manager: *Manager, listener_source: u64) bool {
+    if (listener_source == 0) { ret manager.listener_lease == 0; }
+    ret manager.listener_lease == listener_source;
+}
+
+pub fun lease_listener(manager: *Manager, source: u64) bool {
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        source == 0 || manager.listener_lease != 0) { ret false; }
+    manager.listener_lease = source;
+    ret true;
+}
+
+pub fun release_listener(manager: *Manager, source: u64) bool {
+    if (!physical(manager) || !manager.initialized || source == 0 ||
+        manager.listener_lease != source) { ret false; }
+    manager.listener_lease = 0;
+    ret true;
 }
 
 fun find_peer(manager: *Manager, key: PeerKey) usize {
@@ -193,8 +246,14 @@ fun claim_charge(manager: *Manager) usize {
 }
 
 pub fun reserve(manager: *Manager, endpoint: ip.Endpoint) Result {
+    ret reserve_scoped(manager, 0, endpoint);
+}
+
+pub fun reserve_scoped(manager: *Manager, listener_source: u64,
+                       endpoint: ip.Endpoint) Result {
     var result: Result;
-    if (manager == nil || !manager.initialized || manager.closing) {
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        !scope_allowed(manager, listener_source)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
         ret result;
@@ -241,7 +300,7 @@ pub fun reserve(manager: *Manager, endpoint: ip.Endpoint) Result {
 }
 
 fun slot_for(manager: *Manager, charge: Charge) *ChargeSlot {
-    if (manager == nil || !manager.initialized || charge.source != manager.config.source ||
+    if (!physical(manager) || !manager.initialized || charge.source != manager.config.source ||
         charge.index >= manager.storage.charge_capacity) { ret nil; }
     val slot: *ChargeSlot = ?manager.storage.charges[charge.index];
     if (slot.state == CHARGE_FREE || slot.generation != charge.generation) { ret nil; }
@@ -249,7 +308,18 @@ fun slot_for(manager: *Manager, charge: Charge) *ChargeSlot {
 }
 
 pub fun commit(manager: *Manager, charge: Charge) Result {
+    ret commit_scoped(manager, 0, charge);
+}
+
+pub fun commit_scoped(manager: *Manager, listener_source: u64,
+                      charge: Charge) Result {
     var result: Result;
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        !scope_allowed(manager, listener_source)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     val slot: *ChargeSlot = slot_for(manager, charge);
     if (slot == nil || slot.state != CHARGE_RESERVED) {
         result.status = STATUS_STALE;
@@ -265,7 +335,18 @@ pub fun commit(manager: *Manager, charge: Charge) Result {
 }
 
 pub fun release(manager: *Manager, charge: Charge) Result {
+    ret release_scoped(manager, 0, charge);
+}
+
+pub fun release_scoped(manager: *Manager, listener_source: u64,
+                       charge: Charge) Result {
     var result: Result;
+    if (!physical(manager) || !manager.initialized ||
+        !scope_allowed(manager, listener_source)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     val slot: *ChargeSlot = slot_for(manager, charge);
     if (slot == nil) {
         result.status = STATUS_STALE;
@@ -288,13 +369,15 @@ pub fun release(manager: *Manager, charge: Charge) Result {
 }
 
 pub fun begin_close(manager: *Manager) bool {
-    if (manager == nil || !manager.initialized || manager.closing) { ret false; }
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        manager.listener_lease != 0) { ret false; }
     manager.closing = true;
     ret true;
 }
 
 pub fun finish_close(manager: *Manager) bool {
-    if (manager == nil || !manager.initialized || !manager.closing ||
+    if (!physical(manager) || !manager.initialized || !manager.closing ||
+        manager.listener_lease != 0 ||
         manager.active != 0 || manager.reserved != 0) { ret false; }
     manager.initialized = false;
     ret true;
@@ -302,7 +385,7 @@ pub fun finish_close(manager: *Manager) bool {
 
 pub fun snapshot(manager: *Manager) Snapshot {
     var value: Snapshot;
-    if (manager == nil) { ret value; }
+    if (!physical(manager) || !manager.initialized) { ret value; }
     value.active = manager.active;
     value.reserved = manager.reserved;
     value.initialized = manager.initialized;
@@ -318,9 +401,10 @@ pub fun snapshot(manager: *Manager) Snapshot {
 test "quic.connection.admission: global and peer limits are charged before commit" {
     var peers: [3]PeerSlot;
     var charges: [3]ChargeSlot;
-    var manager: Manager = init(Config{source: 91, max_connections: 3,
+    var manager: Manager;
+    if (!initialize(?manager, Config{source: 91, max_connections: 3,
         max_connections_per_peer: 2}, Storage{peers: ?peers[0], peer_capacity: 3,
-        charges: ?charges[0], charge_capacity: 3});
+        charges: ?charges[0], charge_capacity: 3})) { ret 1; }
     val first: Result = reserve(?manager, ip.endpoint(192, 0, 2, 1, 4000));
     val second: Result = reserve(?manager, ip.endpoint(192, 0, 2, 1, 4001));
     val blocked: Result = reserve(?manager, ip.endpoint(192, 0, 2, 1, 4002));
@@ -344,9 +428,10 @@ test "quic.connection.admission: global and peer limits are charged before commi
 test "quic.connection.admission: stale and cross-source charges cannot release capacity" {
     var peers: [1]PeerSlot;
     var charges: [1]ChargeSlot;
-    var manager: Manager = init(Config{source: 92, max_connections: 1,
+    var manager: Manager;
+    if (!initialize(?manager, Config{source: 92, max_connections: 1,
         max_connections_per_peer: 1}, Storage{peers: ?peers[0], peer_capacity: 1,
-        charges: ?charges[0], charge_capacity: 1});
+        charges: ?charges[0], charge_capacity: 1})) { ret 1; }
     val held: Result = reserve(?manager, ip.endpoint(203, 0, 113, 1, 1));
     var wrong: Charge = held.charge;
     wrong.source = 93;
@@ -358,5 +443,35 @@ test "quic.connection.admission: stale and cross-source charges cannot release c
     if (reused.status != STATUS_OK || reused.charge.generation == held.charge.generation ||
         release(?manager, held.charge).status != STATUS_STALE ||
         release(?manager, reused.charge).status != STATUS_OK) { ret 2; }
+    ret 0;
+}
+
+test "quic.connection.admission: hostile products and aliases publish no initialization" {
+    val maximum: usize = ~(0::usize);
+    var peers: [2]PeerSlot;
+    var charges: [1]ChargeSlot;
+    peers[0].active = 71;
+    charges[0].state = CHARGE_COMMITTED;
+    var manager: Manager;
+    val peer_overflow: usize = maximum / $size_of(PeerSlot) + 1;
+    if (initialize(?manager, Config{source: 93, max_connections: 1,
+            max_connections_per_peer: 1}, Storage{peers: (1::usize)::*PeerSlot,
+            peer_capacity: peer_overflow, charges: ?charges[0], charge_capacity: 1}) ||
+        initialize(?manager, Config{source: 93, max_connections: 1,
+            max_connections_per_peer: 1}, Storage{peers: maximum::*PeerSlot,
+            peer_capacity: 1, charges: ?charges[0], charge_capacity: 1}) ||
+        initialize(?manager, Config{source: 93, max_connections: 1,
+            max_connections_per_peer: 1}, Storage{peers: ?peers[0],
+            peer_capacity: 2, charges: (?peers[0])::*ChargeSlot,
+            charge_capacity: 1}) || manager.initialized || peers[0].active != 71 ||
+        charges[0].state != CHARGE_COMMITTED) { ret 1; }
+    if (!initialize(?manager, Config{source: 93, max_connections: 1,
+            max_connections_per_peer: 1}, Storage{peers: ?peers[0],
+            peer_capacity: 2, charges: ?charges[0], charge_capacity: 1})) { ret 2; }
+    val generation: u64 = peers[0].generation;
+    if (initialize(?manager, Config{source: 94, max_connections: 1,
+            max_connections_per_peer: 1}, Storage{peers: ?peers[0],
+            peer_capacity: 2, charges: ?charges[0], charge_capacity: 1}) ||
+        manager.config.source != 93 || peers[0].generation != generation) { ret 3; }
     ret 0;
 }

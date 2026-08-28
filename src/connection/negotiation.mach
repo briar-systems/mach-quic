@@ -1,5 +1,6 @@
 # client version negotiation and Retry restart lifecycle
 
+use quic.connection.ownership;
 use quic.crypto.protection;
 use quic.packet.packet;
 
@@ -73,38 +74,94 @@ fun supported(config: *Config, version: u32) bool {
     ret false;
 }
 
-pub fun init(config: Config, storage: Storage, version: u32,
-             original_destination: packet.ConnectionId,
-             initial_local_source: packet.ConnectionId) Client {
-    var client: Client;
+fun physical(client: *Client) bool {
+    if (!ownership.bytes(client::*u8, $size_of(Client),
+            ownership.ZERO_FORBIDDEN).valid) { ret false; }
+    var ranges: [4]ownership.Range;
+    ranges[0] = ownership.bytes(client::*u8, $size_of(Client),
+        ownership.ZERO_FORBIDDEN);
+    ranges[1] = ownership.array(client.config.supported_versions::*u8,
+        client.config.supported_version_count, $size_of(u32),
+        ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.bytes(client.storage.retry_token,
+        client.storage.retry_token_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.bytes(client.storage.retry_pseudo,
+        client.storage.retry_pseudo_capacity, ownership.ZERO_FORBIDDEN);
+    ret ownership.all_disjoint(?ranges[0], 4);
+}
+
+fun input_disjoint(client: *Client, input: ownership.Range) bool {
+    if (!input.valid) { ret false; }
+    var ranges: [4]ownership.Range;
+    ranges[0] = ownership.bytes(client::*u8, $size_of(Client),
+        ownership.ZERO_FORBIDDEN);
+    ranges[1] = ownership.array(client.config.supported_versions::*u8,
+        client.config.supported_version_count, $size_of(u32),
+        ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.bytes(client.storage.retry_token,
+        client.storage.retry_token_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.bytes(client.storage.retry_pseudo,
+        client.storage.retry_pseudo_capacity, ownership.ZERO_FORBIDDEN);
+    var i: usize = 0;
+    for (i < 4) {
+        if (!ownership.disjoint(input, ranges[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun initialize(client: *Client, config: Config, storage: Storage, version: u32,
+                   original_destination: packet.ConnectionId,
+                   initial_local_source: packet.ConnectionId) bool {
     if (config.supported_versions == nil || config.supported_version_count == 0 ||
-        config.supported_version_count > 16 || !supported(?config, version) ||
+        config.supported_version_count > 16 ||
         storage.retry_token == nil || storage.retry_token_capacity == 0 ||
         storage.retry_pseudo == nil || storage.retry_pseudo_capacity < 64 ||
-        original_destination.len == 0 || initial_local_source.len == 0) { ret client; }
+        original_destination.len == 0 || initial_local_source.len == 0 ||
+        original_destination.len::usize > packet.MAX_CONNECTION_ID ||
+        initial_local_source.len::usize > packet.MAX_CONNECTION_ID) { ret false; }
+    var ranges: [4]ownership.Range;
+    ranges[0] = ownership.bytes(client::*u8, $size_of(Client),
+        ownership.ZERO_FORBIDDEN);
+    ranges[1] = ownership.array(config.supported_versions::*u8,
+        config.supported_version_count, $size_of(u32), ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.bytes(storage.retry_token, storage.retry_token_capacity,
+        ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.bytes(storage.retry_pseudo, storage.retry_pseudo_capacity,
+        ownership.ZERO_FORBIDDEN);
+    if (!ownership.all_disjoint(?ranges[0], 4) || client.initialized ||
+        !supported(?config, version)) { ret false; }
     var i: usize = 0;
     for (i < config.supported_version_count) {
         if (config.supported_versions[i] != packet.VERSION_1 &&
-            config.supported_versions[i] != packet.VERSION_2) { ret client; }
+            config.supported_versions[i] != packet.VERSION_2) { ret false; }
         var j: usize = 0;
         for (j < i) {
-            if (config.supported_versions[i] == config.supported_versions[j]) { ret client; }
+            if (config.supported_versions[i] == config.supported_versions[j]) {
+                ret false;
+            }
             j = j + 1;
         }
         i = i + 1;
     }
+    memory.raw_zero(storage.retry_token, storage.retry_token_capacity);
+    memory.raw_zero(storage.retry_pseudo, storage.retry_pseudo_capacity);
     client.config = config;
     client.storage = storage;
     client.version = version;
     client.original_destination = original_destination;
     client.peer_destination = original_destination;
     client.initial_local_source = initial_local_source;
+    client.retry_token_length = 0;
+    client.authenticated_packet_received = false;
+    client.version_negotiated = false;
+    client.retry_accepted = false;
     client.initialized = true;
-    ret client;
+    ret true;
 }
 
 pub fun note_authenticated(client: *Client) bool {
-    if (client == nil || !client.initialized) { ret false; }
+    if (!physical(client) || !client.initialized) { ret false; }
     client.authenticated_packet_received = true;
     ret true;
 }
@@ -119,13 +176,20 @@ fun decode_packet(data: *u8, length: usize, output: *packet.Packet) bool {
 
 pub fun version_negotiation(client: *Client, data: *u8, length: usize) Result {
     var result: Result;
-    if (client == nil || !client.initialized) {
+    if (!physical(client) || !client.initialized) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
         ret result;
     }
     if (client.authenticated_packet_received || client.version_negotiated ||
         client.retry_accepted) { result.status = STATUS_IGNORED; ret result; }
+    val input: ownership.Range = ownership.bytes(data, length,
+        ownership.ZERO_FORBIDDEN);
+    if (!input_disjoint(client, input)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_PACKET;
+        ret result;
+    }
     var value: packet.Packet;
     if (!decode_packet(data, length, ?value) ||
         value.header.kind != packet.PACKET_VERSION_NEGOTIATION) {
@@ -179,13 +243,20 @@ pub fun version_negotiation(client: *Client, data: *u8, length: usize) Result {
 
 pub fun retry(client: *Client, data: *u8, length: usize) Result {
     var result: Result;
-    if (client == nil || !client.initialized) {
+    if (!physical(client) || !client.initialized) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
         ret result;
     }
     if (client.authenticated_packet_received || client.retry_accepted) {
         result.status = STATUS_IGNORED;
+        ret result;
+    }
+    val input: ownership.Range = ownership.bytes(data, length,
+        ownership.ZERO_FORBIDDEN);
+    if (!input_disjoint(client, input)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_PACKET;
         ret result;
     }
     var value: packet.Packet;
@@ -230,12 +301,21 @@ pub fun retry(client: *Client, data: *u8, length: usize) Result {
 
 pub fun token(client: *Client) packet.Span {
     var value: packet.Span;
-    if (client == nil || !client.initialized || client.retry_token_length == 0) {
+    if (!physical(client) || !client.initialized || client.retry_token_length == 0) {
         ret value;
     }
     value.data = client.storage.retry_token;
     value.len = client.retry_token_length;
     ret value;
+}
+
+pub fun finish(client: *Client) bool {
+    if (!physical(client) || !client.initialized) { ret false; }
+    memory.raw_zero(client.storage.retry_token, client.storage.retry_token_capacity);
+    memory.raw_zero(client.storage.retry_pseudo, client.storage.retry_pseudo_capacity);
+    client.retry_token_length = 0;
+    client.initialized = false;
+    ret true;
 }
 
 test "quic.connection.negotiation: spoofed and downgrade version packets are ignored" {
@@ -248,10 +328,11 @@ test "quic.connection.negotiation: spoofed and downgrade version packets are ign
     local.len = 8;
     original.data[0] = 1;
     local.data[0] = 2;
-    var client: Client = init(Config{supported_versions: ?versions[0],
+    var client: Client;
+    if (!initialize(?client, Config{supported_versions: ?versions[0],
         supported_version_count: 2}, Storage{retry_token: ?retry_token[0],
         retry_token_capacity: 256, retry_pseudo: ?pseudo[0],
-        retry_pseudo_capacity: 256}, packet.VERSION_1, original, local);
+        retry_pseudo_capacity: 256}, packet.VERSION_1, original, local)) { ret 1; }
     var offered: [8]u8;
     binary.put_uint(?offered[0], packet.VERSION_2::u64, 4, binary.BIG);
     binary.put_uint(?offered[4], 0xfaceb00c, 4, binary.BIG);
@@ -267,5 +348,48 @@ test "quic.connection.negotiation: spoofed and downgrade version packets are ign
         packet.default_limits());
     if (!encoded.ok || version_negotiation(?client, ?bytes[0], encoded.count).status !=
         STATUS_RESTART || client.version != packet.VERSION_2) { ret 1; }
+    ret 0;
+}
+
+test "quic.connection.negotiation: hostile ranges and aliases do not publish state" {
+    val maximum: usize = ~(0::usize);
+    var versions: [1]u32 = [1]u32{packet.VERSION_1};
+    var retry_token: [128]u8;
+    var pseudo: [128]u8;
+    retry_token[0] = 91;
+    pseudo[0] = 92;
+    var original: packet.ConnectionId;
+    var local: packet.ConnectionId;
+    original.len = 8;
+    local.len = 8;
+    var client: Client;
+    if (initialize(?client, Config{supported_versions: maximum::*u32,
+            supported_version_count: 1}, Storage{retry_token: ?retry_token[0],
+            retry_token_capacity: 128, retry_pseudo: ?pseudo[0],
+            retry_pseudo_capacity: 128}, packet.VERSION_1, original, local) ||
+        initialize(?client, Config{supported_versions: ?versions[0],
+            supported_version_count: 1}, Storage{retry_token: maximum::*u8,
+            retry_token_capacity: 128, retry_pseudo: ?pseudo[0],
+            retry_pseudo_capacity: 128}, packet.VERSION_1, original, local) ||
+        initialize(?client, Config{supported_versions: ?versions[0],
+            supported_version_count: 1}, Storage{retry_token: ?retry_token[0],
+            retry_token_capacity: 128, retry_pseudo: ?retry_token[0],
+            retry_pseudo_capacity: 128}, packet.VERSION_1, original, local) ||
+        initialize((?retry_token[0])::*Client,
+            Config{supported_versions: ?versions[0], supported_version_count: 1},
+            Storage{retry_token: ?retry_token[0], retry_token_capacity: 128,
+            retry_pseudo: ?pseudo[0], retry_pseudo_capacity: 128},
+            packet.VERSION_1, original, local) || client.initialized ||
+        retry_token[0] != 91 || pseudo[0] != 92) { ret 1; }
+    if (!initialize(?client, Config{supported_versions: ?versions[0],
+            supported_version_count: 1}, Storage{retry_token: ?retry_token[0],
+            retry_token_capacity: 128, retry_pseudo: ?pseudo[0],
+            retry_pseudo_capacity: 128}, packet.VERSION_1, original, local)) { ret 2; }
+    if (version_negotiation(?client, ?retry_token[0], 1).error != ERROR_PACKET ||
+        initialize(?client, Config{supported_versions: ?versions[0],
+            supported_version_count: 1}, Storage{retry_token: ?retry_token[0],
+            retry_token_capacity: 128, retry_pseudo: ?pseudo[0],
+            retry_pseudo_capacity: 128}, packet.VERSION_1, original, local) ||
+        !finish(?client) || client.initialized) { ret 3; }
     ret 0;
 }

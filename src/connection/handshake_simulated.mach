@@ -38,6 +38,9 @@ rec Provider {
     destroyed: bool;
 }
 
+var reentry_adapter: *handshake.Adapter;
+var reentry_rejected: bool;
+
 rec Fixture {
     receive_data: [256]u8;
     receive_present: [256]bool;
@@ -69,6 +72,10 @@ fun start_provider(context: ptr, secret_context: *^u8,
 fun ingest_provider(context: ptr, secret_context: *^u8, level: u8, offset: u64,
                     data: *u8, length: usize, now_ns: u64) handshake.ProviderResult {
     val provider: *Provider = context::*Provider;
+    if (reentry_adapter != nil && handshake.close(reentry_adapter, 0,
+        now_ns).error == handshake.ERROR_STATE) {
+        reentry_rejected = true;
+    }
     if (!provider.started || level < handshake.INITIAL ||
         level > handshake.APPLICATION || offset != provider.ingested_length::u64 ||
         data == nil || length == 0 || length > 256 - provider.ingested_length ||
@@ -156,6 +163,8 @@ fun destroy_provider(context: ptr, secret_context: *^u8) bool {
 }
 
 fun make_fixture(fixture: *Fixture, source: u64) bool {
+    reentry_adapter = ?fixture.adapter;
+    reentry_rejected = false;
     val storage: handshake.Storage = handshake.Storage{
         receive_data: ?fixture.receive_data[0],
         receive_present: ?fixture.receive_present[0], receive_length: 256,
@@ -172,9 +181,9 @@ fun make_fixture(fixture: *Fixture, source: u64) bool {
         next_event: next_provider_event, complete_event: complete_provider_event,
         close: close_provider, destroy: destroy_provider, initialized: true
     };
-    fixture.adapter = handshake.init(handshake.Config{source: source,
+    if (!handshake.initialize(?fixture.adapter, handshake.Config{source: source,
         max_crypto_per_level: 64, max_event_data: 64, max_peer_identity: 64},
-        storage, protocol);
+        storage, protocol)) { ret false; }
     var alpn: [2]u8 = [2]u8{'h', '3'};
     var parameters: [3]u8 = [3]u8{1, 0, 0};
     var start: handshake.Start;
@@ -225,6 +234,7 @@ test "quic.connection.handshake: every-byte crypto fragmentation is reassembled 
         if (i == 0 && received.status != handshake.STATUS_OK) { ret 3; }
     }
     if (fixture.provider.ingested_calls != 1 ||
+        !reentry_rejected ||
         fixture.provider.ingested_length != 16) { ret 4; }
     i = 0;
     for (i < 16) {
@@ -402,5 +412,17 @@ test "quic.connection.handshake: Version Negotiation replaces rather than retran
         prepared.data.data[0] != 'n' ||
         handshake.cancel_prepared(?fixture.adapter, prepared.token).status !=
             handshake.STATUS_OK || !handshake.destroy(?fixture.adapter)) { ret 6; }
+    ret 0;
+}
+
+test "quic.connection.handshake: provider failures retain exact native errors" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 407)) { ret 1; }
+    val failed: handshake.Result = handshake.poll(?fixture.adapter,
+        0 - 1::u64);
+    if (failed.status != handshake.STATUS_ERROR ||
+        failed.error != handshake.ERROR_PROVIDER || failed.provider_error != 4 ||
+        !handshake.snapshot(?fixture.adapter).closing ||
+        !handshake.destroy(?fixture.adapter)) { ret 2; }
     ret 0;
 }

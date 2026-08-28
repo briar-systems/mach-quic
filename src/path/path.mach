@@ -1,3 +1,7 @@
+use congestion_api: quic.congestion.controller;
+use pacer_api: quic.congestion.pacer;
+use quic.connection.ownership;
+
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -90,6 +94,10 @@ pub rec Path {
     received_bytes: u64;
     sent_bytes: u64;
     reserved_bytes: u64;
+    recovery_owners: usize;
+    recovery_bytes_in_flight: u64;
+    congestion: congestion_api.State;
+    pacer: pacer_api.State;
     validation_started_ns: u64;
     validation_deadline_ns: u64;
     largest_non_probing_packet: u64;
@@ -116,6 +124,7 @@ pub rec Path {
     peer_non_probing_received: bool;
     mtu_probe_prepared: bool;
     mtu_probe_active: bool;
+    transport_valid: bool;
 }
 
 pub rec Challenge {
@@ -167,6 +176,7 @@ pub rec Manager {
     storage: Storage;
     selected_index: usize;
     selected_generation: u64;
+    core_lease: u64;
     fallback_index: usize;
     fallback_generation: u64;
     largest_migration_packet: u64;
@@ -445,11 +455,18 @@ fun valid_config(config: Config, storage: Storage, initial: Endpoint) bool {
         config.maximum_mtu > MAX_UDP_PAYLOAD || config.mtu_probe_step == 0) { ret false; }
     if (config.validation_timeout_factor < 3 || config.mtu_probe_attempts == 0 ||
         config.black_hole_threshold == 0) { ret false; }
-    if (storage.paths == nil || storage.path_capacity == 0 ||
-        storage.challenges == nil || storage.challenge_capacity == 0 ||
-        storage.responses == nil || storage.response_capacity == 0 ||
-        storage.sends == nil || storage.send_capacity == 0) { ret false; }
-    ret true;
+    var ranges: [4]ownership.Range;
+    ranges[0] = ownership.array(storage.paths::*u8, storage.path_capacity,
+        $size_of(Path), ownership.ZERO_FORBIDDEN);
+    ranges[1] = ownership.array(storage.challenges::*u8,
+        storage.challenge_capacity, $size_of(Challenge),
+        ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.array(storage.responses::*u8,
+        storage.response_capacity, $size_of(Response),
+        ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.array(storage.sends::*u8, storage.send_capacity,
+        $size_of(SendReservation), ownership.ZERO_FORBIDDEN);
+    ret ownership.all_disjoint(?ranges[0], 4);
 }
 
 pub fun default_config(source: u64, role: u8, initial_address_validated: bool) Config {
@@ -472,6 +489,9 @@ fun reset_path(value: *Path, generation: u64) {
     value.received_bytes = 0;
     value.sent_bytes = 0;
     value.reserved_bytes = 0;
+    value.recovery_owners = 0;
+    value.recovery_bytes_in_flight = 0;
+    value.transport_valid = false;
     value.validation_started_ns = 0;
     value.validation_deadline_ns = 0;
     value.largest_non_probing_packet = 0;
@@ -528,9 +548,15 @@ fun clear_storage(storage: Storage) {
     }
 }
 
+fun manager_record_valid(manager: *Manager) bool {
+    ret manager != nil && ownership.bytes((?manager.config)::*u8,
+        $size_of(Manager), ownership.ZERO_FORBIDDEN).valid;
+}
+
 fun handle_at(manager: *Manager, index: usize) Handle {
     var result: Handle;
-    if (manager == nil || index >= manager.storage.path_capacity || !manager.storage.paths[index].valid) {
+    if (!manager_record_valid(manager) ||
+        index >= manager.storage.path_capacity || !manager.storage.paths[index].valid) {
         ret result;
     }
     result.source = manager.config.source;
@@ -540,26 +566,36 @@ fun handle_at(manager: *Manager, index: usize) Handle {
 }
 
 fun handle_valid(manager: *Manager, value: Handle) bool {
-    ret manager != nil && manager.valid && value.source == manager.config.source &&
+    ret manager_record_valid(manager) && manager.valid &&
+        value.source == manager.config.source &&
         value.index < manager.storage.path_capacity && manager.storage.paths[value.index].valid &&
         manager.storage.paths[value.index].generation == value.generation;
 }
 
-pub fun init(config: Config, storage: Storage, initial: Endpoint) Manager {
-    var manager: Manager;
-    manager.selected_index = invalid_index();
-    manager.fallback_index = invalid_index();
-    manager.selected_generation = 0;
-    manager.fallback_generation = 0;
-    manager.largest_migration_packet = 0;
-    manager.valid = false;
-    manager.handshake_confirmed = false;
-    manager.has_largest_migration_packet = false;
-    manager.closing = false;
-    if (!valid_config(config, storage, initial)) { ret manager; }
+pub fun initialize(manager: *Manager, config: Config, storage: Storage,
+                   initial: Endpoint) bool {
+    if (manager == nil) { ret false; }
+    var ranges: [5]ownership.Range;
+    ranges[0] = ownership.bytes((?manager.config)::*u8, $size_of(Manager),
+        ownership.ZERO_FORBIDDEN);
+    ranges[1] = ownership.array(storage.paths::*u8, storage.path_capacity,
+        $size_of(Path), ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.array(storage.challenges::*u8,
+        storage.challenge_capacity, $size_of(Challenge),
+        ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.array(storage.responses::*u8,
+        storage.response_capacity, $size_of(Response),
+        ownership.ZERO_FORBIDDEN);
+    ranges[4] = ownership.array(storage.sends::*u8, storage.send_capacity,
+        $size_of(SendReservation), ownership.ZERO_FORBIDDEN);
+    if (!ownership.all_disjoint(?ranges[0], 5) || manager.valid ||
+        !valid_config(config, storage, initial)) { ret false; }
     clear_storage(storage);
-    manager.config = config;
-    manager.storage = storage;
+    var candidate: Manager;
+    candidate.config = config;
+    candidate.storage = storage;
+    candidate.selected_index = invalid_index();
+    candidate.fallback_index = invalid_index();
     var first: Path;
     reset_path(?first, 1);
     first.endpoint = initial;
@@ -574,18 +610,19 @@ pub fun init(config: Config, storage: Storage, initial: Endpoint) Manager {
     first.mtu_validated = config.initial_address_validated;
     if (first.address_validated) { first.state = PATH_VALIDATED; }
     storage.paths[0] = first;
-    manager.selected_index = 0;
-    manager.selected_generation = 1;
+    candidate.selected_index = 0;
+    candidate.selected_generation = 1;
     if (first.address_validated) {
-        manager.fallback_index = 0;
-        manager.fallback_generation = 1;
+        candidate.fallback_index = 0;
+        candidate.fallback_generation = 1;
     }
-    manager.valid = true;
-    ret manager;
+    candidate.valid = true;
+    manager[0] = candidate;
+    ret true;
 }
 
 pub fun selected(manager: *Manager) PathResult {
-    if (manager == nil || !manager.valid) { ret path_error(ERROR_STATE); }
+    if (!manager_record_valid(manager) || !manager.valid) { ret path_error(ERROR_STATE); }
     var result: PathResult;
     result.handle = handle_at(manager, manager.selected_index);
     if (result.handle.source == 0) { ret path_error(ERROR_STATE); }
@@ -593,8 +630,22 @@ pub fun selected(manager: *Manager) PathResult {
     ret result;
 }
 
+pub fun lease_core(manager: *Manager, source: u64) bool {
+    if (!manager_record_valid(manager) || !manager.valid || manager.closing || source == 0 ||
+        manager.core_lease != 0) { ret false; }
+    manager.core_lease = source;
+    ret true;
+}
+
+pub fun release_core(manager: *Manager, source: u64) bool {
+    if (!manager_record_valid(manager) || !manager.valid || source == 0 ||
+        manager.core_lease != source) { ret false; }
+    manager.core_lease = 0;
+    ret true;
+}
+
 pub fun find(manager: *Manager, endpoint: Endpoint) PathResult {
-    if (manager == nil || !manager.valid) { ret path_error(ERROR_STATE); }
+    if (!manager_record_valid(manager) || !manager.valid) { ret path_error(ERROR_STATE); }
     if (!valid_address(endpoint.local) || !valid_address(endpoint.peer)) { ret path_error(ERROR_ADDRESS); }
     var i: usize = 0;
     for (i < manager.storage.path_capacity) {
@@ -689,7 +740,8 @@ fun activate(manager: *Manager, index: usize, migration: u8) Observation {
 }
 
 pub fun confirm_handshake(manager: *Manager) OperationResult {
-    if (manager == nil || !manager.valid || manager.closing) { ret operation_error(ERROR_STATE); }
+    if (!manager_record_valid(manager) || !manager.valid || manager.closing ||
+        manager.core_lease != 0) { ret operation_error(ERROR_STATE); }
     manager.handshake_confirmed = true;
     var result: OperationResult;
     result.status = STATUS_OK;
@@ -698,7 +750,8 @@ pub fun confirm_handshake(manager: *Manager) OperationResult {
 
 # receiving a handshake packet proves return routability on that path
 pub fun validate_address(manager: *Manager, value: Handle) OperationResult {
-    if (!handle_valid(manager, value) || manager.closing) {
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.core_lease != 0) {
         ret operation_error(ERROR_TOKEN);
     }
     val path: *Path = ?manager.storage.paths[value.index];
@@ -715,7 +768,8 @@ pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes
                 non_probing: bool, authenticated: bool, fresh: bool,
                 connection_id_available: bool, now_ns: u64) Observation {
     var result: Observation;
-    if (manager == nil || !manager.valid || manager.closing) {
+    if (!manager_record_valid(manager) || !manager.valid || manager.closing ||
+        manager.core_lease != 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
         ret result;
@@ -834,7 +888,7 @@ pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes
 }
 
 pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult {
-    if (manager == nil || !manager.valid || manager.closing) { ret path_error(ERROR_STATE); }
+    if (!manager_record_valid(manager) || !manager.valid || manager.closing) { ret path_error(ERROR_STATE); }
     if (!manager.handshake_confirmed) { ret path_error(ERROR_HANDSHAKE); }
     if (manager.config.role != ROLE_CLIENT) { ret path_error(ERROR_MIGRATION_DISABLED); }
     if (!valid_address(endpoint.local) || !valid_address(endpoint.peer)) { ret path_error(ERROR_ADDRESS); }
@@ -995,7 +1049,7 @@ fun challenge_token(manager: *Manager, index: usize) ChallengeToken {
 }
 
 fun challenge_token_valid(manager: *Manager, token: ChallengeToken) bool {
-    ret manager != nil && manager.valid && token.source == manager.config.source &&
+    ret manager_record_valid(manager) && manager.valid && token.source == manager.config.source &&
         token.index < manager.storage.challenge_capacity && manager.storage.challenges[token.index].valid &&
         manager.storage.challenges[token.index].generation == token.generation &&
         manager.storage.challenges[token.index].path_index == token.path_index &&
@@ -1004,7 +1058,8 @@ fun challenge_token_valid(manager: *Manager, token: ChallengeToken) bool {
 
 pub fun prepare_challenge(manager: *Manager, value: Handle) PreparedChallenge {
     var result: PreparedChallenge;
-    if (!handle_valid(manager, value) || manager.closing) {
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.core_lease != 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_TOKEN;
         ret result;
@@ -1040,7 +1095,8 @@ pub fun prepare_challenge(manager: *Manager, value: Handle) PreparedChallenge {
 }
 
 pub fun cancel_challenge(manager: *Manager, token: ChallengeToken) OperationResult {
-    if (!challenge_token_valid(manager, token)) {
+    if (!manager_record_valid(manager) || manager.core_lease != 0 ||
+        !challenge_token_valid(manager, token)) {
         var stale: OperationResult;
         stale.status = STATUS_STALE;
         ret stale;
@@ -1061,7 +1117,8 @@ pub fun cancel_challenge(manager: *Manager, token: ChallengeToken) OperationResu
 }
 
 pub fun publish_challenge(manager: *Manager, token: ChallengeToken, now_ns: u64) OperationResult {
-    if (!challenge_token_valid(manager, token)) {
+    if (!manager_record_valid(manager) || manager.core_lease != 0 ||
+        !challenge_token_valid(manager, token)) {
         var stale: OperationResult;
         stale.status = STATUS_STALE;
         ret stale;
@@ -1117,7 +1174,8 @@ fun free_path_challenges(manager: *Manager, index: usize, generation: u64, inclu
 
 pub fun receive_response(manager: *Manager, data: [8]u8, now_ns: u64) ValidationResult {
     var result: ValidationResult;
-    if (manager == nil || !manager.valid || manager.closing) {
+    if (!manager_record_valid(manager) || !manager.valid || manager.closing ||
+        manager.core_lease != 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
         ret result;
@@ -1209,6 +1267,7 @@ fun free_path_responses(manager: *Manager, index: usize, generation: u64, includ
 
 pub fun queue_response(manager: *Manager, value: Handle, data: [8]u8) OperationResult {
     if (!handle_valid(manager, value) || manager.closing ||
+        manager.core_lease != 0 ||
         manager.storage.paths[value.index].state == PATH_FAILED) { ret operation_error(ERROR_TOKEN); }
     val index: usize = free_response_index(manager);
     if (index == invalid_index()) { ret operation_error(ERROR_CAPACITY); }
@@ -1237,7 +1296,7 @@ fun response_token(manager: *Manager, index: usize) ResponseToken {
 }
 
 fun response_token_valid(manager: *Manager, token: ResponseToken) bool {
-    ret manager != nil && manager.valid && token.source == manager.config.source &&
+    ret manager_record_valid(manager) && manager.valid && token.source == manager.config.source &&
         token.index < manager.storage.response_capacity && manager.storage.responses[token.index].valid &&
         manager.storage.responses[token.index].generation == token.generation &&
         manager.storage.responses[token.index].path_index == token.path_index &&
@@ -1262,6 +1321,7 @@ fun amplification_allowance(manager: *Manager, index: usize) u64 {
 pub fun prepare_response(manager: *Manager, value: Handle) PreparedResponse {
     var result: PreparedResponse;
     if (!handle_valid(manager, value) || manager.closing ||
+        manager.core_lease != 0 ||
         manager.storage.paths[value.index].state == PATH_FAILED) {
         result.status = STATUS_ERROR;
         result.error = ERROR_TOKEN;
@@ -1299,7 +1359,8 @@ pub fun prepare_response(manager: *Manager, value: Handle) PreparedResponse {
 }
 
 pub fun cancel_response(manager: *Manager, token: ResponseToken) OperationResult {
-    if (!response_token_valid(manager, token)) {
+    if (!manager_record_valid(manager) || manager.core_lease != 0 ||
+        !response_token_valid(manager, token)) {
         var stale: OperationResult;
         stale.status = STATUS_STALE;
         ret stale;
@@ -1320,7 +1381,8 @@ pub fun cancel_response(manager: *Manager, token: ResponseToken) OperationResult
 }
 
 pub fun publish_response(manager: *Manager, token: ResponseToken) OperationResult {
-    if (!response_token_valid(manager, token)) {
+    if (!manager_record_valid(manager) || manager.core_lease != 0 ||
+        !response_token_valid(manager, token)) {
         var stale: OperationResult;
         stale.status = STATUS_STALE;
         ret stale;
@@ -1395,7 +1457,9 @@ fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
         ret result;
     }
     var reserved: u64 = 0;
-    if (!checked_add(path.reserved_bytes, bytes, ?reserved)) {
+    var committed: u64 = 0;
+    if (!checked_add(path.reserved_bytes, bytes, ?reserved) ||
+        !checked_add(path.sent_bytes, reserved, ?committed)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_OVERFLOW;
         ret result;
@@ -1424,7 +1488,7 @@ fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
 
 pub fun reserve_send(manager: *Manager, value: Handle, bytes: u64,
                      non_probing: bool) SendResult {
-    if (!handle_valid(manager, value)) {
+    if (!handle_valid(manager, value) || manager.core_lease != 0) {
         var result: SendResult;
         result.status = STATUS_ERROR;
         result.error = ERROR_TOKEN;
@@ -1437,7 +1501,8 @@ pub fun reserve_send(manager: *Manager, value: Handle, bytes: u64,
 pub fun reserve_mtu_send(manager: *Manager, value: Handle, bytes: u64,
                          non_probing: bool, token: MtuToken) SendResult {
     var result: SendResult;
-    if (!handle_valid(manager, value) || !mtu_token_valid(manager, token) ||
+    if (!handle_valid(manager, value) || manager.core_lease != 0 ||
+        !mtu_token_valid(manager, token) ||
         token.path_index != value.index || token.path_generation != value.generation ||
         !manager.storage.paths[value.index].mtu_probe_prepared ||
         manager.storage.paths[value.index].mtu_probe_active ||
@@ -1452,7 +1517,7 @@ pub fun reserve_mtu_send(manager: *Manager, value: Handle, bytes: u64,
 }
 
 fun send_token_valid(manager: *Manager, token: SendToken) bool {
-    ret manager != nil && manager.valid && token.source == manager.config.source &&
+    ret manager_record_valid(manager) && manager.valid && token.source == manager.config.source &&
         token.index < manager.storage.send_capacity && manager.storage.sends[token.index].valid &&
         manager.storage.sends[token.index].generation == token.generation &&
         manager.storage.sends[token.index].path_index == token.path_index &&
@@ -1461,7 +1526,8 @@ fun send_token_valid(manager: *Manager, token: SendToken) bool {
 }
 
 pub fun cancel_send(manager: *Manager, token: SendToken) OperationResult {
-    if (!send_token_valid(manager, token)) {
+    if (!manager_record_valid(manager) || manager.core_lease != 0 ||
+        !send_token_valid(manager, token)) {
         var stale: OperationResult;
         stale.status = STATUS_STALE;
         ret stale;
@@ -1482,7 +1548,8 @@ pub fun cancel_send(manager: *Manager, token: SendToken) OperationResult {
 }
 
 pub fun publish_send(manager: *Manager, token: SendToken) OperationResult {
-    if (!send_token_valid(manager, token)) {
+    if (!manager_record_valid(manager) || manager.core_lease != 0 ||
+        !send_token_valid(manager, token)) {
         var stale: OperationResult;
         stale.status = STATUS_STALE;
         ret stale;
@@ -1497,14 +1564,6 @@ pub fun publish_send(manager: *Manager, token: SendToken) OperationResult {
     }
     val path: *Path = ?manager.storage.paths[token.path_index];
     if (path.reserved_bytes < token.bytes) { ret operation_error(ERROR_STATE); }
-    if (manager.closing || path.state == PATH_FAILED ||
-        (manager.storage.sends[token.index].non_probing && !path.selected)) {
-        path.reserved_bytes = path.reserved_bytes - token.bytes;
-        clear_send(manager, token.index);
-        var stale: OperationResult;
-        stale.status = STATUS_STALE;
-        ret stale;
-    }
     var sent: u64 = 0;
     if (!checked_add(path.sent_bytes, token.bytes, ?sent)) {
         ret operation_error(ERROR_OVERFLOW);
@@ -1559,7 +1618,8 @@ fun timeout_path(manager: *Manager, index: usize) TimeoutResult {
 
 pub fun on_timeout(manager: *Manager, now_ns: u64) TimeoutResult {
     var result: TimeoutResult;
-    if (manager == nil || !manager.valid || manager.closing) {
+    if (!manager_record_valid(manager) || !manager.valid || manager.closing ||
+        manager.core_lease != 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
         ret result;
@@ -1596,7 +1656,8 @@ fun next_probe(path: *Path, config: Config) u16 {
 
 pub fun prepare_mtu_probe(manager: *Manager, value: Handle) MtuPrepared {
     var result: MtuPrepared;
-    if (!handle_valid(manager, value) || manager.closing) {
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.core_lease != 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_TOKEN;
         ret result;
@@ -1631,7 +1692,7 @@ pub fun prepare_mtu_probe(manager: *Manager, value: Handle) MtuPrepared {
 }
 
 fun mtu_token_valid(manager: *Manager, token: MtuToken) bool {
-    ret manager != nil && manager.valid && token.source == manager.config.source &&
+    ret manager_record_valid(manager) && manager.valid && token.source == manager.config.source &&
         token.path_index < manager.storage.path_capacity &&
         manager.storage.paths[token.path_index].valid &&
         manager.storage.paths[token.path_index].generation == token.path_generation &&
@@ -1652,7 +1713,8 @@ fun mtu_send_reserved(manager: *Manager, token: MtuToken) bool {
 }
 
 pub fun cancel_mtu_probe(manager: *Manager, token: MtuToken) OperationResult {
-    if (!mtu_token_valid(manager, token)) {
+    if (!manager_record_valid(manager) || manager.core_lease != 0 ||
+        !mtu_token_valid(manager, token)) {
         var stale: OperationResult;
         stale.status = STATUS_STALE;
         ret stale;
@@ -1675,7 +1737,8 @@ pub fun cancel_mtu_probe(manager: *Manager, token: MtuToken) OperationResult {
 }
 
 pub fun publish_mtu_probe(manager: *Manager, token: MtuToken) OperationResult {
-    if (!mtu_token_valid(manager, token)) {
+    if (!manager_record_valid(manager) || manager.core_lease != 0 ||
+        !mtu_token_valid(manager, token)) {
         var stale: OperationResult;
         stale.status = STATUS_STALE;
         ret stale;
@@ -1703,7 +1766,8 @@ pub fun publish_mtu_probe(manager: *Manager, token: MtuToken) OperationResult {
 
 pub fun on_mtu_terminal(manager: *Manager, token: MtuToken, terminal: u8) MtuResult {
     var result: MtuResult;
-    if (!mtu_token_valid(manager, token)) {
+    if (!manager_record_valid(manager) || manager.core_lease != 0 ||
+        !mtu_token_valid(manager, token)) {
         result.status = STATUS_STALE;
         ret result;
     }
@@ -1750,7 +1814,7 @@ pub fun on_mtu_terminal(manager: *Manager, token: MtuToken, terminal: u8) MtuRes
 
 pub fun on_large_packet_lost(manager: *Manager, value: Handle, packet_size: u16) MtuResult {
     var result: MtuResult;
-    if (!handle_valid(manager, value)) {
+    if (!handle_valid(manager, value) || manager.core_lease != 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_TOKEN;
         ret result;
@@ -1779,7 +1843,9 @@ pub fun on_large_packet_lost(manager: *Manager, value: Handle, packet_size: u16)
 }
 
 pub fun on_packet_acked(manager: *Manager, value: Handle, packet_size: u16) OperationResult {
-    if (!handle_valid(manager, value)) { ret operation_error(ERROR_TOKEN); }
+    if (!handle_valid(manager, value) || manager.core_lease != 0) {
+        ret operation_error(ERROR_TOKEN);
+    }
     if (packet_size >= manager.storage.paths[value.index].current_mtu) {
         manager.storage.paths[value.index].black_hole_losses = 0;
     }
@@ -1847,7 +1913,112 @@ pub fun snapshot(manager: *Manager, value: Handle) Snapshot {
     ret result;
 }
 
+pub fun retain_recovery(manager: *Manager, value: Handle) OperationResult {
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.core_lease != 0) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    val path: *Path = ?manager.storage.paths[value.index];
+    if (path.recovery_owners == 0 - 1::usize) {
+        ret operation_error(ERROR_OVERFLOW);
+    }
+    path.recovery_owners = path.recovery_owners + 1;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun configure_transport(manager: *Manager, value: Handle,
+                            smoothed_rtt_ns: u64,
+                            now_ns: u64) OperationResult {
+    if (!handle_valid(manager, value) || manager.core_lease != 0 ||
+        smoothed_rtt_ns == 0) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    val path: *Path = ?manager.storage.paths[value.index];
+    if (path.transport_valid) {
+        var current: OperationResult;
+        current.status = STATUS_OK;
+        ret current;
+    }
+    path.congestion = congestion_api.init(congestion_api.default_config(
+        congestion_api.ALGORITHM_CUBIC, path.current_mtu::u64), now_ns);
+    if (!path.congestion.valid) { ret operation_error(ERROR_STATE); }
+    path.pacer = pacer_api.init(pacer_api.default_config(path.current_mtu::u64,
+        path.congestion.congestion_window), path.congestion.congestion_window,
+        smoothed_rtt_ns, now_ns);
+    if (!path.pacer.valid) {
+        var clean: congestion_api.State;
+        path.congestion = clean;
+        ret operation_error(ERROR_STATE);
+    }
+    path.transport_valid = true;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun unconfigure_transport(manager: *Manager, value: Handle) OperationResult {
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.core_lease != 0 ||
+        !manager.storage.paths[value.index].transport_valid ||
+        manager.storage.paths[value.index].recovery_owners != 0 ||
+        manager.storage.paths[value.index].recovery_bytes_in_flight != 0) {
+        ret operation_error(ERROR_STATE);
+    }
+    var clean_congestion: congestion_api.State;
+    var clean_pacer: pacer_api.State;
+    manager.storage.paths[value.index].congestion = clean_congestion;
+    manager.storage.paths[value.index].pacer = clean_pacer;
+    manager.storage.paths[value.index].transport_valid = false;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun recovery_sent(manager: *Manager, value: Handle,
+                      bytes: u64) OperationResult {
+    if (!handle_valid(manager, value) || manager.core_lease != 0 ||
+        !manager.storage.paths[value.index].transport_valid || bytes == 0 ||
+        bytes > (0 - 1::u64) -
+            manager.storage.paths[value.index].recovery_bytes_in_flight) {
+        ret operation_error(ERROR_OVERFLOW);
+    }
+    manager.storage.paths[value.index].recovery_bytes_in_flight =
+        manager.storage.paths[value.index].recovery_bytes_in_flight + bytes;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun recovery_terminal(manager: *Manager, value: Handle,
+                          bytes: u64) OperationResult {
+    if (!handle_valid(manager, value) || manager.core_lease != 0 ||
+        !manager.storage.paths[value.index].transport_valid || bytes == 0 ||
+        bytes > manager.storage.paths[value.index].recovery_bytes_in_flight) {
+        ret operation_error(ERROR_STATE);
+    }
+    manager.storage.paths[value.index].recovery_bytes_in_flight =
+        manager.storage.paths[value.index].recovery_bytes_in_flight - bytes;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun release_recovery(manager: *Manager, value: Handle) OperationResult {
+    if (!handle_valid(manager, value) || manager.core_lease != 0 ||
+        manager.storage.paths[value.index].recovery_owners == 0) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    manager.storage.paths[value.index].recovery_owners =
+        manager.storage.paths[value.index].recovery_owners - 1;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
 fun path_has_owners(manager: *Manager, index: usize, generation: u64) bool {
+    if (manager.storage.paths[index].recovery_owners != 0) { ret true; }
     var i: usize = 0;
     for (i < manager.storage.challenge_capacity) {
         if (manager.storage.challenges[i].valid && manager.storage.challenges[i].path_index == index &&
@@ -1924,7 +2095,8 @@ pub fun release(manager: *Manager, value: Handle) OperationResult {
 }
 
 pub fun begin_close(manager: *Manager) OperationResult {
-    if (manager == nil || !manager.valid) { ret operation_error(ERROR_STATE); }
+    if (!manager_record_valid(manager) || !manager.valid ||
+        manager.core_lease != 0) { ret operation_error(ERROR_STATE); }
     manager.closing = true;
     var i: usize = 0;
     for (i < manager.storage.challenge_capacity) {
@@ -1948,7 +2120,8 @@ pub fun begin_close(manager: *Manager) OperationResult {
 }
 
 pub fun finish_close(manager: *Manager) OperationResult {
-    if (manager == nil || !manager.valid || !manager.closing) { ret operation_error(ERROR_STATE); }
+    if (!manager_record_valid(manager) || !manager.valid || !manager.closing ||
+        manager.core_lease != 0) { ret operation_error(ERROR_STATE); }
     var i: usize = 0;
     for (i < manager.storage.path_capacity) {
         if (manager.storage.paths[i].valid && path_has_owners(manager, i,
@@ -1960,8 +2133,366 @@ pub fun finish_close(manager: *Manager) OperationResult {
         i = i + 1;
     }
     clear_storage(manager.storage);
+    manager.core_lease = 0;
     manager.valid = false;
     var result: OperationResult;
     result.status = STATUS_OK;
     ret result;
+}
+
+fun enter_core_scope(manager: *Manager, source: u64) bool {
+    if (!manager_record_valid(manager) || source == 0 ||
+        manager.core_lease != source) { ret false; }
+    manager.core_lease = 0;
+    ret true;
+}
+
+fun leave_core_scope(manager: *Manager, source: u64) {
+    if (manager_record_valid(manager) && manager.valid) {
+        manager.core_lease = source;
+    }
+}
+
+pub fun confirm_handshake_scoped(manager: *Manager,
+                                 source: u64) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = confirm_handshake(manager);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun validate_address_scoped(manager: *Manager, source: u64,
+                                value: Handle) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = validate_address(manager, value);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun observe_scoped(manager: *Manager, source: u64, endpoint: Endpoint,
+                       packet_number: u64, bytes: u64, non_probing: bool,
+                       authenticated: bool, fresh: bool,
+                       connection_id_available: bool,
+                       now_ns: u64) Observation {
+    if (!enter_core_scope(manager, source)) {
+        var failed: Observation;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: Observation = observe(manager, endpoint, packet_number, bytes,
+        non_probing, authenticated, fresh, connection_id_available, now_ns);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun prepare_challenge_scoped(manager: *Manager, source: u64,
+                                 value: Handle) PreparedChallenge {
+    if (!enter_core_scope(manager, source)) {
+        var failed: PreparedChallenge;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: PreparedChallenge = prepare_challenge(manager, value);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun cancel_challenge_scoped(manager: *Manager, source: u64,
+                                token: ChallengeToken) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = cancel_challenge(manager, token);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun publish_challenge_scoped(manager: *Manager, source: u64,
+                                 token: ChallengeToken,
+                                 now_ns: u64) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = publish_challenge(manager, token, now_ns);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun receive_response_scoped(manager: *Manager, source: u64, data: [8]u8,
+                                now_ns: u64) ValidationResult {
+    if (!enter_core_scope(manager, source)) {
+        var failed: ValidationResult;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: ValidationResult = receive_response(manager, data, now_ns);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun queue_response_scoped(manager: *Manager, source: u64, value: Handle,
+                              data: [8]u8) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = queue_response(manager, value, data);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun prepare_response_scoped(manager: *Manager, source: u64,
+                                value: Handle) PreparedResponse {
+    if (!enter_core_scope(manager, source)) {
+        var failed: PreparedResponse;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: PreparedResponse = prepare_response(manager, value);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun cancel_response_scoped(manager: *Manager, source: u64,
+                               token: ResponseToken) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = cancel_response(manager, token);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun publish_response_scoped(manager: *Manager, source: u64,
+                                token: ResponseToken) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = publish_response(manager, token);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun reserve_send_scoped(manager: *Manager, source: u64, value: Handle,
+                            bytes: u64, non_probing: bool) SendResult {
+    if (!enter_core_scope(manager, source)) {
+        var failed: SendResult;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: SendResult = reserve_send(manager, value, bytes, non_probing);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun reserve_mtu_send_scoped(manager: *Manager, source: u64, value: Handle,
+                                bytes: u64, non_probing: bool,
+                                token: MtuToken) SendResult {
+    if (!enter_core_scope(manager, source)) {
+        var failed: SendResult;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: SendResult = reserve_mtu_send(manager, value, bytes,
+        non_probing, token);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun cancel_send_scoped(manager: *Manager, source: u64,
+                           token: SendToken) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = cancel_send(manager, token);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun publish_send_scoped(manager: *Manager, source: u64,
+                            token: SendToken) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = publish_send(manager, token);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun on_timeout_scoped(manager: *Manager, source: u64,
+                          now_ns: u64) TimeoutResult {
+    if (!enter_core_scope(manager, source)) {
+        var failed: TimeoutResult;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: TimeoutResult = on_timeout(manager, now_ns);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun prepare_mtu_probe_scoped(manager: *Manager, source: u64,
+                                 value: Handle) MtuPrepared {
+    if (!enter_core_scope(manager, source)) {
+        var failed: MtuPrepared;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: MtuPrepared = prepare_mtu_probe(manager, value);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun cancel_mtu_probe_scoped(manager: *Manager, source: u64,
+                                token: MtuToken) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = cancel_mtu_probe(manager, token);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun publish_mtu_probe_scoped(manager: *Manager, source: u64,
+                                 token: MtuToken) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = publish_mtu_probe(manager, token);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun on_mtu_terminal_scoped(manager: *Manager, source: u64, token: MtuToken,
+                               terminal: u8) MtuResult {
+    if (!enter_core_scope(manager, source)) {
+        var failed: MtuResult;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: MtuResult = on_mtu_terminal(manager, token, terminal);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun on_large_packet_lost_scoped(manager: *Manager, source: u64,
+                                    value: Handle,
+                                    packet_size: u16) MtuResult {
+    if (!enter_core_scope(manager, source)) {
+        var failed: MtuResult;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: MtuResult = on_large_packet_lost(manager, value, packet_size);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun on_packet_acked_scoped(manager: *Manager, source: u64, value: Handle,
+                               packet_size: u16) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = on_packet_acked(manager, value, packet_size);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun retain_recovery_scoped(manager: *Manager, source: u64,
+                               value: Handle) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = retain_recovery(manager, value);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun configure_transport_scoped(manager: *Manager, source: u64,
+                                   value: Handle, smoothed_rtt_ns: u64,
+                                   now_ns: u64) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = configure_transport(manager, value,
+        smoothed_rtt_ns, now_ns);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun unconfigure_transport_scoped(manager: *Manager, source: u64,
+                                     value: Handle) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = unconfigure_transport(manager, value);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun recovery_sent_scoped(manager: *Manager, source: u64, value: Handle,
+                             bytes: u64) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = recovery_sent(manager, value, bytes);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun recovery_terminal_scoped(manager: *Manager, source: u64, value: Handle,
+                                 bytes: u64) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = recovery_terminal(manager, value, bytes);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun release_recovery_scoped(manager: *Manager, source: u64,
+                                value: Handle) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = release_recovery(manager, value);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun begin_close_scoped(manager: *Manager, source: u64) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = begin_close(manager);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun finish_close_scoped(manager: *Manager, source: u64) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = finish_close(manager);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+fun initialized_for_test(config: Config, storage: Storage,
+                         initial: Endpoint) Manager {
+    var manager: Manager;
+    initialize(?manager, config, storage, initial);
+    ret manager;
+}
+
+test "quic.path.path: owned regions reject maximum-address descriptors" {
+    var paths: [1]Path;
+    var challenges: [1]Challenge;
+    var responses: [1]Response;
+    var sends: [1]SendReservation;
+    var endpoint: Endpoint;
+    endpoint.local.family = ADDRESS_IPV4;
+    endpoint.local.bytes[0] = 1;
+    endpoint.local.port = 1;
+    endpoint.peer.family = ADDRESS_IPV4;
+    endpoint.peer.bytes[0] = 2;
+    endpoint.peer.port = 2;
+    val maximum: usize = 0 - 1::usize;
+    var output: Manager;
+    if (initialize(maximum::*Manager, default_config(90, ROLE_CLIENT, true),
+        Storage{paths: ?paths[0], path_capacity: 1,
+        challenges: ?challenges[0], challenge_capacity: 1,
+        responses: ?responses[0], response_capacity: 1,
+        sends: ?sends[0], send_capacity: 1}, endpoint) ||
+        initialize((?paths[0])::*Manager,
+        default_config(90, ROLE_CLIENT, true),
+        Storage{paths: ?paths[0], path_capacity: 1,
+        challenges: ?challenges[0], challenge_capacity: 1,
+        responses: ?responses[0], response_capacity: 1,
+        sends: ?sends[0], send_capacity: 1}, endpoint)) { ret 1; }
+    val hostile: Manager = initialized_for_test(default_config(91, ROLE_CLIENT, true), Storage{
+        paths: maximum::*Path, path_capacity: 1,
+        challenges: ?challenges[0], challenge_capacity: 1,
+        responses: ?responses[0], response_capacity: 1,
+        sends: ?sends[0], send_capacity: 1}, endpoint);
+    val overflowed: Manager = initialized_for_test(default_config(92, ROLE_CLIENT, true),
+        Storage{paths: ?paths[0], path_capacity: maximum,
+        challenges: ?challenges[0], challenge_capacity: 1,
+        responses: ?responses[0], response_capacity: 1,
+        sends: ?sends[0], send_capacity: 1}, endpoint);
+    if (hostile.valid || overflowed.valid || output.valid) { ret 1; }
+    ret 0;
 }

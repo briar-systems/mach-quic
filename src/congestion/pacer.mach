@@ -30,6 +30,8 @@ pub rec State {
     last_update_ns: u64;
     budget: f64;
     generation: u64;
+    outstanding_generation: u64;
+    outstanding: bool;
     valid: bool;
 }
 
@@ -182,6 +184,7 @@ pub fun reconfigure(state: *State, config: Config, now_ns: u64,
 pub fun schedule(state: *State, now_ns: u64, congestion_window: u64, smoothed_rtt_ns: u64,
                  packet_bytes: u64, ack_only: bool) Schedule {
     if (state == nil || !state.valid) { ret schedule_error(ERROR_STATE); }
+    if (state.outstanding) { ret schedule_error(ERROR_STATE); }
     if (packet_bytes == 0 || packet_bytes > state.config.max_datagram_size) {
         ret schedule_error(ERROR_PACKET);
     }
@@ -209,6 +212,8 @@ pub fun schedule(state: *State, now_ns: u64, congestion_window: u64, smoothed_rt
     }
     next.generation = next_generation(next.generation);
     result.generation = next.generation;
+    next.outstanding_generation = result.generation;
+    next.outstanding = true;
     state[0] = next;
     ret result;
 }
@@ -227,11 +232,8 @@ pub fun publish(state: *State, scheduled: Schedule, now_ns: u64,
     var result: PublishResult;
     result.generation = state.generation;
     result.budget = state.budget::u64;
-    if (scheduled.generation != state.generation) {
-        result.status = PUBLISH_STALE;
-        ret result;
-    }
-    if (scheduled.congestion_window != congestion_window || scheduled.smoothed_rtt_ns != smoothed_rtt_ns) {
+    if (!state.outstanding ||
+        scheduled.generation != state.outstanding_generation) {
         result.status = PUBLISH_STALE;
         ret result;
     }
@@ -250,6 +252,8 @@ pub fun publish(state: *State, scheduled: Schedule, now_ns: u64,
         }
     }
     next.generation = next_generation(next.generation);
+    next.outstanding = false;
+    next.outstanding_generation = 0;
     state[0] = next;
     result.status = PUBLISH_OK;
     result.generation = state.generation;
@@ -263,11 +267,14 @@ pub fun cancel(state: *State, scheduled: Schedule) OperationResult {
         result.error = ERROR_STATE;
         ret result;
     }
-    if (scheduled.generation != state.generation) {
+    if (!state.outstanding ||
+        scheduled.generation != state.outstanding_generation) {
         result.ok = true;
         result.generation = state.generation;
         ret result;
     }
+    state.outstanding = false;
+    state.outstanding_generation = 0;
     state.generation = next_generation(state.generation);
     result.ok = true;
     result.generation = state.generation;
@@ -285,6 +292,8 @@ pub fun reset(state: *State, congestion_window: u64, smoothed_rtt_ns: u64, now_n
         ret result;
     }
     val generation: u64 = next_generation(state.generation);
+    val outstanding_generation: u64 = state.outstanding_generation;
+    val outstanding: bool = state.outstanding;
     val next: State = init(state.config, congestion_window, smoothed_rtt_ns, now_ns);
     if (!next.valid) {
         result.error = ERROR_CONFIG;
@@ -292,6 +301,8 @@ pub fun reset(state: *State, congestion_window: u64, smoothed_rtt_ns: u64, now_n
     }
     state[0] = next;
     state.generation = generation;
+    state.outstanding_generation = outstanding_generation;
+    state.outstanding = outstanding;
     result.ok = true;
     result.generation = generation;
     ret result;
@@ -313,12 +324,13 @@ test "quic.congestion.pacer: initial burst is bounded and subsequent sends are p
     ret 0;
 }
 
-test "quic.congestion.pacer: stale schedules and ACK-only sends cannot spend twice" {
+test "quic.congestion.pacer: one stable reservation and ACK-only sends cannot spend twice" {
     var state: State = init(default_config(1200, 1200), 1200, 100000000, 0);
     val first: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
     val second: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
-    if (publish(?state, first, 0, 1200, 100000000).status != PUBLISH_STALE) { ret 1; }
-    if (publish(?state, second, 0, 1200, 100000000).status != PUBLISH_OK) { ret 1; }
+    if (second.ok || publish(?state, first, 0, 1200, 100000000).status !=
+        PUBLISH_OK || publish(?state, first, 0, 1200, 100000000).status !=
+        PUBLISH_STALE) { ret 1; }
     val ack_only: Schedule = schedule(?state, 0, 1200, 100000000, 64, true);
     if (!ack_only.ready || publish(?state, ack_only, 0, 1200, 100000000).status != PUBLISH_OK) { ret 1; }
     val next: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
@@ -326,17 +338,20 @@ test "quic.congestion.pacer: stale schedules and ACK-only sends cannot spend twi
     ret 0;
 }
 
-test "quic.congestion.pacer: controller and RTT updates invalidate queued timers" {
+test "quic.congestion.pacer: controller and RTT updates preserve a queued send" {
     var state: State = init(default_config(1200, 1200), 1200, 100000000, 0);
     var queued: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
     if (publish(?state, queued, 0, 1200, 100000000).status != PUBLISH_OK) { ret 1; }
     queued = schedule(?state, 0, 1200, 100000000, 1200, false);
     if (queued.ready || queued.ready_at_ns < 80000000) { ret 1; }
     if (!sync(?state, 0, 1200, 200000000).ok) { ret 1; }
-    if (publish(?state, queued, queued.ready_at_ns, 1200, 200000000).status != PUBLISH_STALE) { ret 1; }
-    val replacement: Schedule = schedule(?state, 0, 1200, 200000000, 1200, false);
-    if (replacement.ready || replacement.ready_at_ns < 160000000) { ret 1; }
-    if (publish(?state, replacement, replacement.ready_at_ns, 2400, 200000000).status != PUBLISH_STALE) { ret 1; }
+    if (publish(?state, queued, queued.ready_at_ns, 1200, 200000000).status !=
+        PUBLISH_OK) { ret 1; }
+    val replacement: Schedule = schedule(?state, queued.ready_at_ns, 1200,
+        200000000, 1200, false);
+    if (!replacement.ok || replacement.ready || replacement.ready_at_ns < 240000000) { ret 1; }
+    if (publish(?state, replacement, replacement.ready_at_ns, 2400,
+        200000000).status != PUBLISH_OK) { ret 1; }
     ret 0;
 }
 

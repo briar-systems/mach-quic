@@ -1,6 +1,7 @@
 # authenticated address and retry tokens with bounded replay ownership
 
 use quic.packet.packet;
+use quic.connection.ownership;
 
 use crypto.contracts;
 use crypto.hmac;
@@ -74,6 +75,7 @@ pub rec Manager {
     current_generation: u64;
     previous_generation: u64;
     next_replay: usize;
+    listener_lease: u64;
     initialized: bool;
     closing: bool;
 }
@@ -120,31 +122,91 @@ fun copy_key(output: *^u8, input: contracts.SecretBytes) bool {
     ret true;
 }
 
-pub fun init(config: Config, storage: Storage, generation: u64,
-             key: contracts.SecretBytes) Manager {
-    var manager: Manager;
+fun key_aliases_manager(manager: *Manager, key: contracts.SecretBytes) bool {
+    if (manager == nil || key.data == nil) { ret false; }
+    var i: usize = 0;
+    for (i < KEY_SIZE) {
+        if (key.data == ?manager.current[i] || key.data == ?manager.previous[i]) {
+            ret true;
+        }
+        i = i + 1;
+    }
+    ret false;
+}
+
+fun physical(manager: *Manager) bool {
+    if (manager == nil) { ret false; }
+    val manager_range: ownership.Range = ownership.bytes((?manager.config)::*u8,
+        $size_of(Manager), ownership.ZERO_FORBIDDEN);
+    if (!manager_range.valid) { ret false; }
+    val replay_range: ownership.Range = ownership.array(manager.storage.replay::*u8,
+        manager.storage.replay_capacity, $size_of(ReplaySlot),
+        ownership.ZERO_FORBIDDEN);
+    ret replay_range.valid && ownership.disjoint(replay_range, manager_range);
+}
+
+pub fun initialize(manager: *Manager, config: Config, storage: Storage,
+                   generation: u64, key: contracts.SecretBytes) bool {
     if (config.source == 0 || config.retry_max_age_ns == 0 ||
         config.address_max_age_ns == 0 || generation == 0 ||
         storage.replay == nil || storage.replay_capacity == 0 || key.data == nil ||
-        key.len != KEY_SIZE) { ret manager; }
-    if (!copy_key(?manager.current[0], key)) { ret manager; }
+        key.len != KEY_SIZE) { ret false; }
+    if (manager == nil) { ret false; }
+    val manager_range: ownership.Range = ownership.bytes((?manager.config)::*u8,
+        $size_of(Manager), ownership.ZERO_FORBIDDEN);
+    val replay_range: ownership.Range = ownership.array(storage.replay::*u8,
+        storage.replay_capacity, $size_of(ReplaySlot), ownership.ZERO_FORBIDDEN);
+    if (!manager_range.valid || !replay_range.valid ||
+        !ownership.disjoint(replay_range, manager_range) ||
+        key_aliases_manager(manager, key) || manager.initialized) {
+        ret false;
+    }
+    var next: Manager;
+    if (!copy_key(?next.current[0], key)) { ret false; }
     var i: usize = 0;
     for (i < storage.replay_capacity) {
         storage.replay[i].state = REPLAY_FREE;
         storage.replay[i].generation = next_generation(storage.replay[i].generation);
         i = i + 1;
     }
-    manager.config = config;
-    manager.storage = storage;
-    manager.current_generation = generation;
-    manager.initialized = true;
-    ret manager;
+    next.config = config;
+    next.storage = storage;
+    next.current_generation = generation;
+    next.initialized = true;
+    @manager = next;
+    ret true;
+}
+
+fun scope_allowed(manager: *Manager, listener_source: u64) bool {
+    if (listener_source == 0) { ret manager.listener_lease == 0; }
+    ret manager.listener_lease == listener_source;
+}
+
+pub fun lease_listener(manager: *Manager, source: u64) bool {
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        source == 0 || manager.listener_lease != 0) { ret false; }
+    manager.listener_lease = source;
+    ret true;
+}
+
+pub fun release_listener(manager: *Manager, source: u64) bool {
+    if (!physical(manager) || !manager.initialized || source == 0 ||
+        manager.listener_lease != source) { ret false; }
+    manager.listener_lease = 0;
+    ret true;
 }
 
 pub fun rotate(manager: *Manager, generation: u64, key: contracts.SecretBytes) bool {
-    if (manager == nil || !manager.initialized || manager.closing ||
+    ret rotate_scoped(manager, 0, generation, key);
+}
+
+pub fun rotate_scoped(manager: *Manager, listener_source: u64, generation: u64,
+                      key: contracts.SecretBytes) bool {
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        !scope_allowed(manager, listener_source) ||
         generation == 0 || generation <= manager.current_generation ||
         key.data == nil || key.len != KEY_SIZE) { ret false; }
+    if (key_aliases_manager(manager, key)) { ret false; }
     ct.zeroize(?manager.previous[0], KEY_SIZE);
     var i: usize = 0;
     for (i < KEY_SIZE) {
@@ -217,8 +279,17 @@ pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
              original_destination: packet.ConnectionId,
              retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
              output: *u8, capacity: usize) Result {
+    ret seal_scoped(manager, 0, purpose, peer, original_destination,
+        retry_source, issued_at_ns, nonce, output, capacity);
+}
+
+pub fun seal_scoped(manager: *Manager, listener_source: u64, purpose: u8,
+                    peer: ip.Endpoint, original_destination: packet.ConnectionId,
+                    retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
+                    output: *u8, capacity: usize) Result {
     var result: Result;
-    if (manager == nil || !manager.initialized || manager.closing) {
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        !scope_allowed(manager, listener_source)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
         ret result;
@@ -235,7 +306,16 @@ pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
         result.error = ERROR_FORMAT;
         ret result;
     }
-    if (output == nil || capacity < TOKEN_SIZE) {
+    val output_range: ownership.Range = ownership.bytes(output, capacity,
+        ownership.ZERO_FORBIDDEN);
+    val manager_range: ownership.Range = ownership.bytes((?manager.config)::*u8,
+        $size_of(Manager), ownership.ZERO_FORBIDDEN);
+    val replay_range: ownership.Range = ownership.array(manager.storage.replay::*u8,
+        manager.storage.replay_capacity, $size_of(ReplaySlot),
+        ownership.ZERO_FORBIDDEN);
+    if (capacity < TOKEN_SIZE || !output_range.valid ||
+        !ownership.disjoint(output_range, manager_range) ||
+        !ownership.disjoint(output_range, replay_range)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_BUFFER;
         ret result;
@@ -326,13 +406,28 @@ fun reserve_replay(manager: *Manager, generation: u64, nonce: u64,
 
 pub fun open(manager: *Manager, input: *u8, length: usize,
              expected_peer: ip.Endpoint, now_ns: u64) Result {
+    ret open_scoped(manager, 0, input, length, expected_peer, now_ns);
+}
+
+pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
+                    length: usize, expected_peer: ip.Endpoint, now_ns: u64) Result {
     var result: Result;
-    if (manager == nil || !manager.initialized || manager.closing) {
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        !scope_allowed(manager, listener_source)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
         ret result;
     }
-    if (input == nil || length != TOKEN_SIZE || input[0] != 'M' || input[1] != 'Q' ||
+    val input_range: ownership.Range = ownership.bytes(input, length,
+        ownership.ZERO_FORBIDDEN);
+    val manager_range: ownership.Range = ownership.bytes((?manager.config)::*u8,
+        $size_of(Manager), ownership.ZERO_FORBIDDEN);
+    val replay_range: ownership.Range = ownership.array(manager.storage.replay::*u8,
+        manager.storage.replay_capacity, $size_of(ReplaySlot),
+        ownership.ZERO_FORBIDDEN);
+    if (!input_range.valid || !ownership.disjoint(input_range, manager_range) ||
+        !ownership.disjoint(input_range, replay_range) || length != TOKEN_SIZE ||
+        input[0] != 'M' || input[1] != 'Q' ||
         input[2] != 'T' || input[3] != '1' || !valid_purpose(input[4]) || input[29] > 1 ||
         input[52]::usize > packet.MAX_CONNECTION_ID ||
         input[73]::usize > packet.MAX_CONNECTION_ID ||
@@ -416,7 +511,7 @@ pub fun open(manager: *Manager, input: *u8, length: usize,
 }
 
 fun replay_slot(manager: *Manager, reservation: Reservation) *ReplaySlot {
-    if (manager == nil || !manager.initialized ||
+    if (!physical(manager) || !manager.initialized ||
         reservation.source != manager.config.source ||
         reservation.index >= manager.storage.replay_capacity) { ret nil; }
     val slot: *ReplaySlot = ?manager.storage.replay[reservation.index];
@@ -427,7 +522,18 @@ fun replay_slot(manager: *Manager, reservation: Reservation) *ReplaySlot {
 }
 
 pub fun commit(manager: *Manager, reservation: Reservation) Result {
+    ret commit_scoped(manager, 0, reservation);
+}
+
+pub fun commit_scoped(manager: *Manager, listener_source: u64,
+                      reservation: Reservation) Result {
     var result: Result;
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        !scope_allowed(manager, listener_source)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     val slot: *ReplaySlot = replay_slot(manager, reservation);
     if (slot == nil || slot.state != REPLAY_RESERVED) {
         result.status = STATUS_STALE;
@@ -440,7 +546,18 @@ pub fun commit(manager: *Manager, reservation: Reservation) Result {
 }
 
 pub fun cancel(manager: *Manager, reservation: Reservation) Result {
+    ret cancel_scoped(manager, 0, reservation);
+}
+
+pub fun cancel_scoped(manager: *Manager, listener_source: u64,
+                      reservation: Reservation) Result {
     var result: Result;
+    if (!physical(manager) || !manager.initialized ||
+        !scope_allowed(manager, listener_source)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     val slot: *ReplaySlot = replay_slot(manager, reservation);
     if (slot == nil || slot.state != REPLAY_RESERVED) {
         result.status = STATUS_STALE;
@@ -454,13 +571,15 @@ pub fun cancel(manager: *Manager, reservation: Reservation) Result {
 }
 
 pub fun begin_close(manager: *Manager) bool {
-    if (manager == nil || !manager.initialized || manager.closing) { ret false; }
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        manager.listener_lease != 0) { ret false; }
     manager.closing = true;
     ret true;
 }
 
 pub fun finish_close(manager: *Manager) bool {
-    if (manager == nil || !manager.initialized || !manager.closing) { ret false; }
+    if (!physical(manager) || !manager.initialized || !manager.closing ||
+        manager.listener_lease != 0) { ret false; }
     var i: usize = 0;
     for (i < manager.storage.replay_capacity) {
         if (manager.storage.replay[i].state == REPLAY_RESERVED) { ret false; }
@@ -498,9 +617,10 @@ fun test_id(value: u8) packet.ConnectionId {
 test "quic.connection.token: retry tokens bind address and are single use" {
     var replay: [4]ReplaySlot;
     var key: [32]^u8 = test_key(1);
-    var manager: Manager = init(Config{source: 301, retry_max_age_ns: 100,
+    var manager: Manager;
+    if (!initialize(?manager, Config{source: 301, retry_max_age_ns: 100,
         address_max_age_ns: 1000}, Storage{replay: ?replay[0], replay_capacity: 4},
-        1, contracts.SecretBytes{data: ?key[0], len: 32});
+        1, contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
     val peer: ip.Endpoint = ip.endpoint(192, 0, 2, 10, 4433);
     var encoded: [TOKEN_SIZE]u8;
     val sealed: Result = seal(?manager, PURPOSE_RETRY, peer, test_id(9),
@@ -522,9 +642,10 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
     var replay: [1]ReplaySlot;
     var key_one: [32]^u8 = test_key(2);
     var key_two: [32]^u8 = test_key(3);
-    var manager: Manager = init(Config{source: 302, retry_max_age_ns: 100,
+    var manager: Manager;
+    if (!initialize(?manager, Config{source: 302, retry_max_age_ns: 100,
         address_max_age_ns: 1000}, Storage{replay: ?replay[0], replay_capacity: 1},
-        4, contracts.SecretBytes{data: ?key_one[0], len: 32});
+        4, contracts.SecretBytes{data: ?key_one[0], len: 32})) { ret 1; }
     val peer: ip.Endpoint = ip.endpoint(203, 0, 113, 2, 8443);
     var first: [TOKEN_SIZE]u8;
     var second: [TOKEN_SIZE]u8;
@@ -545,5 +666,34 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
         open(?manager, ?second[0], TOKEN_SIZE, peer, 1031).error != ERROR_EXPIRED) { ret 5; }
     ct.zeroize(?key_one[0], 32);
     ct.zeroize(?key_two[0], 32);
+    ret 0;
+}
+
+test "quic.connection.token: hostile ranges and aliases never expose or mutate key state" {
+    val maximum: usize = ~(0::usize);
+    var replay: [1]ReplaySlot;
+    replay[0].state = REPLAY_CONSUMED;
+    var key: [32]^u8 = test_key(7);
+    var manager: Manager;
+    val replay_overflow: usize = maximum / $size_of(ReplaySlot) + 1;
+    if (initialize(?manager, Config{source: 303, retry_max_age_ns: 100,
+            address_max_age_ns: 1000}, Storage{replay: (1::usize)::*ReplaySlot,
+            replay_capacity: replay_overflow}, 1,
+            contracts.SecretBytes{data: ?key[0], len: 32}) ||
+        initialize(?manager, Config{source: 303, retry_max_age_ns: 100,
+            address_max_age_ns: 1000}, Storage{replay: maximum::*ReplaySlot,
+            replay_capacity: 1}, 1,
+            contracts.SecretBytes{data: ?key[0], len: 32}) ||
+        manager.initialized || replay[0].state != REPLAY_CONSUMED) { ret 1; }
+    if (!initialize(?manager, Config{source: 303, retry_max_age_ns: 100,
+            address_max_age_ns: 1000}, Storage{replay: ?replay[0],
+            replay_capacity: 1}, 1,
+            contracts.SecretBytes{data: ?key[0], len: 32})) { ret 2; }
+    if (initialize(?manager, Config{source: 304, retry_max_age_ns: 100,
+            address_max_age_ns: 1000}, Storage{replay: ?replay[0],
+            replay_capacity: 1}, 2,
+            contracts.SecretBytes{data: ?key[0], len: 32}) ||
+        manager.current_generation != 1) { ret 3; }
+    ct.zeroize(?key[0], 32);
     ret 0;
 }

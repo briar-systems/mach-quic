@@ -715,6 +715,10 @@ test "quic.packet.packet: RFC packet number reconstruction vectors" {
     if (packet_number_width(0, 0 - 1::u64) != 1) { ret 1; }
     if (packet_number_width(128, 0) != 1) { ret 1; }
     if (packet_number_width(129, 0) != 2) { ret 1; }
+    if (reconstruct_packet_number(MAX_PACKET_NUMBER, 0xffffffff, 4) !=
+        MAX_PACKET_NUMBER ||
+        reconstruct_packet_number(MAX_PACKET_NUMBER + 1, 0xffffffff, 4) !=
+            MAX_PACKET_NUMBER + 1) { ret 1; }
     ret 0;
 }
 

@@ -90,12 +90,14 @@ pub rec CoreTimer { deadline_ns: u64; generation: u64; armed: bool; }
 pub rec CoreResult {
     status: Status;
     error: u64;
+    provider_error: u64;
     state: ConnectionState;
 }
 
 pub rec CoreDatagram {
     status: Status;
     error: u64;
+    provider_error: u64;
     state: ConnectionState;
     local: ip.Endpoint;
     peer: ip.Endpoint;
