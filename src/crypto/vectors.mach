@@ -492,6 +492,17 @@ test "quic.crypto.protection: receive key phases retain old and prederive next" 
         contracts.Bytes{data: ?second_wire[0], len: 21}, 1,
         contracts.Buffer{data: ?scratch[0], capacity: 5},
         contracts.SecretBuffer{data: ?opened_payload[0], capacity: 3});
+    if (opened.error != protection.KEY_UPDATE_ERROR || receive.generation != 1
+        || opened_payload[0]:^ != 0
+        || protection.confirm_handshake_receive(?receive) != protection.OK) {
+        protection.destroy_send(?send); protection.destroy_send(?response_send);
+        protection.destroy_receive(?receive);
+        ct.zeroize(?secret[0], 32); ret 13;
+    }
+    opened = protection.open_receive_packet(?receive, 102,
+        contracts.Bytes{data: ?second_wire[0], len: 21}, 1,
+        contracts.Buffer{data: ?scratch[0], capacity: 5},
+        contracts.SecretBuffer{data: ?opened_payload[0], capacity: 3});
     if (opened.error != protection.OK || !opened.key_phase || !opened.key_updated
         || opened.generation != 2
         || !receive.phase || receive.generation != 2 || !receive.have_previous
@@ -506,12 +517,52 @@ test "quic.crypto.protection: receive key phases retain old and prederive next" 
         contracts.Bytes{data: ?first_wire[0], len: 21}, 1,
         contracts.Buffer{data: ?scratch[0], capacity: 5},
         contracts.SecretBuffer{data: ?opened_payload[0], capacity: 3});
-    if (opened.error != protection.OK || opened.key_phase || receive.generation != 2
+    if (opened.error != protection.OK || opened.key_phase || receive.generation != 2) {
+        protection.destroy_send(?send); protection.destroy_send(?response_send);
+        protection.destroy_receive(?receive);
+        ct.zeroize(?secret[0], 32); ret 7;
+    }
+    if (protection.note_acknowledged(?send, 101) != protection.OK
+        || protection.initiate_update(?send) != protection.OK) {
+        protection.destroy_send(?send); protection.destroy_send(?response_send);
+        protection.destroy_receive(?receive);
+        ct.zeroize(?secret[0], 32); ret 9;
+    }
+    var third_header: [2]u8 = [2]u8{0x40, 0x66};
+    var third_wire: [21]u8;
+    if (protection.seal_send_packet(?send, 102,
+        contracts.Bytes{data: ?third_header[0], len: 2}, 1,
+        contracts.SecretBytes{data: ?payload[0], len: 3},
+        contracts.Buffer{data: ?third_wire[0], capacity: 21}).error != protection.OK) {
+        protection.destroy_send(?send); protection.destroy_send(?response_send);
+        protection.destroy_receive(?receive);
+        ct.zeroize(?secret[0], 32); ret 10;
+    }
+    opened_payload[0] = 0xaa;
+    opened = protection.open_receive_packet(?receive, 103,
+        contracts.Bytes{data: ?third_wire[0], len: 21}, 1,
+        contracts.Buffer{data: ?scratch[0], capacity: 5},
+        contracts.SecretBuffer{data: ?opened_payload[0], capacity: 3});
+    if (opened.error != protection.KEY_UPDATE_ERROR || opened_payload[0]:^ != 0
+        || receive.generation != 2
+        || protection.confirm_update_response(?receive, 2, 100)
+            != protection.KEY_UPDATE_ERROR
+        || protection.confirm_update_response(?receive, 2, 101) != protection.OK) {
+        protection.destroy_send(?send); protection.destroy_send(?response_send);
+        protection.destroy_receive(?receive);
+        ct.zeroize(?secret[0], 32); ret 11;
+    }
+    opened = protection.open_receive_packet(?receive, 103,
+        contracts.Bytes{data: ?third_wire[0], len: 21}, 1,
+        contracts.Buffer{data: ?scratch[0], capacity: 5},
+        contracts.SecretBuffer{data: ?opened_payload[0], capacity: 3});
+    if (opened.error != protection.OK || !opened.key_updated || opened.generation != 3
+        || receive.phase || receive.generation != 3
         || protection.discard_previous(?receive) != protection.OK
         || receive.have_previous || receive.previous.state != protection.STATE_DISCARDED) {
         protection.destroy_send(?send); protection.destroy_send(?response_send);
         protection.destroy_receive(?receive);
-        ct.zeroize(?secret[0], 32); ret 7;
+        ct.zeroize(?secret[0], 32); ret 12;
     }
     protection.destroy_send(?send);
     protection.destroy_send(?response_send);

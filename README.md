@@ -86,7 +86,10 @@ is no caller-held candidate key token that can commit a later generation.
 advanced. The connection calls `respond_to_update` before sending its next packet
 or an acknowledgment. That operation accepts only the same generation or exactly
 one later generation, which makes response idempotence and consecutive-update
-rejection explicit.
+rejection explicit. After publishing an updated-phase packet that acknowledges
+the exact triggering packet, the connection calls `confirm_update_response` with
+that receive generation and triggering packet number. Until then, a consecutive
+authenticated update is rejected without publishing plaintext or receive state.
 
 `destroy`, `destroy_initial`, `destroy_send`, and `destroy_receive` zero all
 secret, packet-key, IV, and header-key storage and make later operations fail as
