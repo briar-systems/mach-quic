@@ -49,6 +49,15 @@ pub fun disjoint(left: Range, right: Range) bool {
     ret left_end < right_start || right_end < left_start;
 }
 
+pub fun contains(outer: Range, inner: Range) bool {
+    if (!outer.valid || !inner.valid || outer.length == 0 ||
+        inner.length == 0) { ret false; }
+    val outer_start: usize = outer.data::usize;
+    val inner_start: usize = inner.data::usize;
+    if (inner_start < outer_start) { ret false; }
+    ret inner_start + inner.length - 1 <= outer_start + outer.length - 1;
+}
+
 pub fun secret_disjoint(left: *^u8, left_length: usize,
                         right: *^u8, right_length: usize) bool {
     if (left == nil || right == nil || left_length == 0 || right_length == 0) {
@@ -92,6 +101,21 @@ test "quic.connection.ownership: inclusive maximum ranges are checked without wr
     val pair: Range = bytes(before_maximum, 2, ZERO_FORBIDDEN);
     if (!last.valid || !prior.valid || !pair.valid || !disjoint(last, prior) ||
         disjoint(last, pair) || bytes(at_maximum, 2, ZERO_FORBIDDEN).valid) { ret 1; }
+    ret 0;
+}
+
+test "quic.connection.ownership: containment is inclusive and rejects overhang" {
+    var storage: [8]u8;
+    val whole: Range = bytes(?storage[0], 8, ZERO_FORBIDDEN);
+    if (!contains(whole, whole) ||
+        !contains(whole, bytes(?storage[0], 1, ZERO_FORBIDDEN)) ||
+        !contains(whole, bytes(?storage[7], 1, ZERO_FORBIDDEN)) ||
+        !contains(whole, bytes(?storage[3], 4, ZERO_FORBIDDEN))) { ret 1; }
+    if (contains(whole, bytes(?storage[4], 5, ZERO_FORBIDDEN)) ||
+        contains(bytes(?storage[1], 6, ZERO_FORBIDDEN),
+            bytes(?storage[0], 2, ZERO_FORBIDDEN)) ||
+        contains(whole, bytes(nil, 0, ZERO_ALLOWED)) ||
+        contains(bytes(nil, 0, ZERO_ALLOWED), whole)) { ret 2; }
     ret 0;
 }
 

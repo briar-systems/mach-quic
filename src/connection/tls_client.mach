@@ -82,7 +82,8 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
     var signatures: [1]tls13.SignatureScheme =
         [1]tls13.SignatureScheme{tls13.ED25519};
     var client_config: config.ClientConfig;
-    client_config.server_name = "api.example.com";
+    client_config.server_name = contracts.Bytes{
+        data: "api.example.com"::*u8, len: 15};
     client_config.alpn = ?protocols[0];
     client_config.alpn_len = 1;
     client_config.trust = ?trust;
@@ -95,8 +96,12 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
     client_config.signatures = ?signatures[0];
     client_config.signature_len = 1;
     client_config.entropy = ?entropy;
+    client_config.entropy_context_size = 1;
     client_config.limits = config.production_limits();
-    client_config.limits.max_handshake_bytes = 4096;
+    client_config.limits.max_peer_handshake_bytes = 4096;
+    client_config.limits.max_client_hello_bytes = 4096;
+    client_config.limits.max_client_flight_bytes = 4096;
+    client_config.limits.max_chain_bytes = 4096;
     client_config.limits.max_ticket_bytes = 4096;
     var local_parameters: [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
     var tls_value: client.Client;
@@ -129,14 +134,14 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
         Config{verification_time_unix: 1800000000, deadline_ns: 1000,
             entropy_context_size: 1,
             entropy_secret_context_size: 0}) || rejected_adapter.initialized) {
-        ret 2;
+        ret 21;
     }
     var adapter: handshake_api.Adapter;
     if (!initialize(?adapter, adapter_config, adapter_storage, ?tls_value,
             Config{verification_time_unix: 1800000000, deadline_ns: 1000,
                 entropy_context_size: 1,
                 entropy_secret_context_size: 0})) {
-        ret 2;
+        ret 22;
     }
     var start: handshake_api.Start;
     start.role = handshake_api.CLIENT;
@@ -149,7 +154,7 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
     start.now_ns = 1;
     if (!adapter.initialized ||
         handshake_api.start(?adapter, ?start).status != handshake_api.STATUS_OK) {
-        ret 2;
+        ret 23;
     }
     val first: handshake_api.Event = handshake_api.next_event(?adapter);
     if (first.status != handshake_api.STATUS_OK ||
