@@ -219,11 +219,12 @@ non-probing traffic there.
 Server amplification accounting is independent per unvalidated path. A send first
 reserves its fully encoded datagram size. Concurrent reservations cannot exceed
 three times authenticated bytes received. Publication charges the path, while
-cancellation returns the reservation. A failed path or connection close makes a
-prepared publication stale and returns its reserved bytes. A non-probing
-reservation likewise becomes stale if migration selects another path before the
-datagram publishes. Probing work remains usable on a non-selected path. The driver
-calls frame publication only after its containing datagram publication succeeds.
+cancellation returns the reservation. Once reserved, the exact path handle and
+byte charge remain completion-owned across migration, path failure, and connection
+close. Publication therefore remains valid until that send is published or
+cancelled, while new reservations observe the current selected path and close
+state. Probing work remains usable on a non-selected path. The driver calls frame
+publication only after its containing datagram publication succeeds.
 
 Congestion, pacing, ECN validation, and PMTU state belong to the path handle, while
 QUIC packet-number spaces and recovery history remain connection-wide. The driver
@@ -313,7 +314,8 @@ Delivery borrows the queue's copied payload until
 payloads until their owners release or cancel them. The DATAGRAM form without a
 Length field consumes the remainder of a QUIC packet and must therefore be
 selected only for the final frame. The length-bearing form can be composed with
-later frames.
+later frames. The connection core always emits the length-bearing form, so
+required QUIC padding is never interpreted as application payload.
 
 ## Connection core contracts
 
@@ -364,7 +366,11 @@ restart events rather than implicit fallback behavior.
 `connection.handshake.initialize_tls_client` binds a caller-owned
 `tls.client.Client` directly to
 that adapter. The binding is typed because a TLS client contains welded secret
-state and cannot safely pass through an untyped callback context. It validates
+state and cannot safely pass through an untyped callback context. Its ownership
+descriptor includes the entropy provider's public and secret context sizes. The
+binding validates the client record, every nested writable TLS buffer, immutable
+configuration anchor, persistent TLS secret, and entropy context against the
+adapter and connection storage before initialization. It also validates
 the exact SNI, single ALPN, QUIC transport-parameter extension, client role, and
 QUIC version before starting. Certificate verification uses a separate Unix
 verification time, while the optional handshake deadline and all connection
@@ -393,8 +399,8 @@ ownership after a full UDP send. RTT, congestion, or migration changes between
 generation and completion do not invalidate that exact send transaction. ACK,
 loss, Retry, key discard, and teardown settle each owner exactly once.
 
-Timers are generation-tagged and cover idle timeout, draining, recovery, delayed
-ACK, and path validation. Graceful close can retransmit CONNECTION_CLOSE until
+Timers are generation-tagged and cover idle timeout, closing, draining, recovery,
+delayed ACK, and path validation. Graceful close can retransmit CONNECTION_CLOSE until
 draining begins. Draining and abortive close reject all further receive and
 non-close generation work. Both
 paths first drain prepared and recovery-owned work. `finish_close` then destroys
@@ -403,7 +409,9 @@ and path storage.
 
 The core exposes direct transport-shaped `receive`, `generate`, `complete_send`,
 `timer`, `on_timeout`, `begin_close`, `close_ready`, and `finish_close`
-operations. A UDP or application driver owns the stable `Core` and `Secrets`
+operations. It also exposes lease-safe path probing, validation work, active
+migration, and authenticated Packet Too Big handling without releasing manager
+ownership. A UDP or application driver owns the stable `Core` and `Secrets`
 records and serializes those calls. This direct split is intentional because the
 generic public driver context cannot erase secret-welded state.
 
@@ -456,7 +464,10 @@ Timers are absolute monotonic deadlines carrying the driver source and protocol
 generation. `on_timeout` revalidates both the deadline and generation before
 advancing driver time. Early and obsolete observations do not affect later work.
 Protocol callbacks are invoked under the connection lock and cannot reenter the
-same driver. They must be transactional on non-OK returns. Successful generation
+same driver. Same-thread reentry is rejected before lock acquisition. Immutable
+driver anchors and lifecycle state are snapshotted around each callback, and
+unauthorized callback mutation is restored and reported as a protocol error.
+Callbacks must be transactional on non-OK returns. Successful generation
 owns exactly one opaque send owner until its terminal callback.
 
 The connection cancellation scope may be a child of a process or listener scope.
