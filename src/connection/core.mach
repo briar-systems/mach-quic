@@ -66,10 +66,11 @@ pub val OWNER_NEW_TOKEN: OwnerKind = 12;
 pub val OWNER_MTU_PROBE: OwnerKind = 13;
 
 val TIMER_IDLE: u8 = 1;
-val TIMER_DRAIN: u8 = 2;
-val TIMER_RECOVERY: u8 = 3;
-val TIMER_PATH: u8 = 4;
-val TIMER_ACK: u8 = 5;
+val TIMER_CLOSE: u8 = 2;
+val TIMER_DRAIN: u8 = 3;
+val TIMER_RECOVERY: u8 = 4;
+val TIMER_PATH: u8 = 5;
+val TIMER_ACK: u8 = 6;
 
 pub val OWNER_FREE: u8 = 0;
 pub val OWNER_PREPARED: u8 = 1;
@@ -474,7 +475,7 @@ fun fail(core: *Core, error: u64, now_ns: u64) transport_api.CoreResult {
         core.close_started_ns = now_ns;
         core.close_deadline_ns = saturated_add(now_ns,
             core.config.drain_timeout_ns);
-        core.state = transport_api.DRAINING;
+        core.state = transport_api.CLOSING;
     }
     ret core_result(core, transport_api.STATUS_ERROR, error);
 }
@@ -1261,7 +1262,7 @@ fun pump_handshake(core: *Core, secrets: *Secrets) u64 {
             core.close_started_ns = core.last_now_ns;
             core.close_deadline_ns = saturated_add(core.last_now_ns,
                 core.config.drain_timeout_ns);
-            core.state = transport_api.DRAINING;
+            core.state = transport_api.CLOSING;
             ret NO_ERROR;
         }
         count = count + 1;
@@ -2037,6 +2038,10 @@ fun receive_protected(core: *Core, secrets: *Secrets,
             secrets.storage.receive_plaintext[plaintext_index]:^;
         plaintext_index = plaintext_index + 1;
     }
+    if (core.state == transport_api.CLOSING) {
+        core.close_queued = true;
+        ret core_result(core, transport_api.STATUS_OK, 0);
+    }
     val plaintext: *u8 = core.storage.receive_decoded;
     var ack_eliciting: bool = false;
     var non_probing: bool = false;
@@ -2132,10 +2137,8 @@ pub fun receive(core: *Core, secrets: *Secrets,
         ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
             error: INTERNAL_ERROR, state: transport_api.DRAINING};
     }
-    if (core.state == transport_api.CLOSED) {
-        ret core_result(core, transport_api.STATUS_CLOSED, 0);
-    }
-    if (core.closing) {
+    if (core.state == transport_api.CLOSED ||
+        core.state == transport_api.DRAINING) {
         ret core_result(core, transport_api.STATUS_CLOSED, 0);
     }
     core.last_now_ns = input.received_at_ns;
@@ -2902,6 +2905,15 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     }
     val transport_path: *path_api.Path =
         ?core.paths.storage.paths[path.index];
+    if (ack_eliciting &&
+        (transport_path.recovery_owners == 0 - 1::usize ||
+        packet_size::u64 > (0 - 1::u64) -
+            transport_path.recovery_bytes_in_flight ||
+        packet_size > (0 - 1::usize) - core.recovery_state.bytes_in_flight)) {
+        cancel_payload(core, secrets, owner);
+        result.status = transport_api.STATUS_BLOCKED;
+        ret result;
+    }
     val admitted: congestion_api.Admission = congestion_api.admit(
         ?transport_path.congestion, transport_path.recovery_bytes_in_flight,
         0 - 1::u64, packet_size::u64, 0, in_flight,
@@ -3120,7 +3132,10 @@ pub fun timer(core: *Core) transport_api.CoreTimer {
     var armed: bool = false;
     var deadline: u64 = 0;
     var kind: u8 = 0;
-    if (core.closing) {
+    if (core.state == transport_api.CLOSING) {
+        timer_candidate(?armed, ?deadline, ?kind,
+            core.close_deadline_ns, TIMER_CLOSE);
+    } or (core.state == transport_api.DRAINING) {
         timer_candidate(?armed, ?deadline, ?kind,
             core.close_deadline_ns, TIMER_DRAIN);
     } or (core.idle_timer_enabled) {
@@ -3229,6 +3244,13 @@ pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
     core.timer_deadline_ns = 0;
     core.timer_recovery_generation = 0;
     core.timer_generation = next_generation(core.timer_generation);
+    if (fired_kind == TIMER_CLOSE) {
+        core.state = transport_api.DRAINING;
+        core.close_queued = false;
+        core.close_deadline_ns = saturated_add(now_ns,
+            core.config.drain_timeout_ns);
+        ret core_result(core, transport_api.STATUS_OK, 0);
+    }
     if (fired_kind == TIMER_DRAIN) {
         if (!terminal_drain(core, secrets, now_ns)) {
             ret fail(core, INTERNAL_ERROR, now_ns);
@@ -3294,7 +3316,10 @@ pub fun begin_close(core: *Core, secrets: *Secrets, abortive: bool,
         if (abortive) {
             core.close_queued = false;
             core.peer_close_received = true;
-            core.close_deadline_ns = now_ns;
+            core.state = transport_api.DRAINING;
+            if (!terminal_drain(core, secrets, now_ns)) {
+                ret fail(core, INTERNAL_ERROR, now_ns);
+            }
         }
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
@@ -3320,7 +3345,7 @@ pub fun begin_close(core: *Core, secrets: *Secrets, abortive: bool,
         core.close_deadline_ns = saturated_add(now_ns,
             core.config.drain_timeout_ns);
     }
-    core.state = transport_api.DRAINING;
+    core.state = transport_api.CLOSING;
     if (abortive && !terminal_drain(core, secrets, now_ns)) {
         ret fail(core, INTERNAL_ERROR, now_ns);
     }

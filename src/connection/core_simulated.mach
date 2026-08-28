@@ -450,10 +450,33 @@ test "quic.connection.core: partial UDP success cancels every prepared owner" {
         ?fixture.secrets, generated.owner, transport.SEND_SENT,
         generated.count - 1, 3);
     if (completed.status != transport.STATUS_ERROR ||
-        completed.state != transport.DRAINING ||
+        completed.state != transport.CLOSING ||
         core.snapshot(?fixture.engine).active_owners != 0 ||
         fixture.path_values[0].reserved_bytes != 0 ||
         fixture.adapter_attempts[0].state != handshake.ATTEMPT_FREE) { ret 3; }
+    ret 0;
+}
+
+test "quic.connection.core: graceful close preserves send completion before draining" {
+    var fixture: Fixture;
+    if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
+    var output: [1200]u8;
+    val generated: transport.CoreDatagram = core.generate(?fixture.engine,
+        ?fixture.secrets, ?output[0], 1200, 2);
+    if (generated.status != transport.STATUS_OK ||
+        core.begin_close(?fixture.engine, ?fixture.secrets, false, 0, nil, 0,
+            3).state != transport.CLOSING ||
+        core.complete_send(?fixture.engine, ?fixture.secrets, generated.owner,
+            transport.SEND_SENT, generated.count, 4).status !=
+            transport.STATUS_OK) { ret 2; }
+    val closing: transport.CoreTimer = core.timer(?fixture.engine);
+    if (!closing.armed || closing.deadline_ns != 303 ||
+        core.on_timeout(?fixture.engine, ?fixture.secrets, closing.generation,
+            303).state != transport.DRAINING) { ret 3; }
+    val draining: transport.CoreTimer = core.timer(?fixture.engine);
+    if (!draining.armed || draining.deadline_ns != 603 ||
+        core.on_timeout(?fixture.engine, ?fixture.secrets, draining.generation,
+            603).state != transport.CLOSED) { ret 4; }
     ret 0;
 }
 

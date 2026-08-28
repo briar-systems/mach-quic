@@ -33,8 +33,9 @@ pub def ConnectionState: u8;
 pub val NEW: ConnectionState = 1;
 pub val HANDSHAKING: ConnectionState = 2;
 pub val ACTIVE: ConnectionState = 3;
-pub val DRAINING: ConnectionState = 4;
-pub val CLOSED: ConnectionState = 5;
+pub val CLOSING: ConnectionState = 4;
+pub val DRAINING: ConnectionState = 5;
+pub val CLOSED: ConnectionState = 6;
 
 pub def Status: u8;
 pub val STATUS_OK: Status = 1;
@@ -444,6 +445,7 @@ fun state_transition(current: ConnectionState, next: ConnectionState) bool {
     if (current == NEW) { ret true; }
     if (current == HANDSHAKING) { ret next >= HANDSHAKING; }
     if (current == ACTIVE) { ret next >= ACTIVE; }
+    if (current == CLOSING) { ret next >= CLOSING; }
     if (current == DRAINING) { ret next >= DRAINING; }
     ret next == CLOSED;
 }
@@ -526,12 +528,11 @@ fun begin_components(driver: *Driver) bool {
 fun apply_state(driver: *Driver, state: ConnectionState) bool {
     if (state == 0 || state == driver.state) { ret true; }
     if (!state_transition(driver.state, state)) { ret false; }
-    if (state >= DRAINING && driver.state < DRAINING) {
+    if (state >= CLOSING && driver.state < CLOSING) {
         if (!begin_components(driver)) { ret false; }
         driver.closing = true;
-        driver.state = DRAINING;
     }
-    if (state < DRAINING) { driver.state = state; }
+    driver.state = state;
     ret true;
 }
 
@@ -578,16 +579,16 @@ fun begin_close_locked(driver: *Driver, abortive: bool, cause: lifecycle.Cause,
         abortive, application_error, reason, reason_length, now_ns);
     val normalized: OperationResult = normalize_core(driver, core);
     if (normalized.status == STATUS_ERROR) { ret normalized; }
-    if (!begin_components(driver)) { ret operation_error(ERROR_STATE); }
-    driver.closing = true;
-    driver.state = DRAINING;
+    if (!driver.closing || driver.state < CLOSING) {
+        ret operation_error(ERROR_STATE);
+    }
     driver.close_mode = lifecycle.GRACEFUL;
     if (abortive) { driver.close_mode = lifecycle.ABORTIVE; }
     driver.close_cause = cause;
     driver.terminal_cause = cause;
     driver.application_error = application_error;
     ret OperationResult{status: STATUS_OK, error: ERROR_NONE,
-        protocol_error: 0, state: DRAINING};
+        protocol_error: 0, state: driver.state};
 }
 
 fun cancellation_callback(context: ptr, reason: cancel.Reason) {
@@ -1437,7 +1438,8 @@ pub fun cancel_connection(driver: *Driver) bool {
 pub fun finish_close(driver: *Driver) OperationResult {
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
     mutex.lock(?driver.lock);
-    if (!driver.closing || driver.state != DRAINING) {
+    if (!driver.closing || (driver.state != DRAINING &&
+        driver.state != CLOSED)) {
         mutex.unlock(?driver.lock);
         ret operation_error(ERROR_STATE);
     }

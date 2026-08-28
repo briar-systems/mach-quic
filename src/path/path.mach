@@ -1917,8 +1917,7 @@ pub fun snapshot(manager: *Manager, value: Handle) Snapshot {
 }
 
 pub fun retain_recovery(manager: *Manager, value: Handle) OperationResult {
-    if (!handle_valid(manager, value) || manager.closing ||
-        manager.core_lease != 0) {
+    if (!handle_valid(manager, value) || manager.core_lease != 0) {
         ret operation_error(ERROR_TOKEN);
     }
     val path: *Path = ?manager.storage.paths[value.index];
