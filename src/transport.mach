@@ -508,13 +508,14 @@ fun init_driver(driver: *Driver, role: Role, config: Config, protocol: Protocol,
     }
     cancel.init_registration(?driver.cancellation);
     driver.initialized = true;
+    driver.cancellation_attached = true;
     val attached: cancel.Reason = cancel.attach(scope, ?driver.cancellation,
         cancellation_callback, driver::ptr);
     if (attached != cancel.ACTIVE) {
+        driver.cancellation_attached = false;
         driver.initialized = false;
         ret false;
     }
-    driver.cancellation_attached = true;
     ret true;
 }
 
@@ -594,10 +595,18 @@ pub fun receive_datagram(driver: *Driver, input: *Datagram) OperationResult {
         ret operation_error(ERROR_BUFFER);
     }
     mutex.lock(?driver.lock);
-    if (driver.state == CLOSED) {
+    if (driver.state == CLOSED || (driver.closing &&
+        driver.close_mode == lifecycle.ABORTIVE)) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
         ret OperationResult{status: STATUS_CLOSED, error: ERROR_NONE,
+            protocol_error: 0, state: state};
+    }
+    if (driver.operation_scope == nil ||
+        cancel.reason(driver.operation_scope) != cancel.ACTIVE) {
+        val state: ConnectionState = driver.state;
+        mutex.unlock(?driver.lock);
+        ret OperationResult{status: STATUS_CANCELLED, error: ERROR_CANCELLED,
             protocol_error: 0, state: state};
     }
     if (!update_now(driver, input.received_at_ns)) {
@@ -628,7 +637,9 @@ pub fun timer(driver: *Driver) Timer {
     var result: Timer;
     if (driver == nil || !driver.initialized) { ret result; }
     mutex.lock(?driver.lock);
-    if (driver.state != CLOSED) {
+    if (driver.state != CLOSED && !(driver.closing &&
+        driver.close_mode == lifecycle.ABORTIVE) && driver.operation_scope != nil &&
+        cancel.reason(driver.operation_scope) == cancel.ACTIVE) {
         val core: CoreTimer = driver.protocol.timer(driver.protocol.context);
         if (core.armed && core.generation != 0) {
             result.source = driver.config.source;
@@ -651,6 +662,13 @@ pub fun on_timeout(driver: *Driver, value: Timer, now_ns: u64) OperationResult {
         mutex.unlock(?driver.lock);
         ret OperationResult{status: STATUS_CLOSED, error: ERROR_NONE,
             protocol_error: 0, state: CLOSED};
+    }
+    if ((driver.closing && driver.close_mode == lifecycle.ABORTIVE) ||
+        driver.operation_scope == nil || cancel.reason(driver.operation_scope) != cancel.ACTIVE) {
+        val state: ConnectionState = driver.state;
+        mutex.unlock(?driver.lock);
+        ret OperationResult{status: STATUS_CANCELLED, error: ERROR_CANCELLED,
+            protocol_error: 0, state: state};
     }
     if (now_ns < driver.last_now_ns) {
         mutex.unlock(?driver.lock);
@@ -919,6 +937,7 @@ pub fun operation_snapshot(driver: *Driver, token: Token) Generated {
 
 fun app_available(driver: *Driver) bool {
     ret driver.initialized && !driver.closing &&
+        driver.operation_scope != nil && cancel.reason(driver.operation_scope) == cancel.ACTIVE &&
         (driver.state == HANDSHAKING || driver.state == ACTIVE);
 }
 
