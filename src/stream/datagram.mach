@@ -1,0 +1,545 @@
+use quic.packet.packet;
+use quic.wire.varint;
+
+use std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+pub val ENTRY_FREE: u8 = 0;
+pub val ENTRY_QUEUED: u8 = 1;
+pub val ENTRY_RESERVED: u8 = 2;
+pub val ENTRY_DELIVERED: u8 = 3;
+
+pub val STATUS_OK: u8 = 1;
+pub val STATUS_EMPTY: u8 = 2;
+pub val STATUS_STALE: u8 = 3;
+pub val STATUS_ERROR: u8 = 4;
+
+pub val ERROR_NONE: u8 = 0;
+pub val ERROR_STATE: u8 = 1;
+pub val ERROR_DISABLED: u8 = 2;
+pub val ERROR_LIMIT: u8 = 3;
+pub val ERROR_CAPACITY: u8 = 4;
+pub val ERROR_TOKEN: u8 = 5;
+pub val ERROR_OVERFLOW: u8 = 6;
+
+pub rec Config {
+    source: u64;
+    peer_max_frame_size: usize;
+    local_max_frame_size: usize;
+    enabled: bool;
+}
+
+pub rec Entry {
+    generation: u64;
+    sequence: u64;
+    length: usize;
+    state: u8;
+}
+
+pub rec Storage {
+    send_entries: *Entry;
+    send_capacity: usize;
+    send_bytes: *u8;
+    send_bytes_length: usize;
+    send_stride: usize;
+    receive_entries: *Entry;
+    receive_capacity: usize;
+    receive_bytes: *u8;
+    receive_bytes_length: usize;
+    receive_stride: usize;
+}
+
+pub rec Queue {
+    config: Config;
+    storage: Storage;
+    next_sequence: u64;
+    send_count: usize;
+    receive_count: usize;
+    delivered_count: usize;
+    valid: bool;
+    closing: bool;
+}
+
+pub rec Token {
+    source: u64;
+    index: usize;
+    generation: u64;
+    receive: bool;
+}
+
+pub rec QueueResult {
+    ok: bool;
+    status: u8;
+    error: u8;
+    token: Token;
+}
+
+pub rec Prepared {
+    ok: bool;
+    status: u8;
+    error: u8;
+    token: Token;
+    data: packet.Span;
+    frame_size: usize;
+    with_length: bool;
+}
+
+pub rec Delivery {
+    status: u8;
+    error: u8;
+    token: Token;
+    data: packet.Span;
+}
+
+pub rec OperationResult {
+    status: u8;
+    error: u8;
+}
+
+fun checked_size(count: usize, stride: usize, available: usize) bool {
+    if (count == 0 || stride == 0 || count > (0 - 1::usize) / stride) { ret false; }
+    ret count * stride <= available;
+}
+
+fun valid_storage(storage: Storage) bool {
+    ret storage.send_entries != nil && storage.receive_entries != nil &&
+        storage.send_bytes != nil && storage.receive_bytes != nil &&
+        storage.send_capacity > 0 && storage.receive_capacity > 0 &&
+        checked_size(storage.send_capacity, storage.send_stride, storage.send_bytes_length) &&
+        checked_size(storage.receive_capacity, storage.receive_stride, storage.receive_bytes_length);
+}
+
+fun valid_config(config: Config, storage: Storage) bool {
+    if (config.source == 0) { ret false; }
+    if (!config.enabled) {
+        ret config.peer_max_frame_size == 0 && config.local_max_frame_size == 0 &&
+            storage.send_capacity == 0 && storage.receive_capacity == 0;
+    }
+    ret valid_storage(storage) && config.peer_max_frame_size > 0 && config.local_max_frame_size > 0;
+}
+
+fun next_generation(value: u64) u64 {
+    if (value == 0 - 1::u64) { ret 1; }
+    ret value + 1;
+}
+
+fun take_sequence(queue: *Queue, value: *u64) bool {
+    if (queue.next_sequence == 0 - 1::u64) { ret false; }
+    @value = queue.next_sequence;
+    queue.next_sequence = queue.next_sequence + 1;
+    ret true;
+}
+
+pub fun init(config: Config, storage: Storage) Queue {
+    var queue: Queue;
+    queue.config = config;
+    queue.storage = storage;
+    if (!valid_config(config, storage)) { ret queue; }
+    var i: usize = 0;
+    for (i < storage.send_capacity) {
+        storage.send_entries[i].generation = 1;
+        storage.send_entries[i].state = ENTRY_FREE;
+        i = i + 1;
+    }
+    i = 0;
+    for (i < storage.receive_capacity) {
+        storage.receive_entries[i].generation = 1;
+        storage.receive_entries[i].state = ENTRY_FREE;
+        i = i + 1;
+    }
+    queue.next_sequence = 1;
+    queue.valid = true;
+    ret queue;
+}
+
+fun queue_error(code: u8) QueueResult {
+    var result: QueueResult;
+    result.status = STATUS_ERROR;
+    result.error = code;
+    ret result;
+}
+
+fun frame_size(length: usize, with_length: bool) usize {
+    if (!with_length) {
+        if (length == 0 - 1::usize) { ret 0; }
+        ret length + 1;
+    }
+    val width: u8 = varint.width(length::u64);
+    if (width == 0 || length > (0 - 1::usize) - 1 - width::usize) { ret 0; }
+    ret 1 + width::usize + length;
+}
+
+fun token(queue: *Queue, index: usize, receive: bool) Token {
+    var value: Token;
+    value.source = queue.config.source;
+    value.index = index;
+    value.receive = receive;
+    if (receive) {
+        value.generation = queue.storage.receive_entries[index].generation;
+    } or {
+        value.generation = queue.storage.send_entries[index].generation;
+    }
+    ret value;
+}
+
+fun send_valid(queue: *Queue, value: Token, state: u8) bool {
+    if (queue == nil || !queue.valid || value.source != queue.config.source || value.receive ||
+        value.index >= queue.storage.send_capacity) { ret false; }
+    val entry: Entry = queue.storage.send_entries[value.index];
+    ret entry.generation == value.generation && entry.state == state;
+}
+
+fun receive_valid(queue: *Queue, value: Token, state: u8) bool {
+    if (queue == nil || !queue.valid || value.source != queue.config.source || !value.receive ||
+        value.index >= queue.storage.receive_capacity) { ret false; }
+    val entry: Entry = queue.storage.receive_entries[value.index];
+    ret entry.generation == value.generation && entry.state == state;
+}
+
+fun free_send(queue: *Queue, index: usize) {
+    val entry: *Entry = ?queue.storage.send_entries[index];
+    entry.state = ENTRY_FREE;
+    entry.length = 0;
+    entry.generation = next_generation(entry.generation);
+    if (queue.send_count > 0) { queue.send_count = queue.send_count - 1; }
+}
+
+fun free_receive(queue: *Queue, index: usize) {
+    val entry: *Entry = ?queue.storage.receive_entries[index];
+    if (entry.state == ENTRY_DELIVERED && queue.delivered_count > 0) {
+        queue.delivered_count = queue.delivered_count - 1;
+    }
+    entry.state = ENTRY_FREE;
+    entry.length = 0;
+    entry.generation = next_generation(entry.generation);
+    if (queue.receive_count > 0) { queue.receive_count = queue.receive_count - 1; }
+}
+
+pub fun enqueue(queue: *Queue, data: *u8, length: usize) QueueResult {
+    if (queue == nil || !queue.valid || queue.closing) { ret queue_error(ERROR_STATE); }
+    if (!queue.config.enabled) { ret queue_error(ERROR_DISABLED); }
+    if (length > queue.storage.send_stride || (length > 0 && data == nil) ||
+        frame_size(length, false) > queue.config.peer_max_frame_size) { ret queue_error(ERROR_LIMIT); }
+    if (queue.next_sequence == 0 - 1::u64) { ret queue_error(ERROR_OVERFLOW); }
+    var i: usize = 0;
+    for (i < queue.storage.send_capacity && queue.storage.send_entries[i].state != ENTRY_FREE) { i = i + 1; }
+    if (i == queue.storage.send_capacity) { ret queue_error(ERROR_CAPACITY); }
+    if (length > 0) { memory.copy[u8](?queue.storage.send_bytes[i * queue.storage.send_stride], data, length); }
+    val entry: *Entry = ?queue.storage.send_entries[i];
+    entry.length = length;
+    if (!take_sequence(queue, ?entry.sequence)) { ret queue_error(ERROR_OVERFLOW); }
+    entry.state = ENTRY_QUEUED;
+    queue.send_count = queue.send_count + 1;
+    var result: QueueResult;
+    result.ok = true;
+    result.status = STATUS_OK;
+    result.token = token(queue, i, false);
+    ret result;
+}
+
+fun prepared_error(status: u8, code: u8) Prepared {
+    var result: Prepared;
+    result.status = status;
+    result.error = code;
+    ret result;
+}
+
+pub fun prepare(queue: *Queue, with_length: bool) Prepared {
+    if (queue == nil || !queue.valid || queue.closing) { ret prepared_error(STATUS_ERROR, ERROR_STATE); }
+    if (!queue.config.enabled) { ret prepared_error(STATUS_ERROR, ERROR_DISABLED); }
+    var chosen: usize = queue.storage.send_capacity;
+    var sequence: u64 = 0;
+    var i: usize = 0;
+    for (i < queue.storage.send_capacity) {
+        val entry: Entry = queue.storage.send_entries[i];
+        if (entry.state == ENTRY_QUEUED && (chosen == queue.storage.send_capacity || entry.sequence < sequence)) {
+            chosen = i;
+            sequence = entry.sequence;
+        }
+        i = i + 1;
+    }
+    if (chosen == queue.storage.send_capacity) { ret prepared_error(STATUS_EMPTY, ERROR_NONE); }
+    val entry: *Entry = ?queue.storage.send_entries[chosen];
+    val encoded: usize = frame_size(entry.length, with_length);
+    if (encoded == 0 || encoded > queue.config.peer_max_frame_size) {
+        ret prepared_error(STATUS_ERROR, ERROR_LIMIT);
+    }
+    entry.state = ENTRY_RESERVED;
+    var result: Prepared;
+    result.ok = true;
+    result.status = STATUS_OK;
+    result.token = token(queue, chosen, false);
+    result.data.data = ?queue.storage.send_bytes[chosen * queue.storage.send_stride];
+    result.data.len = entry.length;
+    result.frame_size = encoded;
+    result.with_length = with_length;
+    ret result;
+}
+
+pub fun cancel_prepared(queue: *Queue, prepared: Prepared) OperationResult {
+    var result: OperationResult;
+    if (!prepared.ok || !send_valid(queue, prepared.token, ENTRY_RESERVED)) {
+        result.status = STATUS_STALE;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    if (queue.closing) { free_send(queue, prepared.token.index); }
+    or { queue.storage.send_entries[prepared.token.index].state = ENTRY_QUEUED; }
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun publish(queue: *Queue, prepared: Prepared) OperationResult {
+    var result: OperationResult;
+    if (queue != nil && queue.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (!prepared.ok || !send_valid(queue, prepared.token, ENTRY_RESERVED)) {
+        result.status = STATUS_STALE;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    free_send(queue, prepared.token.index);
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun cancel(queue: *Queue, value: Token) OperationResult {
+    var result: OperationResult;
+    if (!send_valid(queue, value, ENTRY_QUEUED)) {
+        result.status = STATUS_STALE;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    free_send(queue, value.index);
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun receive(queue: *Queue, data: *u8, length: usize, encoded_frame_size: usize) QueueResult {
+    if (queue == nil || !queue.valid || queue.closing) { ret queue_error(ERROR_STATE); }
+    if (!queue.config.enabled) { ret queue_error(ERROR_DISABLED); }
+    if (length > queue.storage.receive_stride || (length > 0 && data == nil) ||
+        length == 0 - 1::usize || encoded_frame_size < length + 1 ||
+        encoded_frame_size > queue.config.local_max_frame_size) {
+        ret queue_error(ERROR_LIMIT);
+    }
+    if (queue.next_sequence == 0 - 1::u64) { ret queue_error(ERROR_OVERFLOW); }
+    var i: usize = 0;
+    for (i < queue.storage.receive_capacity && queue.storage.receive_entries[i].state != ENTRY_FREE) { i = i + 1; }
+    if (i == queue.storage.receive_capacity) { ret queue_error(ERROR_CAPACITY); }
+    if (length > 0) { memory.copy[u8](?queue.storage.receive_bytes[i * queue.storage.receive_stride], data, length); }
+    val entry: *Entry = ?queue.storage.receive_entries[i];
+    entry.length = length;
+    if (!take_sequence(queue, ?entry.sequence)) { ret queue_error(ERROR_OVERFLOW); }
+    entry.state = ENTRY_QUEUED;
+    queue.receive_count = queue.receive_count + 1;
+    var result: QueueResult;
+    result.ok = true;
+    result.status = STATUS_OK;
+    result.token = token(queue, i, true);
+    ret result;
+}
+
+pub fun next(queue: *Queue) Delivery {
+    var result: Delivery;
+    if (queue == nil || !queue.valid || queue.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (!queue.config.enabled) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_DISABLED;
+        ret result;
+    }
+    var chosen: usize = queue.storage.receive_capacity;
+    var sequence: u64 = 0;
+    var i: usize = 0;
+    for (i < queue.storage.receive_capacity) {
+        val entry: Entry = queue.storage.receive_entries[i];
+        if (entry.state == ENTRY_QUEUED && (chosen == queue.storage.receive_capacity || entry.sequence < sequence)) {
+            chosen = i;
+            sequence = entry.sequence;
+        }
+        i = i + 1;
+    }
+    if (chosen == queue.storage.receive_capacity) {
+        result.status = STATUS_EMPTY;
+        ret result;
+    }
+    queue.storage.receive_entries[chosen].state = ENTRY_DELIVERED;
+    queue.delivered_count = queue.delivered_count + 1;
+    result.status = STATUS_OK;
+    result.token = token(queue, chosen, true);
+    result.data.data = ?queue.storage.receive_bytes[chosen * queue.storage.receive_stride];
+    result.data.len = queue.storage.receive_entries[chosen].length;
+    ret result;
+}
+
+pub fun release(queue: *Queue, value: Token) OperationResult {
+    var result: OperationResult;
+    if (!receive_valid(queue, value, ENTRY_DELIVERED)) {
+        result.status = STATUS_STALE;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    free_receive(queue, value.index);
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun begin_close(queue: *Queue) OperationResult {
+    var result: OperationResult;
+    if (queue == nil || !queue.valid) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    queue.closing = true;
+    var i: usize = 0;
+    for (i < queue.storage.send_capacity) {
+        if (queue.storage.send_entries[i].state == ENTRY_QUEUED) { free_send(queue, i); }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < queue.storage.receive_capacity) {
+        if (queue.storage.receive_entries[i].state == ENTRY_QUEUED) { free_receive(queue, i); }
+        i = i + 1;
+    }
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun finish_close(queue: *Queue) OperationResult {
+    var result: OperationResult;
+    if (queue == nil || !queue.valid || !queue.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (queue.send_count != 0 || queue.delivered_count != 0) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_CAPACITY;
+        ret result;
+    }
+    queue.valid = false;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+test "quic.stream.datagram: optional queues copy, order, cancel, and publish" {
+    var send_entries: [2]Entry;
+    var receive_entries: [2]Entry;
+    var send_bytes: [16]u8;
+    var receive_bytes: [16]u8;
+    val storage: Storage = Storage{
+        send_entries: ?send_entries[0], send_capacity: 2,
+        send_bytes: ?send_bytes[0], send_bytes_length: 16, send_stride: 8,
+        receive_entries: ?receive_entries[0], receive_capacity: 2,
+        receive_bytes: ?receive_bytes[0], receive_bytes_length: 16, receive_stride: 8
+    };
+    var queue: Queue = init(Config{source: 7, peer_max_frame_size: 10,
+        local_max_frame_size: 10, enabled: true}, storage);
+    var first: [3]u8 = [3]u8{1, 2, 3};
+    var second: [2]u8 = [2]u8{4, 5};
+    val a: QueueResult = enqueue(?queue, ?first[0], 3);
+    val b: QueueResult = enqueue(?queue, ?second[0], 2);
+    first[0] = 9;
+    if (!a.ok || !b.ok || cancel(?queue, b.token).status != STATUS_OK) { ret 1; }
+    val prepared: Prepared = prepare(?queue, true);
+    if (!prepared.ok || prepared.data.len != 3 || prepared.data.data[0] != 1 ||
+        publish(?queue, prepared).status != STATUS_OK || queue.send_count != 0) { ret 1; }
+    if (!receive(?queue, ?second[0], 2, 4).ok) { ret 1; }
+    val delivered: Delivery = next(?queue);
+    if (delivered.status != STATUS_OK || delivered.data.len != 2 || delivered.data.data[0] != 4) { ret 1; }
+    if (release(?queue, delivered.token).status != STATUS_OK) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.datagram: capacity and close preserve delivered ownership" {
+    var send_entries: [1]Entry;
+    var receive_entries: [1]Entry;
+    var send_bytes: [4]u8;
+    var receive_bytes: [4]u8;
+    val storage: Storage = Storage{
+        send_entries: ?send_entries[0], send_capacity: 1,
+        send_bytes: ?send_bytes[0], send_bytes_length: 4, send_stride: 4,
+        receive_entries: ?receive_entries[0], receive_capacity: 1,
+        receive_bytes: ?receive_bytes[0], receive_bytes_length: 4, receive_stride: 4
+    };
+    var queue: Queue = init(Config{source: 8, peer_max_frame_size: 6,
+        local_max_frame_size: 6, enabled: true}, storage);
+    var data: [4]u8 = [4]u8{1, 2, 3, 4};
+    if (!receive(?queue, ?data[0], 4, 6).ok || receive(?queue, ?data[0], 1, 3).error != ERROR_CAPACITY) { ret 1; }
+    val delivered: Delivery = next(?queue);
+    if (begin_close(?queue).status != STATUS_OK || finish_close(?queue).error != ERROR_CAPACITY) { ret 1; }
+    if (release(?queue, delivered.token).status != STATUS_OK || finish_close(?queue).status != STATUS_OK) { ret 1; }
+    if (next(?queue).error != ERROR_STATE) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.datagram: disabled mode needs no storage" {
+    var empty_storage: Storage;
+    var disabled_config: Config;
+    disabled_config.source = 9;
+    disabled_config.enabled = false;
+    var disabled: Queue = init(disabled_config, empty_storage);
+    var byte: [1]u8 = [1]u8{7};
+    if (!disabled.valid || enqueue(?disabled, ?byte[0], 1).error != ERROR_DISABLED ||
+        prepare(?disabled, true).error != ERROR_DISABLED || next(?disabled).error != ERROR_DISABLED) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.datagram: frame and sequence bounds are transactional" {
+    var byte: [1]u8 = [1]u8{7};
+    var send_entries: [1]Entry;
+    var receive_entries: [1]Entry;
+    var send_bytes: [1]u8;
+    var receive_bytes: [1]u8;
+    val storage: Storage = Storage{
+        send_entries: ?send_entries[0], send_capacity: 1,
+        send_bytes: ?send_bytes[0], send_bytes_length: 1, send_stride: 1,
+        receive_entries: ?receive_entries[0], receive_capacity: 1,
+        receive_bytes: ?receive_bytes[0], receive_bytes_length: 1, receive_stride: 1
+    };
+    var queue: Queue = init(Config{source: 10, peer_max_frame_size: 2,
+        local_max_frame_size: 2, enabled: true}, storage);
+    val queued: QueueResult = enqueue(?queue, ?byte[0], 1);
+    if (!queued.ok || prepare(?queue, true).error != ERROR_LIMIT) { ret 1; }
+    val no_length: Prepared = prepare(?queue, false);
+    if (!no_length.ok || no_length.frame_size != 2 || publish(?queue, no_length).status != STATUS_OK) { ret 1; }
+    queue.next_sequence = 0 - 1::u64;
+    if (enqueue(?queue, ?byte[0], 1).error != ERROR_OVERFLOW || queue.send_count != 0 ||
+        receive(?queue, ?byte[0], 1, 2).error != ERROR_OVERFLOW || queue.receive_count != 0) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.datagram: close pins prepared data until explicit cancellation" {
+    var send_entries: [1]Entry;
+    var receive_entries: [1]Entry;
+    var send_bytes: [4]u8;
+    var receive_bytes: [4]u8;
+    val storage: Storage = Storage{
+        send_entries: ?send_entries[0], send_capacity: 1,
+        send_bytes: ?send_bytes[0], send_bytes_length: 4, send_stride: 4,
+        receive_entries: ?receive_entries[0], receive_capacity: 1,
+        receive_bytes: ?receive_bytes[0], receive_bytes_length: 4, receive_stride: 4
+    };
+    var queue: Queue = init(Config{source: 11, peer_max_frame_size: 6,
+        local_max_frame_size: 6, enabled: true}, storage);
+    var data: [2]u8 = [2]u8{3, 4};
+    if (!enqueue(?queue, ?data[0], 2).ok) { ret 1; }
+    val prepared: Prepared = prepare(?queue, true);
+    if (!prepared.ok || begin_close(?queue).status != STATUS_OK ||
+        prepared.data.data[0] != 3 || finish_close(?queue).error != ERROR_CAPACITY ||
+        publish(?queue, prepared).error != ERROR_STATE) { ret 1; }
+    if (cancel_prepared(?queue, prepared).status != STATUS_OK ||
+        finish_close(?queue).status != STATUS_OK || cancel_prepared(?queue, prepared).status != STATUS_STALE) { ret 1; }
+    ret 0;
+}
