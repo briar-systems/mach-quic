@@ -35,6 +35,8 @@ pub val PATH_RESPONSE: u64 = 0x1b;
 pub val CONNECTION_CLOSE_TRANSPORT: u64 = 0x1c;
 pub val CONNECTION_CLOSE_APPLICATION: u64 = 0x1d;
 pub val HANDSHAKE_DONE: u64 = 0x1e;
+pub val DATAGRAM: u64 = 0x30;
+pub val DATAGRAM_LEN: u64 = 0x31;
 
 pub val STATUS_DONE: u8 = 1;
 pub val STATUS_MORE: u8 = 2;
@@ -173,7 +175,7 @@ fun take_data(d: *binary.Decoder, width: usize) packet.Span {
 fun valid_type(kind: u64) bool {
     if (kind <= NEW_TOKEN) { ret true; }
     if (is_stream(kind)) { ret true; }
-    ret kind >= MAX_DATA && kind <= HANDSHAKE_DONE;
+    ret (kind >= MAX_DATA && kind <= HANDSHAKE_DONE) || kind == DATAGRAM || kind == DATAGRAM_LEN;
 }
 
 fun value_or_missing(d: *binary.Decoder, final: bool, value: *u64) DecodeResult {
@@ -301,6 +303,20 @@ pub fun decode(d: *binary.Decoder, final: bool, limits: Limits, storage: Storage
             length = cursor.len - cursor.pos;
             if (length > limits.max_payload_size) { ret failed(ERROR_LIMIT); }
             if (length::u64 > varint.MAX - frame.offset) { ret failed(ERROR_ENCODING); }
+        }
+        frame.data = take_data(?cursor, length);
+    } or (kind == DATAGRAM || kind == DATAGRAM_LEN) {
+        var length: usize = 0;
+        if (kind == DATAGRAM_LEN) {
+            var encoded_length: u64 = 0;
+            if (value_or_missing(?cursor, final, ?encoded_length).status != STATUS_DONE) { ret missing(final, 1); }
+            if (encoded_length > limits.max_payload_size::u64) { ret failed(ERROR_LIMIT); }
+            length = encoded_length::usize;
+            if (!fits(?cursor, length)) { ret missing(final, length); }
+        } or {
+            if (!final) { ret missing(false, 1); }
+            length = cursor.len - cursor.pos;
+            if (length > limits.max_payload_size) { ret failed(ERROR_LIMIT); }
         }
         frame.data = take_data(?cursor, length);
     } or (kind == MAX_DATA || kind == DATA_BLOCKED) {
@@ -434,7 +450,8 @@ pub fun encoded_size(frame: *Frame, limits: Limits) EncodeResult {
     } or (frame.kind == STOP_SENDING) {
         if (!add_value(?count, frame.stream_id, limits.max_frame_size) ||
             !add_value(?count, frame.error_code, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or (frame.kind == CRYPTO || frame.kind == NEW_TOKEN || is_stream(frame.kind)) {
+    } or (frame.kind == CRYPTO || frame.kind == NEW_TOKEN || is_stream(frame.kind) ||
+          frame.kind == DATAGRAM || frame.kind == DATAGRAM_LEN) {
         if (!valid_data(frame.data, limits.max_payload_size)) { ret encode_error(ERROR_LIMIT); }
         if ((frame.kind == CRYPTO || is_stream(frame.kind)) && frame.data.len::u64 > varint.MAX - frame.offset) { ret encode_error(ERROR_ENCODING); }
         if (frame.kind == NEW_TOKEN && (frame.data.len == 0 || frame.data.len > limits.max_token_size)) { ret encode_error(ERROR_LIMIT); }
@@ -442,6 +459,7 @@ pub fun encoded_size(frame: *Frame, limits: Limits) EncodeResult {
             (!add_value(?count, frame.offset, limits.max_frame_size) ||
              !add_value(?count, frame.data.len::u64, limits.max_frame_size))) { ret encode_error(ERROR_LIMIT); }
         if (frame.kind == NEW_TOKEN && !add_value(?count, frame.data.len::u64, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
+        if (frame.kind == DATAGRAM_LEN && !add_value(?count, frame.data.len::u64, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
         if (is_stream(frame.kind)) {
             if (!add_value(?count, frame.stream_id, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
             if ((frame.kind & 0x04) != 0 && !add_value(?count, frame.offset, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
@@ -533,6 +551,9 @@ pub fun encode(b: *binary.Builder, frame: *Frame, limits: Limits) EncodeResult {
         if (ok && (frame.kind & 0x04) != 0) { ok = write_v(body, frame.offset); }
         if (ok && (frame.kind & 0x02) != 0) { ok = write_v(body, frame.data.len::u64); }
         if (ok) { ok = write_bytes(body, frame.data.data, frame.data.len); }
+    } or (ok && (frame.kind == DATAGRAM || frame.kind == DATAGRAM_LEN)) {
+        if (frame.kind == DATAGRAM_LEN) { ok = write_v(body, frame.data.len::u64); }
+        if (ok) { ok = write_bytes(body, frame.data.data, frame.data.len); }
     } or (ok && (frame.kind == MAX_DATA || frame.kind == DATA_BLOCKED || frame.kind == MAX_STREAMS_BIDI || frame.kind == MAX_STREAMS_UNI || frame.kind == STREAMS_BLOCKED_BIDI || frame.kind == STREAMS_BLOCKED_UNI)) {
         ok = write_v(body, frame.maximum);
     } or (ok && (frame.kind == MAX_STREAM_DATA || frame.kind == STREAM_DATA_BLOCKED)) {
@@ -586,7 +607,8 @@ fun fragmented_round_trip(frame: *Frame) bool {
 }
 
 test "quic.frame.frame: every registered frame family round trips" {
-    var frames: [20]Frame;
+    var frames: [22]Frame;
+    var datagram_data: [4]u8 = [4]u8{9, 8, 7, 6};
     frames[0].kind = PADDING; frames[0].padding_count = 1;
     frames[1].kind = PING;
     frames[2].kind = RESET_STREAM; frames[2].stream_id = 1; frames[2].error_code = 2; frames[2].final_size = 3;
@@ -607,11 +629,13 @@ test "quic.frame.frame: every registered frame family round trips" {
     frames[17].kind = CONNECTION_CLOSE_APPLICATION; frames[17].error_code = 2;
     frames[18].kind = STREAM_BASE | 0x07; frames[18].stream_id = 4; frames[18].offset = 5; frames[18].fin = true;
     frames[19].kind = CRYPTO; frames[19].offset = 3;
+    frames[20].kind = DATAGRAM_LEN; frames[20].data.data = ?datagram_data[0]; frames[20].data.len = 4;
+    frames[21].kind = DATAGRAM; frames[21].data.data = ?datagram_data[0]; frames[21].data.len = 4;
 
     var bytes: [1024]u8;
     var b: binary.Builder = binary.builder(?bytes[0], 1024, binary.BIG);
     var i: usize = 0;
-    for (i < 20) {
+    for (i < 22) {
         if (!fragmented_round_trip(?frames[i])) { ret 1; }
         if (!encode(?b, ?frames[i], default_limits()).ok) { ret 1; }
         i = i + 1;
@@ -622,13 +646,37 @@ test "quic.frame.frame: every registered frame family round trips" {
     storage.ack_capacity = 4;
     var d: binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
     i = 0;
-    for (i < 20) {
+    for (i < 22) {
         var decoded: Frame;
         val r: DecodeResult = decode(?d, true, default_limits(), storage, ?decoded);
-        if (r.status != STATUS_DONE || decoded.kind != frames[i].kind) { ret 1; }
+        if (r.status != STATUS_DONE || decoded.kind != frames[i].kind || decoded.data.len != frames[i].data.len) { ret 1; }
         i = i + 1;
     }
     if (d.pos != b.len) { ret 1; }
+    ret 0;
+}
+
+test "quic.frame.frame: DATAGRAM length and payload failures are transactional" {
+    val truncated: [3]u8 = [3]u8{0x31, 3, 1};
+    var d: binary.Decoder = binary.decoder(?truncated[0], 3, binary.BIG);
+    var storage: Storage;
+    var out: Frame;
+    out.kind = 0xff;
+    val failed: DecodeResult = decode(?d, true, default_limits(), storage, ?out);
+    if (failed.error != ERROR_TRUNCATED || d.pos != 0 || out.kind != 0xff) { ret 1; }
+
+    var limits: Limits = default_limits();
+    limits.max_payload_size = 1;
+    val oversized: [4]u8 = [4]u8{0x31, 2, 1, 2};
+    d = binary.decoder(?oversized[0], 4, binary.BIG);
+    if (decode(?d, true, limits, storage, ?out).error != ERROR_LIMIT || d.pos != 0 || out.kind != 0xff) { ret 1; }
+    val no_length: [3]u8 = [3]u8{0x30, 4, 5};
+    d = binary.decoder(?no_length[0], 3, binary.BIG);
+    val more: DecodeResult = decode(?d, false, default_limits(), storage, ?out);
+    if (more.status != STATUS_MORE || d.pos != 0 || out.kind != 0xff) { ret 1; }
+    val done: DecodeResult = decode(?d, true, default_limits(), storage, ?out);
+    if (done.status != STATUS_DONE || out.kind != DATAGRAM || out.data.len != 2 ||
+        out.data.data[0] != 4 || out.data.data[1] != 5) { ret 1; }
     ret 0;
 }
 

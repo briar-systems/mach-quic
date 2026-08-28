@@ -13,6 +13,7 @@ fwd quic.recovery.ack;
 fwd quic.congestion.controller;
 fwd quic.congestion.pacer;
 fwd quic.stream.stream;
+fwd quic.stream.datagram;
 fwd quic.transport;
 
 test "quic: version is present" {
