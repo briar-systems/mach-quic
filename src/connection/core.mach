@@ -153,8 +153,12 @@ pub rec Storage {
     owner_capacity: usize;
     peer_extensions: *transport_parameters.Parameter;
     peer_extension_capacity: usize;
+    peer_extension_bytes: *u8;
+    peer_extension_byte_capacity: usize;
     local_extensions: *transport_parameters.Parameter;
     local_extension_capacity: usize;
+    local_extension_bytes: *u8;
+    local_extension_byte_capacity: usize;
     received_token: *u8;
     received_token_capacity: usize;
     send_token: *u8;
@@ -373,7 +377,7 @@ fun secret_record_valid(secrets: *Secrets) bool {
 
 fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
     if (!borrowed.valid) { ret false; }
-    var owned: [19]ownership.Range;
+    var owned: [21]ownership.Range;
     owned[0] = ownership.bytes(core.storage.receive_header,
         core.storage.receive_header_capacity, ownership.ZERO_FORBIDDEN);
     owned[1] = ownership.bytes(core.storage.receive_decoded,
@@ -414,16 +418,20 @@ fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
     owned[14] = ownership.array(core.storage.local_extensions::*u8,
         core.storage.local_extension_capacity,
         $size_of(transport_parameters.Parameter), ownership.ZERO_ALLOWED);
-    owned[15] = ownership.bytes(core.storage.received_token,
+    owned[15] = ownership.bytes(core.storage.peer_extension_bytes,
+        core.storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
+    owned[16] = ownership.bytes(core.storage.local_extension_bytes,
+        core.storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
+    owned[17] = ownership.bytes(core.storage.received_token,
         core.storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
-    owned[16] = ownership.bytes(core.storage.send_token,
+    owned[18] = ownership.bytes(core.storage.send_token,
         core.storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
-    owned[17] = ownership.bytes(core.storage.negotiation.retry_token,
+    owned[19] = ownership.bytes(core.storage.negotiation.retry_token,
         core.storage.negotiation.retry_token_capacity, ownership.ZERO_ALLOWED);
-    owned[18] = ownership.bytes(core.storage.negotiation.retry_pseudo,
+    owned[20] = ownership.bytes(core.storage.negotiation.retry_pseudo,
         core.storage.negotiation.retry_pseudo_capacity, ownership.ZERO_ALLOWED);
     var i: usize = 0;
-    for (i < 19) {
+    for (i < 21) {
         if (!ownership.disjoint(borrowed, owned[i])) { ret false; }
         i = i + 1;
     }
@@ -502,7 +510,7 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         zero_negotiation = ownership.ZERO_ALLOWED;
         zero_versions = ownership.ZERO_ALLOWED;
     }
-    var ranges: [21]ownership.Range;
+    var ranges: [23]ownership.Range;
     ranges[0] = ownership.bytes((?core.config)::*u8, $size_of(Core),
         ownership.ZERO_FORBIDDEN);
     ranges[1] = ownership.bytes((secret_state_address - secret_state_offset)::*u8,
@@ -547,15 +555,23 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ranges[16] = ownership.array(storage.local_extensions::*u8,
         storage.local_extension_capacity, $size_of(transport_parameters.Parameter),
         ownership.ZERO_ALLOWED);
-    ranges[17] = ownership.bytes(storage.received_token,
+    ranges[17] = ownership.bytes(storage.peer_extension_bytes,
+        storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
+    ranges[18] = ownership.bytes(storage.local_extension_bytes,
+        storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
+    ranges[19] = ownership.bytes(storage.received_token,
         storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
-    ranges[18] = ownership.bytes(storage.send_token,
+    ranges[20] = ownership.bytes(storage.send_token,
         storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
-    ranges[19] = ownership.bytes(storage.negotiation.retry_token,
+    ranges[21] = ownership.bytes(storage.negotiation.retry_token,
         storage.negotiation.retry_token_capacity, zero_negotiation);
-    ranges[20] = ownership.bytes(storage.negotiation.retry_pseudo,
+    ranges[22] = ownership.bytes(storage.negotiation.retry_pseudo,
         storage.negotiation.retry_pseudo_capacity, zero_negotiation);
-    if (!ownership.all_disjoint(?ranges[0], 21)) { ret false; }
+    if (!ownership.all_disjoint(?ranges[0], 23) ||
+        !ownership.secret_disjoint(secret_storage.receive_plaintext,
+            secret_storage.receive_plaintext_capacity,
+            secret_storage.send_plaintext,
+            secret_storage.send_plaintext_capacity)) { ret false; }
     var borrowed: [4]ownership.Range;
     borrowed[0] = ownership.bytes(config.alpn.data, config.alpn.length,
         ownership.ZERO_FORBIDDEN);
@@ -569,7 +585,7 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     for (i < 4) {
         if (!borrowed[i].valid) { ret false; }
         var j: usize = 0;
-        for (j < 21) {
+        for (j < 23) {
             if (!ownership.disjoint(borrowed[i], ranges[j])) { ret false; }
             j = j + 1;
         }
@@ -624,14 +640,14 @@ fun validate_local_parameters(config: Config, parameters: *transport_parameters.
 }
 
 fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
-                            storage: *Storage,
+                            storage: *Storage, secret_storage: *SecretStorage,
                             handshake: *handshake_api.Adapter,
                             cids: *cid_api.Manager, paths: *path_api.Manager,
                             streams: *stream_api.Manager,
                             datagrams: *datagram_api.Queue) bool {
     if (handshake == nil || cids == nil || paths == nil || streams == nil ||
         datagrams == nil) { ret false; }
-    var ranges: [51]ownership.Range;
+    var ranges: [53]ownership.Range;
     ranges[0] = ownership.bytes((?core.config)::*u8, $size_of(Core),
         ownership.ZERO_FORBIDDEN);
     val secret_state_address: usize = (?secrets.initialized)::usize;
@@ -679,102 +695,104 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ranges[16] = ownership.array(storage.local_extensions::*u8,
         storage.local_extension_capacity, $size_of(transport_parameters.Parameter),
         ownership.ZERO_ALLOWED);
-    ranges[17] = ownership.bytes(storage.received_token,
+    ranges[17] = ownership.bytes(storage.peer_extension_bytes,
+        storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
+    ranges[18] = ownership.bytes(storage.local_extension_bytes,
+        storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
+    ranges[19] = ownership.bytes(storage.received_token,
         storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
-    ranges[18] = ownership.bytes(storage.send_token,
+    ranges[20] = ownership.bytes(storage.send_token,
         storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
     var zero_negotiation: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (config.role == transport_api.SERVER) {
         zero_negotiation = ownership.ZERO_ALLOWED;
     }
-    ranges[19] = ownership.bytes(storage.negotiation.retry_token,
+    ranges[21] = ownership.bytes(storage.negotiation.retry_token,
         storage.negotiation.retry_token_capacity, zero_negotiation);
-    ranges[20] = ownership.bytes(storage.negotiation.retry_pseudo,
+    ranges[22] = ownership.bytes(storage.negotiation.retry_pseudo,
         storage.negotiation.retry_pseudo_capacity, zero_negotiation);
-
     # public first-field anchors validate mixed records before field access
-    ranges[21] = ownership.bytes((?handshake.config)::*u8,
+    ranges[23] = ownership.bytes((?handshake.config)::*u8,
         $size_of(handshake_api.Adapter), ownership.ZERO_FORBIDDEN);
-    ranges[22] = ownership.bytes((?cids.config)::*u8,
+    ranges[24] = ownership.bytes((?cids.config)::*u8,
         $size_of(cid_api.Manager), ownership.ZERO_FORBIDDEN);
-    ranges[23] = ownership.bytes((?paths.config)::*u8,
+    ranges[25] = ownership.bytes((?paths.config)::*u8,
         $size_of(path_api.Manager), ownership.ZERO_FORBIDDEN);
-    ranges[24] = ownership.bytes((?streams.config)::*u8,
+    ranges[26] = ownership.bytes((?streams.config)::*u8,
         $size_of(stream_api.Manager), ownership.ZERO_FORBIDDEN);
-    ranges[25] = ownership.bytes((?datagrams.config)::*u8,
+    ranges[27] = ownership.bytes((?datagrams.config)::*u8,
         $size_of(datagram_api.Queue), ownership.ZERO_FORBIDDEN);
-    if (!ownership.all_disjoint(?ranges[0], 26)) { ret false; }
+    if (!ownership.all_disjoint(?ranges[0], 28)) { ret false; }
 
-    ranges[26] = ownership.bytes(handshake.storage.receive_data,
+    ranges[28] = ownership.bytes(handshake.storage.receive_data,
         handshake.storage.receive_length, ownership.ZERO_FORBIDDEN);
-    ranges[27] = ownership.array(handshake.storage.receive_present::*u8,
+    ranges[29] = ownership.array(handshake.storage.receive_present::*u8,
         handshake.storage.receive_length, $size_of(bool),
         ownership.ZERO_FORBIDDEN);
-    ranges[28] = ownership.bytes(handshake.storage.send_data,
+    ranges[30] = ownership.bytes(handshake.storage.send_data,
         handshake.storage.send_length, ownership.ZERO_FORBIDDEN);
-    ranges[29] = ownership.array(handshake.storage.send_pending::*u8,
+    ranges[31] = ownership.array(handshake.storage.send_pending::*u8,
         handshake.storage.send_length, $size_of(bool),
         ownership.ZERO_FORBIDDEN);
-    ranges[30] = ownership.array(handshake.storage.send_acked::*u8,
+    ranges[32] = ownership.array(handshake.storage.send_acked::*u8,
         handshake.storage.send_length, $size_of(bool),
         ownership.ZERO_FORBIDDEN);
-    ranges[31] = ownership.array(handshake.storage.send_inflight::*u8,
+    ranges[33] = ownership.array(handshake.storage.send_inflight::*u8,
         handshake.storage.send_length, $size_of(u16),
         ownership.ZERO_FORBIDDEN);
-    ranges[32] = ownership.array(handshake.storage.attempts::*u8,
+    ranges[34] = ownership.array(handshake.storage.attempts::*u8,
         handshake.storage.attempt_capacity, $size_of(handshake_api.Attempt),
         ownership.ZERO_FORBIDDEN);
-    ranges[33] = ownership.array(cids.storage.local::*u8,
+    ranges[35] = ownership.array(cids.storage.local::*u8,
         cids.storage.local_capacity, $size_of(cid_api.Entry),
         ownership.ZERO_FORBIDDEN);
-    ranges[34] = ownership.array(cids.storage.peer::*u8,
+    ranges[36] = ownership.array(cids.storage.peer::*u8,
         cids.storage.peer_capacity, $size_of(cid_api.Entry),
         ownership.ZERO_FORBIDDEN);
-    ranges[35] = ownership.array(paths.storage.paths::*u8,
+    ranges[37] = ownership.array(paths.storage.paths::*u8,
         paths.storage.path_capacity, $size_of(path_api.Path),
         ownership.ZERO_FORBIDDEN);
-    ranges[36] = ownership.array(paths.storage.challenges::*u8,
+    ranges[38] = ownership.array(paths.storage.challenges::*u8,
         paths.storage.challenge_capacity, $size_of(path_api.Challenge),
         ownership.ZERO_FORBIDDEN);
-    ranges[37] = ownership.array(paths.storage.responses::*u8,
+    ranges[39] = ownership.array(paths.storage.responses::*u8,
         paths.storage.response_capacity, $size_of(path_api.Response),
         ownership.ZERO_FORBIDDEN);
-    ranges[38] = ownership.array(paths.storage.sends::*u8,
+    ranges[40] = ownership.array(paths.storage.sends::*u8,
         paths.storage.send_capacity, $size_of(path_api.SendReservation),
         ownership.ZERO_FORBIDDEN);
-    ranges[39] = ownership.array(streams.storage.streams::*u8,
+    ranges[41] = ownership.array(streams.storage.streams::*u8,
         streams.storage.stream_capacity, $size_of(stream_api.Stream),
         ownership.ZERO_FORBIDDEN);
-    ranges[40] = ownership.array(streams.storage.attempts::*u8,
+    ranges[42] = ownership.array(streams.storage.attempts::*u8,
         streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
         ownership.ZERO_FORBIDDEN);
-    ranges[41] = ownership.bytes(streams.storage.send_data,
+    ranges[43] = ownership.bytes(streams.storage.send_data,
         streams.storage.send_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[42] = ownership.array(streams.storage.send_pending::*u8,
+    ranges[44] = ownership.array(streams.storage.send_pending::*u8,
         streams.storage.send_state_length, $size_of(bool),
         ownership.ZERO_FORBIDDEN);
-    ranges[43] = ownership.array(streams.storage.send_acked::*u8,
+    ranges[45] = ownership.array(streams.storage.send_acked::*u8,
         streams.storage.send_state_length, $size_of(bool),
         ownership.ZERO_FORBIDDEN);
-    ranges[44] = ownership.bytes(streams.storage.send_inflight,
+    ranges[46] = ownership.bytes(streams.storage.send_inflight,
         streams.storage.send_state_length, ownership.ZERO_FORBIDDEN);
-    ranges[45] = ownership.bytes(streams.storage.receive_data,
+    ranges[47] = ownership.bytes(streams.storage.receive_data,
         streams.storage.receive_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[46] = ownership.array(streams.storage.receive_present::*u8,
+    ranges[48] = ownership.array(streams.storage.receive_present::*u8,
         streams.storage.receive_state_length, $size_of(bool),
         ownership.ZERO_FORBIDDEN);
     var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
-    ranges[47] = ownership.array(datagrams.storage.send_entries::*u8,
+    ranges[49] = ownership.array(datagrams.storage.send_entries::*u8,
         datagrams.storage.send_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[48] = ownership.bytes(datagrams.storage.send_bytes,
+    ranges[50] = ownership.bytes(datagrams.storage.send_bytes,
         datagrams.storage.send_bytes_length, datagram_zero);
-    ranges[49] = ownership.array(datagrams.storage.receive_entries::*u8,
+    ranges[51] = ownership.array(datagrams.storage.receive_entries::*u8,
         datagrams.storage.receive_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[50] = ownership.bytes(datagrams.storage.receive_bytes,
+    ranges[52] = ownership.bytes(datagrams.storage.receive_bytes,
         datagrams.storage.receive_bytes_length, datagram_zero);
-    if (!ownership.all_disjoint(?ranges[0], 51)) { ret false; }
-
+    if (!ownership.all_disjoint(?ranges[0], 53)) { ret false; }
     var borrowed: [4]ownership.Range;
     borrowed[0] = ownership.bytes(config.alpn.data, config.alpn.length,
         ownership.ZERO_FORBIDDEN);
@@ -789,8 +807,8 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     var i: usize = 0;
     for (i < 4) {
         if (!borrowed[i].valid) { ret false; }
-        var j: usize = 21;
-        for (j < 51) {
+        var j: usize = 23;
+        for (j < 53) {
             if (!ownership.disjoint(borrowed[i], ranges[j])) { ret false; }
             j = j + 1;
         }
@@ -806,7 +824,7 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
                datagrams: *datagram_api.Queue, now_ns: u64) bool {
     if (!storage_valid(core, secrets, ?config, ?storage,
         ?secret_storage)) { ret false; }
-    if (!component_storage_valid(core, secrets, ?config, ?storage, handshake,
+    if (!component_storage_valid(core, secrets, ?config, ?storage, ?secret_storage, handshake,
         cids, paths, streams, datagrams)) { ret false; }
     if (core.initialized || core.destroyed ||
         !valid_role(config.role) || config.source == 0 ||
@@ -858,7 +876,9 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
             config.local_transport_parameters.length, true,
             local_parameter_role(config.role), transport_parameters.default_limits(),
             transport_parameters.Storage{extensions: storage.local_extensions,
-                extension_capacity: storage.local_extension_capacity},
+                extension_capacity: storage.local_extension_capacity,
+                extension_bytes: storage.local_extension_bytes,
+                extension_byte_capacity: storage.local_extension_byte_capacity},
             ?local_parameters);
     if (local_decoded.status != transport_parameters.STATUS_DONE ||
         !validate_local_parameters(config, ?local_parameters, cids, paths, streams,
@@ -1065,7 +1085,10 @@ fun accept_parameters(core: *Core, event: *handshake_api.Event) bool {
         event.data.data, event.data.length, true, peer_parameter_role(core.role),
         transport_parameters.default_limits(), transport_parameters.Storage{
             extensions: core.storage.peer_extensions,
-            extension_capacity: core.storage.peer_extension_capacity}, ?parameters);
+            extension_capacity: core.storage.peer_extension_capacity,
+            extension_bytes: core.storage.peer_extension_bytes,
+            extension_byte_capacity: core.storage.peer_extension_byte_capacity},
+        ?parameters);
     if (decoded.status != transport_parameters.STATUS_DONE ||
         !validate_peer_parameters(core, ?parameters)) { ret false; }
     if (transport_parameters.has(?parameters,

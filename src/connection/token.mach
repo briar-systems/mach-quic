@@ -123,15 +123,11 @@ fun copy_key(output: *^u8, input: contracts.SecretBytes) bool {
 }
 
 fun key_aliases_manager(manager: *Manager, key: contracts.SecretBytes) bool {
-    if (manager == nil || key.data == nil) { ret false; }
-    var i: usize = 0;
-    for (i < KEY_SIZE) {
-        if (key.data == ?manager.current[i] || key.data == ?manager.previous[i]) {
-            ret true;
-        }
-        i = i + 1;
-    }
-    ret false;
+    if (manager == nil || key.data == nil || key.len != KEY_SIZE) { ret false; }
+    ret !ownership.secret_disjoint(key.data, key.len,
+            ?manager.current[0], KEY_SIZE) ||
+        !ownership.secret_disjoint(key.data, key.len,
+            ?manager.previous[0], KEY_SIZE);
 }
 
 fun physical(manager: *Manager) bool {

@@ -84,7 +84,9 @@ rec Fixture {
     ack_application: [8]ack.Range;
     owners: [8]core.Owner;
     peer_extensions: [4]transport_parameters.Parameter;
+    peer_extension_bytes: [64]u8;
     local_extensions: [4]transport_parameters.Parameter;
+    local_extension_bytes: [64]u8;
     local_parameters: [256]u8;
     received_token: [128]u8;
     send_token: [128]u8;
@@ -347,7 +349,11 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
         ack_application: ack.SpaceStorage{ranges: ?fixture.ack_application[0], capacity: 8},
         owners: ?fixture.owners[0], owner_capacity: 8,
         peer_extensions: ?fixture.peer_extensions[0], peer_extension_capacity: 4,
+        peer_extension_bytes: ?fixture.peer_extension_bytes[0],
+        peer_extension_byte_capacity: 64,
         local_extensions: ?fixture.local_extensions[0], local_extension_capacity: 4,
+        local_extension_bytes: ?fixture.local_extension_bytes[0],
+        local_extension_byte_capacity: 64,
         received_token: ?fixture.received_token[0], received_token_capacity: 128,
         send_token: ?fixture.send_token[0], send_token_capacity: 128,
         negotiation: negotiation.Storage{

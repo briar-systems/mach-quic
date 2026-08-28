@@ -49,6 +49,24 @@ pub fun disjoint(left: Range, right: Range) bool {
     ret left_end < right_start || right_end < left_start;
 }
 
+pub fun secret_disjoint(left: *^u8, left_length: usize,
+                        right: *^u8, right_length: usize) bool {
+    if (left == nil || right == nil || left_length == 0 || right_length == 0) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < right_length) {
+        if (left == ?right[i]) { ret false; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < left_length) {
+        if (right == ?left[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
 pub fun all_disjoint(ranges: *Range, count: usize) bool {
     val list: Range = array(ranges::*u8, count, $size_of(Range), ZERO_FORBIDDEN);
     if (!list.valid) { ret false; }
