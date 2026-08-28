@@ -696,6 +696,21 @@ pub fun confirm_handshake(manager: *Manager) OperationResult {
     ret result;
 }
 
+# receiving a handshake packet proves return routability on that path
+pub fun validate_address(manager: *Manager, value: Handle) OperationResult {
+    if (!handle_valid(manager, value) || manager.closing) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    val path: *Path = ?manager.storage.paths[value.index];
+    path.address_validated = true;
+    path.state = PATH_VALIDATED;
+    manager.fallback_index = value.index;
+    manager.fallback_generation = value.generation;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
 pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes: u64,
                 non_probing: bool, authenticated: bool, fresh: bool,
                 connection_id_available: bool, now_ns: u64) Observation {

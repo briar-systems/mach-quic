@@ -31,6 +31,7 @@ pub val ENTRY_FREE: EntryState = 0;
 pub val ENTRY_ACTIVE: EntryState = 1;
 pub val ENTRY_RETIRE_QUEUED: EntryState = 2;
 pub val ENTRY_RETIRED: EntryState = 3;
+pub val ENTRY_RETIRE_SENT: EntryState = 4;
 
 pub rec Entry {
     id: packet.ConnectionId;
@@ -39,6 +40,8 @@ pub rec Entry {
     generation: u64;
     state: EntryState;
     current: bool;
+    advertised: bool;
+    advertisement_inflight: bool;
 }
 
 pub rec Storage {
@@ -120,19 +123,23 @@ fun clear_entries(entries: *Entry, capacity: usize) {
     for (i < capacity) {
         entries[i].state = ENTRY_FREE;
         entries[i].current = false;
+        entries[i].advertised = false;
+        entries[i].advertisement_inflight = false;
         entries[i].generation = next_generation(entries[i].generation);
         i = i + 1;
     }
 }
 
 fun assign(entry: *Entry, sequence: u64, id: packet.ConnectionId,
-           reset_token: [16]u8, current: bool) {
+           reset_token: [16]u8, current: bool, advertised: bool) {
     entry.id = id;
     entry.reset_token = reset_token;
     entry.sequence = sequence;
     entry.generation = next_generation(entry.generation);
     entry.state = ENTRY_ACTIVE;
     entry.current = current;
+    entry.advertised = advertised;
+    entry.advertisement_inflight = false;
 }
 
 pub fun init(config: Config, storage: Storage, initial_local: packet.ConnectionId,
@@ -147,8 +154,8 @@ pub fun init(config: Config, storage: Storage, initial_local: packet.ConnectionI
     clear_entries(storage.local, storage.local_capacity);
     clear_entries(storage.peer, storage.peer_capacity);
     var empty_token: [16]u8;
-    assign(?storage.local[0], 0, initial_local, empty_token, true);
-    assign(?storage.peer[0], 0, initial_peer, empty_token, true);
+    assign(?storage.local[0], 0, initial_local, empty_token, true, true);
+    assign(?storage.peer[0], 0, initial_peer, empty_token, true, true);
     manager.config = config;
     manager.storage = storage;
     manager.local_active = 1;
@@ -254,10 +261,49 @@ pub fun issue_local(manager: *Manager, sequence: u64, id: packet.ConnectionId,
         result.error = ERROR_CAPACITY;
         ret result;
     }
-    assign(?manager.storage.local[index], sequence, id, reset_token, false);
+    assign(?manager.storage.local[index], sequence, id, reset_token, false, false);
     manager.local_active = manager.local_active + 1;
     result.status = STATUS_OK;
     result.handle = handle(manager, index, true);
+    ret result;
+}
+
+# retry replaces the peer's sequence-zero initial destination before authentication
+pub fun replace_initial_peer(manager: *Manager, id: packet.ConnectionId) Result {
+    var result: Result;
+    if (manager == nil || !manager.initialized || manager.closing || id.len == 0 ||
+        id.len::usize > packet.MAX_CONNECTION_ID || manager.peer_active != 1 ||
+        manager.peer_retire_prior_to != 0 || manager.storage.peer[0].state != ENTRY_ACTIVE ||
+        manager.storage.peer[0].sequence != 0 || !manager.storage.peer[0].current) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    manager.storage.peer[0].id = id;
+    manager.storage.peer[0].generation =
+        next_generation(manager.storage.peer[0].generation);
+    result.status = STATUS_OK;
+    result.handle = handle(manager, 0, false);
+    ret result;
+}
+
+# applies the peer's active_connection_id_limit before any additional local id is issued
+pub fun update_local_limit(manager: *Manager, limit: u64) Result {
+    var result: Result;
+    if (manager == nil || !manager.initialized || manager.closing || limit < 2) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_LIMIT;
+        ret result;
+    }
+    var effective: usize = manager.storage.local_capacity;
+    if (limit < effective::u64) { effective = limit::usize; }
+    if (manager.local_active > effective) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_LIMIT;
+        ret result;
+    }
+    manager.config.local_active_limit = effective;
+    result.status = STATUS_OK;
     ret result;
 }
 
@@ -327,7 +373,8 @@ pub fun receive_new(manager: *Manager, sequence: u64, retire_prior_to: u64,
     var index: usize = existing;
     if (index == manager.storage.peer_capacity) {
         index = find_free(manager.storage.peer, manager.storage.peer_capacity);
-        assign(?manager.storage.peer[index], sequence, id, reset_token, current_retired);
+        assign(?manager.storage.peer[index], sequence, id, reset_token,
+            current_retired, true);
         manager.peer_active = manager.peer_active + 1;
     }
     if (current_retired && existing != manager.storage.peer_capacity) {
@@ -416,6 +463,94 @@ pub fun current(manager: *Manager, local: bool) Selected {
     ret result;
 }
 
+pub fun rotate_peer(manager: *Manager) Result {
+    var result: Result;
+    if (manager == nil || !manager.initialized || manager.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    var current_index: usize = manager.storage.peer_capacity;
+    var next_index: usize = manager.storage.peer_capacity;
+    var i: usize = 0;
+    for (i < manager.storage.peer_capacity) {
+        if (manager.storage.peer[i].state == ENTRY_ACTIVE) {
+            if (manager.storage.peer[i].current) { current_index = i; }
+            or (next_index == manager.storage.peer_capacity) { next_index = i; }
+        }
+        i = i + 1;
+    }
+    if (current_index == manager.storage.peer_capacity ||
+        next_index == manager.storage.peer_capacity) {
+        result.status = STATUS_BLOCKED;
+        result.error = ERROR_LIMIT;
+        ret result;
+    }
+    manager.storage.peer[current_index].current = false;
+    manager.storage.peer[current_index].state = ENTRY_RETIRE_QUEUED;
+    manager.storage.peer[next_index].current = true;
+    manager.peer_active = manager.peer_active - 1;
+    result.status = STATUS_OK;
+    result.handle = handle(manager, next_index, false);
+    ret result;
+}
+
+pub fun next_advertisement(manager: *Manager) Selected {
+    var result: Selected;
+    if (manager == nil || !manager.initialized || manager.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    var i: usize = 0;
+    for (i < manager.storage.local_capacity) {
+        val entry: *Entry = ?manager.storage.local[i];
+        if (entry.state == ENTRY_ACTIVE && !entry.advertised &&
+            !entry.advertisement_inflight) {
+            result.status = STATUS_OK;
+            result.handle = handle(manager, i, true);
+            result.id = entry.id;
+            result.reset_token = entry.reset_token;
+            ret result;
+        }
+        i = i + 1;
+    }
+    result.status = STATUS_BLOCKED;
+    ret result;
+}
+
+pub fun advertisement_sent(manager: *Manager, value: Handle) Result {
+    var result: Result;
+    val entry: *Entry = slot_for(manager, value);
+    if (entry == nil || !value.local || entry.state != ENTRY_ACTIVE ||
+        entry.advertised || entry.advertisement_inflight) {
+        result.status = STATUS_STALE;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    entry.advertisement_inflight = true;
+    result.status = STATUS_OK;
+    result.handle = value;
+    ret result;
+}
+
+pub fun advertisement_terminal(manager: *Manager, value: Handle,
+                               acknowledged: bool) Result {
+    var result: Result;
+    val entry: *Entry = slot_for(manager, value);
+    if (entry == nil || !value.local || entry.state != ENTRY_ACTIVE ||
+        !entry.advertisement_inflight) {
+        result.status = STATUS_STALE;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    entry.advertisement_inflight = false;
+    if (acknowledged) { entry.advertised = true; }
+    result.status = STATUS_OK;
+    result.handle = value;
+    ret result;
+}
+
 pub fun next_retirement(manager: *Manager) Result {
     var result: Result;
     if (manager == nil || !manager.initialized) {
@@ -444,7 +579,23 @@ pub fun retirement_sent(manager: *Manager, value: Handle) Result {
         result.error = ERROR_TOKEN;
         ret result;
     }
-    entry.state = ENTRY_RETIRED;
+    entry.state = ENTRY_RETIRE_SENT;
+    result.status = STATUS_OK;
+    result.handle = value;
+    ret result;
+}
+
+pub fun retirement_terminal(manager: *Manager, value: Handle,
+                            acknowledged: bool) Result {
+    var result: Result;
+    val entry: *Entry = slot_for(manager, value);
+    if (entry == nil || value.local || entry.state != ENTRY_RETIRE_SENT) {
+        result.status = STATUS_STALE;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    entry.state = ENTRY_RETIRE_QUEUED;
+    if (acknowledged) { entry.state = ENTRY_RETIRED; }
     result.status = STATUS_OK;
     result.handle = value;
     ret result;
@@ -538,5 +689,26 @@ test "quic.connection.cid: local retirement requires a replacement before curren
     val retired: Result = receive_retire(?manager, 0);
     if (retired.status != STATUS_OK || !retired.replacement_needed) { ret 3; }
     if (!begin_close(?manager) || !finish_close(?manager) || snapshot(?manager).initialized) { ret 4; }
+    ret 0;
+}
+
+test "quic.connection.cid: migration consumes one peer id and bounds local advertisements" {
+    var local: [3]Entry;
+    var peer: [6]Entry;
+    var manager: Manager = init(Config{source: 204, local_active_limit: 2,
+        peer_active_limit: 3}, Storage{local: ?local[0], local_capacity: 3,
+        peer: ?peer[0], peer_capacity: 6}, make_id(1), make_id(10));
+    if (update_local_limit(?manager, 8).status != STATUS_OK ||
+        manager.config.local_active_limit != 3) { ret 1; }
+    val added: Result = receive_new(?manager, 1, 0, make_id(20), make_token(20));
+    val rotated: Result = rotate_peer(?manager);
+    if (added.status != STATUS_OK || rotated.status != STATUS_OK ||
+        rotated.handle.sequence != 1 || snapshot(?manager).peer_active != 1 ||
+        next_retirement(?manager).handle.sequence != 0 ||
+        rotate_peer(?manager).status != STATUS_BLOCKED) { ret 2; }
+    val retirement: Result = next_retirement(?manager);
+    if (retirement_sent(?manager, retirement.handle).status != STATUS_OK ||
+        retirement_terminal(?manager, retirement.handle, false).status != STATUS_OK ||
+        next_retirement(?manager).status != STATUS_OK) { ret 3; }
     ret 0;
 }
