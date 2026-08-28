@@ -1453,6 +1453,12 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
             path_handle.generation) { ret false; }
     val transport_path: *path_api.Path =
         ?core.paths.storage.paths[path_handle.index];
+    val selected: path_api.PathResult = path_api.selected(core.paths);
+    val path_persistent: bool = persistent &&
+        selected.status == path_api.STATUS_OK &&
+        selected.handle.source == path_handle.source &&
+        selected.handle.index == path_handle.index &&
+        selected.handle.generation == path_handle.generation;
     val updated: congestion_api.UpdateResult = congestion_api.on_recovery(
         ?transport_path.congestion, congestion_api.Signals{
             events: event, event_count: 1,
@@ -1461,7 +1467,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
             smoothed_rtt_ns: core.recovery_state.rtt.smoothed_ns,
             ecn_congestion: false,
             ecn_sent_at_ns: 0,
-            persistent_congestion: persistent &&
+            persistent_congestion: path_persistent &&
                 event.kind == recovery.EVENT_LOST,
             growth_permitted: owner.growth_permitted,
             retry: event.kind == recovery.EVENT_RETRY});
@@ -1539,8 +1545,13 @@ fun apply_recovery_events(core: *Core, secrets: *Secrets, count: usize, now_ns: 
 fun handle_ack(core: *Core, secrets: *Secrets, space: u8, value: *frame.Frame,
                now_ns: u64) bool {
     val before: u64 = core.recovery_state.bytes_in_flight::u64;
-    val acknowledged: recovery.AckResult = recovery.on_ack(?core.recovery_state,
+    val selected: path_api.PathResult = path_api.selected(core.paths);
+    if (selected.status != path_api.STATUS_OK) { ret false; }
+    val acknowledged: recovery.AckResult = recovery.on_ack_path(
+        ?core.recovery_state,
         space, value, now_ns, core.peer_parameters.ack_delay_exponent::u8,
+        selected.handle.source, selected.handle.index,
+        selected.handle.generation,
         core.storage.recovery_events, core.storage.recovery_event_capacity);
     if (!acknowledged.ok) { ret false; }
     ret apply_recovery_events(core, secrets, acknowledged.event_count, now_ns,
@@ -3103,7 +3114,10 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
     val sent: recovery.OperationResult = recovery.on_packet_sent(
         ?core.recovery_state, owner.space, recovery.SentPacket{
             number: owner.packet_number, sent_at_ns: now_ns,
-            bytes: owner.bytes, owner: owner.owner, ecn: 0,
+            bytes: owner.bytes, owner: owner.owner,
+            path_source: recovery_path.source,
+            path_index: recovery_path.index,
+            path_generation: recovery_path.generation, ecn: 0,
             ack_eliciting: owner.ack_eliciting, in_flight: owner.in_flight});
     if (!sent.ok) {
         path_api.recovery_terminal_scoped(core.paths, core.config.source, recovery_path,
@@ -3277,8 +3291,14 @@ pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
     }
     if (fired_kind == TIMER_RECOVERY) {
         val before: u64 = core.recovery_state.bytes_in_flight::u64;
-        val timed: recovery.TimeoutResult = recovery.on_timeout(
+        val selected: path_api.PathResult = path_api.selected(core.paths);
+        if (selected.status != path_api.STATUS_OK) {
+            ret fail(core, NO_VIABLE_PATH, now_ns);
+        }
+        val timed: recovery.TimeoutResult = recovery.on_timeout_path(
             ?core.recovery_state, now_ns, recovery_generation,
+            selected.handle.source, selected.handle.index,
+            selected.handle.generation,
             core.storage.recovery_events, core.storage.recovery_event_capacity);
         if (timed.status == recovery.TIMEOUT_LOSS) {
             if (!apply_recovery_events(core, secrets, timed.event_count,

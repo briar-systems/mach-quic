@@ -25,6 +25,15 @@ fun sent(number: u64, at_ns: u64, owner: u64) recovery.SentPacket {
     ret packet;
 }
 
+fun path_sent(number: u64, at_ns: u64, owner: u64, source: u64,
+              path_index: usize, generation: u64) recovery.SentPacket {
+    var value: recovery.SentPacket = sent(number, at_ns, owner);
+    value.path_source = source;
+    value.path_index = path_index;
+    value.path_generation = generation;
+    ret value;
+}
+
 test "quic.recovery.simulated: reordering and duplicate ACKs preserve terminal ownership" {
     var initial: [8]recovery.SentPacket;
     var handshake: [8]recovery.SentPacket;
@@ -308,5 +317,34 @@ test "quic.recovery.simulated: arithmetic saturation cannot wrap timers or fligh
     val near_end: u64 = (0 - 1::u64) - 10;
     val accepted: recovery.OperationResult = recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, near_end, 81));
     if (!accepted.ok || accepted.timer.deadline_ns != 0 - 1::u64) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: old path acknowledgements cannot update selected path RTT" {
+    var initial: [2]recovery.SentPacket;
+    var handshake: [2]recovery.SentPacket;
+    var application: [4]recovery.SentPacket;
+    var state: recovery.Recovery = recovery.init(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 2},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 2},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 4},
+        recovery.default_config()
+    );
+    recovery.confirm_handshake(?state, 0);
+    if (!recovery.on_packet_sent(?state, packet.SPACE_APPLICATION,
+        path_sent(0, 0, 120, 8, 0, 1)).ok) { ret 1; }
+    if (!recovery.on_packet_sent(?state, packet.SPACE_APPLICATION,
+        path_sent(1, 10, 121, 8, 1, 2)).ok) { ret 1; }
+    var events: [4]recovery.Event;
+    var ack: frame.Frame = ack_one(0);
+    val old_path: recovery.AckResult = recovery.on_ack_path(?state,
+        packet.SPACE_APPLICATION, ?ack, 100, 0, 8, 1, 2, ?events[0], 4);
+    if (!old_path.ok || state.rtt.has_sample || events[0].path_index != 0 ||
+        events[0].path_generation != 1) { ret 1; }
+    ack = ack_one(1);
+    val selected_path: recovery.AckResult = recovery.on_ack_path(?state,
+        packet.SPACE_APPLICATION, ?ack, 210, 0, 8, 1, 2, ?events[0], 4);
+    if (!selected_path.ok || !state.rtt.has_sample || state.rtt.latest_ns != 200 ||
+        events[0].path_index != 1 || events[0].path_generation != 2) { ret 1; }
     ret 0;
 }
