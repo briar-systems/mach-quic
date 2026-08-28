@@ -145,8 +145,12 @@ pub rec ReceiveKeys {
     generation: u64;
     current_floor: u64;
     largest_current: u64;
+    update_packet_number: u64;
+    updates: u64;
     have_previous: bool;
     have_current_packet: bool;
+    handshake_confirmed: bool;
+    update_response_confirmed: bool;
     state: State;
 }
 
@@ -828,8 +832,12 @@ pub fun destroy_receive(value: *ReceiveKeys) {
     value.generation = 0;
     value.current_floor = 0;
     value.largest_current = 0;
+    value.update_packet_number = 0;
+    value.updates = 0;
     value.have_previous = false;
     value.have_current_packet = false;
+    value.handshake_confirmed = false;
+    value.update_response_confirmed = false;
     value.state = STATE_DISCARDED;
 }
 
@@ -848,6 +856,12 @@ pub fun init_receive(output: *ReceiveKeys, version: u32, algorithm: Algorithm,
     output.phase = false;
     output.generation = 1;
     output.state = STATE_ACTIVE;
+    ret OK;
+}
+
+pub fun confirm_handshake_receive(value: *ReceiveKeys) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    value.handshake_confirmed = true;
     ret OK;
 }
 
@@ -877,6 +891,10 @@ fun commit_received(value: *ReceiveKeys, used: *KeySet,
     }
     if (used == ?value.previous) { ret OK; }
     if (used != ?value.next) { ret KEY_UPDATE_ERROR; }
+    if (!value.handshake_confirmed
+        || (value.updates != 0 && !value.update_response_confirmed)) {
+        ret KEY_UPDATE_ERROR;
+    }
     var future: KeySet;
     val error: Error = next_set(?value.next, ?future);
     if (error != OK) { destroy(?future); ret error; }
@@ -889,7 +907,10 @@ fun commit_received(value: *ReceiveKeys, used: *KeySet,
     value.generation = value.current.generation;
     value.current_floor = packet_number;
     value.largest_current = packet_number;
+    value.update_packet_number = packet_number;
+    value.updates = value.updates + 1;
     value.have_current_packet = true;
+    value.update_response_confirmed = false;
     ret OK;
 }
 
@@ -962,6 +983,17 @@ pub fun discard_previous(value: *ReceiveKeys) Error {
     if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
     destroy(?value.previous);
     value.have_previous = false;
+    ret OK;
+}
+
+pub fun confirm_update_response(value: *ReceiveKeys, generation: u64,
+    acknowledged_packet_number: u64) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    if (value.updates == 0 || generation != value.generation
+        || acknowledged_packet_number != value.update_packet_number) {
+        ret KEY_UPDATE_ERROR;
+    }
+    value.update_response_confirmed = true;
     ret OK;
 }
 
