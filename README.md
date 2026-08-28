@@ -13,8 +13,8 @@ preferred addresses are copied into bounded values. Callers therefore retain the
 input datagram until all borrowed views have been consumed.
 
 Packet headers are decoded after header protection has been removed. The crypto
-provider boundary remains responsible for header protection, packet protection,
-Retry integrity generation and validation, and key lifecycle.
+layer owns header and packet protection, Retry integrity, traffic-key derivation,
+key phases, and deterministic key discard.
 
 All decode entry points distinguish incomplete input from malformed input.
 Neither a failed nor incomplete operation advances its cursor or publishes its
@@ -31,8 +31,9 @@ output. Protocol fields accept the non-minimal varint encodings allowed by RFC
 - `transport_parameters` owns known parameter validation, peer-role rules,
   defaults, duplicate detection, preferred addresses, and lossless borrowed views
   of unknown extensions.
-- `crypto` adapts handshake and packet protection supplied by `mach-crypto` and
-  `mach-tls` without embedding an algorithm in the transport state machine.
+- `crypto.protection` consumes bounded TLS traffic secrets and owns QUIC-specific
+  HKDF labels, AEAD nonces, AES and ChaCha20 header masks, packet protection,
+  Retry integrity, key phases, and discard.
 - `recovery.ack` owns received-packet ranges and ACK generation.
 - `recovery.recovery` owns sent-packet history, RTT, loss detection, probe state,
   and retransmission ownership.
@@ -49,9 +50,53 @@ HTTP/3 will consume QUIC streams and the version-neutral message contracts from
 `mach-http`. It does not belong in the QUIC transport layer. QPACK and HTTP/3 frame
 processing will be added with the HTTP/3 engine once the connection core is implemented.
 
-The remaining handshake, connection-core, and packet-protection work is tracked
-separately from the completed wire, recovery, congestion, path, stream, datagram,
+The remaining handshake and connection-core work is tracked separately from the
+completed wire, packet-protection, recovery, congestion, path, stream, datagram,
 and public driver layers.
+
+## Packet protection contracts
+
+`crypto.protection` is allocation-free and uses fixed caller-owned records and
+buffers. QUIC v1 and v2 Initial keys are derived from the original destination
+connection ID. TLS supplies the traffic secret and negotiated cipher suite for
+0-RTT, Handshake, and 1-RTT. QUIC derives `quic key`, `quic iv`, `quic hp`, and
+`quic ku` material locally, with the version 2 labels selected automatically.
+The supported suites are AES-128-GCM-SHA-256, AES-256-GCM-SHA-384, and
+ChaCha20-Poly1305-SHA-256.
+
+`seal_packet` copies an unprotected header, encrypts the payload with the exact
+packet-number nonce, then applies header protection from the ciphertext sample.
+`open_packet` removes header protection into caller scratch, reconstructs the
+packet number, authenticates the complete ciphertext, and only then publishes
+plaintext metadata. Authentication failure returns no packet number or header
+length and zeroes the rejected plaintext span. Header scratch is unauthenticated
+workspace and must not be consumed unless the operation succeeds. Reserved-bit
+violations are reported only after authentication and likewise publish no frame
+data.
+
+Managed 1-RTT send and receive state uses `SendKeys` and `ReceiveKeys`. The send
+path rejects repeated or decreasing packet numbers before touching output. The
+first key update requires handshake confirmation. Later updates additionally
+require an acknowledgment for a packet sent in the current phase. Header
+protection keys remain unchanged across updates. The receive path keeps current
+and prederived next keys, retains one previous generation for reordered packets,
+and advances its generation only after successful packet authentication. There
+is no caller-held candidate key token that can commit a later generation.
+`open_receive_packet` reports the authenticated receive generation and whether it
+advanced. The connection calls `respond_to_update` before sending its next packet
+or an acknowledgment. That operation accepts only the same generation or exactly
+one later generation, which makes response idempotence and consecutive-update
+rejection explicit. After publishing an updated-phase packet that acknowledges
+the exact triggering packet, the connection calls `confirm_update_response` with
+that receive generation and triggering packet number. Until then, a consecutive
+authenticated update is rejected without publishing plaintext or receive state.
+
+`destroy`, `destroy_initial`, `destroy_send`, and `destroy_receive` zero all
+secret, packet-key, IV, and header-key storage and make later operations fail as
+discarded. Direct copies of secret-bearing records are unsupported. Retry tags
+use the fixed RFC key and nonce for the selected QUIC version. Their pseudo-packet
+workspace is caller-owned and bounded by the encoded Retry packet plus the
+original destination connection ID.
 
 ## Recovery contracts
 
