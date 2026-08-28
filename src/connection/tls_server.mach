@@ -4,6 +4,7 @@ use crypto.contracts;
 use crypto.encoding.keys;
 use crypto.secret;
 use handshake_api: quic.connection.handshake;
+use quic.connection.ownership;
 use quic.crypto.protection;
 use quic.packet.packet;
 use std.crypto.ct;
@@ -660,5 +661,129 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
     var retired: *credentials.Generation = nil;
     if (credentials.retire_store(?store, ?retired) != contracts.OK) { ret 12; }
     if (keys.destroy_private(?key) != contracts.OK) { ret 13; }
+    ret 0;
+}
+
+var ranges_input: [8192]u8;
+var ranges_output: [8192]u8;
+var ranges_hello: [8192]u8;
+var ranges_certificates: [4]cert.Certificate;
+var ranges_parameters: [256]u8;
+
+# mach-tls copies the configuration and entropy into the provider record and
+# repoints config at those copies, so reporting them as ranges disjoint from
+# that record makes the whole set overlap and every binding fail
+test "quic.connection.tls_server: reported provider ranges are internally disjoint" {
+    var owner: secret.Allocator = secret.system_allocator();
+    var chain_storage: [1]cert.Certificate;
+    var key: keys.PrivateKey;
+    var identity: credentials.Identity;
+    if (!load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) { ret 1; }
+    var generation: credentials.Generation = credentials.empty_generation();
+    if (credentials.initialize(?generation, ?identity, 1, 0, nil,
+        false) != contracts.OK) { ret 2; }
+    var store: credentials.Store = credentials.empty_store();
+    if (credentials.initialize_store(?store, ?generation) != contracts.OK) {
+        ret 3;
+    }
+
+    var versions: [1]u16 = [1]u16{tls13.VERSION};
+    var suites: [1]tls13.CipherSuite =
+        [1]tls13.CipherSuite{tls13.AES_128_GCM_SHA256};
+    var groups: [1]tls13.NamedGroup = [1]tls13.NamedGroup{tls13.X25519};
+    var signatures: [1]tls13.SignatureScheme =
+        [1]tls13.SignatureScheme{tls13.ED25519};
+    var protocols: [1]config.ProtocolName = [1]config.ProtocolName{
+        config.ProtocolName{data: "h3"::*u8, len: 2}};
+    var counter: u8 = 11;
+    var entropy: secret.Entropy = secret.Entropy{context: ?counter,
+        secret_context: nil, fill_fn: deterministic_entropy, initialized: true};
+    var listener_config: config.ServerConfig;
+    listener_config.credentials = ?store;
+    listener_config.alpn = ?protocols[0];
+    listener_config.alpn_len = 1;
+    listener_config.require_alpn = true;
+    listener_config.versions = ?versions[0];
+    listener_config.version_len = 1;
+    listener_config.suites = ?suites[0];
+    listener_config.suite_len = 1;
+    listener_config.groups = ?groups[0];
+    listener_config.group_len = 1;
+    listener_config.signatures = ?signatures[0];
+    listener_config.signature_len = 1;
+    listener_config.entropy = ?entropy;
+    listener_config.entropy_context_size = 1;
+    listener_config.limits = config.production_limits();
+    listener_config.limits.max_peer_handshake_bytes = 8192;
+    listener_config.limits.max_client_hello_bytes = 8192;
+    listener_config.limits.max_client_flight_bytes = 8192;
+    listener_config.limits.max_server_flight_bytes = 8192;
+    listener_config.limits.max_chain_bytes = 4096;
+    listener_config.limits.max_ticket_bytes = 4096;
+
+    var listener_engine: server.Server;
+    if (!server.init(?listener_engine, ?listener_config, server.Storage{
+            input: ?ranges_input[0], input_capacity: 8192,
+            output: ?ranges_output[0], output_capacity: 8192,
+            hello: ?ranges_hello[0], hello_capacity: 8192,
+            certificates: ?ranges_certificates[0], certificate_capacity: 4,
+            peer_parameters: ?ranges_parameters[0],
+            peer_parameters_capacity: 256},
+        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+            data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
+        server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
+
+    var adapter: handshake_api.Adapter;
+    if (!initialize(?adapter, adapter_config(86), listener_storage(),
+        ?listener_engine, Config{verification_time_unix: VERIFICATION_TIME,
+            deadline_ns: 0, entropy_context_size: 1,
+            entropy_secret_context_size: 0})) { ret 5; }
+
+    var reported: [10]ownership.Range;
+    if (!handshake_api.provider_ranges(?adapter, ?reported[0],
+        handshake_api.PROVIDER_RANGE_CAPACITY)) { ret 6; }
+    if (!ownership.all_disjoint(?reported[0],
+        handshake_api.PROVIDER_RANGE_CAPACITY)) { ret 7; }
+
+    # the provider record itself is reported, and the configuration copy that
+    # lives inside it is not reported beside it
+    val record: ownership.Range = ownership.bytes(
+        ((?listener_engine.state)::usize -
+            $offset_of(server.Server, state))::*u8,
+        $size_of(server.Server), ownership.ZERO_FORBIDDEN);
+    val configuration: ownership.Range = ownership.bytes(
+        ((?listener_engine.configuration.limits)::usize -
+            $offset_of(config.ServerConfig, limits))::*u8,
+        $size_of(config.ServerConfig), ownership.ZERO_FORBIDDEN);
+    if (!ownership.contains(record, configuration)) { ret 8; }
+    var found: bool = false;
+    var i: usize = 0;
+    for (i < handshake_api.PROVIDER_RANGE_CAPACITY) {
+        if (reported[i].valid && ownership.contains(reported[i], record) &&
+            ownership.contains(record, reported[i])) { found = true; }
+        i = i + 1;
+    }
+    if (!found) { ret 9; }
+
+    # the adapter's own storage is disjoint from everything it reports
+    i = 0;
+    for (i < handshake_api.PROVIDER_RANGE_CAPACITY) {
+        if (!ownership.disjoint(reported[i], ownership.bytes(
+            ?listener_receive[0], 16384, ownership.ZERO_FORBIDDEN))) { ret 10; }
+        i = i + 1;
+    }
+
+    # and the provider's welded secrets are disjoint from a caller's plaintext
+    var plaintext: [64]^u8;
+    if (!handshake_api.provider_secrets_disjoint(?adapter, ?plaintext[0], 64)) {
+        ret 11;
+    }
+    if (handshake_api.provider_secrets_disjoint(?adapter,
+        ?listener_engine.schedule.master_secret.data[0], 48)) { ret 12; }
+
+    if (!handshake_api.destroy(?adapter)) { ret 13; }
+    var retired: *credentials.Generation = nil;
+    if (credentials.retire_store(?store, ?retired) != contracts.OK) { ret 14; }
+    if (keys.destroy_private(?key) != contracts.OK) { ret 15; }
     ret 0;
 }
