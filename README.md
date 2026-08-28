@@ -82,6 +82,11 @@ protection keys remain unchanged across updates. The receive path keeps current
 and prederived next keys, retains one previous generation for reordered packets,
 and advances its generation only after successful packet authentication. There
 is no caller-held candidate key token that can commit a later generation.
+`open_receive_packet` reports the authenticated receive generation and whether it
+advanced. The connection calls `respond_to_update` before sending its next packet
+or an acknowledgment. That operation accepts only the same generation or exactly
+one later generation, which makes response idempotence and consecutive-update
+rejection explicit.
 
 `destroy`, `destroy_initial`, `destroy_send`, and `destroy_receive` zero all
 secret, packet-key, IV, and header-key storage and make later operations fail as
