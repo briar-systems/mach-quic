@@ -351,6 +351,44 @@ test "quic.stream.simulated: close pins reserved stream payloads until cancellat
     ret 0;
 }
 
+test "quic.stream.simulated: flow-control frames create only permitted peer stream halves" {
+    var records: [4]stream.Stream;
+    var send_data: [32]u8;
+    var send_pending: [32]bool;
+    var send_acked: [32]bool;
+    var send_inflight: [32]u8;
+    var receive_data: [32]u8;
+    var receive_present: [32]bool;
+    var attempts: [4]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 4,
+        send_data: ?send_data[0], send_data_length: 32,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 32, send_stride: 8,
+        receive_data: ?receive_data[0], receive_data_length: 32,
+        receive_present: ?receive_present[0], receive_state_length: 32, receive_stride: 8,
+        attempts: ?attempts[0], attempt_capacity: 4
+    };
+    var limits: stream.Config = config(19, 3, 16);
+    limits.send_peer_bidirectional_limit = 4;
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit = 8;
+    limits.receive_unidirectional_limit = 8;
+    var manager: stream.Manager = stream.init(limits, storage);
+    val maximum: stream.ReceiveResult = stream.receive_max_stream_data(?manager, 5, 12);
+    if (!maximum.ok || maximum.new_streams != 2 || records[maximum.handle.index].send_limit != 12 ||
+        stream.accept(?manager).handle.id != 1 || stream.accept(?manager).handle.id != 5) { ret 1; }
+    val blocked: stream.ReceiveResult = stream.receive_stream_data_blocked(?manager, 7, 8);
+    if (!blocked.ok || blocked.new_streams != 2 || blocked.receive_max_stream_data != 8 ||
+        stream.accept(?manager).handle.id != 3 || stream.accept(?manager).handle.id != 7) { ret 1; }
+    if (stream.receive_max_stream_data(?manager, 3, 4).error != stream.ERROR_DIRECTION ||
+        stream.receive_stream_data_blocked(?manager, 0, 1).error != stream.ERROR_DIRECTION ||
+        stream.receive_max_stream_data(?manager, 9, 1).error != stream.ERROR_CAPACITY || manager.active_streams != 4) { ret 1; }
+    if (stream.receive_data_blocked(?manager, 16).receive_max_data != 16 ||
+        stream.receive_streams_blocked(?manager, stream.DIRECTION_BIDIRECTIONAL, 3).peer_max_streams != 3) { ret 1; }
+    ret 0;
+}
+
 test "quic.stream.simulated: stream exhaustion and two-phase teardown are bounded" {
     var records: [2]stream.Stream;
     var send_data: [16]u8;

@@ -199,6 +199,7 @@ pub rec ReceiveResult {
     handle: Handle;
     new_streams: usize;
     connection_delta: u64;
+    receive_max_stream_data: u64;
     closed: bool;
 }
 
@@ -566,6 +567,41 @@ pub fun update_max_stream_data(manager: *Manager, value: Handle, maximum: u64) O
     if (maximum > stream.send_limit) { stream.send_limit = maximum; }
     var result: OperationResult;
     result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun receive_max_stream_data(manager: *Manager, id: u64, maximum: u64) ReceiveResult {
+    if (manager == nil || !manager.valid || manager.closing || id > varint.MAX) {
+        ret receive_error(ERROR_STATE);
+    }
+    if (maximum > varint.MAX) { ret receive_error(ERROR_OVERFLOW); }
+    var index: usize = stream_index(manager, id);
+    var new_streams: usize = 0;
+    if (index == manager.storage.stream_capacity) {
+        if (previously_opened(manager, id)) {
+            if (!id_can_send(manager, id)) { ret receive_error(ERROR_DIRECTION); }
+            var closed: ReceiveResult;
+            closed.ok = true;
+            closed.closed = true;
+            ret closed;
+        }
+        if (local_initiator(manager, id) || unidirectional(id)) { ret receive_error(ERROR_DIRECTION); }
+        var needed: u64 = 0;
+        val code: u8 = peer_preflight(manager, id, ?needed);
+        if (code != ERROR_NONE) { ret receive_error(code); }
+        val before: usize = manager.active_streams;
+        val created: CreateResult = peer_open(manager, id);
+        if (created.status != STATUS_OK) { ret receive_error(created.error); }
+        index = created.handle.index;
+        new_streams = manager.active_streams - before;
+    }
+    val stream: *Stream = ?manager.storage.streams[index];
+    if (!stream.can_send) { ret receive_error(ERROR_DIRECTION); }
+    if (maximum > stream.send_limit) { stream.send_limit = maximum; }
+    var result: ReceiveResult;
+    result.ok = true;
+    result.handle = handle(manager, index);
+    result.new_streams = new_streams;
     ret result;
 }
 
@@ -976,6 +1012,62 @@ fun peer_preflight(manager: *Manager, id: u64, needed: *u64) u8 {
     ret ERROR_NONE;
 }
 
+pub fun receive_stream_data_blocked(manager: *Manager, id: u64, maximum: u64) ReceiveResult {
+    if (manager == nil || !manager.valid || manager.closing || id > varint.MAX) {
+        ret receive_error(ERROR_STATE);
+    }
+    if (maximum > varint.MAX) { ret receive_error(ERROR_OVERFLOW); }
+    var index: usize = stream_index(manager, id);
+    var new_streams: usize = 0;
+    if (index == manager.storage.stream_capacity) {
+        if (previously_opened(manager, id)) {
+            if (!id_can_receive(manager, id)) { ret receive_error(ERROR_DIRECTION); }
+            var closed: ReceiveResult;
+            closed.ok = true;
+            closed.closed = true;
+            ret closed;
+        }
+        var needed: u64 = 0;
+        val code: u8 = peer_preflight(manager, id, ?needed);
+        if (code != ERROR_NONE) { ret receive_error(code); }
+        val before: usize = manager.active_streams;
+        val created: CreateResult = peer_open(manager, id);
+        if (created.status != STATUS_OK) { ret receive_error(created.error); }
+        index = created.handle.index;
+        new_streams = manager.active_streams - before;
+    }
+    val stream: Stream = manager.storage.streams[index];
+    if (!stream.can_receive) { ret receive_error(ERROR_DIRECTION); }
+    var result: ReceiveResult;
+    result.ok = true;
+    result.handle = handle(manager, index);
+    result.new_streams = new_streams;
+    result.receive_max_stream_data = stream.receive_limit;
+    ret result;
+}
+
+pub fun receive_data_blocked(manager: *Manager, maximum: u64) OperationResult {
+    if (manager == nil || !manager.valid) { ret operation_error(ERROR_STATE); }
+    if (maximum > varint.MAX) { ret operation_error(ERROR_OVERFLOW); }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    result.receive_max_data = manager.receive_max_data;
+    ret result;
+}
+
+pub fun receive_streams_blocked(manager: *Manager, direction: u8, maximum: u64) OperationResult {
+    if (manager == nil || !manager.valid) { ret operation_error(ERROR_STATE); }
+    if (maximum > MAX_STREAM_COUNT) { ret operation_error(ERROR_OVERFLOW); }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    if (direction == DIRECTION_BIDIRECTIONAL) {
+        result.peer_max_streams = manager.config.peer_bidirectional_limit;
+    } or (direction == DIRECTION_UNIDIRECTIONAL) {
+        result.peer_max_streams = manager.config.peer_unidirectional_limit;
+    } or { ret operation_error(ERROR_DIRECTION); }
+    ret result;
+}
+
 pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
                        length: usize, fin: bool) ReceiveResult {
     if (manager == nil || !manager.valid || manager.closing || id > varint.MAX ||
@@ -1088,8 +1180,8 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
 }
 
 pub fun receive_reset(manager: *Manager, id: u64, error_code: u64, final_size: u64) ReceiveResult {
-    if (manager == nil || !manager.valid || manager.closing || id > varint.MAX ||
-        error_code > varint.MAX || final_size > varint.MAX) { ret receive_error(ERROR_STATE); }
+    if (manager == nil || !manager.valid || manager.closing || id > varint.MAX) { ret receive_error(ERROR_STATE); }
+    if (error_code > varint.MAX || final_size > varint.MAX) { ret receive_error(ERROR_OVERFLOW); }
     var index: usize = stream_index(manager, id);
     val provisional: bool = index == manager.storage.stream_capacity;
     if (provisional && previously_opened(manager, id)) {
@@ -1170,9 +1262,10 @@ pub fun acknowledge_reset(manager: *Manager, value: Handle) OperationResult {
 }
 
 pub fun receive_stop(manager: *Manager, id: u64, error_code: u64) ReceiveResult {
-    if (manager == nil || !manager.valid || manager.closing || id > varint.MAX || error_code > varint.MAX) {
+    if (manager == nil || !manager.valid || manager.closing || id > varint.MAX) {
         ret receive_error(ERROR_STATE);
     }
+    if (error_code > varint.MAX) { ret receive_error(ERROR_OVERFLOW); }
     var index: usize = stream_index(manager, id);
     if (index == manager.storage.stream_capacity) {
         if (previously_opened(manager, id)) {

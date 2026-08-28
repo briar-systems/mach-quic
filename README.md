@@ -152,6 +152,9 @@ STOP_SENDING, application cancellation, and FIN each retain their distinct
 terminal and retransmission ownership. Delayed frames for a released stream are
 recognized from the cumulative stream counters and discarded instead of being
 misclassified as frames that exceed the advertised stream limit.
+Frame-level flow-control entry points implement the RFC stream-creation rules for
+MAX_STREAM_DATA and STREAM_DATA_BLOCKED and return the current exact limit for a
+driver response without exposing private lookup state.
 
 The manager is serialized by the connection driver. `begin_close` prevents new
 application work and cancels unsent work, while published and prepared attempt
