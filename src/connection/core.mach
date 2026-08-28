@@ -647,7 +647,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
                             datagrams: *datagram_api.Queue) bool {
     if (handshake == nil || cids == nil || paths == nil || streams == nil ||
         datagrams == nil) { ret false; }
-    var ranges: [53]ownership.Range;
+    var ranges: [54]ownership.Range;
     ranges[0] = ownership.bytes((?core.config)::*u8, $size_of(Core),
         ownership.ZERO_FORBIDDEN);
     val secret_state_address: usize = (?secrets.initialized)::usize;
@@ -792,7 +792,20 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         datagrams.storage.receive_capacity, $size_of(datagram_api.Entry), datagram_zero);
     ranges[52] = ownership.bytes(datagrams.storage.receive_bytes,
         datagrams.storage.receive_bytes_length, datagram_zero);
-    if (!ownership.all_disjoint(?ranges[0], 53)) { ret false; }
+    var provider_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (handshake.tls_enabled) { provider_zero = ownership.ZERO_ALLOWED; }
+    ranges[53] = ownership.bytes(handshake.protocol.context::*u8,
+        handshake.protocol.context_size, provider_zero);
+    if (!ownership.all_disjoint(?ranges[0], 54)) { ret false; }
+    if (!handshake.tls_enabled &&
+        (!ownership.secret_disjoint(handshake.protocol.secret_context,
+            handshake.protocol.secret_context_size,
+            secret_storage.receive_plaintext,
+            secret_storage.receive_plaintext_capacity) ||
+        !ownership.secret_disjoint(handshake.protocol.secret_context,
+            handshake.protocol.secret_context_size,
+            secret_storage.send_plaintext,
+            secret_storage.send_plaintext_capacity))) { ret false; }
     var borrowed: [4]ownership.Range;
     borrowed[0] = ownership.bytes(config.alpn.data, config.alpn.length,
         ownership.ZERO_FORBIDDEN);
@@ -808,7 +821,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     for (i < 4) {
         if (!borrowed[i].valid) { ret false; }
         var j: usize = 23;
-        for (j < 53) {
+        for (j < 54) {
             if (!ownership.disjoint(borrowed[i], ranges[j])) { ret false; }
             j = j + 1;
         }

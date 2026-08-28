@@ -40,6 +40,7 @@ rec Provider {
 
 var reentry_adapter: *handshake.Adapter;
 var reentry_rejected: bool;
+var mutate_start_input: bool;
 
 rec Fixture {
     receive_data: [256]u8;
@@ -64,6 +65,11 @@ fun start_provider(context: ptr, secret_context: *^u8,
     if (provider.started || value == nil || value.version == 0 ||
         value.local_transport_parameters.length == 0) {
         ret provider_result(handshake.STATUS_ERROR, 1);
+    }
+    if (mutate_start_input) {
+        value.role = handshake.SERVER;
+        value.version = 77;
+        mutate_start_input = false;
     }
     provider.started = true;
     ret provider_result(handshake.STATUS_OK, 0);
@@ -174,7 +180,8 @@ fun make_fixture(fixture: *Fixture, source: u64) bool {
         attempts: ?fixture.attempts[0], attempt_capacity: 16
     };
     val protocol: handshake.Protocol = handshake.Protocol{
-        context: (?fixture.provider)::ptr, secret_context: ?fixture.secret[0],
+        context: (?fixture.provider)::ptr, context_size: $size_of(Provider),
+        secret_context: ?fixture.secret[0], secret_context_size: 32,
         start: start_provider,
         ingest: ingest_provider, restart: restart_provider,
         poll: poll_provider,
@@ -424,5 +431,15 @@ test "quic.connection.handshake: provider failures retain exact native errors" {
         failed.error != handshake.ERROR_PROVIDER || failed.provider_error != 4 ||
         !handshake.snapshot(?fixture.adapter).closing ||
         !handshake.destroy(?fixture.adapter)) { ret 2; }
+    ret 0;
+}
+
+test "quic.connection.handshake: provider cannot mutate accepted start identity" {
+    var fixture: Fixture;
+    mutate_start_input = true;
+    if (!make_fixture(?fixture, 408) || fixture.adapter.role != handshake.CLIENT ||
+        fixture.adapter.version != 1 || !handshake.destroy(?fixture.adapter)) {
+        ret 1;
+    }
     ret 0;
 }
