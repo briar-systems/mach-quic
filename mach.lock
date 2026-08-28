@@ -12,5 +12,5 @@ commit = "4d23006514994b3e217b30031c1c5ba711ba0624"
 
 [dep.mach-tls]
 url = "https://github.com/briar-systems/mach-tls"
-ref = "commit/a265a2f2b6e20460a7b0b7477c69da9a01f7b036"
-commit = "a265a2f2b6e20460a7b0b7477c69da9a01f7b036"
+ref = "commit/9f5e7f9916be4fa15408ca35b0a5061384959fe5"
+commit = "9f5e7f9916be4fa15408ca35b0a5061384959fe5"
