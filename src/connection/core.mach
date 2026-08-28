@@ -679,18 +679,21 @@ fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
     ret true;
 }
 
-fun pump_handshake(core: *Core, secrets: *Secrets) bool {
+fun pump_handshake(core: *Core, secrets: *Secrets) u64 {
     var count: usize = 0;
     for (count < 64) {
         val event: handshake_api.Event = handshake_api.next_event(secrets.handshake);
-        if (event.status == handshake_api.STATUS_EMPTY) { ret true; }
-        if (event.status != handshake_api.STATUS_OK) { ret false; }
+        if (event.status == handshake_api.STATUS_EMPTY) { ret NO_ERROR; }
+        if (event.status != handshake_api.STATUS_OK) { ret CRYPTO_ERROR_BASE; }
         var accepted: bool = true;
+        var rejected_error: u64 = CRYPTO_ERROR_BASE;
         if (event.kind == handshake_api.EVENT_TRAFFIC_SECRET) {
             accepted = install_secret(core, secrets, ?event);
+            rejected_error = INTERNAL_ERROR;
         }
         if (event.kind == handshake_api.EVENT_PEER_TRANSPORT_PARAMETERS) {
             accepted = accept_parameters(core, ?event);
+            rejected_error = TRANSPORT_PARAMETER_ERROR;
         }
         if (event.kind == handshake_api.EVENT_EARLY_DATA) {
             core.early_disposition = event.disposition;
@@ -707,27 +710,28 @@ fun pump_handshake(core: *Core, secrets: *Secrets) bool {
             core.close_error = CRYPTO_ERROR_BASE + event.alert;
         }
         if (handshake_api.complete_event(secrets.handshake, event.token,
-            accepted).status != handshake_api.STATUS_OK || !accepted) { ret false; }
+            accepted).status != handshake_api.STATUS_OK) { ret INTERNAL_ERROR; }
+        if (!accepted) { ret rejected_error; }
         if (event.kind == handshake_api.EVENT_HANDSHAKE_COMPLETE) {
             if (core.role == transport_api.SERVER) {
-                if (!confirm_handshake(core, secrets)) { ret false; }
+                if (!confirm_handshake(core, secrets)) { ret INTERNAL_ERROR; }
             } or {
                 core.state = transport_api.ACTIVE;
             }
         }
         if (event.kind == handshake_api.EVENT_ALERT) {
-            if (!begin_application_close(core)) { ret false; }
+            if (!begin_application_close(core)) { ret INTERNAL_ERROR; }
             core.closing = true;
             core.close_queued = true;
             core.close_started_ns = core.last_now_ns;
             core.close_deadline_ns = saturated_add(core.last_now_ns,
                 core.config.drain_timeout_ns);
             core.state = transport_api.DRAINING;
-            ret true;
+            ret NO_ERROR;
         }
         count = count + 1;
     }
-    ret false;
+    ret INTERNAL_ERROR;
 }
 
 fun kind_from_bits(version: u32, bits: u8) u8 {
@@ -1069,9 +1073,19 @@ fun process_frame(core: *Core, secrets: *Secrets,
         ret handle_ack(core, secrets, space, value, now_ns);
     }
     if (value.kind == frame.CRYPTO) {
-        ret handshake_api.receive(secrets.handshake, level, value.offset,
-            value.data.data, value.data.len, now_ns).status != handshake_api.STATUS_ERROR &&
-            pump_handshake(core, secrets);
+        val received: handshake_api.Result = handshake_api.receive(
+            secrets.handshake, level, value.offset, value.data.data,
+            value.data.len, now_ns);
+        if (received.status == handshake_api.STATUS_ERROR) {
+            core.close_error = CRYPTO_ERROR_BASE;
+            ret false;
+        }
+        val handshake_error: u64 = pump_handshake(core, secrets);
+        if (handshake_error != NO_ERROR) {
+            core.close_error = handshake_error;
+            ret false;
+        }
+        ret true;
     }
     if (value.kind == frame.NEW_TOKEN) {
         if (core.role != transport_api.CLIENT ||
@@ -1393,8 +1407,15 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
     if (!apply_plaintext(core, secrets, level, space, observed.handle, plaintext,
-        opened.written, input.received_at_ns) || !pump_handshake(core, secrets)) {
-        ret fail(core, PROTOCOL_VIOLATION, input.received_at_ns);
+        opened.written, input.received_at_ns)) {
+        var failure: u64 = PROTOCOL_VIOLATION;
+        if (core.close_error != NO_ERROR) { failure = core.close_error; }
+        ret fail(core, failure, input.received_at_ns);
+    }
+    if (core.closing) { ret core_result(core, transport_api.STATUS_OK, 0); }
+    val handshake_error: u64 = pump_handshake(core, secrets);
+    if (handshake_error != NO_ERROR) {
+        ret fail(core, handshake_error, input.received_at_ns);
     }
     ret core_result(core, transport_api.STATUS_OK, 0);
 }
@@ -1478,10 +1499,11 @@ pub fun poll_handshake(core: *Core, secrets: *Secrets,
     core.last_now_ns = now_ns;
     val polled: handshake_api.Result = handshake_api.poll(
         secrets.handshake, now_ns);
-    if (polled.status == handshake_api.STATUS_ERROR ||
-        !pump_handshake(core, secrets)) {
+    if (polled.status == handshake_api.STATUS_ERROR) {
         ret fail(core, CRYPTO_ERROR_BASE, now_ns);
     }
+    val handshake_error: u64 = pump_handshake(core, secrets);
+    if (handshake_error != NO_ERROR) { ret fail(core, handshake_error, now_ns); }
     ret core_result(core, transport_api.STATUS_OK, 0);
 }
 
