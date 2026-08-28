@@ -169,7 +169,7 @@ pub fun note_authenticated(client: *Client) bool {
 fun decode_packet(data: *u8, length: usize, output: *packet.Packet) bool {
     if (data == nil || length == 0 || output == nil) { ret false; }
     var decoder: binary.Decoder = binary.decoder(data, length, binary.BIG);
-    ret packet.decode(?decoder, true, packet.DecodeContext{},
+    ret packet.decode(?decoder, true, packet.empty_decode_context(),
         packet.default_limits(), output).status == packet.STATUS_DONE &&
         decoder.pos == length;
 }
