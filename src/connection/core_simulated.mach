@@ -296,7 +296,7 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
         attempts: ?fixture.stream_attempts[0], attempt_capacity: 8})) { ret false; }
     if (!datagram.initialize(?fixture.datagrams, datagram.Config{source: 901,
         peer_max_frame_size: 0, local_max_frame_size: 0,
-        enabled: false}, datagram.Storage{})) { ret false; }
+        enabled: false}, datagram.empty_storage())) { ret false; }
 
     fixture.supported_versions[0] = packet.VERSION_2;
     fixture.supported_versions[1] = packet.VERSION_1;

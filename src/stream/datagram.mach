@@ -53,6 +53,23 @@ pub rec Storage {
     receive_stride: usize;
 }
 
+# every field is assigned by name: an empty record literal does not reliably
+# clear one, and these become ownership ranges
+pub fun empty_storage() Storage {
+    var value: Storage;
+    value.send_entries = nil;
+    value.send_capacity = 0;
+    value.send_bytes = nil;
+    value.send_bytes_length = 0;
+    value.send_stride = 0;
+    value.receive_entries = nil;
+    value.receive_capacity = 0;
+    value.receive_bytes = nil;
+    value.receive_bytes_length = 0;
+    value.receive_stride = 0;
+    ret value;
+}
+
 pub rec Queue {
     config: Config;
     storage: Storage;
@@ -800,5 +817,24 @@ test "quic.stream.datagram: owned regions reject maximum addresses and aliases" 
         receive_bytes: ?bytes[0], receive_bytes_length: 4,
         receive_stride: 4});
     if (hostile.valid || aliased.valid) { ret 1; }
+    ret 0;
+}
+
+# an empty record literal does not reliably clear its fields, and these become
+# ownership ranges: a stale pointer here makes a valid queue look overlapping
+test "quic.stream.datagram: empty storage is fully cleared" {
+    val value: Storage = empty_storage();
+    if (value.send_entries != nil || value.send_bytes != nil ||
+        value.receive_entries != nil || value.receive_bytes != nil) { ret 1; }
+    if (value.send_capacity != 0 || value.send_bytes_length != 0 ||
+        value.send_stride != 0 || value.receive_capacity != 0 ||
+        value.receive_bytes_length != 0 || value.receive_stride != 0) { ret 2; }
+    var queue: Queue;
+    var config: Config;
+    config.source = 77;
+    config.peer_max_frame_size = 0;
+    config.local_max_frame_size = 0;
+    config.enabled = false;
+    if (!initialize(?queue, config, empty_storage())) { ret 3; }
     ret 0;
 }
