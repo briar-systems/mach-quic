@@ -20,6 +20,7 @@ use io_lifecycle: std.io.lifecycle;
 use net_types: std.net.async.types;
 
 rec Core {
+    driver: *transport_api.Driver;
     streams: *stream_api.Manager;
     datagrams: *datagram_api.Queue;
     outbound: usize;
@@ -38,6 +39,7 @@ rec Core {
     abortive: bool;
     closed: bool;
     oversize: bool;
+    reentry_rejected: bool;
 }
 
 rec Fixture {
@@ -128,6 +130,14 @@ fun core_receive(context: ptr, input: *transport_api.Datagram) transport_api.Cor
         core.timer_deadline_ns = input.data[1]::u64;
         core.timer_armed = true;
         core.received = core.received + 1;
+        ret core_result(transport_api.STATUS_OK, transport_api.ACTIVE);
+    }
+    if (command == 6 && core.driver != nil) {
+        val reentered: transport_api.OperationResult = transport_api.begin_close(
+            core.driver, 0, nil, 0, input.received_at_ns);
+        core.reentry_rejected = reentered.status == transport_api.STATUS_ERROR &&
+            reentered.error == transport_api.ERROR_STATE;
+        core.driver.config.max_udp_payload = 1;
         ret core_result(transport_api.STATUS_OK, transport_api.ACTIVE);
     }
     ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
@@ -264,6 +274,7 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
         local_max_frame_size: 65, enabled: true}, datagram_storage)) { ret false; }
     fixture.core.streams = ?fixture.streams;
     fixture.core.datagrams = ?fixture.datagrams;
+    fixture.core.driver = ?fixture.driver;
     fixture.core.next_owner = 1;
     fixture.core.timer_generation = 1;
     if (!cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0})) { ret false; }
@@ -401,6 +412,21 @@ test "quic.transport.simulated: malformed generation and scope inputs publish no
             transport_api.STATUS_CANCELLED || !cancel.destroy(?unrelated)) { ret 4; }
     if (transport_api.cancel_send(?fixture.driver, generated.token, 4).status !=
         transport_api.STATUS_OK || !close_fixture(?fixture, 5)) { ret 5; }
+    ret 0;
+}
+
+test "quic.transport.simulated: protocol callbacks cannot reenter or mutate driver" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 111, stream_api.ROLE_CLIENT)) { ret 1; }
+    var command: [1]u8 = [1]u8{6};
+    val rejected: transport_api.OperationResult = input(?fixture.driver,
+        ?command[0], 1, 1);
+    if (rejected.status != transport_api.STATUS_ERROR ||
+        rejected.error != transport_api.ERROR_PROTOCOL ||
+        !fixture.core.reentry_rejected ||
+        fixture.driver.config.max_udp_payload != 1500 ||
+        fixture.driver.state != transport_api.HANDSHAKING) { ret 2; }
+    if (!close_fixture(?fixture, 2)) { ret 3; }
     ret 0;
 }
 
