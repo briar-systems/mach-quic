@@ -503,7 +503,7 @@ test "quic.path.simulated: two-phase close drains every external owner" {
     val response_owner: path.PreparedResponse = path.prepare_response(?manager, handle);
     val mtu_owner: path.MtuPrepared = path.prepare_mtu_probe(?manager, handle);
     val send_owner: path.SendResult = path.reserve_mtu_send(?manager, handle,
-        mtu_owner.size, true, mtu_owner.token);
+        mtu_owner.size::u64, true, mtu_owner.token);
     if (path.begin_close(?manager).status != path.STATUS_OK ||
         path.finish_close(?manager).status != path.STATUS_BLOCKED) { ret 1; }
     if (path.cancel_challenge(?manager, challenge_owner.token).status != path.STATUS_OK ||
