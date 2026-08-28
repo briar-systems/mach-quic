@@ -11,6 +11,7 @@ fwd quic.crypto.keys;
 fwd quic.recovery.recovery;
 fwd quic.recovery.ack;
 fwd quic.congestion.controller;
+fwd quic.congestion.pacer;
 fwd quic.stream.stream;
 fwd quic.transport;
 

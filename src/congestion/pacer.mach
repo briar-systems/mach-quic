@@ -1,0 +1,355 @@
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+
+pub val ERROR_NONE: u8 = 0;
+pub val ERROR_STATE: u8 = 1;
+pub val ERROR_CONFIG: u8 = 2;
+pub val ERROR_TIME: u8 = 3;
+pub val ERROR_PACKET: u8 = 4;
+pub val ERROR_OVERFLOW: u8 = 5;
+
+pub val PUBLISH_OK: u8 = 1;
+pub val PUBLISH_STALE: u8 = 2;
+pub val PUBLISH_EARLY: u8 = 3;
+pub val PUBLISH_ERROR: u8 = 4;
+
+val MAX_EXACT_VALUE: u64 = 9007199254740992;
+
+pub rec Config {
+    max_datagram_size: u64;
+    maximum_burst: u64;
+    gain_numerator: u32;
+    gain_denominator: u32;
+}
+
+pub rec State {
+    config: Config;
+    congestion_window: u64;
+    smoothed_rtt_ns: u64;
+    last_update_ns: u64;
+    budget: f64;
+    generation: u64;
+    valid: bool;
+}
+
+pub rec Schedule {
+    ok: bool;
+    error: u8;
+    ready: bool;
+    ack_only: bool;
+    ready_at_ns: u64;
+    packet_bytes: u64;
+    generation: u64;
+    congestion_window: u64;
+    smoothed_rtt_ns: u64;
+}
+
+pub rec PublishResult {
+    status: u8;
+    error: u8;
+    generation: u64;
+    budget: u64;
+}
+
+pub rec OperationResult {
+    ok: bool;
+    error: u8;
+    generation: u64;
+}
+
+fun minimum(a: u64, b: u64) u64 {
+    if (a < b) { ret a; }
+    ret b;
+}
+
+fun maximum(a: u64, b: u64) u64 {
+    if (a > b) { ret a; }
+    ret b;
+}
+
+fun next_generation(value: u64) u64 {
+    if (value == 0 - 1::u64) { ret 1; }
+    ret value + 1;
+}
+
+fun valid_config(config: Config) bool {
+    if (config.max_datagram_size < 1200 || config.max_datagram_size > 65527) { ret false; }
+    val standard_burst: u64 = minimum(10 * config.max_datagram_size,
+        maximum(14720, 2 * config.max_datagram_size));
+    ret config.maximum_burst >= config.max_datagram_size && config.maximum_burst <= standard_burst &&
+        config.gain_numerator > 0 && config.gain_denominator > 0 &&
+        config.gain_numerator <= 1000 && config.gain_denominator <= 1000;
+}
+
+pub fun default_config(max_datagram_size: u64, initial_window: u64) Config {
+    var config: Config;
+    config.max_datagram_size = max_datagram_size;
+    config.maximum_burst = initial_window;
+    config.gain_numerator = 5;
+    config.gain_denominator = 4;
+    ret config;
+}
+
+pub fun init(config: Config, congestion_window: u64, smoothed_rtt_ns: u64, now_ns: u64) State {
+    var state: State;
+    state.config = config;
+    if (!valid_config(config) || congestion_window < config.max_datagram_size ||
+        congestion_window > MAX_EXACT_VALUE || smoothed_rtt_ns == 0) { ret state; }
+    state.congestion_window = congestion_window;
+    state.smoothed_rtt_ns = smoothed_rtt_ns;
+    state.last_update_ns = now_ns;
+    state.budget = minimum(config.maximum_burst, congestion_window)::f64;
+    state.generation = 1;
+    state.valid = true;
+    ret state;
+}
+
+fun rate(state: *State) f64 {
+    ret state.congestion_window::f64 * state.config.gain_numerator::f64 /
+        (state.smoothed_rtt_ns::f64 * state.config.gain_denominator::f64);
+}
+
+fun advance(state: *State, now_ns: u64, congestion_window: u64, smoothed_rtt_ns: u64) u8 {
+    if (now_ns < state.last_update_ns) { ret ERROR_TIME; }
+    if (congestion_window < state.config.max_datagram_size || congestion_window > MAX_EXACT_VALUE ||
+        smoothed_rtt_ns == 0) { ret ERROR_CONFIG; }
+    val elapsed: u64 = now_ns - state.last_update_ns;
+    if (elapsed > 0) {
+        state.budget = state.budget + elapsed::f64 * rate(state);
+    }
+    state.congestion_window = congestion_window;
+    state.smoothed_rtt_ns = smoothed_rtt_ns;
+    state.last_update_ns = now_ns;
+    val cap: f64 = minimum(state.config.maximum_burst, congestion_window)::f64;
+    if (state.budget > cap) { state.budget = cap; }
+    ret ERROR_NONE;
+}
+
+fun schedule_error(code: u8) Schedule {
+    var result: Schedule;
+    result.error = code;
+    ret result;
+}
+
+pub fun sync(state: *State, now_ns: u64, congestion_window: u64, smoothed_rtt_ns: u64) OperationResult {
+    var result: OperationResult;
+    if (state == nil || !state.valid) {
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    var next: State = state[0];
+    val advanced: u8 = advance(?next, now_ns, congestion_window, smoothed_rtt_ns);
+    if (advanced != ERROR_NONE) {
+        result.error = advanced;
+        ret result;
+    }
+    next.generation = next_generation(next.generation);
+    state[0] = next;
+    result.ok = true;
+    result.generation = state.generation;
+    ret result;
+}
+
+pub fun reconfigure(state: *State, config: Config, now_ns: u64,
+                    congestion_window: u64, smoothed_rtt_ns: u64) OperationResult {
+    var result: OperationResult;
+    if (state == nil || !state.valid) {
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (!valid_config(config) || congestion_window < config.max_datagram_size ||
+        congestion_window > MAX_EXACT_VALUE || smoothed_rtt_ns == 0) {
+        result.error = ERROR_CONFIG;
+        ret result;
+    }
+    var next: State = state[0];
+    val advanced: u8 = advance(?next, now_ns, congestion_window, smoothed_rtt_ns);
+    if (advanced != ERROR_NONE) {
+        result.error = advanced;
+        ret result;
+    }
+    next.config = config;
+    val cap: f64 = minimum(config.maximum_burst, congestion_window)::f64;
+    if (next.budget > cap) { next.budget = cap; }
+    next.generation = next_generation(next.generation);
+    state[0] = next;
+    result.ok = true;
+    result.generation = state.generation;
+    ret result;
+}
+
+pub fun schedule(state: *State, now_ns: u64, congestion_window: u64, smoothed_rtt_ns: u64,
+                 packet_bytes: u64, ack_only: bool) Schedule {
+    if (state == nil || !state.valid) { ret schedule_error(ERROR_STATE); }
+    if (packet_bytes == 0 || packet_bytes > state.config.max_datagram_size) {
+        ret schedule_error(ERROR_PACKET);
+    }
+    var next: State = state[0];
+    val advanced: u8 = advance(?next, now_ns, congestion_window, smoothed_rtt_ns);
+    if (advanced != ERROR_NONE) { ret schedule_error(advanced); }
+    var result: Schedule;
+    result.ok = true;
+    result.ack_only = ack_only;
+    result.packet_bytes = packet_bytes;
+    result.congestion_window = congestion_window;
+    result.smoothed_rtt_ns = smoothed_rtt_ns;
+    result.ready_at_ns = now_ns;
+    if (ack_only || next.budget >= packet_bytes::f64) {
+        result.ready = true;
+    } or {
+        val pacing_rate: f64 = rate(?next);
+        if (pacing_rate <= 0.0) { ret schedule_error(ERROR_CONFIG); }
+        val delay: f64 = (packet_bytes::f64 - next.budget) / pacing_rate;
+        if (delay >= (0 - 1::u64)::f64) { ret schedule_error(ERROR_OVERFLOW); }
+        var delay_ns: u64 = delay::u64;
+        if (delay_ns::f64 < delay) { delay_ns = delay_ns + 1; }
+        if (delay_ns > (0 - 1::u64) - now_ns) { ret schedule_error(ERROR_OVERFLOW); }
+        result.ready_at_ns = now_ns + delay_ns;
+    }
+    next.generation = next_generation(next.generation);
+    result.generation = next.generation;
+    state[0] = next;
+    ret result;
+}
+
+fun publish_error(code: u8, generation: u64) PublishResult {
+    var result: PublishResult;
+    result.status = PUBLISH_ERROR;
+    result.error = code;
+    result.generation = generation;
+    ret result;
+}
+
+pub fun publish(state: *State, scheduled: Schedule, now_ns: u64,
+                congestion_window: u64, smoothed_rtt_ns: u64) PublishResult {
+    if (state == nil || !state.valid || !scheduled.ok) { ret publish_error(ERROR_STATE, 0); }
+    var result: PublishResult;
+    result.generation = state.generation;
+    result.budget = state.budget::u64;
+    if (scheduled.generation != state.generation) {
+        result.status = PUBLISH_STALE;
+        ret result;
+    }
+    if (scheduled.congestion_window != congestion_window || scheduled.smoothed_rtt_ns != smoothed_rtt_ns) {
+        result.status = PUBLISH_STALE;
+        ret result;
+    }
+    if (now_ns < scheduled.ready_at_ns) {
+        result.status = PUBLISH_EARLY;
+        ret result;
+    }
+    var next: State = state[0];
+    val advanced: u8 = advance(?next, now_ns, congestion_window, smoothed_rtt_ns);
+    if (advanced != ERROR_NONE) { ret publish_error(advanced, state.generation); }
+    if (!scheduled.ack_only) {
+        if (next.budget > scheduled.packet_bytes::f64) {
+            next.budget = next.budget - scheduled.packet_bytes::f64;
+        } or {
+            next.budget = 0.0;
+        }
+    }
+    next.generation = next_generation(next.generation);
+    state[0] = next;
+    result.status = PUBLISH_OK;
+    result.generation = state.generation;
+    result.budget = state.budget::u64;
+    ret result;
+}
+
+pub fun cancel(state: *State, scheduled: Schedule) OperationResult {
+    var result: OperationResult;
+    if (state == nil || !state.valid || !scheduled.ok) {
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (scheduled.generation != state.generation) {
+        result.ok = true;
+        result.generation = state.generation;
+        ret result;
+    }
+    state.generation = next_generation(state.generation);
+    result.ok = true;
+    result.generation = state.generation;
+    ret result;
+}
+
+pub fun reset(state: *State, congestion_window: u64, smoothed_rtt_ns: u64, now_ns: u64) OperationResult {
+    var result: OperationResult;
+    if (state == nil || !state.valid) {
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (now_ns < state.last_update_ns) {
+        result.error = ERROR_TIME;
+        ret result;
+    }
+    val generation: u64 = next_generation(state.generation);
+    val next: State = init(state.config, congestion_window, smoothed_rtt_ns, now_ns);
+    if (!next.valid) {
+        result.error = ERROR_CONFIG;
+        ret result;
+    }
+    state[0] = next;
+    state.generation = generation;
+    result.ok = true;
+    result.generation = generation;
+    ret result;
+}
+
+test "quic.congestion.pacer: initial burst is bounded and subsequent sends are paced" {
+    var state: State = init(default_config(1200, 12000), 12000, 100000000, 0);
+    var i: u8 = 0;
+    for (i < 10) {
+        val queued: Schedule = schedule(?state, 0, 12000, 100000000, 1200, false);
+        if (!queued.ok || !queued.ready) { ret 1; }
+        if (publish(?state, queued, 0, 12000, 100000000).status != PUBLISH_OK) { ret 1; }
+        i = i + 1;
+    }
+    val paced: Schedule = schedule(?state, 0, 12000, 100000000, 1200, false);
+    if (!paced.ok || paced.ready || paced.ready_at_ns < 8000000 || paced.ready_at_ns > 8000001) { ret 1; }
+    if (publish(?state, paced, paced.ready_at_ns - 1, 12000, 100000000).status != PUBLISH_EARLY) { ret 1; }
+    if (publish(?state, paced, paced.ready_at_ns, 12000, 100000000).status != PUBLISH_OK) { ret 1; }
+    ret 0;
+}
+
+test "quic.congestion.pacer: stale schedules and ACK-only sends cannot spend twice" {
+    var state: State = init(default_config(1200, 1200), 1200, 100000000, 0);
+    val first: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
+    val second: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
+    if (publish(?state, first, 0, 1200, 100000000).status != PUBLISH_STALE) { ret 1; }
+    if (publish(?state, second, 0, 1200, 100000000).status != PUBLISH_OK) { ret 1; }
+    val ack_only: Schedule = schedule(?state, 0, 1200, 100000000, 64, true);
+    if (!ack_only.ready || publish(?state, ack_only, 0, 1200, 100000000).status != PUBLISH_OK) { ret 1; }
+    val next: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
+    if (next.ready) { ret 1; }
+    ret 0;
+}
+
+test "quic.congestion.pacer: controller and RTT updates invalidate queued timers" {
+    var state: State = init(default_config(1200, 1200), 1200, 100000000, 0);
+    var queued: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
+    if (publish(?state, queued, 0, 1200, 100000000).status != PUBLISH_OK) { ret 1; }
+    queued = schedule(?state, 0, 1200, 100000000, 1200, false);
+    if (queued.ready || queued.ready_at_ns < 80000000) { ret 1; }
+    if (!sync(?state, 0, 1200, 200000000).ok) { ret 1; }
+    if (publish(?state, queued, queued.ready_at_ns, 1200, 200000000).status != PUBLISH_STALE) { ret 1; }
+    val replacement: Schedule = schedule(?state, 0, 1200, 200000000, 1200, false);
+    if (replacement.ready || replacement.ready_at_ns < 160000000) { ret 1; }
+    if (publish(?state, replacement, replacement.ready_at_ns, 2400, 200000000).status != PUBLISH_STALE) { ret 1; }
+    ret 0;
+}
+
+test "quic.congestion.pacer: reconfiguration is bounded and transactional" {
+    var state: State = init(default_config(1200, 12000), 12000, 100000000, 0);
+    val generation: u64 = state.generation;
+    var invalid: Config = default_config(1200, 12000);
+    invalid.maximum_burst = 24000;
+    if (reconfigure(?state, invalid, 0, 12000, 100000000).ok || state.generation != generation) { ret 1; }
+    val replacement: Config = default_config(1400, 14000);
+    if (reconfigure(?state, replacement, 0, 1200, 100000000).ok || state.generation != generation) { ret 1; }
+    if (!reconfigure(?state, replacement, 0, 12000, 100000000).ok ||
+        state.config.max_datagram_size != 1400 || state.budget != 12000.0 ||
+        state.generation == generation) { ret 1; }
+    ret 0;
+}

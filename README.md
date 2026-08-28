@@ -36,7 +36,8 @@ output. Protocol fields accept the non-minimal varint encodings allowed by RFC
 - `recovery.ack` owns received-packet ranges and ACK generation.
 - `recovery.recovery` owns sent-packet history, RTT, loss detection, probe state,
   and retransmission ownership.
-- `congestion` owns send allowance independently of recovery policy.
+- `congestion` owns NewReno, CUBIC, send allowance, and pacing independently of
+  recovery and stream flow-control policy.
 - `stream` owns per-stream flow control and lifecycle state.
 - `transport` composes the parts into a connection without owning HTTP semantics.
 
@@ -44,7 +45,7 @@ HTTP/3 will consume QUIC streams and the version-neutral message contracts from
 `mach-http`. It does not belong in the QUIC transport layer. QPACK and HTTP/3 frame
 processing will be added with the HTTP/3 engine once the transport is implemented.
 
-The remaining connection, protection, congestion, stream, and transport engine
+The remaining connection, protection, stream, and transport engine
 work is tracked separately from these completed wire and recovery primitives.
 
 ## Recovery contracts
@@ -75,6 +76,49 @@ the connection while sent history, largest acknowledgments, loss time, and packe
 numbers remain independent per space. Discarding Initial or Handshake keys releases
 that space and resets PTO backoff. Retry releases all outstanding owners and resets
 loss recovery without reusing packet numbers.
+
+## Congestion contracts
+
+Congestion state is per network path and shared by all packet number spaces on
+that path. `congestion.controller` provides NewReno and CUBIC behind one bounded,
+allocation-free contract. Recovery remains authoritative for packet history and
+bytes in flight. Before an ACK, timeout, key discard, or Retry mutates recovery,
+the connection saves the prior flight size. It then passes recovery's immutable
+terminal event batch, that saved flight size, the current RTT, validated ECN
+state with its triggering packet send time, and the persistent-congestion result
+to `controller.on_recovery`.
+
+Controller updates are transactional. Unknown events, impossible byte totals,
+backward time, and arithmetic overflow leave the controller unchanged. ACKs are
+applied packet by packet even when recovery returns them with losses in the same
+batch. Loss response is therefore independent of event order and occurs at most
+once per recovery epoch. Retry is an explicit signal because it can occur with no
+outstanding owners and therefore with an empty event batch.
+
+`controller.set_limited` records application- and flow-control-limited intervals
+separately and removes those intervals from CUBIC's epoch clock. The connection
+also supplies `growth_permitted` for each recovery batch after determining
+whether the sender was using the available congestion window. Admission keeps
+the encoded packet size used for congestion accounting separate from the stream
+payload bytes used for flow control. A PTO probe can exceed the congestion window
+through the explicit probe input. It still passes through the pacer.
+
+`congestion.pacer` uses a token bucket capped at the standard initial congestion
+window and a default rate of 1.25 times congestion window divided by smoothed RTT.
+ACK-only packets bypass pacing and do not consume pacing budget. Every schedule is
+generation tagged. Publishing, cancelling, synchronizing a changed RTT or window,
+reconfiguring a PMTU or pacing policy, or resetting a path invalidates older
+schedules. A successful send is charged
+only by `pacer.publish`, so a queued packet that is rebuilt, cancelled, or rejected
+does not consume budget.
+
+The connection driver serializes recovery, congestion, and pacing publication for
+one path. After a controller or RTT update it calls `pacer.sync` before acting on
+any queued pacing timer. Streams retain ownership of connection- and stream-level
+flow-control credit. The driver combines that credit with `controller.admit`, then
+asks the pacer to schedule the fully encoded packet size. This keeps stream
+fairness, congestion blocking, flow-control blocking, PTO exemption, and pacing
+as distinct decisions rather than collapsing them into one writable-byte count.
 
 ## Development
 
