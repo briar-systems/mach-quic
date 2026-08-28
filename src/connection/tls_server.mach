@@ -1,0 +1,635 @@
+# typed mach-tls server binding driven against a real mach-tls client
+
+use crypto.contracts;
+use crypto.encoding.keys;
+use crypto.secret;
+use handshake_api: quic.connection.handshake;
+use quic.crypto.protection;
+use quic.packet.packet;
+use std.crypto.ct;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+use tls.cert;
+use tls.cert.credentials;
+use tls.cert.load;
+use tls.client;
+use tls.config;
+use tls.record;
+use tls.server;
+use tls.engine;
+use tls.tls13;
+
+pub rec Config {
+    verification_time_unix: i64;
+    deadline_ns: u64;
+    entropy_context_size: usize;
+    entropy_secret_context_size: usize;
+}
+
+pub fun initialize(adapter: *handshake_api.Adapter,
+                   adapter_config: handshake_api.Config,
+                   storage: handshake_api.Storage, value: *server.Server,
+                   configuration: Config) bool {
+    ret handshake_api.initialize_tls_server(adapter, adapter_config, storage,
+        value, configuration.verification_time_unix, configuration.deadline_ns,
+        configuration.entropy_context_size,
+        configuration.entropy_secret_context_size);
+}
+
+val VERIFICATION_TIME: i64 = 1800000000;
+
+var listener_input: [8192]u8;
+var listener_output: [8192]u8;
+var listener_hello: [8192]u8;
+var listener_certificates: [4]cert.Certificate;
+var listener_parameters: [256]u8;
+var dialer_input: [8192]u8;
+var dialer_output: [8192]u8;
+var dialer_hello: [8192]u8;
+var dialer_certificates: [4]cert.Certificate;
+var dialer_parameters: [256]u8;
+
+var listener_receive: [16384]u8;
+var listener_receive_present: [16384]bool;
+var listener_send: [16384]u8;
+var listener_send_pending: [16384]bool;
+var listener_send_acked: [16384]bool;
+var listener_send_inflight: [16384]u16;
+var listener_attempts: [8]handshake_api.Attempt;
+var dialer_receive: [16384]u8;
+var dialer_receive_present: [16384]bool;
+var dialer_send: [16384]u8;
+var dialer_send_pending: [16384]bool;
+var dialer_send_acked: [16384]bool;
+var dialer_send_inflight: [16384]u16;
+var dialer_attempts: [8]handshake_api.Attempt;
+
+var root_der: [341]u8;
+var leaf_der: [393]u8;
+
+var listener_transport: [5]u8 = [5]u8{0x0a, 0x0b, 0x0c, 0x0d, 0x0e};
+var dialer_transport: [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
+
+#[oblivious]
+fun deterministic_entropy(context: ptr, secret_context: *^u8,
+                          destination: *^u8, length: usize) i64 {
+    val counter: *u8 = context::*u8;
+    var i: usize = 0;
+    for (i < length) {
+        destination[i] = counter[0] + i::u8 + 1;
+        i = i + 1;
+    }
+    counter[0] = counter[0] + 23;
+    ret 0;
+}
+
+fun hex_nibble(value: u8, output: *u8) bool {
+    if (value >= '0' && value <= '9') { output[0] = value - '0'; ret true; }
+    if (value >= 'a' && value <= 'f') { output[0] = value - 'a' + 10; ret true; }
+    ret false;
+}
+
+fun decode_hex(input: *u8, length: usize, output: *u8, capacity: usize) bool {
+    if (input == nil || output == nil || (length & 1) != 0 ||
+        length / 2 > capacity) { ret false; }
+    var i: usize = 0;
+    for (i < length / 2) {
+        var high: u8;
+        var low: u8;
+        if (!hex_nibble(input[i * 2], ?high) ||
+            !hex_nibble(input[i * 2 + 1], ?low)) { ret false; }
+        output[i] = (high << 4) | low;
+        i = i + 1;
+    }
+    ret true;
+}
+
+# an ed25519 chain for api.example.com valid from 2026-08-28 to 2027-08-28
+fun load_credentials(identity: *credentials.Identity,
+                     chain_storage: *cert.Certificate, key: *keys.PrivateKey,
+                     owner: *secret.Allocator) bool {
+    val root_hex: *u8 = "3082015130820103a00302010202141d7193bab7ae596e287e9e4bf29af4f4be7a0ce9300506032b657030163114301206035504030c0b4d616368544c53526f6f74301e170d3236303832383133323131315a170d3336303832353133323131315a30163114301206035504030c0b4d616368544c53526f6f74302a300506032b657003210019033c2a825bf32d9ef128e4c1e053c148488fb0125c7d4087dccbe60760331da3633061301d0603551d0e04160414a3e1f1ea703e2e0fcde6217a83888df333c4e8ea301f0603551d23041830168014a3e1f1ea703e2e0fcde6217a83888df333c4e8ea300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b65700341009b3793c855daa7b89b9f615856bcaf046d37244ecb5de6fab461f83542a884af4f47f23fda39e91d5fa77646c754bf61220533faa84e5795e6ac4493e4278a0d"::*u8;
+    val leaf_hex: *u8 = "3082018530820137a00302010202147da845f0ef3c4bedac9ebe18bdafc1e948a34249300506032b657030163114301206035504030c0b4d616368544c53526f6f74301e170d3236303832383133323131315a170d3237303832383133323131315a301a3118301606035504030c0f6170692e6578616d706c652e636f6d302a300506032b6570032100cf37004bca6a1c334d1a7e487239adfc92a1b93cf1b911afd8d032b0b8158e65a3819230818f300c0603551d130101ff04023000300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06010505070301301a0603551d1104133011820f6170692e6578616d706c652e636f6d301d0603551d0e041604147720306b64aa6266fad59d6aa94234f18ca7b510301f0603551d23041830168014a3e1f1ea703e2e0fcde6217a83888df333c4e8ea300506032b65700341009c055b8841c91781cb2b281a48805b9f205d59c30b03141e9922f3b14accadc3cf4b059d0eafa7e5cc2dc72baf5f2ba821905414a7f5f2ab5ff78b8a148f6a04"::*u8;
+    if (!decode_hex(root_hex, 682, ?root_der[0], 341) ||
+        !decode_hex(leaf_hex, 786, ?leaf_der[0], 393)) { ret false; }
+    var key_der: [48]^u8 = [48]^u8{
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
+        0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+        0xeb, 0x3b, 0x8b, 0xa3, 0x21, 0x67, 0x09, 0xef,
+        0x29, 0x39, 0x0e, 0x9c, 0x43, 0x84, 0x01, 0xbe,
+        0xca, 0x3f, 0xf8, 0x03, 0x7d, 0x60, 0xbb, 0x30,
+        0x42, 0x18, 0xc8, 0x8c, 0xd4, 0xb7, 0x9b, 0x72,
+    };
+    @key = keys.empty_private();
+    val loaded: contracts.Error = load.private_der(
+        contracts.SecretBytes{data: ?key_der[0], len: 48}, cert.PKCS8_DER,
+        owner, key);
+    ct.zeroize(?key_der[0], 48);
+    if (loaded != contracts.OK) { ret false; }
+    chain_storage[0] = cert.Certificate{der: ?leaf_der[0], der_len: 393};
+    identity.server_name = contracts.Bytes{data: "api.example.com"::*u8, len: 15};
+    identity.chain = cert.Chain{certificates: chain_storage, len: 1};
+    identity.private_key = key;
+    ret true;
+}
+
+# what one side observed across the whole exchange, so an assertion names the
+# event that carried it rather than a state the engine happens to expose
+rec Observed {
+    crypto: [5]bool;
+    secret_send: [5]bool;
+    secret_receive: [5]bool;
+    parameters: [256]u8;
+    parameters_length: usize;
+    parameters_seen: bool;
+    early_disposition: u8;
+    authentication_disposition: u8;
+    authentication_seen: bool;
+    complete: bool;
+    alert: u64;
+    alert_seen: bool;
+    error_kind: handshake_api.Error;
+    provider_error: u64;
+}
+
+fun adapter_config(source: u64) handshake_api.Config {
+    ret handshake_api.Config{source: source, max_crypto_per_level: 4096,
+        max_event_data: 4096, max_peer_identity: 4096};
+}
+
+fun listener_storage() handshake_api.Storage {
+    ret handshake_api.Storage{receive_data: ?listener_receive[0],
+        receive_present: ?listener_receive_present[0], receive_length: 16384,
+        receive_stride: 4096, send_data: ?listener_send[0],
+        send_pending: ?listener_send_pending[0],
+        send_acked: ?listener_send_acked[0],
+        send_inflight: ?listener_send_inflight[0], send_length: 16384,
+        send_stride: 4096, attempts: ?listener_attempts[0],
+        attempt_capacity: 8};
+}
+
+fun dialer_storage() handshake_api.Storage {
+    ret handshake_api.Storage{receive_data: ?dialer_receive[0],
+        receive_present: ?dialer_receive_present[0], receive_length: 16384,
+        receive_stride: 4096, send_data: ?dialer_send[0],
+        send_pending: ?dialer_send_pending[0],
+        send_acked: ?dialer_send_acked[0],
+        send_inflight: ?dialer_send_inflight[0], send_length: 16384,
+        send_stride: 4096, attempts: ?dialer_attempts[0],
+        attempt_capacity: 8};
+}
+
+# crypto leaves the sender the way a real driver takes it: prepared, published,
+# then acknowledged, so the send-side ownership machinery carries every byte
+fun flush(source: *handshake_api.Adapter, sink: *handshake_api.Adapter,
+          level: handshake_api.Level, clock: *u64) i64 {
+    var guard: usize = 0;
+    for (guard < 32) {
+        val prepared: handshake_api.Prepared = handshake_api.prepare(source,
+            level, 2048);
+        if (prepared.status == handshake_api.STATUS_EMPTY) { ret 0; }
+        if (prepared.status != handshake_api.STATUS_OK) { ret 1; }
+        if (handshake_api.publish(source, prepared.token).status !=
+            handshake_api.STATUS_OK) { ret 2; }
+        clock[0] = clock[0] + 1;
+        val delivered: handshake_api.Result = handshake_api.receive(sink, level,
+            prepared.offset, prepared.data.data, prepared.data.length, clock[0]);
+        if (handshake_api.on_terminal(source, prepared.token,
+            handshake_api.TERMINAL_ACKED).status !=
+            handshake_api.STATUS_OK) { ret 3; }
+        if (delivered.status != handshake_api.STATUS_OK &&
+            delivered.status != handshake_api.STATUS_MORE) { ret 4; }
+        guard = guard + 1;
+    }
+    ret 5;
+}
+
+fun drain(adapter: *handshake_api.Adapter, peer: *handshake_api.Adapter,
+          observed: *Observed, clock: *u64) i64 {
+    var guard: usize = 0;
+    for (guard < 32) {
+        val event: handshake_api.Event = handshake_api.next_event(adapter);
+        if (event.status == handshake_api.STATUS_EMPTY) { ret 0; }
+        if (event.status != handshake_api.STATUS_OK) {
+            observed.error_kind = event.error;
+            observed.provider_error = event.provider_error;
+            ret 1;
+        }
+        val kind: handshake_api.EventKind = event.kind;
+        val level: handshake_api.Level = event.level;
+        if (kind == handshake_api.EVENT_CRYPTO) {
+            if (level > 4 || event.data.length == 0) { ret 2; }
+            observed.crypto[level] = true;
+        }
+        if (kind == handshake_api.EVENT_TRAFFIC_SECRET) {
+            if (level > 4 || event.secret.data == nil ||
+                event.secret.length !=
+                    protection.hash_size(event.algorithm)) { ret 3; }
+            if (event.direction == handshake_api.DIRECTION_SEND) {
+                observed.secret_send[level] = true;
+            } or { observed.secret_receive[level] = true; }
+        }
+        if (kind == handshake_api.EVENT_PEER_TRANSPORT_PARAMETERS) {
+            if (event.data.length > 256 || event.data.length == 0) { ret 4; }
+            var i: usize = 0;
+            for (i < event.data.length) {
+                observed.parameters[i] = event.data.data[i];
+                i = i + 1;
+            }
+            observed.parameters_length = event.data.length;
+            observed.parameters_seen = true;
+        }
+        if (kind == handshake_api.EVENT_EARLY_DATA) {
+            observed.early_disposition = event.disposition;
+        }
+        if (kind == handshake_api.EVENT_AUTHENTICATION) {
+            observed.authentication_disposition = event.disposition;
+            observed.authentication_seen = true;
+        }
+        if (kind == handshake_api.EVENT_HANDSHAKE_COMPLETE) {
+            observed.complete = true;
+        }
+        if (kind == handshake_api.EVENT_ALERT) {
+            observed.alert = event.alert;
+            observed.alert_seen = true;
+        }
+        if (handshake_api.complete_event(adapter, event.token, true).status !=
+            handshake_api.STATUS_OK) { ret 5; }
+        # an accepted alert closes the adapter, so nothing follows it
+        if (kind == handshake_api.EVENT_ALERT) { ret 0; }
+        if (kind == handshake_api.EVENT_CRYPTO) {
+            val flushed: i64 = flush(adapter, peer, level, clock);
+            if (flushed != 0) { ret 10 + flushed; }
+        }
+        guard = guard + 1;
+    }
+    ret 6;
+}
+
+fun exchange(dialer_adapter: *handshake_api.Adapter,
+             listener_adapter: *handshake_api.Adapter,
+             dialer_seen: *Observed, listener_seen: *Observed,
+             clock: *u64) i64 {
+    var round: usize = 0;
+    for (round < 32) {
+        val dialed: i64 = drain(dialer_adapter, listener_adapter, dialer_seen,
+            clock);
+        if (dialed != 0) { ret 20 + dialed; }
+        val listened: i64 = drain(listener_adapter, dialer_adapter,
+            listener_seen, clock);
+        if (listened != 0) { ret 40 + listened; }
+        if (dialer_seen.alert_seen || listener_seen.alert_seen) { ret 0; }
+        if (dialer_seen.complete && listener_seen.complete) { ret 0; }
+        clock[0] = clock[0] + 1;
+        val polled_dialer: handshake_api.Result = handshake_api.poll(
+            dialer_adapter, clock[0]);
+        if (polled_dialer.status == handshake_api.STATUS_ERROR) { ret 60; }
+        clock[0] = clock[0] + 1;
+        val polled_listener: handshake_api.Result = handshake_api.poll(
+            listener_adapter, clock[0]);
+        if (polled_listener.status == handshake_api.STATUS_ERROR) { ret 61; }
+        round = round + 1;
+    }
+    ret 70;
+}
+
+fun parameters_match(observed: *Observed, expected: *u8,
+                     length: usize) bool {
+    if (!observed.parameters_seen || observed.parameters_length != length) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < length) {
+        if (observed.parameters[i] != expected[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+test "quic.connection.tls_server: a real client and server complete a QUIC handshake through the adapter pair" {
+    var owner: secret.Allocator = secret.system_allocator();
+    var chain_storage: [1]cert.Certificate;
+    var key: keys.PrivateKey;
+    var identity: credentials.Identity;
+    if (!load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) { ret 1; }
+    var generation: credentials.Generation = credentials.empty_generation();
+    if (credentials.initialize(?generation, ?identity, 1, 0, nil,
+        false) != contracts.OK) { ret 2; }
+    var store: credentials.Store = credentials.empty_store();
+    if (credentials.initialize_store(?store, ?generation) != contracts.OK) {
+        ret 3;
+    }
+
+    var versions: [1]u16 = [1]u16{tls13.VERSION};
+    var suites: [3]tls13.CipherSuite = [3]tls13.CipherSuite{
+        tls13.AES_128_GCM_SHA256, tls13.AES_256_GCM_SHA384,
+        tls13.CHACHA20_POLY1305_SHA256};
+    var groups: [2]tls13.NamedGroup = [2]tls13.NamedGroup{
+        tls13.X25519, tls13.SECP256R1};
+    var signatures: [1]tls13.SignatureScheme =
+        [1]tls13.SignatureScheme{tls13.ED25519};
+
+    # a listener that serves two protocols, so start membership is exercised
+    # rather than the client's single-offer equality
+    var listener_protocols: [2]config.ProtocolName = [2]config.ProtocolName{
+        config.ProtocolName{data: "h3"::*u8, len: 2},
+        config.ProtocolName{data: "h3-29"::*u8, len: 5}};
+    var listener_counter: u8 = 3;
+    var listener_entropy: secret.Entropy = secret.Entropy{
+        context: ?listener_counter, secret_context: nil,
+        fill_fn: deterministic_entropy, initialized: true};
+    var listener_config: config.ServerConfig;
+    listener_config.credentials = ?store;
+    listener_config.alpn = ?listener_protocols[0];
+    listener_config.alpn_len = 2;
+    listener_config.require_alpn = true;
+    listener_config.versions = ?versions[0];
+    listener_config.version_len = 1;
+    listener_config.suites = ?suites[0];
+    listener_config.suite_len = 3;
+    listener_config.groups = ?groups[0];
+    listener_config.group_len = 2;
+    listener_config.signatures = ?signatures[0];
+    listener_config.signature_len = 1;
+    listener_config.entropy = ?listener_entropy;
+    listener_config.entropy_context_size = 1;
+    listener_config.limits = config.production_limits();
+    listener_config.limits.max_peer_handshake_bytes = 8192;
+    listener_config.limits.max_client_hello_bytes = 8192;
+    listener_config.limits.max_client_flight_bytes = 8192;
+    listener_config.limits.max_server_flight_bytes = 8192;
+    listener_config.limits.max_chain_bytes = 4096;
+    listener_config.limits.max_ticket_bytes = 4096;
+
+    var listener_engine: server.Server;
+    if (!server.init(?listener_engine, ?listener_config, server.Storage{
+            input: ?listener_input[0], input_capacity: 8192,
+            output: ?listener_output[0], output_capacity: 8192,
+            hello: ?listener_hello[0], hello_capacity: 8192,
+            certificates: ?listener_certificates[0], certificate_capacity: 4,
+            peer_parameters: ?listener_parameters[0],
+            peer_parameters_capacity: 256},
+        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+            data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
+        server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
+
+    var anchor: cert.Certificate = cert.Certificate{der: ?root_der[0],
+        der_len: 341};
+    var trust: cert.TrustStore = cert.TrustStore{anchors: ?anchor, len: 1};
+    var dialer_protocols: [1]config.ProtocolName = [1]config.ProtocolName{
+        config.ProtocolName{data: "h3"::*u8, len: 2}};
+    var dialer_counter: u8 = 91;
+    var dialer_entropy: secret.Entropy = secret.Entropy{
+        context: ?dialer_counter, secret_context: nil,
+        fill_fn: deterministic_entropy, initialized: true};
+    var dialer_config: config.ClientConfig;
+    dialer_config.server_name = contracts.Bytes{
+        data: "api.example.com"::*u8, len: 15};
+    dialer_config.alpn = ?dialer_protocols[0];
+    dialer_config.alpn_len = 1;
+    dialer_config.trust = ?trust;
+    dialer_config.versions = ?versions[0];
+    dialer_config.version_len = 1;
+    dialer_config.suites = ?suites[0];
+    dialer_config.suite_len = 3;
+    dialer_config.groups = ?groups[0];
+    dialer_config.group_len = 2;
+    dialer_config.signatures = ?signatures[0];
+    dialer_config.signature_len = 1;
+    dialer_config.client_identity = nil;
+    dialer_config.entropy = ?dialer_entropy;
+    dialer_config.entropy_context_size = 1;
+    dialer_config.limits = config.production_limits();
+    dialer_config.limits.max_peer_handshake_bytes = 8192;
+    dialer_config.limits.max_client_hello_bytes = 8192;
+    dialer_config.limits.max_client_flight_bytes = 8192;
+    dialer_config.limits.max_chain_bytes = 4096;
+    dialer_config.limits.max_ticket_bytes = 4096;
+
+    var dialer_engine: client.Client;
+    if (!client.init(?dialer_engine, ?dialer_config, client.Storage{
+            input: ?dialer_input[0], input_capacity: 8192,
+            output: ?dialer_output[0], output_capacity: 8192,
+            hello: ?dialer_hello[0], hello_capacity: 8192,
+            certificates: ?dialer_certificates[0], certificate_capacity: 4,
+            peer_parameters: ?dialer_parameters[0],
+            peer_parameters_capacity: 256},
+        client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
+            data: contracts.Bytes{data: ?dialer_transport[0], len: 4}},
+        client.QUIC_TRANSPORT_PARAMETERS)) { ret 5; }
+
+    var listener_adapter: handshake_api.Adapter;
+    var dialer_adapter: handshake_api.Adapter;
+    val binding: Config = Config{verification_time_unix: VERIFICATION_TIME,
+        deadline_ns: 0, entropy_context_size: 1,
+        entropy_secret_context_size: 0};
+    if (!initialize(?listener_adapter, adapter_config(81), listener_storage(),
+        ?listener_engine, binding)) { ret 6; }
+    if (!handshake_api.initialize_tls_client(?dialer_adapter,
+        adapter_config(82), dialer_storage(), ?dialer_engine,
+        VERIFICATION_TIME, 0, 1, 0)) { ret 7; }
+    if (listener_adapter.tls_role != handshake_api.SERVER ||
+        dialer_adapter.tls_role != handshake_api.CLIENT) { ret 8; }
+
+    var listener_start: handshake_api.Start;
+    listener_start.role = handshake_api.SERVER;
+    listener_start.version = packet.VERSION_1;
+    listener_start.server_name = handshake_api.View{data: nil, length: 0};
+    listener_start.alpn = handshake_api.View{data: "h3"::*u8, length: 2};
+    listener_start.local_transport_parameters = handshake_api.View{
+        data: ?listener_transport[0], length: 5};
+    listener_start.now_ns = 1;
+    var dialer_start: handshake_api.Start;
+    dialer_start.role = handshake_api.CLIENT;
+    dialer_start.version = packet.VERSION_1;
+    dialer_start.server_name = handshake_api.View{
+        data: "api.example.com"::*u8, length: 15};
+    dialer_start.alpn = handshake_api.View{data: "h3"::*u8, length: 2};
+    dialer_start.local_transport_parameters = handshake_api.View{
+        data: ?dialer_transport[0], length: 4};
+    dialer_start.now_ns = 1;
+    if (handshake_api.start(?listener_adapter, ?listener_start).status !=
+        handshake_api.STATUS_OK) { ret 9; }
+    if (handshake_api.start(?dialer_adapter, ?dialer_start).status !=
+        handshake_api.STATUS_OK) { ret 10; }
+
+    # Retry and Version Negotiation restarts do not exist for a listener
+    if (handshake_api.on_retry(?listener_adapter, packet.VERSION_1, 2).error !=
+        handshake_api.ERROR_STATE ||
+        handshake_api.on_version_negotiation(?listener_adapter,
+            packet.VERSION_2, 2).error != handshake_api.ERROR_STATE) { ret 11; }
+
+    var clock: u64 = 2;
+    var dialer_seen: Observed;
+    var listener_seen: Observed;
+    val exchanged: i64 = exchange(?dialer_adapter, ?listener_adapter,
+        ?dialer_seen, ?listener_seen, ?clock);
+    if (exchanged != 0) { ret 100 + exchanged::i32; }
+
+    if (!dialer_seen.complete || !listener_seen.complete) { ret 12; }
+    if (dialer_seen.alert_seen || listener_seen.alert_seen) { ret 13; }
+
+    # crypto crossed every level a QUIC handshake uses, in both directions
+    if (!dialer_seen.crypto[handshake_api.INITIAL] ||
+        !listener_seen.crypto[handshake_api.INITIAL] ||
+        !listener_seen.crypto[handshake_api.HANDSHAKE]) { ret 14; }
+
+    # directional traffic secrets at both protected levels, on both sides
+    if (!dialer_seen.secret_send[handshake_api.HANDSHAKE] ||
+        !dialer_seen.secret_receive[handshake_api.HANDSHAKE] ||
+        !dialer_seen.secret_send[handshake_api.APPLICATION] ||
+        !dialer_seen.secret_receive[handshake_api.APPLICATION]) { ret 15; }
+    if (!listener_seen.secret_send[handshake_api.HANDSHAKE] ||
+        !listener_seen.secret_receive[handshake_api.HANDSHAKE] ||
+        !listener_seen.secret_send[handshake_api.APPLICATION] ||
+        !listener_seen.secret_receive[handshake_api.APPLICATION]) { ret 16; }
+
+    # each side received the other's QUIC transport parameters, not its own
+    if (!parameters_match(?dialer_seen, ?listener_transport[0], 5)) { ret 17; }
+    if (!parameters_match(?listener_seen, ?dialer_transport[0], 4)) { ret 18; }
+
+    if (dialer_seen.early_disposition != handshake_api.EARLY_NOT_OFFERED ||
+        listener_seen.early_disposition !=
+            handshake_api.EARLY_NOT_OFFERED) { ret 19; }
+    if (!dialer_seen.authentication_seen ||
+        dialer_seen.authentication_disposition !=
+            handshake_api.AUTHENTICATED) { ret 20; }
+
+    val dialer_state: handshake_api.Snapshot = handshake_api.snapshot(
+        ?dialer_adapter);
+    val listener_state: handshake_api.Snapshot = handshake_api.snapshot(
+        ?listener_adapter);
+    if (!dialer_state.handshake_complete || !listener_state.handshake_complete ||
+        dialer_state.role != handshake_api.CLIENT ||
+        listener_state.role != handshake_api.SERVER ||
+        !dialer_state.peer_parameters_received ||
+        !listener_state.peer_parameters_received) { ret 21; }
+
+    # both engines negotiated one suite and derived the same server secret
+    val listener_view: engine.Snapshot = server.snapshot(?listener_engine);
+    if (listener_view.suite != client.snapshot(?dialer_engine).suite) { ret 22; }
+    if (listener_view.selected_alpn.len != 2 ||
+        listener_view.selected_alpn.data[0] != 'h' ||
+        listener_view.selected_alpn.data[1] != '3') { ret 23; }
+    if (listener_view.peer_name.len != 15) { ret 24; }
+
+    if (!handshake_api.destroy(?dialer_adapter) ||
+        !handshake_api.destroy(?listener_adapter)) { ret 25; }
+    if (!dialer_adapter.destroyed || !listener_adapter.destroyed ||
+        dialer_adapter.tls_role != 0 ||
+        listener_adapter.tls_role != 0) { ret 26; }
+    var retired: *credentials.Generation = nil;
+    if (credentials.retire_store(?store, ?retired) != contracts.OK) { ret 27; }
+    if (keys.destroy_private(?key) != contracts.OK) { ret 28; }
+    ret 0;
+}
+
+var alert_input: [8192]u8;
+var alert_output: [8192]u8;
+var alert_hello: [8192]u8;
+var alert_certificates: [4]cert.Certificate;
+var alert_parameters: [256]u8;
+
+# a malformed first flight must reach the QUIC layer as the exact TLS alert the
+# engine chose, not as a flattened binding failure
+test "quic.connection.tls_server: a terminal alert keeps its identity through the server binding" {
+    var owner: secret.Allocator = secret.system_allocator();
+    var chain_storage: [1]cert.Certificate;
+    var key: keys.PrivateKey;
+    var identity: credentials.Identity;
+    if (!load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) { ret 1; }
+    var generation: credentials.Generation = credentials.empty_generation();
+    if (credentials.initialize(?generation, ?identity, 1, 0, nil,
+        false) != contracts.OK) { ret 2; }
+    var store: credentials.Store = credentials.empty_store();
+    if (credentials.initialize_store(?store, ?generation) != contracts.OK) {
+        ret 3;
+    }
+
+    var versions: [1]u16 = [1]u16{tls13.VERSION};
+    var suites: [1]tls13.CipherSuite =
+        [1]tls13.CipherSuite{tls13.AES_128_GCM_SHA256};
+    var groups: [1]tls13.NamedGroup = [1]tls13.NamedGroup{tls13.X25519};
+    var signatures: [1]tls13.SignatureScheme =
+        [1]tls13.SignatureScheme{tls13.ED25519};
+    var protocols: [1]config.ProtocolName = [1]config.ProtocolName{
+        config.ProtocolName{data: "h3"::*u8, len: 2}};
+    var counter: u8 = 7;
+    var entropy: secret.Entropy = secret.Entropy{context: ?counter,
+        secret_context: nil, fill_fn: deterministic_entropy, initialized: true};
+    var listener_config: config.ServerConfig;
+    listener_config.credentials = ?store;
+    listener_config.alpn = ?protocols[0];
+    listener_config.alpn_len = 1;
+    listener_config.require_alpn = true;
+    listener_config.versions = ?versions[0];
+    listener_config.version_len = 1;
+    listener_config.suites = ?suites[0];
+    listener_config.suite_len = 1;
+    listener_config.groups = ?groups[0];
+    listener_config.group_len = 1;
+    listener_config.signatures = ?signatures[0];
+    listener_config.signature_len = 1;
+    listener_config.entropy = ?entropy;
+    listener_config.entropy_context_size = 1;
+    listener_config.limits = config.production_limits();
+    listener_config.limits.max_peer_handshake_bytes = 8192;
+    listener_config.limits.max_client_hello_bytes = 8192;
+    listener_config.limits.max_client_flight_bytes = 8192;
+    listener_config.limits.max_server_flight_bytes = 8192;
+    listener_config.limits.max_chain_bytes = 4096;
+    listener_config.limits.max_ticket_bytes = 4096;
+
+    var listener_engine: server.Server;
+    if (!server.init(?listener_engine, ?listener_config, server.Storage{
+            input: ?alert_input[0], input_capacity: 8192,
+            output: ?alert_output[0], output_capacity: 8192,
+            hello: ?alert_hello[0], hello_capacity: 8192,
+            certificates: ?alert_certificates[0], certificate_capacity: 4,
+            peer_parameters: ?alert_parameters[0],
+            peer_parameters_capacity: 256},
+        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+            data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
+        server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
+
+    var adapter: handshake_api.Adapter;
+    if (!initialize(?adapter, adapter_config(83), listener_storage(),
+        ?listener_engine, Config{verification_time_unix: VERIFICATION_TIME,
+            deadline_ns: 0, entropy_context_size: 1,
+            entropy_secret_context_size: 0})) { ret 5; }
+    var start: handshake_api.Start;
+    start.role = handshake_api.SERVER;
+    start.version = packet.VERSION_1;
+    start.server_name = handshake_api.View{data: nil, length: 0};
+    start.alpn = handshake_api.View{data: "h3"::*u8, length: 2};
+    start.local_transport_parameters = handshake_api.View{
+        data: ?listener_transport[0], length: 5};
+    start.now_ns = 1;
+    if (handshake_api.start(?adapter, ?start).status !=
+        handshake_api.STATUS_OK) { ret 6; }
+
+    # a ServerHello where the listener demands a ClientHello
+    var malformed: [4]u8 = [4]u8{0x02, 0, 0, 0};
+    val ingested: handshake_api.Result = handshake_api.receive(?adapter,
+        handshake_api.INITIAL, 0, ?malformed[0], 4, 2);
+    if (ingested.status != handshake_api.STATUS_OK) { ret 7; }
+    val alert: handshake_api.Event = handshake_api.next_event(?adapter);
+    if (alert.status != handshake_api.STATUS_OK ||
+        alert.kind != handshake_api.EVENT_ALERT ||
+        alert.alert != record.UNEXPECTED_MESSAGE_ALERT::u64) { ret 8; }
+    if (handshake_api.complete_event(?adapter, alert.token, true).status !=
+        handshake_api.STATUS_OK) { ret 9; }
+
+    # the exact alert survives onto the adapter for CONNECTION_CLOSE mapping
+    val state: handshake_api.Snapshot = handshake_api.snapshot(?adapter);
+    if (state.terminal_alert != record.UNEXPECTED_MESSAGE_ALERT::u64 ||
+        !state.closing || state.handshake_complete) { ret 10; }
+
+    if (!handshake_api.destroy(?adapter) || adapter.tls_role != 0) { ret 11; }
+    var retired: *credentials.Generation = nil;
+    if (credentials.retire_store(?store, ?retired) != contracts.OK) { ret 12; }
+    if (keys.destroy_private(?key) != contracts.OK) { ret 13; }
+    ret 0;
+}
