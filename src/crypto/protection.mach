@@ -97,6 +97,8 @@ pub rec OpenResult {
     packet_number_len: u8;
     key_phase: bool;
     reserved_bits: bool;
+    key_updated: bool;
+    generation: u64;
 }
 
 pub rec KeySet {
@@ -155,7 +157,7 @@ fun failed(error: Error) Result {
 fun open_failed(error: Error) OpenResult {
     ret OpenResult{error: error, written: 0, header_len: 0,
         packet_number: 0, packet_number_len: 0, key_phase: false,
-        reserved_bits: false};
+        reserved_bits: false, key_updated: false, generation: 0};
 }
 
 fun supported_version(version: u32) bool {
@@ -695,6 +697,7 @@ pub fun open_packet(value: *KeySet, expected_packet_number: u64,
     }
     result.written = opened.written;
     result.packet_number = packet_number;
+    result.generation = value.generation;
     ret result;
 }
 
@@ -781,6 +784,27 @@ pub fun initiate_update(value: *SendKeys) Error {
     if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
     if (!value.handshake_confirmed
         || (value.updates != 0 && !value.acknowledged_current)) { ret KEY_UPDATE_ERROR; }
+    var next: KeySet;
+    val error: Error = next_set(?value.current, ?next);
+    if (error != OK) { destroy(?next); ret error; }
+    move_set(?value.current, ?next);
+    value.phase = !value.phase;
+    value.generation = value.current.generation;
+    value.updates = value.updates + 1;
+    value.first_sent = 0;
+    value.largest_acked = 0;
+    value.sent_current = false;
+    value.acknowledged_current = false;
+    ret OK;
+}
+
+pub fun respond_to_update(value: *SendKeys, receive_generation: u64) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    if (!value.handshake_confirmed || receive_generation == 0) { ret KEY_UPDATE_ERROR; }
+    if (receive_generation == value.generation) { ret OK; }
+    if (value.generation == 0 - 1::u64 || receive_generation != value.generation + 1) {
+        ret KEY_UPDATE_ERROR;
+    }
     var next: KeySet;
     val error: Error = next_set(?value.current, ?next);
     if (error != OK) { destroy(?next); ret error; }
@@ -906,6 +930,7 @@ pub fun open_receive_packet(value: *ReceiveKeys, expected_packet_number: u64,
         truncated, result.packet_number_len);
     if (packet_number > packet.MAX_PACKET_NUMBER || result.header_len > input.len
         || input.len - result.header_len < TAG_SIZE) { ret open_failed(PACKET_NUMBER_ERROR); }
+    val prior_generation: u64 = value.generation;
     val candidate: *KeySet = receive_candidate(value, result.key_phase, packet_number);
     if (candidate == nil) { ret open_failed(KEY_UPDATE_ERROR); }
     val opened: Result = open(candidate, packet_number,
@@ -928,6 +953,8 @@ pub fun open_receive_packet(value: *ReceiveKeys, expected_packet_number: u64,
     }
     result.written = opened.written;
     result.packet_number = packet_number;
+    result.generation = value.generation;
+    result.key_updated = value.generation != prior_generation;
     ret result;
 }
 
