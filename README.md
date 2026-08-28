@@ -44,15 +44,13 @@ output. Protocol fields accept the non-minimal varint encodings allowed by RFC
 - `stream.datagram` owns optional RFC 9221 send and receive queues.
 - `path.path` owns network-path identity, validation, migration, per-path
   amplification accounting, and DPLPMTUD policy.
-- `transport` composes the parts into a connection without owning HTTP semantics.
+- `connection.core` composes packet protection, handshake, recovery, congestion,
+  paths, connection IDs, streams, datagrams, and close into one serialized QUIC
+  connection without owning UDP or HTTP semantics.
+- `transport` owns the version-neutral application and UDP driver contracts.
 
-HTTP/3 will consume QUIC streams and the version-neutral message contracts from
-`mach-http`. It does not belong in the QUIC transport layer. QPACK and HTTP/3 frame
-processing will be added with the HTTP/3 engine once the connection core is implemented.
-
-The remaining handshake and connection-core work is tracked separately from the
-completed wire, packet-protection, recovery, congestion, path, stream, datagram,
-and public driver layers.
+HTTP/3 consumes QUIC streams and the version-neutral message contracts from
+`mach-http`. It does not belong in the QUIC transport layer.
 
 ## Packet protection contracts
 
@@ -311,14 +309,73 @@ Length field consumes the remainder of a QUIC packet and must therefore be
 selected only for the final frame. The length-bearing form can be composed with
 later frames.
 
+## Connection core contracts
+
+`connection.core` is allocation-free and serialized. `Core` contains public
+protocol state. `Secrets` contains the TLS adapter, packet keys, and secret
+plaintext scratch. Every operation takes both records explicitly, so secret-welded
+state is never erased through a generic public pointer. Both records and all
+caller-supplied storage keep fixed addresses until `finish_close` succeeds.
+
+Client and server initialization binds the initial connection IDs and path,
+derives Initial keys, starts TLS with the exact ALPN, server name, role, QUIC
+version, and encoded local transport parameters, and initializes independent
+packet-number and recovery spaces. The client validates Version Negotiation and
+Retry identity before restarting. Restart releases every prepared and published
+owner, resets the required packet-number spaces, rotates the Retry destination
+connection ID, preserves the original destination identity, rederives Initial
+keys, and restarts TLS with an explicit reason. Stateless server preflight parses
+and validates Initial packets before connection allocation. Listener admission
+charges connection and peer capacity before token validation or state allocation.
+
+The TLS adapter is a strict event and ownership boundary. The provider receives
+contiguous CRYPTO input with its encryption level, offset, and monotonic time. It
+publishes bounded CRYPTO output, directional traffic-secret generations, peer
+transport parameters, early-data disposition, peer-authentication disposition,
+handshake completion, and terminal alerts. Each borrowed event remains provider
+owned until `complete_event`. Each prepared CRYPTO range is cancelled or
+published, then remains recovery-owned until ACK, loss, key discard, Retry, or
+terminal connection drain. `poll` lets an asynchronous provider advance without
+inventing network input. Retry and Version Negotiation are explicit provider
+restart events rather than implicit fallback behavior.
+
+Authenticated datagrams are opened before frame state is published. Duplicate
+packet numbers and unauthenticated paths publish no frame effects. The core
+enforces per-path pre-authentication amplification limits, peer transport
+parameters, stream and connection flow control, connection-ID limits, path
+validation, congestion admission, pacing, DPLPMTUD, and packet-history capacity.
+Generated datagrams have one opaque owner. `complete_send` either cancels the
+entire preparation or atomically transfers its frame, path, pacing, and recovery
+ownership after a full UDP send. ACK, loss, Retry, key discard, and teardown
+settle each owner exactly once.
+
+Timers are generation-tagged and cover idle timeout, draining, recovery, delayed
+ACK, and path validation. Graceful close can retransmit CONNECTION_CLOSE while
+continuing terminal input. Abortive close stops generation immediately. Both
+paths first drain prepared and recovery-owned work. `finish_close` then destroys
+the TLS provider and all packet keys, zeroes secret scratch, and invalidates CID
+and path storage.
+
+The core exposes direct transport-shaped `receive`, `generate`, `complete_send`,
+`timer`, `on_timeout`, `begin_close`, `close_ready`, and `finish_close`
+operations. A UDP or application driver owns the stable `Core` and `Secrets`
+records and serializes those calls. This direct split is intentional because the
+generic public driver context cannot erase secret-welded state.
+
+The adapter contract is fully defined and covered by deterministic simulated TLS
+providers. Production handshake and cross-implementation interoperability remain
+blocked on real client and server QUIC handshake providers from `mach-tls`. No
+fallback provider is included.
+
 ## Connection driver contracts
 
-`transport.Driver` is the version-neutral client and server boundary. HTTP/3 can
+`transport.Driver` is the version-neutral client and server application boundary. HTTP/3 can
 open, accept, read, write, finish, cancel, inspect, and release streams through
 driver-owned public handles. It can send and receive QUIC DATAGRAM values and
 inspect connection state without importing packet, crypto, recovery, congestion,
-path, or stream implementation modules. The future connection core plugs into the
-serialized `Protocol` callback boundary behind this API.
+path, or stream implementation modules. A connection owner adapts the core's
+direct serialized operations to its UDP scheduling boundary while retaining
+`Secrets` in secret-welded storage.
 
 The driver, its stream and DATAGRAM managers, protocol context, cancellation
 scope, output slots, and every buffer referenced by an active output token have
