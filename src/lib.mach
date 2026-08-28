@@ -18,6 +18,7 @@ fwd quic.stream.datagram;
 fwd quic.path.path;
 fwd quic.connection.admission;
 fwd quic.connection.cid;
+fwd quic.connection.token;
 fwd quic.transport;
 fwd quic.transport.simulated;
 
