@@ -1,9 +1,12 @@
 use std.runtime;
 use std.types.string.str;
 
-pub val VERSION: str = "0.0.0";
+pub val VERSION: str = "0.1.0";
 
 fwd quic.packet.packet;
+fwd quic.frame.frame;
+fwd quic.wire.varint;
+fwd quic.transport_parameters;
 fwd quic.crypto.keys;
 fwd quic.recovery.recovery;
 fwd quic.congestion.controller;
