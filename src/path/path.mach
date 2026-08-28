@@ -888,7 +888,8 @@ pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes
 }
 
 pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult {
-    if (!manager_record_valid(manager) || !manager.valid || manager.closing) { ret path_error(ERROR_STATE); }
+    if (!manager_record_valid(manager) || !manager.valid || manager.closing ||
+        manager.core_lease != 0) { ret path_error(ERROR_STATE); }
     if (!manager.handshake_confirmed) { ret path_error(ERROR_HANDSHAKE); }
     if (manager.config.role != ROLE_CLIENT) { ret path_error(ERROR_MIGRATION_DISABLED); }
     if (!valid_address(endpoint.local) || !valid_address(endpoint.peer)) { ret path_error(ERROR_ADDRESS); }
@@ -916,7 +917,8 @@ pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult
 pub fun migrate(manager: *Manager, value: Handle, preferred: bool,
                 connection_id_available: bool) Observation {
     var result: Observation;
-    if (!handle_valid(manager, value) || manager.closing) {
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.core_lease != 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_TOKEN;
         ret result;
@@ -989,6 +991,7 @@ pub fun queue_challenge(manager: *Manager, value: Handle, data: [8]u8,
                         current_pto_ns: u64, path_pto_ns: u64,
                         padded: bool, purpose: u8) OperationResult {
     if (!handle_valid(manager, value) || manager.closing ||
+        manager.core_lease != 0 ||
         manager.storage.paths[value.index].state == PATH_FAILED) { ret operation_error(ERROR_TOKEN); }
     if (current_pto_ns == 0 || path_pto_ns == 0) { ret operation_error(ERROR_TIME); }
     if (purpose != VALIDATION_PATH && purpose != VALIDATION_MTU) {
@@ -1857,7 +1860,7 @@ pub fun on_packet_acked(manager: *Manager, value: Handle, packet_size: u16) Oper
 pub fun on_packet_too_big(manager: *Manager, value: Handle, reported_mtu: u16,
                           quote_authenticated: bool) MtuResult {
     var result: MtuResult;
-    if (!handle_valid(manager, value)) {
+    if (!handle_valid(manager, value) || manager.core_lease != 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_TOKEN;
         ret result;
@@ -2186,6 +2189,42 @@ pub fun observe_scoped(manager: *Manager, source: u64, endpoint: Endpoint,
     ret result;
 }
 
+pub fun probe_scoped(manager: *Manager, source: u64, endpoint: Endpoint,
+                     preferred: bool) PathResult {
+    if (!enter_core_scope(manager, source)) {
+        ret path_error(ERROR_STATE);
+    }
+    val result: PathResult = probe(manager, endpoint, preferred);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun migrate_scoped(manager: *Manager, source: u64, value: Handle,
+                       preferred: bool,
+                       connection_id_available: bool) Observation {
+    if (!enter_core_scope(manager, source)) {
+        var failed: Observation;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: Observation = migrate(manager, value, preferred,
+        connection_id_available);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun queue_challenge_scoped(manager: *Manager, source: u64,
+                               value: Handle, data: [8]u8,
+                               current_pto_ns: u64, path_pto_ns: u64,
+                               padded: bool, purpose: u8) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = queue_challenge(manager, value, data,
+        current_pto_ns, path_pto_ns, padded, purpose);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
 pub fun prepare_challenge_scoped(manager: *Manager, source: u64,
                                  value: Handle) PreparedChallenge {
     if (!enter_core_scope(manager, source)) {
@@ -2383,6 +2422,21 @@ pub fun on_packet_acked_scoped(manager: *Manager, source: u64, value: Handle,
                                packet_size: u16) OperationResult {
     if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
     val result: OperationResult = on_packet_acked(manager, value, packet_size);
+    leave_core_scope(manager, source);
+    ret result;
+}
+
+pub fun on_packet_too_big_scoped(manager: *Manager, source: u64,
+                                 value: Handle, reported_mtu: u16,
+                                 quote_authenticated: bool) MtuResult {
+    if (!enter_core_scope(manager, source)) {
+        var failed: MtuResult;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: MtuResult = on_packet_too_big(manager, value, reported_mtu,
+        quote_authenticated);
     leave_core_scope(manager, source);
     ret result;
 }
