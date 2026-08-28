@@ -312,6 +312,9 @@ test "quic.stream.simulated: unidirectional streams enforce ownership and ordere
     if (received.status != stream.STATUS_FINISHED || received.count != 4 || !received.fin ||
         output[0] != 1 || output[1] != 2 || output[2] != 3 || output[3] != 4 ||
         stream.release(?manager, peer.handle).status != stream.STATUS_OK) { ret 1; }
+    if (!stream.receive_stream(?manager, 3, 4, nil, 0, true).closed ||
+        !stream.receive_reset(?manager, 3, 9, 4).closed ||
+        !stream.receive_stop(?manager, 2, 9).closed) { ret 1; }
     ret 0;
 }
 

@@ -149,7 +149,9 @@ flow-control violations, stream exhaustion, invalid direction, and inconsistent
 final sizes publish no state. `read` copies only the contiguous prefix and returns
 the exact new MAX_DATA and MAX_STREAM_DATA values after consumption. RESET_STREAM,
 STOP_SENDING, application cancellation, and FIN each retain their distinct
-terminal and retransmission ownership.
+terminal and retransmission ownership. Delayed frames for a released stream are
+recognized from the cumulative stream counters and discarded instead of being
+misclassified as frames that exceed the advertised stream limit.
 
 The manager is serialized by the connection driver. `begin_close` prevents new
 application work and cancels unsent work, while published and prepared attempt

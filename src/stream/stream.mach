@@ -199,6 +199,7 @@ pub rec ReceiveResult {
     handle: Handle;
     new_streams: usize;
     connection_delta: u64;
+    closed: bool;
 }
 
 pub rec Prepared {
@@ -250,6 +251,24 @@ pub fun unidirectional(id: u64) bool {
 fun local_initiator(manager: *Manager, id: u64) bool {
     val server: bool = manager.config.role == ROLE_SERVER;
     ret initiated_by_server(id) == server;
+}
+
+fun previously_opened(manager: *Manager, id: u64) bool {
+    val local: bool = local_initiator(manager, id);
+    val uni: bool = unidirectional(id);
+    var opened: u64 = manager.peer_bidirectional_opened;
+    if (local) { opened = manager.local_bidirectional_opened; }
+    if (uni && local) { opened = manager.local_unidirectional_opened; }
+    if (uni && !local) { opened = manager.peer_unidirectional_opened; }
+    ret (id >> 2) < opened;
+}
+
+fun id_can_send(manager: *Manager, id: u64) bool {
+    ret !unidirectional(id) || local_initiator(manager, id);
+}
+
+fun id_can_receive(manager: *Manager, id: u64) bool {
+    ret !unidirectional(id) || !local_initiator(manager, id);
 }
 
 fun minimum(a: u64, b: u64) u64 {
@@ -965,6 +984,13 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
     if (offset > varint.MAX || length::u64 > varint.MAX - offset) { ret receive_error(ERROR_OVERFLOW); }
     var index: usize = stream_index(manager, id);
     val provisional: bool = index == manager.storage.stream_capacity;
+    if (provisional && previously_opened(manager, id)) {
+        if (!id_can_receive(manager, id)) { ret receive_error(ERROR_DIRECTION); }
+        var closed: ReceiveResult;
+        closed.ok = true;
+        closed.closed = true;
+        ret closed;
+    }
     var needed: u64 = 0;
     if (provisional) {
         val code: u8 = peer_preflight(manager, id, ?needed);
@@ -1065,6 +1091,13 @@ pub fun receive_reset(manager: *Manager, id: u64, error_code: u64, final_size: u
         error_code > varint.MAX || final_size > varint.MAX) { ret receive_error(ERROR_STATE); }
     var index: usize = stream_index(manager, id);
     val provisional: bool = index == manager.storage.stream_capacity;
+    if (provisional && previously_opened(manager, id)) {
+        if (!id_can_receive(manager, id)) { ret receive_error(ERROR_DIRECTION); }
+        var closed: ReceiveResult;
+        closed.ok = true;
+        closed.closed = true;
+        ret closed;
+    }
     var needed: u64 = 0;
     if (provisional) {
         val code: u8 = peer_preflight(manager, id, ?needed);
@@ -1140,6 +1173,13 @@ pub fun receive_stop(manager: *Manager, id: u64, error_code: u64) ReceiveResult 
     }
     var index: usize = stream_index(manager, id);
     if (index == manager.storage.stream_capacity) {
+        if (previously_opened(manager, id)) {
+            if (!id_can_send(manager, id)) { ret receive_error(ERROR_DIRECTION); }
+            var closed: ReceiveResult;
+            closed.ok = true;
+            closed.closed = true;
+            ret closed;
+        }
         if (unidirectional(id)) { ret receive_error(ERROR_DIRECTION); }
         var needed: u64 = 0;
         val code: u8 = peer_preflight(manager, id, ?needed);
