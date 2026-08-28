@@ -610,6 +610,17 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
     if (handshake_api.start(?adapter, ?start).status !=
         handshake_api.STATUS_OK) { ret 6; }
 
+    # Retry and Version Negotiation restart a client's ClientHello; neither
+    # exists for a listener, so both are refused on a started server adapter
+    if (handshake_api.on_retry(?adapter, packet.VERSION_1, 2).error !=
+        handshake_api.ERROR_STATE ||
+        handshake_api.on_version_negotiation(?adapter, packet.VERSION_2,
+            2).error != handshake_api.ERROR_STATE) { ret 14; }
+    val state_before: handshake_api.Snapshot = handshake_api.snapshot(?adapter);
+    if (state_before.closing || state_before.version != packet.VERSION_1) {
+        ret 15;
+    }
+
     # a ServerHello where the listener demands a ClientHello
     var malformed: [4]u8 = [4]u8{0x02, 0, 0, 0};
     val ingested: handshake_api.Result = handshake_api.receive(?adapter,
