@@ -1,6 +1,6 @@
 use quic.packet.packet;
 use quic.recovery.recovery;
-use congestion: quic.congestion.controller;
+use quic.congestion.controller;
 
 use std.types.bool.bool;
 use std.types.size.usize;
@@ -49,5 +49,5 @@ pub rec Connection {
     local_id: packet.ConnectionId;
     peer_id: packet.ConnectionId;
     recovery_state: recovery.Recovery;
-    congestion_state: congestion.State;
+    congestion_state: controller.State;
 }
