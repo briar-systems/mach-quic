@@ -339,6 +339,25 @@ terminal connection drain. `poll` lets an asynchronous provider advance without
 inventing network input. Retry and Version Negotiation are explicit provider
 restart events rather than implicit fallback behavior.
 
+`connection.tls_client.init` binds a caller-owned `tls.client.Client` directly to
+that adapter. The binding is typed because a TLS client contains welded secret
+state and cannot safely pass through an untyped callback context. It validates
+the exact SNI, single ALPN, QUIC transport-parameter extension, client role, and
+QUIC version before starting. Certificate verification uses a separate Unix
+verification time, while the optional handshake deadline and all connection
+timers remain absolute monotonic nanoseconds. TLS Initial, Handshake, and
+Application levels, all three TLS 1.3 suites, both directions, traffic-secret
+generations, peer parameters, early-data disposition, authentication, completion,
+and alerts map without inference. TLS failures that own a terminal alert are
+forwarded through the alert event before teardown.
+
+The binding independently accounts for every accepted ingress and emitted egress
+CRYPTO byte. Retry and Version Negotiation clear QUIC CRYPTO ownership, reset the
+appropriate offsets, and require `mach-tls` to republish its retained ClientHello
+at Initial offset zero. Packet loss and cancellation affect only QUIC's copied
+CRYPTO ranges. They never invalidate a borrowed TLS event or cause TLS to
+regenerate handshake state.
+
 Authenticated datagrams are opened before frame state is published. Duplicate
 packet numbers and unauthenticated paths publish no frame effects. The core
 enforces per-path pre-authentication amplification limits, peer transport
@@ -362,10 +381,13 @@ operations. A UDP or application driver owns the stable `Core` and `Secrets`
 records and serializes those calls. This direct split is intentional because the
 generic public driver context cannot erase secret-welded state.
 
-The adapter contract is fully defined and covered by deterministic simulated TLS
-providers. Production handshake and cross-implementation interoperability remain
-blocked on real client and server QUIC handshake providers from `mach-tls`. No
-fallback provider is included.
+The adapter contract is covered by deterministic simulated providers and the real
+`mach-tls` client provider. Client CRYPTO ownership, loss, Retry, Version
+Negotiation, malformed-alert forwarding, deadlines, and destruction are exercised
+against the exact pinned TLS client. Issue #3 still cannot close because a real
+`mach-tls` server handshake provider does not exist and major-implementation UDP
+interoperability has not yet been demonstrated. No simulated or fallback provider
+is selected by the production client path.
 
 ## Connection driver contracts
 
@@ -429,7 +451,8 @@ separately.
 
 ## Development
 
-Dependencies use pinned Git tags.
+Dependencies use exact Git tags or commit pins. The temporary `mach-tls` commit
+pin remains until its client handshake is released as a tag.
 
 ```sh
 mach dep pull .
