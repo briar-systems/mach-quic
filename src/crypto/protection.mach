@@ -1,0 +1,1083 @@
+# rfc 9001 and rfc 9369 packet protection over caller-owned storage
+
+use crypto.aead.aes_gcm;
+use crypto.aead.chacha20_poly1305;
+use crypto.contracts;
+use crypto.hkdf;
+use crypto.internal.aes;
+use crypto.internal.chacha20;
+use quic.packet.packet;
+use std.crypto.ct;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+pub def Algorithm: u8;
+pub def Level: u8;
+pub def State: u8;
+pub def Error: u8;
+
+pub val AES_128_GCM_SHA256: Algorithm = 1;
+pub val AES_256_GCM_SHA384: Algorithm = 2;
+pub val CHACHA20_POLY1305_SHA256: Algorithm = 3;
+
+pub val LEVEL_INITIAL: Level = 1;
+pub val LEVEL_EARLY: Level = 2;
+pub val LEVEL_HANDSHAKE: Level = 3;
+pub val LEVEL_APPLICATION: Level = 4;
+
+pub val STATE_EMPTY: State = 0;
+pub val STATE_ACTIVE: State = 1;
+pub val STATE_DISCARDED: State = 2;
+
+pub val OK: Error = 0;
+pub val INVALID_INPUT: Error = 1;
+pub val OUTPUT_TOO_SMALL: Error = 2;
+pub val INVALID_KEY: Error = 3;
+pub val AUTH_FAILED: Error = 4;
+pub val UNSUPPORTED_VERSION: Error = 5;
+pub val UNSUPPORTED_ALGORITHM: Error = 6;
+pub val KEYS_DISCARDED: Error = 7;
+pub val PACKET_NUMBER_ERROR: Error = 8;
+pub val SAMPLE_ERROR: Error = 9;
+pub val KEY_UPDATE_ERROR: Error = 10;
+pub val RESERVED_BITS: Error = 11;
+
+pub val MAX_SECRET_SIZE: usize = 48;
+pub val MAX_KEY_SIZE: usize = 32;
+pub val IV_SIZE: usize = 12;
+pub val SAMPLE_SIZE: usize = 16;
+pub val MASK_SIZE: usize = 5;
+pub val TAG_SIZE: usize = 16;
+pub val MAX_CONNECTION_ID: usize = 20;
+
+val INITIAL_SALT_V1: [20]^u8 = [20]^u8{
+    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3,
+    0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
+    0xcc, 0xbb, 0x7f, 0x0a,
+};
+
+val INITIAL_SALT_V2: [20]^u8 = [20]^u8{
+    0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb,
+    0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb,
+    0xf9, 0xbd, 0x2e, 0xd9,
+};
+
+val RETRY_KEY_V1: [16]u8 = [16]u8{
+    0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,
+    0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e,
+};
+
+val RETRY_NONCE_V1: [12]u8 = [12]u8{
+    0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2,
+    0x23, 0x98, 0x25, 0xbb,
+};
+
+val RETRY_KEY_V2: [16]u8 = [16]u8{
+    0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2,
+    0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92,
+};
+
+val RETRY_NONCE_V2: [12]u8 = [12]u8{
+    0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99,
+    0x90, 0xef, 0xb0, 0x4a,
+};
+
+pub rec Result {
+    error: Error;
+    written: usize;
+}
+
+pub rec OpenResult {
+    error: Error;
+    written: usize;
+    header_len: usize;
+    packet_number: u64;
+    packet_number_len: u8;
+    key_phase: bool;
+    reserved_bits: bool;
+    key_updated: bool;
+    generation: u64;
+}
+
+pub rec KeySet {
+    secret: [48]^u8;
+    key: [32]^u8;
+    iv: [12]^u8;
+    hp: [32]^u8;
+    secret_len: usize;
+    key_len: usize;
+    hp_len: usize;
+    version: u32;
+    algorithm: Algorithm;
+    level: Level;
+    generation: u64;
+    state: State;
+}
+
+pub rec InitialKeys {
+    client: KeySet;
+    server: KeySet;
+    state: State;
+}
+
+pub rec SendKeys {
+    current: KeySet;
+    phase: bool;
+    generation: u64;
+    updates: u64;
+    first_sent: u64;
+    largest_acked: u64;
+    largest_sent: u64;
+    handshake_confirmed: bool;
+    sent_current: bool;
+    acknowledged_current: bool;
+    have_sent: bool;
+    state: State;
+}
+
+pub rec ReceiveKeys {
+    previous: KeySet;
+    current: KeySet;
+    next: KeySet;
+    phase: bool;
+    generation: u64;
+    current_floor: u64;
+    largest_current: u64;
+    update_packet_number: u64;
+    updates: u64;
+    have_previous: bool;
+    have_current_packet: bool;
+    handshake_confirmed: bool;
+    update_response_confirmed: bool;
+    state: State;
+}
+
+fun failed(error: Error) Result {
+    ret Result{error: error, written: 0};
+}
+
+fun open_failed(error: Error) OpenResult {
+    ret OpenResult{error: error, written: 0, header_len: 0,
+        packet_number: 0, packet_number_len: 0, key_phase: false,
+        reserved_bits: false, key_updated: false, generation: 0};
+}
+
+fun supported_version(version: u32) bool {
+    ret version == packet.VERSION_1 || version == packet.VERSION_2;
+}
+
+pub fun hash_size(algorithm: Algorithm) usize {
+    if (algorithm == AES_128_GCM_SHA256 || algorithm == CHACHA20_POLY1305_SHA256) {
+        ret 32;
+    }
+    if (algorithm == AES_256_GCM_SHA384) { ret 48; }
+    ret 0;
+}
+
+pub fun key_size(algorithm: Algorithm) usize {
+    if (algorithm == AES_128_GCM_SHA256) { ret 16; }
+    if (algorithm == AES_256_GCM_SHA384 || algorithm == CHACHA20_POLY1305_SHA256) {
+        ret 32;
+    }
+    ret 0;
+}
+
+fun map_crypto(error: contracts.Error) Error {
+    if (error == contracts.OK) { ret OK; }
+    if (error == contracts.OUTPUT_TOO_SMALL) { ret OUTPUT_TOO_SMALL; }
+    if (error == contracts.INVALID_KEY) { ret INVALID_KEY; }
+    if (error == contracts.AUTH_FAILED) { ret AUTH_FAILED; }
+    ret INVALID_INPUT;
+}
+
+fun key_bytes(value: *KeySet) contracts.SecretBytes {
+    if (value == nil || value.state != STATE_ACTIVE || value.key_len == 0) {
+        ret contracts.SecretBytes{data: nil, len: 0};
+    }
+    ret contracts.SecretBytes{data: ?value.key[0], len: value.key_len};
+}
+
+fun secret_bytes(value: *KeySet) contracts.SecretBytes {
+    if (value == nil || value.state != STATE_ACTIVE || value.secret_len == 0) {
+        ret contracts.SecretBytes{data: nil, len: 0};
+    }
+    ret contracts.SecretBytes{data: ?value.secret[0], len: value.secret_len};
+}
+
+pub fun destroy(value: *KeySet) {
+    if (value == nil) { ret; }
+    ct.zeroize(?value.secret[0], MAX_SECRET_SIZE);
+    ct.zeroize(?value.key[0], MAX_KEY_SIZE);
+    ct.zeroize(?value.iv[0], IV_SIZE);
+    ct.zeroize(?value.hp[0], MAX_KEY_SIZE);
+    value.secret_len = 0;
+    value.key_len = 0;
+    value.hp_len = 0;
+    value.version = 0;
+    value.algorithm = 0;
+    value.level = 0;
+    value.generation = 0;
+    value.state = STATE_DISCARDED;
+}
+
+fun move_set(destination: *KeySet, source: *KeySet) {
+    destroy(destination);
+    var i: usize = 0;
+    for (i < MAX_SECRET_SIZE) {
+        destination.secret[i] = source.secret[i];
+        i = i + 1;
+    }
+    i = 0;
+    for (i < MAX_KEY_SIZE) {
+        destination.key[i] = source.key[i];
+        destination.hp[i] = source.hp[i];
+        i = i + 1;
+    }
+    i = 0;
+    for (i < IV_SIZE) {
+        destination.iv[i] = source.iv[i];
+        i = i + 1;
+    }
+    destination.secret_len = source.secret_len;
+    destination.key_len = source.key_len;
+    destination.hp_len = source.hp_len;
+    destination.version = source.version;
+    destination.algorithm = source.algorithm;
+    destination.level = source.level;
+    destination.generation = source.generation;
+    destination.state = source.state;
+    destroy(source);
+}
+
+fun copy_hp(destination: *KeySet, source: *KeySet) {
+    var i: usize = 0;
+    for (i < source.hp_len) {
+        destination.hp[i] = source.hp[i];
+        i = i + 1;
+    }
+    destination.hp_len = source.hp_len;
+}
+
+fun label_for(version: u32, kind: u8) contracts.Bytes {
+    if (kind == 1) {
+        if (version == packet.VERSION_2) {
+            ret contracts.Bytes{data: "quicv2 key"::*u8, len: 10};
+        }
+        ret contracts.Bytes{data: "quic key"::*u8, len: 8};
+    }
+    if (kind == 2) {
+        if (version == packet.VERSION_2) {
+            ret contracts.Bytes{data: "quicv2 iv"::*u8, len: 9};
+        }
+        ret contracts.Bytes{data: "quic iv"::*u8, len: 7};
+    }
+    if (kind == 3) {
+        if (version == packet.VERSION_2) {
+            ret contracts.Bytes{data: "quicv2 hp"::*u8, len: 9};
+        }
+        ret contracts.Bytes{data: "quic hp"::*u8, len: 7};
+    }
+    if (version == packet.VERSION_2) {
+        ret contracts.Bytes{data: "quicv2 ku"::*u8, len: 9};
+    }
+    ret contracts.Bytes{data: "quic ku"::*u8, len: 7};
+}
+
+fun expand_label(algorithm: Algorithm, secret: contracts.SecretBytes,
+    label: contracts.Bytes, output: contracts.SecretBuffer) Error {
+    val digest_size: usize = hash_size(algorithm);
+    if (digest_size == 0 || secret.data == nil || secret.len != digest_size
+        || label.data == nil || label.len > 249 || output.capacity > 65535
+        || (output.capacity != 0 && output.data == nil)) { ret INVALID_INPUT; }
+    var info: [260]u8;
+    info[0] = (output.capacity >> 8)::u8;
+    info[1] = output.capacity::u8;
+    info[2] = (6 + label.len)::u8;
+    info[3] = 't'; info[4] = 'l'; info[5] = 's';
+    info[6] = '1'; info[7] = '3'; info[8] = ' ';
+    var i: usize = 0;
+    for (i < label.len) {
+        info[9 + i] = label.data[i];
+        i = i + 1;
+    }
+    info[9 + label.len] = 0;
+    val info_len: usize = 10 + label.len;
+    var operation: contracts.Operation;
+    if (algorithm == AES_256_GCM_SHA384) {
+        operation = hkdf.expand_sha384(secret,
+            contracts.Bytes{data: ?info[0], len: info_len}, output);
+    } or {
+        operation = hkdf.expand_sha256(secret,
+            contracts.Bytes{data: ?info[0], len: info_len}, output);
+    }
+    if (operation.error != contracts.OK || operation.written != output.capacity) {
+        if (output.data != nil) { ct.zeroize(output.data, output.capacity); }
+        ret map_crypto(operation.error);
+    }
+    ret OK;
+}
+
+fun derive_material(output: *KeySet, version: u32, level: Level,
+    algorithm: Algorithm, secret: contracts.SecretBytes, generation: u64,
+    derive_hp: bool, hp_source: *KeySet) Error {
+    val digest_size: usize = hash_size(algorithm);
+    val cipher_key_size: usize = key_size(algorithm);
+    if (output == nil) { ret INVALID_INPUT; }
+    if (!supported_version(version)) { ret UNSUPPORTED_VERSION; }
+    if (digest_size == 0 || cipher_key_size == 0) { ret UNSUPPORTED_ALGORITHM; }
+    if (secret.data == nil || secret.len != digest_size || generation == 0) {
+        ret INVALID_KEY;
+    }
+    var next: KeySet;
+    next.version = version;
+    next.algorithm = algorithm;
+    next.level = level;
+    next.generation = generation;
+    next.secret_len = digest_size;
+    next.key_len = cipher_key_size;
+    next.hp_len = cipher_key_size;
+    next.state = STATE_ACTIVE;
+    var i: usize = 0;
+    for (i < digest_size) {
+        next.secret[i] = secret.data[i];
+        i = i + 1;
+    }
+    var error: Error = expand_label(algorithm,
+        contracts.SecretBytes{data: ?next.secret[0], len: digest_size}, label_for(version, 1),
+        contracts.SecretBuffer{data: ?next.key[0], capacity: cipher_key_size});
+    if (error == OK) {
+        error = expand_label(algorithm,
+            contracts.SecretBytes{data: ?next.secret[0], len: digest_size}, label_for(version, 2),
+            contracts.SecretBuffer{data: ?next.iv[0], capacity: IV_SIZE});
+    }
+    if (error == OK && derive_hp) {
+        error = expand_label(algorithm,
+            contracts.SecretBytes{data: ?next.secret[0], len: digest_size}, label_for(version, 3),
+            contracts.SecretBuffer{data: ?next.hp[0], capacity: cipher_key_size});
+    } or (error == OK) {
+        if (hp_source == nil || hp_source.state != STATE_ACTIVE
+            || hp_source.hp_len != cipher_key_size) { error = INVALID_KEY; }
+        if (error == OK) { copy_hp(?next, hp_source); }
+    }
+    if (error != OK) {
+        destroy(?next);
+        ret error;
+    }
+    move_set(output, ?next);
+    ret OK;
+}
+
+pub fun derive_tls(output: *KeySet, version: u32, level: Level,
+    algorithm: Algorithm, traffic_secret: contracts.SecretBytes) Error {
+    if (level != LEVEL_EARLY && level != LEVEL_HANDSHAKE && level != LEVEL_APPLICATION) {
+        ret INVALID_INPUT;
+    }
+    ret derive_material(output, version, level, algorithm, traffic_secret, 1, true, nil);
+}
+
+fun initial_salt(version: u32) contracts.SecretBytes {
+    if (version == packet.VERSION_1) {
+        ret contracts.SecretBytes{data: ?INITIAL_SALT_V1[0], len: 20};
+    }
+    if (version == packet.VERSION_2) {
+        ret contracts.SecretBytes{data: ?INITIAL_SALT_V2[0], len: 20};
+    }
+    ret contracts.SecretBytes{data: nil, len: 0};
+}
+
+pub fun derive_initial(output: *InitialKeys, version: u32,
+    destination_connection_id: contracts.Bytes) Error {
+    if (output == nil) { ret INVALID_INPUT; }
+    val salt: contracts.SecretBytes = initial_salt(version);
+    if (salt.data == nil) { ret UNSUPPORTED_VERSION; }
+    if (destination_connection_id.len > MAX_CONNECTION_ID
+        || (destination_connection_id.len != 0 && destination_connection_id.data == nil)) {
+        ret INVALID_INPUT;
+    }
+    var dcid: [20]^u8;
+    var initial: [32]^u8;
+    var client_secret: [32]^u8;
+    var server_secret: [32]^u8;
+    var i: usize = 0;
+    for (i < destination_connection_id.len) {
+        dcid[i] = destination_connection_id.data[i];
+        i = i + 1;
+    }
+    val operation: contracts.Operation = hkdf.extract_sha256(salt,
+        contracts.SecretBytes{data: ?dcid[0], len: destination_connection_id.len},
+        contracts.SecretBuffer{data: ?initial[0], capacity: 32});
+    var error: Error = map_crypto(operation.error);
+    if (error == OK) {
+        error = expand_label(AES_128_GCM_SHA256,
+            contracts.SecretBytes{data: ?initial[0], len: 32},
+            contracts.Bytes{data: "client in"::*u8, len: 9},
+            contracts.SecretBuffer{data: ?client_secret[0], capacity: 32});
+    }
+    if (error == OK) {
+        error = expand_label(AES_128_GCM_SHA256,
+            contracts.SecretBytes{data: ?initial[0], len: 32},
+            contracts.Bytes{data: "server in"::*u8, len: 9},
+            contracts.SecretBuffer{data: ?server_secret[0], capacity: 32});
+    }
+    var next: InitialKeys;
+    if (error == OK) {
+        error = derive_material(?next.client, version, LEVEL_INITIAL, AES_128_GCM_SHA256,
+            contracts.SecretBytes{data: ?client_secret[0], len: 32}, 1, true, nil);
+    }
+    if (error == OK) {
+        error = derive_material(?next.server, version, LEVEL_INITIAL, AES_128_GCM_SHA256,
+            contracts.SecretBytes{data: ?server_secret[0], len: 32}, 1, true, nil);
+    }
+    if (error == OK) {
+        destroy(?output.client);
+        destroy(?output.server);
+        move_set(?output.client, ?next.client);
+        move_set(?output.server, ?next.server);
+        output.state = STATE_ACTIVE;
+    }
+    destroy(?next.client);
+    destroy(?next.server);
+    ct.zeroize(?dcid[0], 20);
+    ct.zeroize(?initial[0], 32);
+    ct.zeroize(?client_secret[0], 32);
+    ct.zeroize(?server_secret[0], 32);
+    ret error;
+}
+
+pub fun destroy_initial(value: *InitialKeys) {
+    if (value == nil) { ret; }
+    destroy(?value.client);
+    destroy(?value.server);
+    value.state = STATE_DISCARDED;
+}
+
+pub fun make_nonce(value: *KeySet, packet_number: u64,
+    output: contracts.Buffer) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    if (packet_number > packet.MAX_PACKET_NUMBER) { ret PACKET_NUMBER_ERROR; }
+    if (output.data == nil || output.capacity < IV_SIZE) { ret OUTPUT_TOO_SMALL; }
+    var nonce: [12]u8;
+    var i: usize = 0;
+    for (i < IV_SIZE) {
+        nonce[i] = value.iv[i]:^;
+        i = i + 1;
+    }
+    i = 0;
+    for (i < 8) {
+        nonce[IV_SIZE - 1 - i] = nonce[IV_SIZE - 1 - i] ^ (packet_number >> (i * 8))::u8;
+        i = i + 1;
+    }
+    i = 0;
+    for (i < IV_SIZE) {
+        output.data[i] = nonce[i];
+        i = i + 1;
+    }
+    ret OK;
+}
+
+pub fun seal(value: *KeySet, packet_number: u64, aad: contracts.Bytes,
+    plaintext: contracts.SecretBytes, output: contracts.Buffer) Result {
+    if (value == nil || value.state != STATE_ACTIVE) { ret failed(KEYS_DISCARDED); }
+    if (packet_number > packet.MAX_PACKET_NUMBER) { ret failed(PACKET_NUMBER_ERROR); }
+    if ((aad.len != 0 && aad.data == nil) || (plaintext.len != 0 && plaintext.data == nil)) {
+        ret failed(INVALID_INPUT);
+    }
+    var nonce: [12]u8;
+    val nonce_error: Error = make_nonce(value, packet_number,
+        contracts.Buffer{data: ?nonce[0], capacity: IV_SIZE});
+    if (nonce_error != OK) { ret failed(nonce_error); }
+    var operation: contracts.Operation;
+    if (value.algorithm == AES_128_GCM_SHA256 || value.algorithm == AES_256_GCM_SHA384) {
+        operation = aes_gcm.seal(key_bytes(value),
+            contracts.Bytes{data: ?nonce[0], len: IV_SIZE}, aad, plaintext, output);
+    } or (value.algorithm == CHACHA20_POLY1305_SHA256) {
+        operation = chacha20_poly1305.seal(key_bytes(value),
+            contracts.Bytes{data: ?nonce[0], len: IV_SIZE}, aad, plaintext, output);
+    } or { ret failed(UNSUPPORTED_ALGORITHM); }
+    ret Result{error: map_crypto(operation.error), written: operation.written};
+}
+
+pub fun open(value: *KeySet, packet_number: u64, aad: contracts.Bytes,
+    input: contracts.Bytes, output: contracts.SecretBuffer) Result {
+    if (value == nil || value.state != STATE_ACTIVE) { ret failed(KEYS_DISCARDED); }
+    if (packet_number > packet.MAX_PACKET_NUMBER) { ret failed(PACKET_NUMBER_ERROR); }
+    if ((aad.len != 0 && aad.data == nil) || input.data == nil) { ret failed(INVALID_INPUT); }
+    var nonce: [12]u8;
+    val nonce_error: Error = make_nonce(value, packet_number,
+        contracts.Buffer{data: ?nonce[0], capacity: IV_SIZE});
+    if (nonce_error != OK) { ret failed(nonce_error); }
+    var operation: contracts.Operation;
+    if (value.algorithm == AES_128_GCM_SHA256 || value.algorithm == AES_256_GCM_SHA384) {
+        operation = aes_gcm.open(key_bytes(value),
+            contracts.Bytes{data: ?nonce[0], len: IV_SIZE}, aad, input, output);
+    } or (value.algorithm == CHACHA20_POLY1305_SHA256) {
+        operation = chacha20_poly1305.open(key_bytes(value),
+            contracts.Bytes{data: ?nonce[0], len: IV_SIZE}, aad, input, output);
+    } or { ret failed(UNSUPPORTED_ALGORITHM); }
+    ret Result{error: map_crypto(operation.error), written: operation.written};
+}
+
+pub fun header_mask(value: *KeySet, sample: contracts.Bytes,
+    output: contracts.SecretBuffer) Result {
+    if (value == nil || value.state != STATE_ACTIVE) { ret failed(KEYS_DISCARDED); }
+    if (sample.data == nil || sample.len != SAMPLE_SIZE) { ret failed(SAMPLE_ERROR); }
+    if (output.data == nil || output.capacity < MASK_SIZE) { ret failed(OUTPUT_TOO_SMALL); }
+    var mask: [64]^u8;
+    var error: Error = OK;
+    if (value.algorithm == AES_128_GCM_SHA256 || value.algorithm == AES_256_GCM_SHA384) {
+        var context: aes.Context;
+        val initialized: contracts.Error = aes.init(?context,
+            contracts.SecretBytes{data: ?value.hp[0], len: value.hp_len});
+        if (initialized != contracts.OK) { error = map_crypto(initialized); }
+        if (error == OK) {
+            var i: usize = 0;
+            for (i < SAMPLE_SIZE) { mask[i] = sample.data[i]; i = i + 1; }
+            aes.encrypt(?context, ?mask[0], ?mask[0]);
+        }
+        aes.destroy(?context);
+    } or (value.algorithm == CHACHA20_POLY1305_SHA256) {
+        var nonce: [12]u8;
+        var i: usize = 0;
+        for (i < 12) { nonce[i] = sample.data[4 + i]; i = i + 1; }
+        val counter: u32 = sample.data[0]::u32 | (sample.data[1]::u32 << 8)
+            | (sample.data[2]::u32 << 16) | (sample.data[3]::u32 << 24);
+        var context: chacha20.Context;
+        val initialized: contracts.Error = chacha20.init(?context,
+            contracts.SecretBytes{data: ?value.hp[0], len: value.hp_len},
+            contracts.Bytes{data: ?nonce[0], len: 12});
+        if (initialized != contracts.OK) { error = map_crypto(initialized); }
+        if (error == OK) { chacha20.block(?context, counter, ?mask[0]); }
+        chacha20.destroy(?context);
+    } or { error = UNSUPPORTED_ALGORITHM; }
+    if (error != OK) { ct.zeroize(?mask[0], 64); ret failed(error); }
+    var i: usize = 0;
+    for (i < MASK_SIZE) { output.data[i] = mask[i]; i = i + 1; }
+    ct.zeroize(?mask[0], 64);
+    ret Result{error: OK, written: MASK_SIZE};
+}
+
+fun sample_fits(packet_len: usize, packet_number_offset: usize) bool {
+    if (packet_number_offset > (0 - 1::usize) - 4) { ret false; }
+    val sample_offset: usize = packet_number_offset + 4;
+    if (sample_offset > packet_len) { ret false; }
+    ret SAMPLE_SIZE <= packet_len - sample_offset;
+}
+
+pub fun protect_header(value: *KeySet, data: *u8, len: usize,
+    packet_number_offset: usize, packet_number_len: u8) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    if (data == nil || packet_number_len < 1 || packet_number_len > 4
+        || !sample_fits(len, packet_number_offset)
+        || packet_number_offset > len || packet_number_len::usize > len - packet_number_offset) {
+        ret SAMPLE_ERROR;
+    }
+    if ((data[0] & 0x03) + 1 != packet_number_len) { ret INVALID_INPUT; }
+    val sample_offset: usize = packet_number_offset + 4;
+    var mask: [5]^u8;
+    val result: Result = header_mask(value,
+        contracts.Bytes{data: ?data[sample_offset], len: SAMPLE_SIZE},
+        contracts.SecretBuffer{data: ?mask[0], capacity: MASK_SIZE});
+    if (result.error != OK) { ct.zeroize(?mask[0], MASK_SIZE); ret result.error; }
+    var first_mask: u8 = 0x1f;
+    if ((data[0] & 0x80) != 0) { first_mask = 0x0f; }
+    data[0] = data[0] ^ (mask[0]:^ & first_mask);
+    var i: usize = 0;
+    for (i < packet_number_len::usize) {
+        data[packet_number_offset + i] = data[packet_number_offset + i] ^ mask[1 + i]:^;
+        i = i + 1;
+    }
+    ct.zeroize(?mask[0], MASK_SIZE);
+    ret OK;
+}
+
+fun unprotect_header_to(value: *KeySet, input: contracts.Bytes,
+    packet_number_offset: usize, output: contracts.Buffer) OpenResult {
+    if (value == nil || value.state != STATE_ACTIVE) { ret open_failed(KEYS_DISCARDED); }
+    if (input.data == nil || !sample_fits(input.len, packet_number_offset)
+        || output.data == nil) {
+        ret open_failed(SAMPLE_ERROR);
+    }
+    val sample_offset: usize = packet_number_offset + 4;
+    var mask: [5]^u8;
+    val result: Result = header_mask(value,
+        contracts.Bytes{data: ?input.data[sample_offset], len: SAMPLE_SIZE},
+        contracts.SecretBuffer{data: ?mask[0], capacity: MASK_SIZE});
+    if (result.error != OK) { ct.zeroize(?mask[0], MASK_SIZE); ret open_failed(result.error); }
+    val long_header: bool = (input.data[0] & 0x80) != 0;
+    var first_mask: u8 = 0x1f;
+    if (long_header) { first_mask = 0x0f; }
+    val first: u8 = input.data[0] ^ (mask[0]:^ & first_mask);
+    val packet_number_len: u8 = (first & 0x03) + 1;
+    val header_len: usize = packet_number_offset + packet_number_len::usize;
+    if (header_len > input.len || header_len > output.capacity) {
+        ct.zeroize(?mask[0], MASK_SIZE);
+        ret open_failed(SAMPLE_ERROR);
+    }
+    var i: usize = 0;
+    for (i < header_len) {
+        output.data[i] = input.data[i];
+        i = i + 1;
+    }
+    output.data[0] = first;
+    i = 0;
+    for (i < packet_number_len::usize) {
+        output.data[packet_number_offset + i] = input.data[packet_number_offset + i]
+            ^ mask[1 + i]:^;
+        i = i + 1;
+    }
+    ct.zeroize(?mask[0], MASK_SIZE);
+    val reserved_bits: bool = (long_header && (first & 0x0c) != 0)
+        || (!long_header && (first & 0x18) != 0);
+    ret OpenResult{error: OK, written: 0, header_len: header_len,
+        packet_number: 0, packet_number_len: packet_number_len,
+        key_phase: !long_header && (first & 0x04) != 0,
+        reserved_bits: reserved_bits, key_updated: false, generation: 0};
+}
+
+fun read_truncated(data: *u8, offset: usize, width: u8) u32 {
+    var value: u32 = 0;
+    var i: usize = 0;
+    for (i < width::usize) {
+        value = (value << 8) | data[offset + i]::u32;
+        i = i + 1;
+    }
+    ret value;
+}
+
+pub fun seal_packet(value: *KeySet, packet_number: u64, header: contracts.Bytes,
+    packet_number_offset: usize, plaintext: contracts.SecretBytes,
+    output: contracts.Buffer) Result {
+    if (value == nil || value.state != STATE_ACTIVE) { ret failed(KEYS_DISCARDED); }
+    if (header.data == nil || header.len == 0 || packet_number_offset >= header.len
+        || (plaintext.len != 0 && plaintext.data == nil)) { ret failed(INVALID_INPUT); }
+    val packet_number_len: u8 = (header.data[0] & 0x03) + 1;
+    if (packet_number_offset + packet_number_len::usize != header.len) {
+        ret failed(INVALID_INPUT);
+    }
+    if (plaintext.len > (0 - 1::usize) - TAG_SIZE
+        || header.len > (0 - 1::usize) - plaintext.len - TAG_SIZE) {
+        ret failed(INVALID_INPUT);
+    }
+    val required: usize = header.len + plaintext.len + TAG_SIZE;
+    if (output.data == nil || output.capacity < required) { ret failed(OUTPUT_TOO_SMALL); }
+    if (!sample_fits(required, packet_number_offset)) { ret failed(SAMPLE_ERROR); }
+    var i: usize = 0;
+    for (i < header.len) { output.data[i] = header.data[i]; i = i + 1; }
+    val encrypted: Result = seal(value, packet_number, header, plaintext,
+        contracts.Buffer{data: ?output.data[header.len], capacity: output.capacity - header.len});
+    if (encrypted.error != OK) { ret encrypted; }
+    val protected: Error = protect_header(value, output.data, required,
+        packet_number_offset, packet_number_len);
+    if (protected != OK) { ret failed(protected); }
+    ret Result{error: OK, written: required};
+}
+
+pub fun open_packet(value: *KeySet, expected_packet_number: u64,
+    input: contracts.Bytes, packet_number_offset: usize,
+    header_scratch: contracts.Buffer, plaintext: contracts.SecretBuffer) OpenResult {
+    if (expected_packet_number > packet.MAX_PACKET_NUMBER) {
+        ret open_failed(PACKET_NUMBER_ERROR);
+    }
+    var result: OpenResult = unprotect_header_to(value, input,
+        packet_number_offset, header_scratch);
+    if (result.error != OK) { ret result; }
+    val truncated: u32 = read_truncated(header_scratch.data, packet_number_offset,
+        result.packet_number_len);
+    val packet_number: u64 = packet.reconstruct_packet_number(expected_packet_number,
+        truncated, result.packet_number_len);
+    if (packet_number > packet.MAX_PACKET_NUMBER || result.header_len > input.len
+        || input.len - result.header_len < TAG_SIZE) { ret open_failed(PACKET_NUMBER_ERROR); }
+    val opened: Result = open(value, packet_number,
+        contracts.Bytes{data: header_scratch.data, len: result.header_len},
+        contracts.Bytes{data: ?input.data[result.header_len], len: input.len - result.header_len},
+        plaintext);
+    if (opened.error != OK) { ret open_failed(opened.error); }
+    if (result.reserved_bits) {
+        if (plaintext.data != nil && opened.written != 0) {
+            ct.zeroize(plaintext.data, opened.written);
+        }
+        ret open_failed(RESERVED_BITS);
+    }
+    result.written = opened.written;
+    result.packet_number = packet_number;
+    result.generation = value.generation;
+    ret result;
+}
+
+fun next_set(current: *KeySet, output: *KeySet) Error {
+    if (current == nil || output == nil || current.state != STATE_ACTIVE
+        || current.level != LEVEL_APPLICATION || current.generation == 0
+        || current.generation == 0 - 1::u64) { ret KEY_UPDATE_ERROR; }
+    var updated: [48]^u8;
+    val digest_size: usize = current.secret_len;
+    val expanded: Error = expand_label(current.algorithm, secret_bytes(current),
+        label_for(current.version, 4),
+        contracts.SecretBuffer{data: ?updated[0], capacity: digest_size});
+    if (expanded != OK) { ct.zeroize(?updated[0], MAX_SECRET_SIZE); ret expanded; }
+    val derived: Error = derive_material(output, current.version, LEVEL_APPLICATION,
+        current.algorithm, contracts.SecretBytes{data: ?updated[0], len: digest_size},
+        current.generation + 1, false, current);
+    ct.zeroize(?updated[0], MAX_SECRET_SIZE);
+    ret derived;
+}
+
+pub fun destroy_send(value: *SendKeys) {
+    if (value == nil) { ret; }
+    destroy(?value.current);
+    value.phase = false;
+    value.generation = 0;
+    value.updates = 0;
+    value.first_sent = 0;
+    value.largest_acked = 0;
+    value.largest_sent = 0;
+    value.handshake_confirmed = false;
+    value.sent_current = false;
+    value.acknowledged_current = false;
+    value.have_sent = false;
+    value.state = STATE_DISCARDED;
+}
+
+pub fun init_send(output: *SendKeys, version: u32, algorithm: Algorithm,
+    traffic_secret: contracts.SecretBytes) Error {
+    if (output == nil) { ret INVALID_INPUT; }
+    var current: KeySet;
+    val error: Error = derive_material(?current, version, LEVEL_APPLICATION,
+        algorithm, traffic_secret, 1, true, nil);
+    if (error != OK) { destroy(?current); ret error; }
+    destroy_send(output);
+    move_set(?output.current, ?current);
+    output.phase = false;
+    output.generation = 1;
+    output.state = STATE_ACTIVE;
+    ret OK;
+}
+
+pub fun confirm_handshake_send(value: *SendKeys) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    value.handshake_confirmed = true;
+    ret OK;
+}
+
+pub fun note_sent(value: *SendKeys, packet_number: u64) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    if (packet_number > packet.MAX_PACKET_NUMBER) { ret PACKET_NUMBER_ERROR; }
+    if (value.have_sent && packet_number <= value.largest_sent) { ret PACKET_NUMBER_ERROR; }
+    if (!value.sent_current) {
+        value.first_sent = packet_number;
+        value.sent_current = true;
+    }
+    value.largest_sent = packet_number;
+    value.have_sent = true;
+    ret OK;
+}
+
+pub fun note_acknowledged(value: *SendKeys, packet_number: u64) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    if (packet_number > packet.MAX_PACKET_NUMBER) { ret PACKET_NUMBER_ERROR; }
+    if (!value.sent_current || packet_number < value.first_sent
+        || !value.have_sent || packet_number > value.largest_sent) { ret KEY_UPDATE_ERROR; }
+    if (!value.acknowledged_current || packet_number > value.largest_acked) {
+        value.largest_acked = packet_number;
+    }
+    value.acknowledged_current = true;
+    ret OK;
+}
+
+pub fun initiate_update(value: *SendKeys) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    if (!value.handshake_confirmed
+        || (value.updates != 0 && !value.acknowledged_current)) { ret KEY_UPDATE_ERROR; }
+    var next: KeySet;
+    val error: Error = next_set(?value.current, ?next);
+    if (error != OK) { destroy(?next); ret error; }
+    move_set(?value.current, ?next);
+    value.phase = !value.phase;
+    value.generation = value.current.generation;
+    value.updates = value.updates + 1;
+    value.first_sent = 0;
+    value.largest_acked = 0;
+    value.sent_current = false;
+    value.acknowledged_current = false;
+    ret OK;
+}
+
+pub fun respond_to_update(value: *SendKeys, receive_generation: u64) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    if (!value.handshake_confirmed || receive_generation == 0) { ret KEY_UPDATE_ERROR; }
+    if (receive_generation == value.generation) { ret OK; }
+    if (value.generation == 0 - 1::u64 || receive_generation != value.generation + 1) {
+        ret KEY_UPDATE_ERROR;
+    }
+    var next: KeySet;
+    val error: Error = next_set(?value.current, ?next);
+    if (error != OK) { destroy(?next); ret error; }
+    move_set(?value.current, ?next);
+    value.phase = !value.phase;
+    value.generation = value.current.generation;
+    value.updates = value.updates + 1;
+    value.first_sent = 0;
+    value.largest_acked = 0;
+    value.sent_current = false;
+    value.acknowledged_current = false;
+    ret OK;
+}
+
+pub fun destroy_receive(value: *ReceiveKeys) {
+    if (value == nil) { ret; }
+    destroy(?value.previous);
+    destroy(?value.current);
+    destroy(?value.next);
+    value.phase = false;
+    value.generation = 0;
+    value.current_floor = 0;
+    value.largest_current = 0;
+    value.update_packet_number = 0;
+    value.updates = 0;
+    value.have_previous = false;
+    value.have_current_packet = false;
+    value.handshake_confirmed = false;
+    value.update_response_confirmed = false;
+    value.state = STATE_DISCARDED;
+}
+
+pub fun init_receive(output: *ReceiveKeys, version: u32, algorithm: Algorithm,
+    traffic_secret: contracts.SecretBytes) Error {
+    if (output == nil) { ret INVALID_INPUT; }
+    var current: KeySet;
+    var next: KeySet;
+    var error: Error = derive_material(?current, version, LEVEL_APPLICATION,
+        algorithm, traffic_secret, 1, true, nil);
+    if (error == OK) { error = next_set(?current, ?next); }
+    if (error != OK) { destroy(?current); destroy(?next); ret error; }
+    destroy_receive(output);
+    move_set(?output.current, ?current);
+    move_set(?output.next, ?next);
+    output.phase = false;
+    output.generation = 1;
+    output.state = STATE_ACTIVE;
+    ret OK;
+}
+
+pub fun confirm_handshake_receive(value: *ReceiveKeys) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    value.handshake_confirmed = true;
+    ret OK;
+}
+
+fun receive_candidate(value: *ReceiveKeys, phase: bool,
+    packet_number: u64) *KeySet {
+    if (value == nil || value.state != STATE_ACTIVE
+        || packet_number > packet.MAX_PACKET_NUMBER) { ret nil; }
+    if (phase == value.phase) { ret ?value.current; }
+    if (value.have_previous && value.have_current_packet
+        && packet_number < value.current_floor) { ret ?value.previous; }
+    ret ?value.next;
+}
+
+fun commit_received(value: *ReceiveKeys, used: *KeySet,
+    packet_number: u64) Error {
+    if (value == nil || value.state != STATE_ACTIVE || used == nil
+        || packet_number > packet.MAX_PACKET_NUMBER) { ret INVALID_INPUT; }
+    if (used == ?value.current) {
+        if (!value.have_current_packet || packet_number < value.current_floor) {
+            value.current_floor = packet_number;
+        }
+        if (!value.have_current_packet || packet_number > value.largest_current) {
+            value.largest_current = packet_number;
+        }
+        value.have_current_packet = true;
+        ret OK;
+    }
+    if (used == ?value.previous) { ret OK; }
+    if (used != ?value.next) { ret KEY_UPDATE_ERROR; }
+    if (!value.handshake_confirmed
+        || (value.updates != 0 && !value.update_response_confirmed)) {
+        ret KEY_UPDATE_ERROR;
+    }
+    var future: KeySet;
+    val error: Error = next_set(?value.next, ?future);
+    if (error != OK) { destroy(?future); ret error; }
+    destroy(?value.previous);
+    move_set(?value.previous, ?value.current);
+    move_set(?value.current, ?value.next);
+    move_set(?value.next, ?future);
+    value.have_previous = true;
+    value.phase = !value.phase;
+    value.generation = value.current.generation;
+    value.current_floor = packet_number;
+    value.largest_current = packet_number;
+    value.update_packet_number = packet_number;
+    value.updates = value.updates + 1;
+    value.have_current_packet = true;
+    value.update_response_confirmed = false;
+    ret OK;
+}
+
+pub fun seal_send_packet(value: *SendKeys, packet_number: u64,
+    header: contracts.Bytes, packet_number_offset: usize,
+    plaintext: contracts.SecretBytes, output: contracts.Buffer) Result {
+    if (value == nil || value.state != STATE_ACTIVE) { ret failed(KEYS_DISCARDED); }
+    if (header.data == nil || header.len == 0 || (header.data[0] & 0x80) != 0
+        || (((header.data[0] & 0x04) != 0) != value.phase)) {
+        ret failed(KEY_UPDATE_ERROR);
+    }
+    if (packet_number > packet.MAX_PACKET_NUMBER
+        || (value.have_sent && packet_number <= value.largest_sent)) {
+        ret failed(PACKET_NUMBER_ERROR);
+    }
+    val result: Result = seal_packet(?value.current, packet_number, header,
+        packet_number_offset, plaintext, output);
+    if (result.error != OK) { ret result; }
+    val noted: Error = note_sent(value, packet_number);
+    if (noted != OK) { ret failed(noted); }
+    ret result;
+}
+
+pub fun open_receive_packet(value: *ReceiveKeys, expected_packet_number: u64,
+    input: contracts.Bytes, packet_number_offset: usize,
+    header_scratch: contracts.Buffer, plaintext: contracts.SecretBuffer) OpenResult {
+    if (value == nil || value.state != STATE_ACTIVE) { ret open_failed(KEYS_DISCARDED); }
+    if (expected_packet_number > packet.MAX_PACKET_NUMBER) {
+        ret open_failed(PACKET_NUMBER_ERROR);
+    }
+    var result: OpenResult = unprotect_header_to(?value.current, input,
+        packet_number_offset, header_scratch);
+    if (result.error != OK) { ret result; }
+    if ((header_scratch.data[0] & 0x80) != 0) { ret open_failed(KEY_UPDATE_ERROR); }
+    val truncated: u32 = read_truncated(header_scratch.data, packet_number_offset,
+        result.packet_number_len);
+    val packet_number: u64 = packet.reconstruct_packet_number(expected_packet_number,
+        truncated, result.packet_number_len);
+    if (packet_number > packet.MAX_PACKET_NUMBER || result.header_len > input.len
+        || input.len - result.header_len < TAG_SIZE) { ret open_failed(PACKET_NUMBER_ERROR); }
+    val prior_generation: u64 = value.generation;
+    val candidate: *KeySet = receive_candidate(value, result.key_phase, packet_number);
+    if (candidate == nil) { ret open_failed(KEY_UPDATE_ERROR); }
+    val opened: Result = open(candidate, packet_number,
+        contracts.Bytes{data: header_scratch.data, len: result.header_len},
+        contracts.Bytes{data: ?input.data[result.header_len], len: input.len - result.header_len},
+        plaintext);
+    if (opened.error != OK) { ret open_failed(opened.error); }
+    if (result.reserved_bits) {
+        if (plaintext.data != nil && opened.written != 0) {
+            ct.zeroize(plaintext.data, opened.written);
+        }
+        ret open_failed(RESERVED_BITS);
+    }
+    val committed: Error = commit_received(value, candidate, packet_number);
+    if (committed != OK) {
+        if (plaintext.data != nil && opened.written != 0) {
+            ct.zeroize(plaintext.data, opened.written);
+        }
+        ret open_failed(committed);
+    }
+    result.written = opened.written;
+    result.packet_number = packet_number;
+    result.generation = value.generation;
+    result.key_updated = value.generation != prior_generation;
+    ret result;
+}
+
+pub fun discard_previous(value: *ReceiveKeys) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    destroy(?value.previous);
+    value.have_previous = false;
+    ret OK;
+}
+
+pub fun confirm_update_response(value: *ReceiveKeys, generation: u64,
+    acknowledged_packet_number: u64) Error {
+    if (value == nil || value.state != STATE_ACTIVE) { ret KEYS_DISCARDED; }
+    if (value.updates == 0 || generation != value.generation
+        || acknowledged_packet_number != value.update_packet_number) {
+        ret KEY_UPDATE_ERROR;
+    }
+    value.update_response_confirmed = true;
+    ret OK;
+}
+
+fun retry_material(version: u32, key: *^u8, nonce: *u8) Error {
+    var key_source: *u8 = nil;
+    var nonce_source: *u8 = nil;
+    if (version == packet.VERSION_1) {
+        key_source = ?RETRY_KEY_V1[0];
+        nonce_source = ?RETRY_NONCE_V1[0];
+    } or (version == packet.VERSION_2) {
+        key_source = ?RETRY_KEY_V2[0];
+        nonce_source = ?RETRY_NONCE_V2[0];
+    } or { ret UNSUPPORTED_VERSION; }
+    var i: usize = 0;
+    for (i < 16) { key[i] = key_source[i]; i = i + 1; }
+    i = 0;
+    for (i < 12) { nonce[i] = nonce_source[i]; i = i + 1; }
+    ret OK;
+}
+
+pub fun retry_tag(version: u32, original_destination_connection_id: contracts.Bytes,
+    retry_without_tag: contracts.Bytes, pseudo_packet: contracts.Buffer,
+    output: contracts.SecretBuffer) Result {
+    if (original_destination_connection_id.len > MAX_CONNECTION_ID
+        || (original_destination_connection_id.len != 0
+            && original_destination_connection_id.data == nil)
+        || (retry_without_tag.len != 0 && retry_without_tag.data == nil)) {
+        ret failed(INVALID_INPUT);
+    }
+    if (retry_without_tag.len > (0 - 1::usize) - 1 - original_destination_connection_id.len) {
+        ret failed(INVALID_INPUT);
+    }
+    val pseudo_len: usize = 1 + original_destination_connection_id.len + retry_without_tag.len;
+    if (pseudo_packet.data == nil || pseudo_packet.capacity < pseudo_len
+        || output.data == nil || output.capacity < TAG_SIZE) { ret failed(OUTPUT_TOO_SMALL); }
+    var key: [16]^u8;
+    var nonce: [12]u8;
+    val material_error: Error = retry_material(version, ?key[0], ?nonce[0]);
+    if (material_error != OK) { ct.zeroize(?key[0], 16); ret failed(material_error); }
+    pseudo_packet.data[0] = original_destination_connection_id.len::u8;
+    var i: usize = 0;
+    for (i < original_destination_connection_id.len) {
+        pseudo_packet.data[1 + i] = original_destination_connection_id.data[i];
+        i = i + 1;
+    }
+    i = 0;
+    for (i < retry_without_tag.len) {
+        pseudo_packet.data[1 + original_destination_connection_id.len + i] = retry_without_tag.data[i];
+        i = i + 1;
+    }
+    var empty: [1]^u8;
+    var tag: [16]u8;
+    val operation: contracts.Operation = aes_gcm.seal(
+        contracts.SecretBytes{data: ?key[0], len: 16},
+        contracts.Bytes{data: ?nonce[0], len: 12},
+        contracts.Bytes{data: pseudo_packet.data, len: pseudo_len},
+        contracts.SecretBytes{data: ?empty[0], len: 0},
+        contracts.Buffer{data: ?tag[0], capacity: 16});
+    ct.zeroize(?key[0], 16);
+    ct.zeroize(?empty[0], 1);
+    if (operation.error != contracts.OK || operation.written != TAG_SIZE) {
+        ret failed(map_crypto(operation.error));
+    }
+    i = 0;
+    for (i < TAG_SIZE) { output.data[i] = tag[i]; i = i + 1; }
+    ret Result{error: OK, written: TAG_SIZE};
+}
+
+pub fun verify_retry(version: u32, original_destination_connection_id: contracts.Bytes,
+    retry_without_tag: contracts.Bytes, tag: contracts.Bytes,
+    pseudo_packet: contracts.Buffer) Error {
+    if (tag.data == nil || tag.len != TAG_SIZE) { ret INVALID_INPUT; }
+    var expected: [16]^u8;
+    val result: Result = retry_tag(version, original_destination_connection_id,
+        retry_without_tag, pseudo_packet,
+        contracts.SecretBuffer{data: ?expected[0], capacity: TAG_SIZE});
+    if (result.error != OK) { ct.zeroize(?expected[0], TAG_SIZE); ret result.error; }
+    var provided: [16]^u8;
+    var i: usize = 0;
+    for (i < TAG_SIZE) { provided[i] = tag.data[i]; i = i + 1; }
+    val equal: ^u8 = ct.eq_bytes(?expected[0], ?provided[0], TAG_SIZE);
+    ct.zeroize(?expected[0], TAG_SIZE);
+    ct.zeroize(?provided[0], TAG_SIZE);
+    if (equal:^ != 1) { ret AUTH_FAILED; }
+    ret OK;
+}

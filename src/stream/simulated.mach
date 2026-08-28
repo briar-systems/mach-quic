@@ -1,0 +1,632 @@
+use quic.stream.stream;
+
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+
+fun initialize_manager(config: stream.Config,
+                       storage: stream.Storage) stream.Manager {
+    var manager: stream.Manager;
+    stream.initialize(?manager, config, storage);
+    ret manager;
+}
+
+fun config(source: u64, streams: u64, data: u64) stream.Config {
+    var value: stream.Config;
+    value.source = source;
+    value.role = stream.ROLE_CLIENT;
+    value.local_bidirectional_limit = streams;
+    value.local_unidirectional_limit = streams;
+    value.peer_bidirectional_limit = streams;
+    value.peer_unidirectional_limit = streams;
+    value.send_max_data = data;
+    value.receive_max_data = data;
+    value.send_local_bidirectional_limit = data;
+    value.send_peer_bidirectional_limit = data;
+    value.send_unidirectional_limit = data;
+    value.receive_local_bidirectional_limit = data;
+    value.receive_peer_bidirectional_limit = data;
+    value.receive_unidirectional_limit = data;
+    ret value;
+}
+
+test "quic.stream.simulated: stream creation, implicit peer streams, and ordered delivery" {
+    var records: [6]stream.Stream;
+    var send_data: [96]u8;
+    var send_pending: [96]bool;
+    var send_acked: [96]bool;
+    var send_inflight: [96]u8;
+    var receive_data: [96]u8;
+    var receive_present: [96]bool;
+    var attempts: [12]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 6,
+        send_data: ?send_data[0], send_data_length: 96,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 96, send_stride: 16,
+        receive_data: ?receive_data[0], receive_data_length: 96,
+        receive_present: ?receive_present[0], receive_state_length: 96, receive_stride: 16,
+        attempts: ?attempts[0], attempt_capacity: 12
+    };
+    var limits: stream.Config = config(11, 2, 64);
+    limits.receive_local_bidirectional_limit = 16;
+    limits.receive_peer_bidirectional_limit = 16;
+    limits.receive_unidirectional_limit = 16;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    val local_bidi: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    val local_uni: stream.CreateResult = stream.open(?manager, stream.DIRECTION_UNIDIRECTIONAL);
+    if (local_bidi.status != stream.STATUS_OK || local_bidi.handle.id != 0 ||
+        local_uni.status != stream.STATUS_OK || local_uni.handle.id != 2) { ret 1; }
+
+    var tail: [2]u8 = [2]u8{'l', 'o'};
+    val reordered: stream.ReceiveResult = stream.receive_stream(?manager, 5, 3, ?tail[0], 2, false);
+    if (!reordered.ok || reordered.new_streams != 2 || manager.active_streams != 4) { ret 1; }
+    val first_peer: stream.CreateResult = stream.accept(?manager);
+    val second_peer: stream.CreateResult = stream.accept(?manager);
+    if (first_peer.handle.id != 1 || second_peer.handle.id != 5) { ret 1; }
+    var head: [3]u8 = [3]u8{'h', 'e', 'l'};
+    if (!stream.receive_stream(?manager, 5, 0, ?head[0], 3, false).ok ||
+        !stream.receive_stream(?manager, 5, 5, nil, 0, true).ok) { ret 1; }
+    var output: [8]u8;
+    val read: stream.ReadResult = stream.read(?manager, second_peer.handle, ?output[0], 8);
+    if (read.status != stream.STATUS_FINISHED || read.count != 5 || !read.fin ||
+        output[0] != 'h' || output[1] != 'e' || output[2] != 'l' ||
+        output[3] != 'l' || output[4] != 'o') { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: final size, overlap, and connection flow failures are transactional" {
+    var records: [3]stream.Stream;
+    var send_data: [48]u8;
+    var send_pending: [48]bool;
+    var send_acked: [48]bool;
+    var send_inflight: [48]u8;
+    var receive_data: [48]u8;
+    var receive_present: [48]bool;
+    var attempts: [6]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 3,
+        send_data: ?send_data[0], send_data_length: 48,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 48, send_stride: 16,
+        receive_data: ?receive_data[0], receive_data_length: 48,
+        receive_present: ?receive_present[0], receive_state_length: 48, receive_stride: 16,
+        attempts: ?attempts[0], attempt_capacity: 6
+    };
+    var limits: stream.Config = config(12, 3, 8);
+    limits.receive_local_bidirectional_limit = 16;
+    limits.receive_peer_bidirectional_limit = 16;
+    limits.receive_unidirectional_limit = 16;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    var data: [6]u8 = [6]u8{1, 2, 3, 4, 5, 6};
+    val received: stream.ReceiveResult = stream.receive_stream(?manager, 1, 0, ?data[0], 6, false);
+    if (!received.ok || manager.receive_committed != 6 || manager.active_streams != 1) { ret 1; }
+    if (!stream.receive_stream(?manager, 1, 0, ?data[0], 6, false).ok ||
+        manager.receive_committed != 6) { ret 1; }
+    if (stream.receive_stream(?manager, 1, 3, nil, 0, true).error != stream.ERROR_FINAL_SIZE ||
+        manager.receive_committed != 6) { ret 1; }
+    var conflict: [1]u8 = [1]u8{9};
+    if (stream.receive_stream(?manager, 1, 2, ?conflict[0], 1, false).error != stream.ERROR_DATA_CONFLICT ||
+        manager.receive_committed != 6) { ret 1; }
+    if (stream.receive_stream(?manager, 5, 0, ?data[0], 3, false).error != stream.ERROR_FLOW_CONTROL ||
+        manager.active_streams != 1 || manager.peer_bidirectional_opened != 1) { ret 1; }
+    if (stream.receive_reset(?manager, 1, 7, 5).error != stream.ERROR_FINAL_SIZE ||
+        manager.receive_committed != 6) { ret 1; }
+    if (stream.receive_stream(?manager, 1, 0x4000000000000000, nil, 0, false).error != stream.ERROR_OVERFLOW ||
+        manager.receive_committed != 6) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: exact send budgets and duplicate transmissions retain ownership" {
+    var records: [2]stream.Stream;
+    var send_data: [8]u8;
+    var send_pending: [8]bool;
+    var send_acked: [8]bool;
+    var send_inflight: [8]u8;
+    var receive_data: [16]u8;
+    var receive_present: [16]bool;
+    var attempts: [8]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 2,
+        send_data: ?send_data[0], send_data_length: 8,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 8, send_stride: 4,
+        receive_data: ?receive_data[0], receive_data_length: 16,
+        receive_present: ?receive_present[0], receive_state_length: 16, receive_stride: 8,
+        attempts: ?attempts[0], attempt_capacity: 8
+    };
+    var limits: stream.Config = config(13, 2, 6);
+    limits.send_local_bidirectional_limit = 4;
+    limits.receive_max_data = 16;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    var data: [8]u8 = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    val first_write: stream.WriteResult = stream.write(?manager, opened.handle, ?data[0], 8);
+    if (first_write.count != 4 || !first_write.stream_blocked || !first_write.storage_blocked ||
+        first_write.connection_blocked) { ret 1; }
+    val first: stream.Prepared = stream.prepare(?manager, opened.handle, 4, false);
+    if (!first.ok || first.offset != 0 || first.data.len != 4 ||
+        stream.publish(?manager, first).status != stream.STATUS_OK) { ret 1; }
+    val duplicate: stream.Prepared = stream.prepare(?manager, opened.handle, 4, true);
+    if (!duplicate.ok || stream.publish(?manager, duplicate).status != stream.STATUS_OK) { ret 1; }
+    if (stream.on_terminal(?manager, first.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
+        records[opened.handle.index].send_used != 4) { ret 1; }
+    if (stream.on_terminal(?manager, duplicate.token, stream.TERMINAL_LOST).status != stream.STATUS_OK ||
+        records[opened.handle.index].send_used != 0) { ret 1; }
+
+    if (stream.update_max_stream_data(?manager, opened.handle, 8).status != stream.STATUS_OK) { ret 1; }
+    val second_write: stream.WriteResult = stream.write(?manager, opened.handle, ?data[4], 4);
+    if (second_write.count != 2 || !second_write.connection_blocked || second_write.stream_blocked) { ret 1; }
+    if (stream.finish(?manager, opened.handle).status != stream.STATUS_OK) { ret 1; }
+    val final: stream.Prepared = stream.prepare(?manager, opened.handle, 4, false);
+    if (!final.ok || !final.fin || final.offset != 4 || final.data.len != 2 ||
+        stream.publish(?manager, final).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, final.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
+    if (!stream.snapshot(?manager, opened.handle).send_closed) { ret 1; }
+    if (!stream.receive_stream(?manager, 0, 0, nil, 0, true).ok ||
+        !stream.snapshot(?manager, opened.handle).receive_closed) { ret 1; }
+    if (stream.release(?manager, opened.handle).status != stream.STATUS_OK) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: reset, stop-sending, and cancellation close both directions" {
+    var records: [2]stream.Stream;
+    var send_data: [16]u8;
+    var send_pending: [16]bool;
+    var send_acked: [16]bool;
+    var send_inflight: [16]u8;
+    var receive_data: [16]u8;
+    var receive_present: [16]bool;
+    var attempts: [8]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 2,
+        send_data: ?send_data[0], send_data_length: 16,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 16, send_stride: 8,
+        receive_data: ?receive_data[0], receive_data_length: 16,
+        receive_present: ?receive_present[0], receive_state_length: 16, receive_stride: 8,
+        attempts: ?attempts[0], attempt_capacity: 8
+    };
+    var limits: stream.Config = config(14, 2, 16);
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit = 8;
+    limits.receive_unidirectional_limit = 8;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    var data: [3]u8 = [3]u8{1, 2, 3};
+    stream.write(?manager, opened.handle, ?data[0], 3);
+    val stopped: stream.ReceiveResult = stream.receive_stop(?manager, 0, 42);
+    if (!stopped.ok || !stream.snapshot(?manager, opened.handle).send_cancelled) { ret 1; }
+    var reset: stream.Prepared = stream.prepare(?manager, opened.handle, 8, false);
+    if (!reset.ok || reset.kind != stream.SEND_RESET || reset.final_size != 3 || reset.application_error != 42 ||
+        stream.publish(?manager, reset).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, reset.token, stream.TERMINAL_LOST).status != stream.STATUS_OK) { ret 1; }
+    reset = stream.prepare(?manager, opened.handle, 8, false);
+    if (!reset.ok || stream.publish(?manager, reset).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, reset.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
+    if (!stream.receive_stream(?manager, 0, 0, nil, 0, true).ok ||
+        stream.release(?manager, opened.handle).status != stream.STATUS_OK) { ret 1; }
+
+    val next: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    if (stream.cancel_receive(?manager, next.handle, 9).status != stream.STATUS_OK ||
+        stream.cancel_send(?manager, next.handle, 10).status != stream.STATUS_OK ||
+        !stream.receive_stop(?manager, next.handle.id, 42).ok) { ret 1; }
+    var control: stream.Prepared = stream.prepare(?manager, next.handle, 8, false);
+    if (control.kind != stream.SEND_RESET || control.application_error != 10 ||
+        stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
+    control = stream.prepare(?manager, next.handle, 8, false);
+    if (control.kind != stream.SEND_STOP || stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
+    if (!stream.receive_reset(?manager, next.handle.id, 11, 3).ok || manager.receive_committed != 3 ||
+        manager.receive_max_data != 19 || !stream.snapshot(?manager, next.handle).receive_closed ||
+        !stream.receive_stream(?manager, next.handle.id, 0, ?data[0], 3, true).ok ||
+        stream.acknowledge_reset(?manager, next.handle).status != stream.STATUS_OK ||
+        stream.release(?manager, next.handle).status != stream.STATUS_OK) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: connection and stream flow budgets remain independent" {
+    var records: [4]stream.Stream;
+    var send_data: [32]u8;
+    var send_pending: [32]bool;
+    var send_acked: [32]bool;
+    var send_inflight: [32]u8;
+    var receive_data: [32]u8;
+    var receive_present: [32]bool;
+    var attempts: [8]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 4,
+        send_data: ?send_data[0], send_data_length: 32,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 32, send_stride: 8,
+        receive_data: ?receive_data[0], receive_data_length: 32,
+        receive_present: ?receive_present[0], receive_state_length: 32, receive_stride: 8,
+        attempts: ?attempts[0], attempt_capacity: 8
+    };
+    var limits: stream.Config = config(16, 4, 5);
+    limits.send_local_bidirectional_limit = 3;
+    limits.send_peer_bidirectional_limit = 3;
+    limits.send_unidirectional_limit = 3;
+    limits.receive_local_bidirectional_limit = 4;
+    limits.receive_peer_bidirectional_limit = 4;
+    limits.receive_unidirectional_limit = 4;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    val first: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    val second: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    var data: [8]u8 = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    val stream_limited: stream.WriteResult = stream.write(?manager, first.handle, ?data[0], 8);
+    val connection_limited: stream.WriteResult = stream.write(?manager, second.handle, ?data[0], 8);
+    if (stream_limited.count != 3 || !stream_limited.stream_blocked || stream_limited.connection_blocked ||
+        connection_limited.count != 2 || !connection_limited.connection_blocked || connection_limited.stream_blocked ||
+        manager.send_committed != 5) { ret 1; }
+    if (stream.update_max_data(?manager, 8).status != stream.STATUS_OK ||
+        stream.update_max_stream_data(?manager, first.handle, 6).status != stream.STATUS_OK ||
+        stream.write(?manager, first.handle, ?data[3], 3).count != 3 || manager.send_committed != 8) { ret 1; }
+
+    if (!stream.receive_stream(?manager, 1, 0, ?data[0], 4, false).ok ||
+        stream.receive_stream(?manager, 5, 0, ?data[0], 2, false).error != stream.ERROR_FLOW_CONTROL ||
+        manager.peer_bidirectional_opened != 1 || manager.receive_committed != 4) { ret 1; }
+    val peer_second: stream.ReceiveResult = stream.receive_stream(?manager, 5, 0, ?data[0], 1, false);
+    if (!peer_second.ok || peer_second.new_streams != 1 || manager.receive_committed != 5) { ret 1; }
+    val peer_first: stream.CreateResult = stream.accept(?manager);
+    if (peer_first.handle.id != 1 || stream.accept(?manager).handle.id != 5) { ret 1; }
+    var output: [4]u8;
+    val consumed: stream.ReadResult = stream.read(?manager, peer_first.handle, ?output[0], 4);
+    if (consumed.count != 4 || consumed.receive_max_data != 5 ||
+        consumed.receive_max_stream_data != 4 || consumed.receive_uncredited != 4) { ret 1; }
+    if (stream.receive_stream(?manager, 5, 1, ?data[1], 3, false).error !=
+        stream.ERROR_FLOW_CONTROL || manager.receive_committed != 5) { ret 1; }
+    if (stream.credit(?manager, peer_first.handle, 5).error != stream.ERROR_STATE ||
+        manager.receive_max_data != 5) { ret 1; }
+    val released: stream.OperationResult = stream.credit(?manager, peer_first.handle, 4);
+    if (released.status != stream.STATUS_OK || released.receive_max_data != 9 ||
+        released.receive_max_stream_data != 8 ||
+        stream.snapshot(?manager, peer_first.handle).receive_uncredited != 0 ||
+        stream.credit(?manager, peer_first.handle, 1).error != stream.ERROR_STATE) { ret 1; }
+    if (!stream.receive_stream(?manager, 5, 1, ?data[1], 3, false).ok ||
+        manager.receive_committed != 8) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: unidirectional streams enforce ownership and ordered delivery" {
+    var records: [2]stream.Stream;
+    var send_data: [16]u8;
+    var send_pending: [16]bool;
+    var send_acked: [16]bool;
+    var send_inflight: [16]u8;
+    var receive_data: [16]u8;
+    var receive_present: [16]bool;
+    var attempts: [4]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 2,
+        send_data: ?send_data[0], send_data_length: 16,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 16, send_stride: 8,
+        receive_data: ?receive_data[0], receive_data_length: 16,
+        receive_present: ?receive_present[0], receive_state_length: 16, receive_stride: 8,
+        attempts: ?attempts[0], attempt_capacity: 4
+    };
+    var limits: stream.Config = config(17, 2, 16);
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit = 8;
+    limits.receive_unidirectional_limit = 8;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    val local: stream.CreateResult = stream.open(?manager, stream.DIRECTION_UNIDIRECTIONAL);
+    var data: [4]u8 = [4]u8{1, 2, 3, 4};
+    if (local.handle.id != 2 || stream.receive_stream(?manager, 2, 0, ?data[0], 1, false).error != stream.ERROR_DIRECTION ||
+        stream.write(?manager, local.handle, ?data[0], 4).count != 4 ||
+        stream.finish(?manager, local.handle).status != stream.STATUS_OK) { ret 1; }
+    val sent: stream.Prepared = stream.prepare(?manager, local.handle, 8, false);
+    if (!sent.ok || !sent.fin || stream.publish(?manager, sent).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, sent.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
+        stream.release(?manager, local.handle).status != stream.STATUS_OK) { ret 1; }
+
+    if (!stream.receive_stream(?manager, 3, 2, ?data[2], 2, true).ok ||
+        !stream.receive_stream(?manager, 3, 0, ?data[0], 2, false).ok) { ret 1; }
+    val peer: stream.CreateResult = stream.accept(?manager);
+    if (peer.handle.id != 3 || stream.write(?manager, peer.handle, ?data[0], 1).error != stream.ERROR_DIRECTION ||
+        stream.receive_stop(?manager, 3, 1).error != stream.ERROR_DIRECTION) { ret 1; }
+    var output: [4]u8;
+    val received: stream.ReadResult = stream.read(?manager, peer.handle, ?output[0], 4);
+    if (received.status != stream.STATUS_FINISHED || received.count != 4 || !received.fin ||
+        output[0] != 1 || output[1] != 2 || output[2] != 3 || output[3] != 4 ||
+        stream.release(?manager, peer.handle).status != stream.STATUS_OK) { ret 1; }
+    if (!stream.receive_stream(?manager, 3, 4, nil, 0, true).closed ||
+        !stream.receive_reset(?manager, 3, 9, 4).closed ||
+        !stream.receive_stop(?manager, 2, 9).closed) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: close preserves reserved stream publication" {
+    var records: [1]stream.Stream;
+    var send_data: [4]u8;
+    var send_pending: [4]bool;
+    var send_acked: [4]bool;
+    var send_inflight: [4]u8;
+    var receive_data: [4]u8;
+    var receive_present: [4]bool;
+    var attempts: [1]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 1,
+        send_data: ?send_data[0], send_data_length: 4,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 4, send_stride: 4,
+        receive_data: ?receive_data[0], receive_data_length: 4,
+        receive_present: ?receive_present[0], receive_state_length: 4, receive_stride: 4,
+        attempts: ?attempts[0], attempt_capacity: 1
+    };
+    var manager: stream.Manager = initialize_manager(config(18, 1, 4), storage);
+    val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    var data: [1]u8 = [1]u8{6};
+    stream.write(?manager, opened.handle, ?data[0], 1);
+    val prepared: stream.Prepared = stream.prepare(?manager, opened.handle, 1, false);
+    if (!prepared.ok || stream.begin_close(?manager).status != stream.STATUS_OK || prepared.data.data[0] != 6 ||
+        stream.finish_close(?manager).error != stream.ERROR_CAPACITY ||
+        stream.publish(?manager, prepared).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, prepared.token,
+            stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
+    if (stream.cancel_prepared(?manager, prepared).status != stream.STATUS_STALE ||
+        stream.finish_close(?manager).status != stream.STATUS_OK) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: flow-control frames create only permitted peer stream halves" {
+    var records: [4]stream.Stream;
+    var send_data: [32]u8;
+    var send_pending: [32]bool;
+    var send_acked: [32]bool;
+    var send_inflight: [32]u8;
+    var receive_data: [32]u8;
+    var receive_present: [32]bool;
+    var attempts: [4]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 4,
+        send_data: ?send_data[0], send_data_length: 32,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 32, send_stride: 8,
+        receive_data: ?receive_data[0], receive_data_length: 32,
+        receive_present: ?receive_present[0], receive_state_length: 32, receive_stride: 8,
+        attempts: ?attempts[0], attempt_capacity: 4
+    };
+    var limits: stream.Config = config(19, 3, 16);
+    limits.send_peer_bidirectional_limit = 4;
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit = 8;
+    limits.receive_unidirectional_limit = 8;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    val maximum: stream.ReceiveResult = stream.receive_max_stream_data(?manager, 5, 12);
+    if (!maximum.ok || maximum.new_streams != 2 || records[maximum.handle.index].send_limit != 12 ||
+        stream.accept(?manager).handle.id != 1 || stream.accept(?manager).handle.id != 5) { ret 1; }
+    val blocked: stream.ReceiveResult = stream.receive_stream_data_blocked(?manager, 7, 8);
+    if (!blocked.ok || blocked.new_streams != 2 || blocked.receive_max_stream_data != 8 ||
+        stream.accept(?manager).handle.id != 3 || stream.accept(?manager).handle.id != 7) { ret 1; }
+    if (stream.receive_max_stream_data(?manager, 3, 4).error != stream.ERROR_DIRECTION ||
+        stream.receive_stream_data_blocked(?manager, 0, 1).error != stream.ERROR_DIRECTION ||
+        stream.receive_max_stream_data(?manager, 9, 1).error != stream.ERROR_CAPACITY || manager.active_streams != 4) { ret 1; }
+    if (stream.receive_data_blocked(?manager, 16).receive_max_data != 16 ||
+        stream.receive_streams_blocked(?manager, stream.DIRECTION_BIDIRECTIONAL, 3).peer_max_streams != 3) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: stream exhaustion and two-phase teardown are bounded" {
+    var records: [2]stream.Stream;
+    var send_data: [16]u8;
+    var send_pending: [16]bool;
+    var send_acked: [16]bool;
+    var send_inflight: [16]u8;
+    var receive_data: [16]u8;
+    var receive_present: [16]bool;
+    var attempts: [4]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 2,
+        send_data: ?send_data[0], send_data_length: 16,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 16, send_stride: 8,
+        receive_data: ?receive_data[0], receive_data_length: 16,
+        receive_present: ?receive_present[0], receive_state_length: 16, receive_stride: 8,
+        attempts: ?attempts[0], attempt_capacity: 4
+    };
+    var limits: stream.Config = config(15, 3, 16);
+    limits.receive_max_data = 16;
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit = 8;
+    limits.receive_unidirectional_limit = 8;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    var data: [1]u8 = [1]u8{1};
+    if (stream.receive_stream(?manager, 9, 0, ?data[0], 1, false).error != stream.ERROR_CAPACITY ||
+        manager.active_streams != 0 || manager.peer_bidirectional_opened != 0) { ret 1; }
+    val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    stream.write(?manager, opened.handle, ?data[0], 1);
+    val prepared: stream.Prepared = stream.prepare(?manager, opened.handle, 1, false);
+    if (stream.publish(?manager, prepared).status != stream.STATUS_OK ||
+        stream.begin_close(?manager).status != stream.STATUS_OK ||
+        stream.finish_close(?manager).error != stream.ERROR_CAPACITY) { ret 1; }
+    if (stream.on_terminal(?manager, prepared.token, stream.TERMINAL_LOST).status != stream.STATUS_OK ||
+        stream.finish_close(?manager).status != stream.STATUS_OK) { ret 1; }
+    if (stream.snapshot(?manager, opened.handle).ok) { ret 1; }
+    ret 0;
+}
+
+test "quic.stream.simulated: consumed credit frames survive loss and stream release" {
+    var records: [1]stream.Stream;
+    var send_data: [8]u8;
+    var send_pending: [8]bool;
+    var send_acked: [8]bool;
+    var send_inflight: [8]u8;
+    var receive_data: [8]u8;
+    var receive_present: [8]bool;
+    var attempts: [4]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 1,
+        send_data: ?send_data[0], send_data_length: 8,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 8, send_stride: 8,
+        receive_data: ?receive_data[0], receive_data_length: 8,
+        receive_present: ?receive_present[0], receive_state_length: 8,
+        receive_stride: 8, attempts: ?attempts[0], attempt_capacity: 4};
+    var limits: stream.Config = config(20, 1, 8);
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit = 8;
+    limits.receive_unidirectional_limit = 8;
+    var manager: stream.Manager = initialize_manager(limits, storage);
+    var input: [4]u8 = [4]u8{1, 2, 3, 4};
+    if (!stream.receive_stream(?manager, 1, 0, ?input[0], 4, false).ok) {
+        ret 1;
+    }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    var output: [4]u8;
+    if (stream.read(?manager, accepted.handle, ?output[0], 4).count != 4 ||
+        stream.prepare_control(?manager).status != stream.STATUS_EMPTY ||
+        stream.credit(?manager, accepted.handle, 4).status != stream.STATUS_OK) {
+        ret 1;
+    }
+    var control: stream.Prepared = stream.prepare_control(?manager);
+    if (control.kind != stream.SEND_MAX_DATA || control.maximum != 12 ||
+        stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token,
+            stream.TERMINAL_LOST).status != stream.STATUS_OK) { ret 1; }
+    control = stream.prepare_control(?manager);
+    if (control.kind != stream.SEND_MAX_DATA ||
+        stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token,
+            stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
+    control = stream.prepare_control(?manager);
+    if (control.kind != stream.SEND_MAX_STREAM_DATA || control.maximum != 12 ||
+        stream.cancel_prepared(?manager, control).status != stream.STATUS_OK) {
+        ret 1;
+    }
+    control = stream.prepare_control(?manager);
+    if (stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token,
+            stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
+        !stream.receive_stream(?manager, 1, 4, nil, 0, true).ok) { ret 1; }
+    records[accepted.handle.index].send_closed = true;
+    if (stream.release(?manager, accepted.handle).status != stream.STATUS_OK) {
+        ret 1;
+    }
+    control = stream.prepare_control(?manager);
+    if (control.kind != stream.SEND_MAX_STREAMS_BIDI || control.maximum != 2 ||
+        stream.publish(?manager, control).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, control.token,
+            stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
+        stream.prepare_control(?manager).status != stream.STATUS_EMPTY) { ret 1; }
+    ret 0;
+}
+
+fun credit_storage(records: *stream.Stream, send_data: *u8,
+                   send_pending: *bool, send_acked: *bool, send_inflight: *u8,
+                   receive_data: *u8, receive_present: *bool,
+                   attempts: *stream.Attempt) stream.Storage {
+    ret stream.Storage{
+        streams: records, stream_capacity: 1,
+        send_data: send_data, send_data_length: 8,
+        send_pending: send_pending, send_acked: send_acked,
+        send_inflight: send_inflight, send_state_length: 8, send_stride: 8,
+        receive_data: receive_data, receive_data_length: 8,
+        receive_present: receive_present, receive_state_length: 8,
+        receive_stride: 8, attempts: attempts, attempt_capacity: 4};
+}
+
+fun credit_limits(source: u64) stream.Config {
+    var limits: stream.Config = config(source, 1, 8);
+    limits.receive_max_data = 8;
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit = 8;
+    limits.receive_unidirectional_limit = 8;
+    ret limits;
+}
+
+test "quic.stream.simulated: cancellation reconciles delivered bytes exactly once" {
+    var records: [1]stream.Stream;
+    var send_data: [8]u8;
+    var send_pending: [8]bool;
+    var send_acked: [8]bool;
+    var send_inflight: [8]u8;
+    var receive_data: [8]u8;
+    var receive_present: [8]bool;
+    var attempts: [4]stream.Attempt;
+    var manager: stream.Manager = initialize_manager(credit_limits(30),
+        credit_storage(?records[0], ?send_data[0], ?send_pending[0],
+            ?send_acked[0], ?send_inflight[0], ?receive_data[0],
+            ?receive_present[0], ?attempts[0]));
+    var input: [6]u8 = [6]u8{1, 2, 3, 4, 5, 6};
+    if (!stream.receive_stream(?manager, 1, 0, ?input[0], 6, false).ok) { ret 1; }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    var output: [4]u8;
+    if (stream.read(?manager, accepted.handle, ?output[0], 4).count != 4 ||
+        manager.receive_max_data != 8) { ret 2; }
+    if (stream.cancel_receive(?manager, accepted.handle, 7).status !=
+            stream.STATUS_OK || manager.receive_max_data != 14 ||
+        stream.snapshot(?manager, accepted.handle).receive_uncredited != 0) {
+        ret 3;
+    }
+    if (stream.cancel_receive(?manager, accepted.handle, 7).status !=
+            stream.STATUS_OK || manager.receive_max_data != 14 ||
+        stream.credit(?manager, accepted.handle, 1).error !=
+            stream.ERROR_STATE || manager.receive_max_data != 14) { ret 4; }
+    ret 0;
+}
+
+test "quic.stream.simulated: reset acknowledgement reconciles delivered bytes once" {
+    var records: [1]stream.Stream;
+    var send_data: [8]u8;
+    var send_pending: [8]bool;
+    var send_acked: [8]bool;
+    var send_inflight: [8]u8;
+    var receive_data: [8]u8;
+    var receive_present: [8]bool;
+    var attempts: [4]stream.Attempt;
+    var manager: stream.Manager = initialize_manager(credit_limits(31),
+        credit_storage(?records[0], ?send_data[0], ?send_pending[0],
+            ?send_acked[0], ?send_inflight[0], ?receive_data[0],
+            ?receive_present[0], ?attempts[0]));
+    var input: [4]u8 = [4]u8{1, 2, 3, 4};
+    if (!stream.receive_stream(?manager, 1, 0, ?input[0], 4, false).ok) { ret 1; }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    var output: [4]u8;
+    if (stream.read(?manager, accepted.handle, ?output[0], 4).count != 4 ||
+        manager.receive_max_data != 8) { ret 2; }
+    if (!stream.receive_reset(?manager, 1, 9, 6).ok ||
+        manager.receive_max_data != 8) { ret 3; }
+    if (stream.acknowledge_reset(?manager, accepted.handle).status !=
+            stream.STATUS_OK || manager.receive_max_data != 14 ||
+        stream.snapshot(?manager, accepted.handle).receive_uncredited != 0) {
+        ret 4;
+    }
+    ret 0;
+}
+
+test "quic.stream.simulated: release reconciles bytes the caller never returned" {
+    var records: [1]stream.Stream;
+    var send_data: [8]u8;
+    var send_pending: [8]bool;
+    var send_acked: [8]bool;
+    var send_inflight: [8]u8;
+    var receive_data: [8]u8;
+    var receive_present: [8]bool;
+    var attempts: [4]stream.Attempt;
+    var manager: stream.Manager = initialize_manager(credit_limits(32),
+        credit_storage(?records[0], ?send_data[0], ?send_pending[0],
+            ?send_acked[0], ?send_inflight[0], ?receive_data[0],
+            ?receive_present[0], ?attempts[0]));
+    var input: [4]u8 = [4]u8{1, 2, 3, 4};
+    if (!stream.receive_stream(?manager, 1, 0, ?input[0], 4, true).ok) { ret 1; }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    var output: [4]u8;
+    val consumed: stream.ReadResult = stream.read(?manager, accepted.handle,
+        ?output[0], 4);
+    if (consumed.count != 4 || !consumed.fin ||
+        consumed.receive_uncredited != 4 || manager.receive_max_data != 8) {
+        ret 2;
+    }
+    if (stream.credit(?manager, accepted.handle, 1).status != stream.STATUS_OK ||
+        manager.receive_max_data != 9 ||
+        stream.snapshot(?manager, accepted.handle).receive_uncredited != 3) {
+        ret 3;
+    }
+    records[accepted.handle.index].send_closed = true;
+    if (stream.release(?manager, accepted.handle).status != stream.STATUS_OK ||
+        manager.receive_max_data != 12) { ret 4; }
+    ret 0;
+}

@@ -1,14 +1,34 @@
 use std.runtime;
 use std.types.string.str;
 
-pub val VERSION: str = "0.0.0";
+pub val VERSION: str = "0.1.0";
 
 fwd quic.packet.packet;
-fwd quic.crypto.keys;
+fwd quic.frame.frame;
+fwd quic.wire.varint;
+fwd quic.transport_parameters;
+fwd quic.crypto.protection;
+fwd quic.crypto.vectors;
 fwd quic.recovery.recovery;
+fwd quic.recovery.ack;
 fwd quic.congestion.controller;
+fwd quic.congestion.pacer;
 fwd quic.stream.stream;
+fwd quic.stream.datagram;
+fwd quic.path.path;
+fwd quic.connection.admission;
+fwd quic.connection.cid;
+fwd quic.connection.token;
+fwd quic.connection.handshake;
+fwd quic.connection.handshake_simulated;
+fwd quic.connection.tls_client;
+fwd quic.connection.tls_server;
+fwd quic.connection.listener;
+fwd quic.connection.negotiation;
+fwd quic.connection.core;
+fwd quic.connection.core_simulated;
 fwd quic.transport;
+fwd quic.transport.simulated;
 
 test "quic: version is present" {
     if (VERSION[0] == 0) { ret 1; }
