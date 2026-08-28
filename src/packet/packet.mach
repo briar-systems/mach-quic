@@ -740,6 +740,30 @@ test "quic.packet.packet: version negotiation and Retry are bounded" {
     ret 0;
 }
 
+test "quic.packet.packet: RFC 9001 Retry vector decodes and re-encodes exactly" {
+    val vector: [36]u8 = [36]u8{
+        0xff, 0, 0, 0, 1, 0, 8, 0xf0, 0x67, 0xa5, 0x50, 0x2a,
+        0x42, 0x62, 0xb5, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x04, 0xa2,
+        0x65, 0xba, 0x2e, 0xff, 0x4d, 0x82, 0x90, 0x58, 0xfb, 0x3f,
+        0x0f, 0x24, 0x96, 0xba
+    };
+    var context: DecodeContext;
+    var packet: Packet;
+    var d: binary.Decoder = binary.decoder(?vector[0], 36, binary.BIG);
+    val decoded: DecodeResult = decode(?d, true, context, default_limits(), ?packet);
+    if (decoded.status != STATUS_DONE || packet.header.kind != PACKET_RETRY || packet.token.len != 5) { ret 1; }
+    if (packet.header.source.len != 8 || packet.header.retry_bits != 0x0f) { ret 1; }
+    var output: [36]u8;
+    var b: binary.Builder = binary.builder(?output[0], 36, binary.BIG);
+    if (!encode(?b, ?packet, default_limits()).ok || b.len != 36) { ret 1; }
+    var i: usize = 0;
+    for (i < 36) {
+        if (output[i] != vector[i]) { ret 1; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
 test "quic.packet.packet: fixed builder failure publishes no packet" {
     var payload: [2]u8 = [2]u8{1, 2};
     var packet: Packet;
