@@ -41,15 +41,17 @@ output. Protocol fields accept the non-minimal varint encodings allowed by RFC
 - `stream.stream` owns stream creation, ordered byte delivery, independent
   connection and stream flow control, cancellation, and recovery ownership.
 - `stream.datagram` owns optional RFC 9221 send and receive queues.
+- `path.path` owns network-path identity, validation, migration, per-path
+  amplification accounting, and DPLPMTUD policy.
 - `transport` composes the parts into a connection without owning HTTP semantics.
 
 HTTP/3 will consume QUIC streams and the version-neutral message contracts from
 `mach-http`. It does not belong in the QUIC transport layer. QPACK and HTTP/3 frame
 processing will be added with the HTTP/3 engine once the transport is implemented.
 
-The remaining connection, protection, path, and transport engine work is tracked
-separately from these completed wire, recovery, congestion, stream, and datagram
-primitives.
+The remaining connection, protection, and transport engine work is tracked
+separately from these completed wire, recovery, congestion, path, stream, and
+datagram primitives.
 
 ## Recovery contracts
 
@@ -122,6 +124,87 @@ flow-control credit. The driver combines that credit with `controller.admit`, th
 asks the pacer to schedule the fully encoded packet size. This keeps stream
 fairness, congestion blocking, flow-control blocking, PTO exemption, and pacing
 as distinct decisions rather than collapsing them into one writable-byte count.
+
+## Path contracts
+
+The path manager is bounded and allocation-free. The caller supplies stable path,
+challenge, response, and send-reservation slots. A path is identified by the full
+local and peer IP and port pair. IPv6 scope IDs are part of identity. Handles and
+all prepared actions carry a source tag, storage index, and generation, so a
+released path or reused action slot cannot make a delayed completion valid.
+
+`observe` accepts only an authenticated packet that the receive packet-number
+tracker has classified as fresh. Spoofed and duplicate packets publish no path and
+grant no amplification credit. Before handshake confirmation, a new peer address
+is ignored. A client also ignores packets from a server address it has not first
+created with `probe`, including a preferred address. A server creates a candidate
+for an authenticated client address, but switches only on the highest-numbered
+non-probing packet seen across candidate paths. Reordered traffic therefore cannot
+roll migration backward. A port-only peer change on the same local address is
+classified as NAT rebinding.
+
+The local `allow_peer_active_migration` policy implements the
+`disable_active_migration` transport parameter without disabling NAT rebinding.
+The peer's corresponding policy prevents client probing from a new local address,
+except for a peer-advertised preferred address. Active migration is client-only,
+requires handshake confirmation, and selects only a validated candidate. A path
+change reports whether the connection must rotate its destination connection ID,
+reset ECN validation, reset congestion and RTT state, and validate the previous
+path. Port-only rebinding can explicitly retain congestion and RTT state. Other
+changes require fresh state.
+
+Challenge data is supplied by the connection's cryptographic random provider and
+must be unpredictable. Outstanding values are unique. Queue, prepare, cancel, and
+publish are distinct operations. The validation deadline starts only when the
+packet is published and is the configured factor times the larger PTO of the old
+and new paths. Path reachability and MTU confirmation have distinct purposes, so
+a failed prior-path revalidation invalidates that path while a failed MTU
+confirmation leaves address ownership intact. A matching PATH_RESPONSE can arrive
+on any path and validates the path on which its PATH_CHALLENGE was sent. A
+challenge below 1200 bytes validates only address ownership. MTU validation needs
+a padded challenge.
+
+Every received PATH_CHALLENGE queues one copied response on its exact receive path,
+including duplicates. The response preparation reports the path's amplification
+and MTU bounds. It requests 1200-byte padding when permitted. On the selected path
+it also reports `require_non_probing`, which tells the packet builder to compose a
+PING or another non-probing frame as required by the forwarding-attack defense.
+A server cannot reserve non-probing traffic on a new path until it has received
+non-probing traffic there.
+
+Server amplification accounting is independent per unvalidated path. A send first
+reserves its fully encoded datagram size. Concurrent reservations cannot exceed
+three times authenticated bytes received. Publication charges the path, while
+cancellation returns the reservation. A failed path or connection close makes a
+prepared publication stale and returns its reserved bytes. The driver calls frame
+publication only after its containing datagram publication succeeds.
+
+Congestion, pacing, ECN validation, and PMTU state belong to the path handle, while
+QUIC packet-number spaces and recovery history remain connection-wide. The driver
+saves the path handle in each recovery owner and applies late ACK or loss events to
+that path even after migration. It applies an `Observation` reset signal before
+sending on the newly selected path. Traffic from an old path never grows the new
+path's congestion window or updates its RTT. If validation of an unvalidated
+selected path fails, the manager returns the last validated fallback or reports
+that path connectivity is lost.
+
+DPLPMTUD probes have their own generation-tagged prepare, send, publish, cancel,
+and terminal lifecycle. `reserve_mtu_send` binds the exact padded datagram size to
+the MTU token. The probe cannot publish to recovery before that datagram publishes,
+and it cannot cancel while the datagram is reserved or after it was sent. ACK
+raises the path MTU. Repeated probe loss narrows the search bound without treating
+ordinary loss as proof. Repeated qualifying large-packet loss falls back to 1200
+and asks the driver to reconfigure congestion and pacing. An ICMP Packet Too Big
+value is only accepted after the connection authenticates its quoted datagram,
+and it remains a bounded search hint. Migration begins at the base MTU on the new
+path.
+
+`begin_close` stops new work and discards unowned queues. Prepared challenges,
+responses, send reservations, and MTU probes remain completion-owned until they
+publish, cancel, or become stale. `finish_close` refuses to invalidate storage
+while any owner remains. Failed paths likewise cannot be released or restarted
+until their owners drain. Restart increments the path generation before accepting
+traffic again.
 
 ## Stream contracts
 
