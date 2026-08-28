@@ -4,12 +4,16 @@ use quic.crypto.protection;
 use quic.connection.ownership;
 use quic.packet.packet;
 
+use crypto.encoding.keys;
+use crypto.secret;
 use std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 use std.types.string.str_len;
+use tls_cert: tls.cert;
+use tls_credentials: tls.cert.credentials;
 use tls_client_api: tls.client;
 use tls_config: tls.config;
 use tls_error_api: tls.error;
@@ -194,6 +198,8 @@ pub rec Adapter {
     tls_client: *tls_client_api.Client;
     tls_verification_time_unix: i64;
     tls_deadline_ns: u64;
+    tls_entropy_context_size: usize;
+    tls_entropy_secret_context_size: usize;
     tls_last_now_ns: u64;
     tls_receive_offsets: [3]u64;
     tls_send_offsets: [3]u64;
@@ -321,6 +327,217 @@ fun provider_context_valid(adapter: *Adapter, storage: Storage,
     ret ownership.all_disjoint(?ranges[0], 9);
 }
 
+fun tls_anchor_disjoint(anchor: ownership.Range, owned: *ownership.Range,
+                        count: usize) bool {
+    if (!anchor.valid) { ret false; }
+    var i: usize = 0;
+    for (i < count) {
+        if (!ownership.disjoint(anchor, owned[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun tls_client_record(value: *tls_client_api.Client) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.state)::usize;
+    val offset: usize = $offset_of(tls_client_api.Client, state);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_client_api.Client), ownership.ZERO_FORBIDDEN);
+}
+
+fun tls_config_record(value: *tls_config.ClientConfig) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.limits)::usize;
+    val offset: usize = $offset_of(tls_config.ClientConfig, limits);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_config.ClientConfig), ownership.ZERO_FORBIDDEN);
+}
+
+fun entropy_record(value: *secret.Entropy) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.initialized)::usize;
+    val offset: usize = $offset_of(secret.Entropy, initialized);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8, $size_of(secret.Entropy),
+        ownership.ZERO_FORBIDDEN);
+}
+
+fun identity_record(value: *tls_credentials.Identity) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.server_name)::usize;
+    val offset: usize = $offset_of(tls_credentials.Identity, server_name);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_credentials.Identity), ownership.ZERO_FORBIDDEN);
+}
+
+fun private_key_record(value: *keys.PrivateKey) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.algorithm)::usize;
+    val offset: usize = $offset_of(keys.PrivateKey, algorithm);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8, $size_of(keys.PrivateKey),
+        ownership.ZERO_FORBIDDEN);
+}
+
+fun tls_secret_context_valid(value: *tls_client_api.Client,
+                             secret_context_size: usize) bool {
+    val entropy: *secret.Entropy = value.config.entropy;
+    if ((entropy.secret_context == nil && secret_context_size != 0) ||
+        (entropy.secret_context != nil && secret_context_size == 0)) {
+        ret false;
+    }
+    if (secret_context_size == 0) { ret true; }
+    if (!ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.private_key[0], 32)) { ret false; }
+    if (!ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.early_secret.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.client_early_traffic.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.early_exporter_master.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.handshake_secret.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.client_handshake_traffic.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.server_handshake_traffic.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.master_secret.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.client_application_traffic.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.server_application_traffic.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.exporter_master.data[0], 48) ||
+        !ownership.secret_disjoint(entropy.secret_context, secret_context_size,
+        ?value.schedule.resumption_master.data[0], 48)) { ret false; }
+    val identity: *tls_credentials.Identity = value.config.client_identity;
+    if (identity != nil && identity.private_key != nil &&
+        identity.private_key.material.data != nil &&
+        !ownership.secret_disjoint(entropy.secret_context,
+            secret_context_size, identity.private_key.material.data,
+            identity.private_key.material.len)) { ret false; }
+    ret true;
+}
+
+fun tls_client_context_valid(adapter: *Adapter, storage: Storage,
+                             value: *tls_client_api.Client,
+                             context_size: usize,
+                             secret_context_size: usize) bool {
+    if (value == nil || value.config == nil || value.config.entropy == nil) {
+        ret false;
+    }
+    val entropy: *secret.Entropy = value.config.entropy;
+    if ((entropy.context == nil && context_size != 0) ||
+        (entropy.context != nil && context_size == 0)) { ret false; }
+    var context_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (context_size == 0) { context_zero = ownership.ZERO_ALLOWED; }
+    var owned: [17]ownership.Range;
+    owned[0] = ownership.bytes((?adapter.config)::*u8, $size_of(Adapter),
+        ownership.ZERO_FORBIDDEN);
+    owned[1] = ownership.bytes(storage.receive_data, storage.receive_length,
+        ownership.ZERO_FORBIDDEN);
+    owned[2] = ownership.array(storage.receive_present::*u8,
+        storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[3] = ownership.bytes(storage.send_data, storage.send_length,
+        ownership.ZERO_FORBIDDEN);
+    owned[4] = ownership.array(storage.send_pending::*u8,
+        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[5] = ownership.array(storage.send_acked::*u8,
+        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[6] = ownership.array(storage.send_inflight::*u8,
+        storage.send_length, $size_of(u16), ownership.ZERO_FORBIDDEN);
+    owned[7] = ownership.array(storage.attempts::*u8,
+        storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
+    owned[8] = tls_client_record(value);
+    owned[9] = ownership.bytes(value.storage.input,
+        value.storage.input_capacity, ownership.ZERO_FORBIDDEN);
+    owned[10] = ownership.bytes(value.storage.output,
+        value.storage.output_capacity, ownership.ZERO_FORBIDDEN);
+    owned[11] = ownership.bytes(value.storage.hello,
+        value.storage.hello_capacity, ownership.ZERO_FORBIDDEN);
+    owned[12] = ownership.array(value.storage.certificates::*u8,
+        value.storage.certificate_capacity, $size_of(tls_cert.Certificate),
+        ownership.ZERO_FORBIDDEN);
+    owned[13] = ownership.bytes(value.storage.peer_parameters,
+        value.storage.peer_parameters_capacity, ownership.ZERO_FORBIDDEN);
+    owned[14] = tls_config_record(value.config);
+    owned[15] = entropy_record(entropy);
+    owned[16] = ownership.bytes(entropy.context::*u8, context_size,
+        context_zero);
+    if (!ownership.all_disjoint(?owned[0], 17) ||
+        !tls_secret_context_valid(value, secret_context_size)) { ret false; }
+
+    val server_name_length: usize = str_len(value.config.server_name);
+    if (server_name_length == 0 || server_name_length == 0 - 1::usize ||
+        !tls_anchor_disjoint(ownership.bytes(value.config.server_name,
+            server_name_length + 1, ownership.ZERO_FORBIDDEN),
+            ?owned[0], 17) ||
+        !tls_anchor_disjoint(ownership.array(value.config.alpn::*u8,
+            value.config.alpn_len, $size_of(tls_config.ProtocolName),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 17) ||
+        !tls_anchor_disjoint(ownership.bytes(value.config.trust::*u8,
+            $size_of(tls_cert.TrustStore), ownership.ZERO_FORBIDDEN),
+            ?owned[0], 17) ||
+        !tls_anchor_disjoint(ownership.array(value.config.trust.anchors::*u8,
+            value.config.trust.len, $size_of(tls_cert.Certificate),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 17) ||
+        !tls_anchor_disjoint(ownership.array(value.config.versions::*u8,
+            value.config.version_len, $size_of(u16), ownership.ZERO_FORBIDDEN),
+            ?owned[0], 17) ||
+        !tls_anchor_disjoint(ownership.array(value.config.suites::*u8,
+            value.config.suite_len, $size_of(tls13.CipherSuite),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 17) ||
+        !tls_anchor_disjoint(ownership.array(value.config.groups::*u8,
+            value.config.group_len, $size_of(tls13.NamedGroup),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 17) ||
+        !tls_anchor_disjoint(ownership.array(value.config.signatures::*u8,
+            value.config.signature_len, $size_of(tls13.SignatureScheme),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 17) ||
+        !tls_anchor_disjoint(ownership.bytes(value.extra.data.data,
+            value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 17)) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < value.config.alpn_len) {
+        if (!tls_anchor_disjoint(ownership.bytes(value.config.alpn[i].data,
+            value.config.alpn[i].len, ownership.ZERO_FORBIDDEN),
+            ?owned[0], 17)) { ret false; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < value.config.trust.len) {
+        if (!tls_anchor_disjoint(ownership.bytes(
+            value.config.trust.anchors[i].der,
+            value.config.trust.anchors[i].der_len,
+            ownership.ZERO_FORBIDDEN), ?owned[0], 17)) { ret false; }
+        i = i + 1;
+    }
+    val identity: *tls_credentials.Identity = value.config.client_identity;
+    if (identity != nil) {
+        if (!tls_anchor_disjoint(identity_record(identity),
+                ?owned[0], 17) ||
+            !tls_anchor_disjoint(ownership.array(identity.chain.certificates::*u8,
+                identity.chain.len, $size_of(tls_cert.Certificate),
+                ownership.ZERO_FORBIDDEN), ?owned[0], 17) ||
+            !tls_anchor_disjoint(private_key_record(identity.private_key),
+                ?owned[0], 17)) { ret false; }
+        i = 0;
+        for (i < identity.chain.len) {
+            if (!tls_anchor_disjoint(ownership.bytes(
+                identity.chain.certificates[i].der,
+                identity.chain.certificates[i].der_len,
+                ownership.ZERO_FORBIDDEN), ?owned[0], 17)) { ret false; }
+            i = i + 1;
+        }
+    }
+    ret true;
+}
+
 fun callback_intact(adapter: *Adapter, before: *Adapter) bool {
     var intact: bool =
         adapter.config.source == before.config.source &&
@@ -353,6 +570,10 @@ fun callback_intact(adapter: *Adapter, before: *Adapter) bool {
         adapter.protocol.destroy == before.protocol.destroy &&
         adapter.protocol.initialized == before.protocol.initialized &&
         adapter.tls_client == before.tls_client &&
+        adapter.tls_entropy_context_size ==
+            before.tls_entropy_context_size &&
+        adapter.tls_entropy_secret_context_size ==
+            before.tls_entropy_secret_context_size &&
         adapter.tls_enabled == before.tls_enabled &&
         adapter.core_lease == before.core_lease &&
         adapter.initialized == before.initialized &&
@@ -846,7 +1067,9 @@ pub fun release_core(adapter: *Adapter, source: u64) bool {
 pub fun initialize_tls_client(adapter: *Adapter, config: Config, storage: Storage,
                               value: *tls_client_api.Client,
                               verification_time_unix: i64,
-                              deadline_ns: u64) bool {
+                              deadline_ns: u64,
+                              entropy_context_size: usize,
+                              entropy_secret_context_size: usize) bool {
     if (value == nil) { ret false; }
     val state_address: usize = (?value.state)::usize;
     val state_offset: usize = $offset_of(tls_client_api.Client, state);
@@ -864,10 +1087,14 @@ pub fun initialize_tls_client(adapter: *Adapter, config: Config, storage: Storag
         value.server_hello_seen) {
         ret false;
     }
-    if (!init_base(adapter, config, storage)) { ret false; }
+    if (!tls_client_context_valid(adapter, storage, value,
+        entropy_context_size, entropy_secret_context_size) ||
+        !init_base(adapter, config, storage)) { ret false; }
     adapter.tls_client = value;
     adapter.tls_verification_time_unix = verification_time_unix;
     adapter.tls_deadline_ns = deadline_ns;
+    adapter.tls_entropy_context_size = entropy_context_size;
+    adapter.tls_entropy_secret_context_size = entropy_secret_context_size;
     adapter.tls_enabled = true;
     ret true;
 }
