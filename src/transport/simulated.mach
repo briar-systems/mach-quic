@@ -268,7 +268,8 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     fixture.core.timer_generation = 1;
     if (!cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0})) { ret false; }
     val protocol: transport_api.Protocol = transport_api.Protocol{
-        context: (?fixture.core)::ptr, receive: core_receive, timeout: core_timeout,
+        context: (?fixture.core)::ptr, context_size: $size_of(Core),
+        receive: core_receive, timeout: core_timeout,
         generate: core_generate, complete_send: core_complete,
         begin_close: core_begin_close, close_ready: core_ready,
         finish_close: core_finish, timer: core_timer
