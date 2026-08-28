@@ -95,6 +95,7 @@ rec Fixture {
     supported_versions: [2]u32;
     engine: core.Core;
     secrets: core.Secrets;
+    init_result: core.InitResult;
 }
 
 fun provider_result(status: u8, error: u64) handshake.ProviderResult {
@@ -369,13 +370,17 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
         fixture.streams.storage.send_data = ?fixture.receive_header[0];
     }
     if (role == transport.CLIENT) {
-        ret core.init_client(?fixture.engine, ?fixture.secrets, config, storage,
+        fixture.init_result = core.init_client_result(?fixture.engine,
+            ?fixture.secrets, config, storage,
             secret_storage, ?fixture.adapter, ?fixture.cids, ?fixture.paths,
             ?fixture.streams, ?fixture.datagrams, now_ns);
+        ret fixture.init_result.ok;
     }
-    ret core.init_server(?fixture.engine, ?fixture.secrets, config, storage,
+    fixture.init_result = core.init_server_result(?fixture.engine,
+        ?fixture.secrets, config, storage,
         secret_storage, ?fixture.adapter, ?fixture.cids, ?fixture.paths,
         ?fixture.streams, ?fixture.datagrams, now_ns);
+    ret fixture.init_result.ok;
 }
 
 fun initialize(fixture: *Fixture, role: u8, validated: bool,
@@ -679,7 +684,9 @@ test "quic.connection.core: failed provider start rolls back every manager lease
         fixture.adapter.core_lease != 0 || fixture.cids.core_lease != 0 ||
         fixture.paths.core_lease != 0 || fixture.streams.core_lease != 0 ||
         fixture.datagrams.core_lease != 0 ||
-        fixture.path_values[0].transport_valid) { ret 1; }
+        fixture.path_values[0].transport_valid || fixture.init_result.ok ||
+        fixture.init_result.error != core.INTERNAL_ERROR ||
+        fixture.init_result.provider_error != 0x7711) { ret 1; }
     ret 0;
 }
 

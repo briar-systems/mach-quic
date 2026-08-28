@@ -206,6 +206,12 @@ pub rec Snapshot {
     destroyed: bool;
 }
 
+pub rec InitResult {
+    ok: bool;
+    error: u64;
+    provider_error: u64;
+}
+
 pub rec Core {
     config: Config;
     storage: Storage;
@@ -835,7 +841,8 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
                secret_storage: SecretStorage, handshake: *handshake_api.Adapter,
                cids: *cid_api.Manager,
                paths: *path_api.Manager, streams: *stream_api.Manager,
-               datagrams: *datagram_api.Queue, now_ns: u64) bool {
+               datagrams: *datagram_api.Queue, now_ns: u64,
+               init_result: *InitResult) bool {
     if (!storage_valid(core, secrets, ?config, ?storage,
         ?secret_storage)) { ret false; }
     if (!component_storage_valid(core, secrets, ?config, ?storage, ?secret_storage, handshake,
@@ -994,7 +1001,11 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         protection.destroy_initial(?candidate_secrets.initial_keys);
         ret false;
     }
-    if (handshake_api.start_scoped(handshake, config.source, ?start).status != handshake_api.STATUS_OK) {
+    val started: handshake_api.Result = handshake_api.start_scoped(handshake,
+        config.source, ?start);
+    if (started.status != handshake_api.STATUS_OK) {
+        init_result.error = INTERNAL_ERROR;
+        init_result.provider_error = started.provider_error;
         path_api.unconfigure_transport_scoped(paths, config.source, current_path.handle);
         datagram_api.release_core(datagrams, config.source);
         stream_api.release_core(streams, config.source);
@@ -1014,7 +1025,48 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     candidate.initialized = true;
     secrets[0] = candidate_secrets;
     core[0] = candidate;
+    init_result.ok = true;
     ret true;
+}
+
+pub fun init_client_result(core: *Core, secrets: *Secrets, config: Config,
+                           storage: Storage, secret_storage: SecretStorage,
+                           handshake: *handshake_api.Adapter,
+                           cids: *cid_api.Manager, paths: *path_api.Manager,
+                           streams: *stream_api.Manager,
+                           datagrams: *datagram_api.Queue,
+                           now_ns: u64) InitResult {
+    var init_result: InitResult;
+    if (config.role != transport_api.CLIENT) {
+        init_result.error = INTERNAL_ERROR;
+        ret init_result;
+    }
+    if (!initialize(core, secrets, config, storage, secret_storage, handshake,
+        cids, paths, streams, datagrams, now_ns, ?init_result) &&
+        init_result.error == NO_ERROR) {
+        init_result.error = INTERNAL_ERROR;
+    }
+    ret init_result;
+}
+
+pub fun init_server_result(core: *Core, secrets: *Secrets, config: Config,
+                           storage: Storage, secret_storage: SecretStorage,
+                           handshake: *handshake_api.Adapter,
+                           cids: *cid_api.Manager, paths: *path_api.Manager,
+                           streams: *stream_api.Manager,
+                           datagrams: *datagram_api.Queue,
+                           now_ns: u64) InitResult {
+    var init_result: InitResult;
+    if (config.role != transport_api.SERVER) {
+        init_result.error = INTERNAL_ERROR;
+        ret init_result;
+    }
+    if (!initialize(core, secrets, config, storage, secret_storage, handshake,
+        cids, paths, streams, datagrams, now_ns, ?init_result) &&
+        init_result.error == NO_ERROR) {
+        init_result.error = INTERNAL_ERROR;
+    }
+    ret init_result;
 }
 
 pub fun init_client(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
@@ -1022,9 +1074,8 @@ pub fun init_client(core: *Core, secrets: *Secrets, config: Config, storage: Sto
                     handshake: *handshake_api.Adapter, cids: *cid_api.Manager,
                     paths: *path_api.Manager, streams: *stream_api.Manager,
                     datagrams: *datagram_api.Queue, now_ns: u64) bool {
-    if (config.role != transport_api.CLIENT) { ret false; }
-    ret initialize(core, secrets, config, storage, secret_storage, handshake, cids, paths, streams,
-        datagrams, now_ns);
+    ret init_client_result(core, secrets, config, storage, secret_storage,
+        handshake, cids, paths, streams, datagrams, now_ns).ok;
 }
 
 pub fun init_server(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
@@ -1032,9 +1083,8 @@ pub fun init_server(core: *Core, secrets: *Secrets, config: Config, storage: Sto
                     handshake: *handshake_api.Adapter, cids: *cid_api.Manager,
                     paths: *path_api.Manager, streams: *stream_api.Manager,
                     datagrams: *datagram_api.Queue, now_ns: u64) bool {
-    if (config.role != transport_api.SERVER) { ret false; }
-    ret initialize(core, secrets, config, storage, secret_storage, handshake, cids, paths, streams,
-        datagrams, now_ns);
+    ret init_server_result(core, secrets, config, storage, secret_storage,
+        handshake, cids, paths, streams, datagrams, now_ns).ok;
 }
 
 fun install_secret(core: *Core, secrets: *Secrets,
