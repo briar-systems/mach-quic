@@ -673,9 +673,13 @@ pub fun init_tls_client(config: Config, storage: Storage,
                         verification_time_unix: i64,
                         deadline_ns: u64) Adapter {
     var adapter: Adapter;
+    val state: tls_client_api.Snapshot = tls_client_api.snapshot(value);
     if (value == nil || value.config == nil ||
         value.extra.kind != tls_client_api.QUIC_TRANSPORT_PARAMETERS ||
-        value.peer_extension != tls_client_api.QUIC_TRANSPORT_PARAMETERS) {
+        value.peer_extension != tls_client_api.QUIC_TRANSPORT_PARAMETERS ||
+        state.status != tls_client_api.MORE || state.output_pending ||
+        state.event_active || value.hello_len != 0 || value.retry_count != 0 ||
+        value.server_hello_seen) {
         ret adapter;
     }
     adapter = init_base(config, storage);
@@ -1215,6 +1219,8 @@ pub fun destroy(adapter: *Adapter) bool {
             adapter.protocol.secret_context);
     }
     if (!provider_destroyed) { ret false; }
+    adapter.tls_client = nil;
+    adapter.tls_enabled = false;
     memory.raw_zero(adapter.storage.receive_data, adapter.storage.receive_length);
     memory.raw_zero(adapter.storage.receive_present, adapter.storage.receive_length);
     memory.raw_zero(adapter.storage.send_data, adapter.storage.send_length);
