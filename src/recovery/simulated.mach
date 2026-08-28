@@ -1,0 +1,312 @@
+use quic.frame.frame;
+use quic.packet.packet;
+use quic.recovery.recovery;
+
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+fun ack_one(number: u64) frame.Frame {
+    var ack: frame.Frame;
+    ack.kind = frame.ACK;
+    ack.largest_acknowledged = number;
+    ret ack;
+}
+
+fun sent(number: u64, at_ns: u64, owner: u64) recovery.SentPacket {
+    var packet: recovery.SentPacket;
+    packet.number = number;
+    packet.sent_at_ns = at_ns;
+    packet.bytes = 1200;
+    packet.owner = owner;
+    packet.ack_eliciting = true;
+    packet.in_flight = true;
+    ret packet;
+}
+
+test "quic.recovery.simulated: reordering and duplicate ACKs preserve terminal ownership" {
+    var initial: [8]recovery.SentPacket;
+    var handshake: [8]recovery.SentPacket;
+    var application: [8]recovery.SentPacket;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 8},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 8},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 8},
+        recovery.default_config()
+    );
+    recovery.confirm_handshake(?state, 0);
+    var number: u64 = 0;
+    for (number < 4) {
+        if (!recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(number, number * 1000000, 100 + number)).ok) { ret 1; }
+        number = number + 1;
+    }
+    var events: [8]recovery.Event;
+    var ack: frame.Frame = ack_one(3);
+    val first: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 100000000, 3, ?events[0], 8);
+    if (!first.ok || first.acked_count != 1 || first.lost_count != 1 || first.event_count != 2) { ret 1; }
+    if (events[0].kind != recovery.EVENT_ACKED || events[0].owner != 103) { ret 1; }
+    if (events[1].kind != recovery.EVENT_LOST || events[1].owner != 100) { ret 1; }
+    if (state.spaces[2].len != 2 || state.bytes_in_flight != 2400) { ret 1; }
+
+    val duplicate: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 101000000, 3, ?events[0], 8);
+    if (!duplicate.ok || duplicate.event_count != 0 || state.spaces[2].len != 2) { ret 1; }
+    ack = ack_one(2);
+    val reordered: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 110000000, 3, ?events[0], 8);
+    if (!reordered.ok || reordered.acked_count != 1 || events[0].owner != 102 || state.spaces[2].len != 1) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: time threshold fires deterministically" {
+    var initial: [4]recovery.SentPacket;
+    var handshake: [4]recovery.SentPacket;
+    var application: [4]recovery.SentPacket;
+    var config: recovery.Config = recovery.default_config();
+    config.initial_rtt_ns = 100000000;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 4},
+        config
+    );
+    recovery.confirm_handshake(?state, 0);
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 0, 10));
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(1, 1000000, 11));
+    var events: [4]recovery.Event;
+    var ack: frame.Frame = ack_one(1);
+    val acknowledged: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 50000000, 0, ?events[0], 4);
+    if (!acknowledged.ok || acknowledged.lost_count != 0 || acknowledged.timer.kind != recovery.TIMER_LOSS) { ret 1; }
+    val deadline: u64 = acknowledged.timer.deadline_ns;
+    val timeout: recovery.TimeoutResult = recovery.on_timeout(?state, deadline, acknowledged.timer.generation, ?events[0], 4);
+    if (timeout.status != recovery.TIMEOUT_LOSS || timeout.event_count != 1 || events[0].owner != 10) { ret 1; }
+    if (state.spaces[2].len != 0 || state.bytes_in_flight != 0) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: timer generations close both ACK and timeout races" {
+    var initial: [4]recovery.SentPacket;
+    var handshake: [4]recovery.SentPacket;
+    var application: [4]recovery.SentPacket;
+    var config: recovery.Config = recovery.default_config();
+    config.initial_rtt_ns = 100000000;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 4},
+        config
+    );
+    recovery.confirm_handshake(?state, 0);
+    val sent_result: recovery.OperationResult = recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 0, 40));
+    val queued: recovery.Timer = sent_result.timer;
+    var events: [4]recovery.Event;
+    var ack: frame.Frame = ack_one(0);
+    if (!recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 50000000, 0, ?events[0], 4).ok) { ret 1; }
+    val stale: recovery.TimeoutResult = recovery.on_timeout(?state, queued.deadline_ns, queued.generation, ?events[0], 4);
+    if (stale.status != recovery.TIMEOUT_STALE || stale.event_count != 0) { ret 1; }
+
+    val next: recovery.OperationResult = recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(1, 100000000, 41));
+    val probe: recovery.TimeoutResult = recovery.on_timeout(?state, next.timer.deadline_ns, next.timer.generation, nil, 0);
+    if (probe.status != recovery.TIMEOUT_PROBE || probe.probe_count != 2 || probe.probe_owner != 41) { ret 1; }
+    if (state.spaces[2].len != 1 || state.pto_count != 1) { ret 1; }
+    ack = ack_one(1);
+    if (!recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, next.timer.deadline_ns, 0, ?events[0], 4).ok) { ret 1; }
+    if (state.pto_count != 0 || state.spaces[2].len != 0) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: packet spaces and key discard remain independent" {
+    var initial: [4]recovery.SentPacket;
+    var handshake: [4]recovery.SentPacket;
+    var application: [4]recovery.SentPacket;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 4},
+        recovery.default_config()
+    );
+    recovery.on_packet_sent(?state, packet.SPACE_INITIAL, sent(0, 1, 50));
+    recovery.on_packet_sent(?state, packet.SPACE_HANDSHAKE, sent(0, 2, 51));
+    recovery.confirm_handshake(?state, 2);
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 3, 52));
+    val old_timer: recovery.Timer = recovery.timer(?state);
+    var events: [4]recovery.Event;
+    val discarded: recovery.DiscardResult = recovery.discard_space(?state, packet.SPACE_INITIAL, 4, ?events[0], 4);
+    if (!discarded.ok || discarded.event_count != 1 || events[0].kind != recovery.EVENT_DISCARDED || events[0].owner != 50) { ret 1; }
+    if (state.spaces[0].active || state.spaces[1].len != 1 || state.spaces[2].len != 1 || state.bytes_in_flight != 2400) { ret 1; }
+    if (recovery.on_timeout(?state, old_timer.deadline_ns, old_timer.generation, ?events[0], 4).status != recovery.TIMEOUT_STALE) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: Retry transfers owners without reusing packet numbers" {
+    var initial: [3]recovery.SentPacket;
+    var handshake: [3]recovery.SentPacket;
+    var application: [3]recovery.SentPacket;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 3},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 3},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 3},
+        recovery.default_config()
+    );
+    recovery.on_packet_sent(?state, packet.SPACE_INITIAL, sent(0, 1, 60));
+    recovery.set_handshake_keys(?state, true, 1);
+    recovery.on_packet_sent(?state, packet.SPACE_HANDSHAKE, sent(0, 2, 61));
+    recovery.confirm_handshake(?state, 2);
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 3, 62));
+    recovery.update_rtt(?state, 10, 0, 3);
+    state.pto_count = 3;
+    val before: recovery.Timer = recovery.timer(?state);
+    var events: [3]recovery.Event;
+    val short: recovery.DiscardResult = recovery.on_retry(?state, 4, ?events[0], 2);
+    if (short.ok || short.error != recovery.ERROR_EVENT_CAPACITY || state.bytes_in_flight != 3600 ||
+        state.spaces[0].len != 1 || state.spaces[1].len != 1 || state.spaces[2].len != 1 ||
+        recovery.timer(?state).generation != before.generation) { ret 1; }
+    val retried: recovery.DiscardResult = recovery.on_retry(?state, 4, ?events[0], 3);
+    if (!retried.ok || retried.event_count != 3 || events[0].kind != recovery.EVENT_RETRY ||
+        events[0].owner != 60 || events[1].owner != 61 || events[2].owner != 62) { ret 1; }
+    if (!state.spaces[0].active || !state.spaces[1].active || !state.spaces[2].active ||
+        state.spaces[0].len != 0 || state.spaces[1].len != 0 || state.spaces[2].len != 0 ||
+        state.bytes_in_flight != 0 || state.pto_count != 0 || state.rtt.has_sample ||
+        state.handshake_confirmed || state.handshake_keys_available || state.peer_address_validated ||
+        retried.timer.kind != recovery.TIMER_PTO || retried.timer.space != packet.SPACE_INITIAL) { ret 1; }
+    if (recovery.on_packet_sent(?state, packet.SPACE_INITIAL, sent(0, 5, 63)).error != recovery.ERROR_PACKET_NUMBER) { ret 1; }
+    if (recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 6, 64)).error != recovery.ERROR_PACKET_NUMBER) { ret 1; }
+    if (!recovery.on_packet_sent(?state, packet.SPACE_INITIAL, sent(1, 7, 65)).ok) { ret 1; }
+    if (!recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(1, 8, 66)).ok) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: packet-threshold loss never crosses number spaces" {
+    var initial: [6]recovery.SentPacket;
+    var handshake: [2]recovery.SentPacket;
+    var application: [2]recovery.SentPacket;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 6},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 2},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 2},
+        recovery.default_config()
+    );
+    var number: u64 = 0;
+    for (number < 4) {
+        recovery.on_packet_sent(?state, packet.SPACE_INITIAL, sent(number, number + 1, 90 + number));
+        number = number + 1;
+    }
+    recovery.on_packet_sent(?state, packet.SPACE_HANDSHAKE, sent(0, 5, 100));
+    var events: [6]recovery.Event;
+    var ack: frame.Frame = ack_one(3);
+    val result: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_INITIAL, ?ack, 1000000, 0, ?events[0], 6);
+    if (!result.ok || result.acked_count != 1 || result.lost_count != 1 ||
+        state.spaces[0].len != 2 || state.spaces[1].len != 1 || state.bytes_in_flight != 3600) { ret 1; }
+    if (events[1].kind != recovery.EVENT_LOST || events[1].space != packet.SPACE_INITIAL || events[1].owner != 90) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: early, stale, and amplification timer transitions are deterministic" {
+    var initial: [3]recovery.SentPacket;
+    var handshake: [2]recovery.SentPacket;
+    var application: [2]recovery.SentPacket;
+    var config: recovery.Config = recovery.default_config();
+    config.initial_rtt_ns = 1000000;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 3},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 2},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 2},
+        config
+    );
+    val sent_result: recovery.OperationResult = recovery.on_packet_sent(?state, packet.SPACE_INITIAL, sent(0, 1, 0));
+    val first: recovery.Timer = sent_result.timer;
+    val early: recovery.TimeoutResult = recovery.on_timeout(?state, first.deadline_ns - 1, first.generation, nil, 0);
+    if (early.status != recovery.TIMEOUT_EARLY || early.timer.generation != first.generation) { ret 1; }
+    val blocked: recovery.OperationResult = recovery.set_amplification_blocked(?state, true, 2);
+    if (!blocked.ok || blocked.timer.armed) { ret 1; }
+    if (recovery.on_timeout(?state, first.deadline_ns, first.generation, nil, 0).status != recovery.TIMEOUT_STALE) { ret 1; }
+    val unblocked: recovery.OperationResult = recovery.set_amplification_blocked(?state, false, 3);
+    if (!unblocked.ok || !unblocked.timer.armed || unblocked.timer.kind != recovery.TIMER_PTO) { ret 1; }
+    val probe: recovery.TimeoutResult = recovery.on_timeout(?state, unblocked.timer.deadline_ns, unblocked.timer.generation, nil, 0);
+    if (probe.status != recovery.TIMEOUT_PROBE || !probe.has_probe_owner || probe.probe_owner != 0) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: malformed ACK and output exhaustion leave recovery unchanged" {
+    var initial: [2]recovery.SentPacket;
+    var handshake: [2]recovery.SentPacket;
+    var application: [4]recovery.SentPacket;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 2},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 2},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 4},
+        recovery.default_config()
+    );
+    recovery.confirm_handshake(?state, 0);
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 1, 110));
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(1, 2, 111));
+    val before: recovery.Timer = recovery.timer(?state);
+    var malformed: frame.Frame = ack_one(1);
+    malformed.first_ack_range = 2;
+    var events: [2]recovery.Event;
+    val rejected: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?malformed, 3, 0, ?events[0], 2);
+    if (rejected.ok || rejected.error != recovery.ERROR_ACK || state.spaces[2].len != 2 ||
+        state.bytes_in_flight != 2400 || recovery.timer(?state).generation != before.generation) { ret 1; }
+    var valid: frame.Frame = ack_one(1);
+    val exhausted: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?valid, 3, 0, nil, 0);
+    if (exhausted.ok || exhausted.error != recovery.ERROR_EVENT_CAPACITY || state.spaces[2].len != 2 ||
+        state.bytes_in_flight != 2400 || recovery.timer(?state).generation != before.generation) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: sustained loss establishes persistent congestion" {
+    var initial: [8]recovery.SentPacket;
+    var handshake: [8]recovery.SentPacket;
+    var application: [8]recovery.SentPacket;
+    var config: recovery.Config = recovery.default_config();
+    config.initial_rtt_ns = 100000000;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 8},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 8},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 8},
+        config
+    );
+    recovery.confirm_handshake(?state, 0);
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 0, 70));
+    var events: [8]recovery.Event;
+    var ack: frame.Frame = ack_one(0);
+    if (!recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 100000000, 0, ?events[0], 8).ok) { ret 1; }
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(1, 200000000, 71));
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(2, 1300000000, 72));
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(3, 1400000000, 73));
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(4, 1401000000, 74));
+    recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(5, 1402000000, 75));
+    ack = ack_one(5);
+    val result: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 1500000000, 0, ?events[0], 8);
+    if (!result.ok || result.lost_count < 2 || !result.persistent_congestion) { ret 1; }
+    var found_first: bool = false;
+    var found_second: bool = false;
+    var i: usize = 0;
+    for (i < result.event_count) {
+        if (events[i].kind == recovery.EVENT_LOST && events[i].owner == 71) { found_first = true; }
+        if (events[i].kind == recovery.EVENT_LOST && events[i].owner == 72) { found_second = true; }
+        i = i + 1;
+    }
+    if (!found_first || !found_second) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.simulated: arithmetic saturation cannot wrap timers or flight bytes" {
+    var initial: [2]recovery.SentPacket;
+    var handshake: [2]recovery.SentPacket;
+    var application: [2]recovery.SentPacket;
+    var state: recovery.Recovery = recovery.init_with_storage(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 2},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 2},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 2},
+        recovery.default_config()
+    );
+    recovery.confirm_handshake(?state, 0);
+    state.bytes_in_flight = 0 - 1::usize;
+    val rejected: recovery.OperationResult = recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 1, 80));
+    if (rejected.error != recovery.ERROR_OVERFLOW || state.spaces[2].len != 0 || state.bytes_in_flight != 0 - 1::usize) { ret 1; }
+    state.bytes_in_flight = 0;
+    val near_end: u64 = (0 - 1::u64) - 10;
+    val accepted: recovery.OperationResult = recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, near_end, 81));
+    if (!accepted.ok || accepted.timer.deadline_ns != 0 - 1::u64) { ret 1; }
+    ret 0;
+}
