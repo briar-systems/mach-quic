@@ -1,5 +1,5 @@
-use handshake: quic.connection.handshake;
-use protection: quic.crypto.protection;
+use quic.connection.handshake;
+use quic.crypto.protection;
 
 use std.crypto.ct;
 use std.types.bool.bool;
@@ -32,6 +32,7 @@ rec Provider {
     completed: usize;
     rejected: usize;
     retries: usize;
+    version_restarts: usize;
     closes: usize;
     started: bool;
     destroyed: bool;
@@ -82,14 +83,26 @@ fun ingest_provider(context: ptr, secret_context: *^u8, level: u8, offset: u64,
     ret provider_result(handshake.STATUS_OK, 0);
 }
 
-fun retry_provider(context: ptr, secret_context: *^u8, version: u32,
-                   now_ns: u64) handshake.ProviderResult {
+fun restart_provider(context: ptr, secret_context: *^u8, reason: u8,
+                     version: u32, now_ns: u64) handshake.ProviderResult {
     val provider: *Provider = context::*Provider;
     if (!provider.started || version == 0 || now_ns == 0 - 1::u64) {
         ret provider_result(handshake.STATUS_ERROR, 3);
     }
-    provider.retries = provider.retries + 1;
+    if (reason == handshake.RESTART_RETRY) {
+        provider.retries = provider.retries + 1;
+    } or (reason == handshake.RESTART_VERSION_NEGOTIATION) {
+        provider.version_restarts = provider.version_restarts + 1;
+    } or { ret provider_result(handshake.STATUS_ERROR, 3); }
     ret provider_result(handshake.STATUS_OK, 0);
+}
+
+fun poll_provider(context: ptr, secret_context: *^u8,
+                  now_ns: u64) handshake.ProviderResult {
+    if (now_ns == 0 - 1::u64) {
+        ret provider_result(handshake.STATUS_ERROR, 4);
+    }
+    ret provider_result(handshake.STATUS_EMPTY, 0);
 }
 
 fun next_provider_event(context: ptr, secret_context: *^u8,
@@ -154,7 +167,8 @@ fun make_fixture(fixture: *Fixture, source: u64) bool {
     val protocol: handshake.Protocol = handshake.Protocol{
         context: (?fixture.provider)::ptr, secret_context: ?fixture.secret[0],
         start: start_provider,
-        ingest: ingest_provider, retry: retry_provider,
+        ingest: ingest_provider, restart: restart_provider,
+        poll: poll_provider,
         next_event: next_provider_event, complete_event: complete_provider_event,
         close: close_provider, destroy: destroy_provider, initialized: true
     };
@@ -351,5 +365,37 @@ test "quic.connection.handshake: invalid provider events and rejection are termi
         event.token, false).error != handshake.ERROR_REJECTED ||
         rejected.provider.rejected != 1 || !handshake.destroy(?rejected.adapter)) { ret 6; }
     ct.zeroize(?secret[0], 32);
+    ret 0;
+}
+
+test "quic.connection.handshake: Version Negotiation replaces rather than retransmits crypto" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 406)) { ret 1; }
+    var old: [4]u8 = [4]u8{'o', 'l', 'd', '!'};
+    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 1,
+        kind: handshake.EVENT_CRYPTO, level: handshake.INITIAL, offset: 0,
+        data: handshake.View{data: ?old[0], length: 4}}) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 2; }
+    val sent: handshake.Prepared = handshake.prepare(?fixture.adapter,
+        handshake.INITIAL, 4);
+    if (sent.status != handshake.STATUS_OK ||
+        handshake.publish(?fixture.adapter, sent.token).status != handshake.STATUS_OK ||
+        handshake.on_terminal(?fixture.adapter, sent.token,
+            handshake.TERMINAL_LOST).status != handshake.STATUS_OK) { ret 3; }
+    if (handshake.on_version_negotiation(?fixture.adapter, 2, 20).status !=
+        handshake.STATUS_OK || fixture.provider.version_restarts != 1 ||
+        handshake.prepare(?fixture.adapter, handshake.INITIAL, 4).status !=
+            handshake.STATUS_EMPTY) { ret 4; }
+    var fresh: [4]u8 = [4]u8{'n', 'e', 'w', '!'};
+    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 2,
+        kind: handshake.EVENT_CRYPTO, level: handshake.INITIAL, offset: 0,
+        data: handshake.View{data: ?fresh[0], length: 4}}) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 5; }
+    val prepared: handshake.Prepared = handshake.prepare(?fixture.adapter,
+        handshake.INITIAL, 4);
+    if (prepared.status != handshake.STATUS_OK || prepared.data.length != 4 ||
+        prepared.data.data[0] != 'n' ||
+        handshake.cancel_prepared(?fixture.adapter, prepared.token).status !=
+            handshake.STATUS_OK || !handshake.destroy(?fixture.adapter)) { ret 6; }
     ret 0;
 }

@@ -65,6 +65,9 @@ pub val AUTHENTICATION_FAILED: u8 = 2;
 pub val TERMINAL_ACKED: u8 = 1;
 pub val TERMINAL_LOST: u8 = 2;
 
+pub val RESTART_RETRY: u8 = 1;
+pub val RESTART_VERSION_NEGOTIATION: u8 = 2;
+
 pub val ATTEMPT_FREE: u8 = 0;
 pub val ATTEMPT_PREPARED: u8 = 1;
 pub val ATTEMPT_PUBLISHED: u8 = 2;
@@ -104,7 +107,8 @@ pub rec ProviderEvent {
 
 pub def StartFun: fun(ptr, *^u8, *Start) ProviderResult;
 pub def IngestFun: fun(ptr, *^u8, Level, u64, *u8, usize, u64) ProviderResult;
-pub def RetryFun: fun(ptr, *^u8, u32, u64) ProviderResult;
+pub def RestartFun: fun(ptr, *^u8, u8, u32, u64) ProviderResult;
+pub def PollFun: fun(ptr, *^u8, u64) ProviderResult;
 pub def NextEventFun: fun(ptr, *^u8, *ProviderEvent) bool;
 pub def CompleteEventFun: fun(ptr, *^u8, u64, bool) bool;
 pub def CloseFun: fun(ptr, *^u8, u64, u64) ProviderResult;
@@ -115,7 +119,8 @@ pub rec Protocol {
     secret_context: *^u8;
     start: StartFun;
     ingest: IngestFun;
-    retry: RetryFun;
+    restart: RestartFun;
+    poll: PollFun;
     next_event: NextEventFun;
     complete_event: CompleteEventFun;
     close: CloseFun;
@@ -389,6 +394,7 @@ fun valid_secret_event(adapter: *Adapter, event: *ProviderEvent) bool {
             event.generation != 1) { ret false; }
     }
     if (event.level == HANDSHAKE && event.generation != 1) { ret false; }
+    if (event.level == APPLICATION && event.generation != 1) { ret false; }
     val index: usize = secret_index(event.level, event.direction);
     if (event.generation != adapter.secret_generation[index] + 1) { ret false; }
     if (event.level == APPLICATION &&
@@ -552,7 +558,8 @@ fun claim_attempt(adapter: *Adapter) usize {
     ret adapter.storage.attempt_capacity;
 }
 
-pub fun prepare(adapter: *Adapter, level: Level, maximum: usize) Prepared {
+fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
+                    probe: bool) Prepared {
     var result: Prepared;
     if (adapter == nil || !adapter.initialized || !adapter.started || adapter.closing ||
         !valid_level(level) || maximum == 0) {
@@ -564,18 +571,26 @@ pub fun prepare(adapter: *Adapter, level: Level, maximum: usize) Prepared {
     val base: usize = level_base(adapter.storage.send_stride, level);
     var begin: usize = 0;
     for (begin < adapter.levels[index].send_length::usize &&
-        (!adapter.storage.send_pending[base + begin] ||
+        ((!adapter.storage.send_pending[base + begin] &&
+        !(probe && !adapter.storage.send_acked[base + begin])) ||
         adapter.storage.send_acked[base + begin] ||
-        adapter.storage.send_inflight[base + begin] != 0)) { begin = begin + 1; }
+        (!probe && adapter.storage.send_inflight[base + begin] != 0) ||
+        adapter.storage.send_inflight[base + begin] == 0xffff)) {
+        begin = begin + 1;
+    }
     if (begin == adapter.levels[index].send_length::usize) {
         result.status = STATUS_EMPTY;
         ret result;
     }
     var end: usize = begin;
     for (end < adapter.levels[index].send_length::usize && end - begin < maximum &&
-        adapter.storage.send_pending[base + end] &&
+        (adapter.storage.send_pending[base + end] ||
+        (probe && !adapter.storage.send_acked[base + end])) &&
         !adapter.storage.send_acked[base + end] &&
-        adapter.storage.send_inflight[base + end] == 0) { end = end + 1; }
+        (probe || adapter.storage.send_inflight[base + end] == 0) &&
+        adapter.storage.send_inflight[base + end] != 0xffff) {
+        end = end + 1;
+    }
     val attempt_index: usize = claim_attempt(adapter);
     if (attempt_index == adapter.storage.attempt_capacity) {
         result.status = STATUS_BLOCKED;
@@ -602,6 +617,15 @@ pub fun prepare(adapter: *Adapter, level: Level, maximum: usize) Prepared {
     result.data = View{data: ?adapter.storage.send_data[base + begin],
         length: end - begin};
     ret result;
+}
+
+pub fun prepare(adapter: *Adapter, level: Level, maximum: usize) Prepared {
+    ret prepare_attempt(adapter, level, maximum, false);
+}
+
+pub fun prepare_probe(adapter: *Adapter, level: Level,
+                      maximum: usize) Prepared {
+    ret prepare_attempt(adapter, level, maximum, true);
 }
 
 fun attempt_for(adapter: *Adapter, token: AttemptToken) *Attempt {
@@ -693,16 +717,84 @@ fun reset_level(adapter: *Adapter, level: Level, reset_send: bool) {
     }
 }
 
-pub fun on_retry(adapter: *Adapter, version: u32, now_ns: u64) Result {
+fun clear_level(adapter: *Adapter, level: Level) {
+    val index: usize = level_index(level);
+    val receive_base: usize = level_base(adapter.storage.receive_stride, level);
+    val send_base: usize = level_base(adapter.storage.send_stride, level);
+    memory.raw_zero(?adapter.storage.receive_data[receive_base],
+        adapter.storage.receive_stride);
+    memory.raw_zero(?adapter.storage.receive_present[receive_base],
+        adapter.storage.receive_stride);
+    memory.raw_zero(?adapter.storage.send_data[send_base],
+        adapter.storage.send_stride);
+    memory.raw_zero(?adapter.storage.send_pending[send_base],
+        adapter.storage.send_stride);
+    memory.raw_zero(?adapter.storage.send_acked[send_base],
+        adapter.storage.send_stride);
+    memory.raw_zero(?adapter.storage.send_inflight[send_base],
+        adapter.storage.send_stride * 2);
+    var state: LevelState;
+    adapter.levels[index] = state;
+    var i: usize = 0;
+    for (i < adapter.storage.attempt_capacity) {
+        if (adapter.storage.attempts[i].state != ATTEMPT_FREE &&
+            adapter.storage.attempts[i].level == level) {
+            adapter.storage.attempts[i].state = ATTEMPT_FREE;
+            adapter.storage.attempts[i].generation =
+                next_generation(adapter.storage.attempts[i].generation);
+        }
+        i = i + 1;
+    }
+}
+
+pub fun restart(adapter: *Adapter, reason: u8, version: u32, now_ns: u64) Result {
     if (adapter == nil || !adapter.initialized || !adapter.started || adapter.closing ||
         adapter.role != CLIENT || adapter.handshake_complete || adapter.event_active ||
-        version == 0) { ret failed(ERROR_STATE); }
-    val provider: ProviderResult = adapter.protocol.retry(adapter.protocol.context,
-        adapter.protocol.secret_context, version, now_ns);
+        version == 0 || (reason != RESTART_RETRY &&
+        reason != RESTART_VERSION_NEGOTIATION)) { ret failed(ERROR_STATE); }
+    val provider: ProviderResult = adapter.protocol.restart(adapter.protocol.context,
+        adapter.protocol.secret_context, reason, version, now_ns);
     if (provider.status != STATUS_OK) { ret provider_failed(provider.error); }
-    reset_level(adapter, INITIAL, true);
+    if (reason == RESTART_RETRY) {
+        reset_level(adapter, INITIAL, true);
+    } or {
+        var level: Level = INITIAL;
+        for (level <= APPLICATION) {
+            clear_level(adapter, level);
+            level = level + 1;
+        }
+        var secret: usize = 0;
+        for (secret < 8) {
+            adapter.secret_generation[secret] = 0;
+            secret = secret + 1;
+        }
+        adapter.peer_parameters_received = false;
+        adapter.early_data_received = false;
+        adapter.authentication_received = false;
+        adapter.handshake_complete = false;
+        adapter.terminal_alert = 0;
+    }
     adapter.version = version;
     ret Result{status: STATUS_OK};
+}
+
+pub fun on_retry(adapter: *Adapter, version: u32, now_ns: u64) Result {
+    ret restart(adapter, RESTART_RETRY, version, now_ns);
+}
+
+pub fun on_version_negotiation(adapter: *Adapter, version: u32,
+                               now_ns: u64) Result {
+    ret restart(adapter, RESTART_VERSION_NEGOTIATION, version, now_ns);
+}
+
+pub fun poll(adapter: *Adapter, now_ns: u64) Result {
+    if (adapter == nil || !adapter.initialized || !adapter.started ||
+        adapter.closing || adapter.event_active) { ret failed(ERROR_STATE); }
+    val provider: ProviderResult = adapter.protocol.poll(adapter.protocol.context,
+        adapter.protocol.secret_context, now_ns);
+    if (provider.status != STATUS_OK && provider.status != STATUS_EMPTY &&
+        provider.status != STATUS_MORE) { ret provider_failed(provider.error); }
+    ret Result{status: provider.status, provider_error: provider.error};
 }
 
 pub fun close(adapter: *Adapter, alert: u64, now_ns: u64) Result {
