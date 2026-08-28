@@ -223,11 +223,13 @@ pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
         result.error = ERROR_STATE;
         ret result;
     }
-    if (!valid_purpose(purpose) || original_destination.len == 0 ||
+    if (!valid_purpose(purpose) ||
         original_destination.len::usize > packet.MAX_CONNECTION_ID ||
         retry_source.len::usize > packet.MAX_CONNECTION_ID ||
-        (purpose == PURPOSE_RETRY && retry_source.len == 0) ||
-        (purpose == PURPOSE_ADDRESS && retry_source.len != 0) ||
+        (purpose == PURPOSE_RETRY &&
+            (original_destination.len == 0 || retry_source.len == 0)) ||
+        (purpose == PURPOSE_ADDRESS &&
+            (original_destination.len != 0 || retry_source.len != 0)) ||
         issued_at_ns == 0 || nonce == 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_FORMAT;
@@ -332,10 +334,10 @@ pub fun open(manager: *Manager, input: *u8, length: usize,
     }
     if (input == nil || length != TOKEN_SIZE || input[0] != 'M' || input[1] != 'Q' ||
         input[2] != 'T' || input[3] != '1' || !valid_purpose(input[4]) || input[29] > 1 ||
-        input[52] == 0 || input[52]::usize > packet.MAX_CONNECTION_ID ||
+        input[52]::usize > packet.MAX_CONNECTION_ID ||
         input[73]::usize > packet.MAX_CONNECTION_ID ||
-        (input[4] == PURPOSE_RETRY && input[73] == 0) ||
-        (input[4] == PURPOSE_ADDRESS && input[73] != 0)) {
+        (input[4] == PURPOSE_RETRY && (input[52] == 0 || input[73] == 0)) ||
+        (input[4] == PURPOSE_ADDRESS && (input[52] != 0 || input[73] != 0))) {
         result.status = STATUS_ERROR;
         result.error = ERROR_FORMAT;
         ret result;
@@ -535,8 +537,9 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
         open(?manager, ?first[0], TOKEN_SIZE, peer, 21).status != STATUS_OK) { ret 3; }
     val old: Result = open(?manager, ?first[0], TOKEN_SIZE, peer, 21);
     if (old.error != ERROR_REPLAY) { ret 4; }
+    var no_destination: packet.ConnectionId;
     var no_retry_source: packet.ConnectionId;
-    if (seal(?manager, PURPOSE_ADDRESS, peer, test_id(2), no_retry_source, 30, 2,
+    if (seal(?manager, PURPOSE_ADDRESS, peer, no_destination, no_retry_source, 30, 2,
         ?second[0], TOKEN_SIZE).status != STATUS_OK ||
         open(?manager, ?second[0], TOKEN_SIZE, peer, 1001).status != STATUS_OK ||
         open(?manager, ?second[0], TOKEN_SIZE, peer, 1031).error != ERROR_EXPIRED) { ret 5; }

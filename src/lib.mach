@@ -21,6 +21,7 @@ fwd quic.connection.cid;
 fwd quic.connection.token;
 fwd quic.connection.handshake;
 fwd quic.connection.handshake_simulated;
+fwd quic.connection.listener;
 fwd quic.transport;
 fwd quic.transport.simulated;
 
