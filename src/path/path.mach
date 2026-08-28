@@ -147,6 +147,7 @@ pub rec SendReservation {
     bytes: u64;
     mtu_generation: u64;
     mtu_probe: bool;
+    non_probing: bool;
     valid: bool;
 }
 
@@ -292,6 +293,7 @@ pub rec TimeoutResult {
     reverted: bool;
     mtu_validation_failed: bool;
     connection_lost: bool;
+    rotate_connection_id: bool;
     reset_congestion: bool;
     reset_rtt: bool;
     reset_ecn: bool;
@@ -659,11 +661,14 @@ fun activate(manager: *Manager, index: usize, migration: u8) Observation {
         manager.storage.paths[previous_index].generation == manager.selected_generation) {
         result.previous = handle_at(manager, previous_index);
         manager.storage.paths[previous_index].selected = false;
-        if (manager.storage.paths[previous_index].address_validated &&
-            !manager.storage.paths[index].address_validated) {
-            manager.fallback_index = previous_index;
-            manager.fallback_generation = manager.storage.paths[previous_index].generation;
-            result.validate_previous = true;
+        if (manager.storage.paths[previous_index].address_validated) {
+            if (!manager.storage.paths[index].address_validated) {
+                manager.fallback_index = previous_index;
+                manager.fallback_generation = manager.storage.paths[previous_index].generation;
+            }
+            if (migration == MIGRATION_PEER || migration == MIGRATION_REBINDING) {
+                result.validate_previous = true;
+            }
         }
     }
     manager.storage.paths[index].selected = true;
@@ -692,7 +697,8 @@ pub fun confirm_handshake(manager: *Manager) OperationResult {
 }
 
 pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes: u64,
-                non_probing: bool, authenticated: bool, fresh: bool, now_ns: u64) Observation {
+                non_probing: bool, authenticated: bool, fresh: bool,
+                connection_id_available: bool, now_ns: u64) Observation {
     var result: Observation;
     if (manager == nil || !manager.valid || manager.closing) {
         result.status = STATUS_ERROR;
@@ -789,6 +795,12 @@ pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes
         result.needs_validation = true;
         ret result;
     }
+    if (!rebinding && !connection_id_available) {
+        result.status = STATUS_BLOCKED;
+        result.needs_validation = true;
+        result.rotate_connection_id = true;
+        ret result;
+    }
     manager.largest_migration_packet = packet_number;
     manager.has_largest_migration_packet = true;
     var kind: u8 = MIGRATION_PEER;
@@ -832,7 +844,8 @@ pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult
     ret create_path(manager, endpoint, true, preferred, selected_port_rebinding(manager, endpoint));
 }
 
-pub fun migrate(manager: *Manager, value: Handle, preferred: bool) Observation {
+pub fun migrate(manager: *Manager, value: Handle, preferred: bool,
+                connection_id_available: bool) Observation {
     var result: Observation;
     if (!handle_valid(manager, value) || manager.closing) {
         result.status = STATUS_ERROR;
@@ -857,6 +870,12 @@ pub fun migrate(manager: *Manager, value: Handle, preferred: bool) Observation {
     }
     if (!manager.storage.paths[value.index].address_validated) {
         result.status = STATUS_BLOCKED;
+        ret result;
+    }
+    if (!manager.storage.paths[value.index].port_rebinding && !connection_id_available) {
+        result.status = STATUS_BLOCKED;
+        result.handle = value;
+        result.rotate_connection_id = true;
         ret result;
     }
     var kind: u8 = MIGRATION_ACTIVE;
@@ -1339,6 +1358,10 @@ fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
         result.status = STATUS_BLOCKED;
         ret result;
     }
+    if (non_probing && !path.selected) {
+        result.status = STATUS_BLOCKED;
+        ret result;
+    }
     if (bytes > maximum) {
         result.status = STATUS_ERROR;
         result.error = ERROR_MTU;
@@ -1370,6 +1393,7 @@ fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
     reservation.bytes = bytes;
     reservation.mtu_generation = mtu_generation;
     reservation.mtu_probe = mtu_probe;
+    reservation.non_probing = non_probing;
     reservation.valid = true;
     manager.storage.sends[index] = reservation;
     path.reserved_bytes = reserved;
@@ -1401,7 +1425,9 @@ pub fun reserve_mtu_send(manager: *Manager, value: Handle, bytes: u64,
     if (!handle_valid(manager, value) || !mtu_token_valid(manager, token) ||
         token.path_index != value.index || token.path_generation != value.generation ||
         !manager.storage.paths[value.index].mtu_probe_prepared ||
-        manager.storage.paths[value.index].mtu_probe_active || bytes != token.size::u64) {
+        manager.storage.paths[value.index].mtu_probe_active ||
+        manager.storage.paths[value.index].mtu_datagram_generation == token.generation ||
+        mtu_send_reserved(manager, token) || bytes != token.size::u64) {
         result.status = STATUS_ERROR;
         result.error = ERROR_TOKEN;
         ret result;
@@ -1456,7 +1482,8 @@ pub fun publish_send(manager: *Manager, token: SendToken) OperationResult {
     }
     val path: *Path = ?manager.storage.paths[token.path_index];
     if (path.reserved_bytes < token.bytes) { ret operation_error(ERROR_STATE); }
-    if (manager.closing || path.state == PATH_FAILED) {
+    if (manager.closing || path.state == PATH_FAILED ||
+        (manager.storage.sends[token.index].non_probing && !path.selected)) {
         path.reserved_bytes = path.reserved_bytes - token.bytes;
         clear_send(manager, token.index);
         var stale: OperationResult;
@@ -1511,6 +1538,7 @@ fun timeout_path(manager: *Manager, index: usize) TimeoutResult {
     result.reset_congestion = true;
     result.reset_rtt = true;
     result.reset_ecn = true;
+    result.rotate_connection_id = true;
     ret result;
 }
 
@@ -1559,7 +1587,8 @@ pub fun prepare_mtu_probe(manager: *Manager, value: Handle) MtuPrepared {
         ret result;
     }
     val path: *Path = ?manager.storage.paths[value.index];
-    if (path.state != PATH_VALIDATED || !path.address_validated || !path.mtu_validated) {
+    if (!path.selected || path.state != PATH_VALIDATED ||
+        !path.address_validated || !path.mtu_validated) {
         result.status = STATUS_BLOCKED;
         ret result;
     }

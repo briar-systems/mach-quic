@@ -151,7 +151,9 @@ requires handshake confirmation, and selects only a validated candidate. A path
 change reports whether the connection must rotate its destination connection ID,
 reset ECN validation, reset congestion and RTT state, and validate the previous
 path. Port-only rebinding can explicitly retain congestion and RTT state. Other
-changes require fresh state.
+changes require fresh state. The driver preflights an unused destination
+connection ID through the migration call. A migration that needs rotation remains
+blocked and does not change selection until one is available.
 
 Challenge data is supplied by the connection's cryptographic random provider and
 must be unpredictable. Outstanding values are unique. Queue, prepare, cancel, and
@@ -176,8 +178,10 @@ Server amplification accounting is independent per unvalidated path. A send firs
 reserves its fully encoded datagram size. Concurrent reservations cannot exceed
 three times authenticated bytes received. Publication charges the path, while
 cancellation returns the reservation. A failed path or connection close makes a
-prepared publication stale and returns its reserved bytes. The driver calls frame
-publication only after its containing datagram publication succeeds.
+prepared publication stale and returns its reserved bytes. A non-probing
+reservation likewise becomes stale if migration selects another path before the
+datagram publishes. Probing work remains usable on a non-selected path. The driver
+calls frame publication only after its containing datagram publication succeeds.
 
 Congestion, pacing, ECN validation, and PMTU state belong to the path handle, while
 QUIC packet-number spaces and recovery history remain connection-wide. The driver

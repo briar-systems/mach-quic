@@ -60,13 +60,13 @@ test "quic.path.simulated: unauthenticated, duplicate, and pre-handshake peer ch
     val original: path.Endpoint = endpoint(1, 4433, 1, 55000);
     val changed: path.Endpoint = endpoint(1, 4433, 1, 55001);
     var manager: path.Manager = path.init(config(101, path.ROLE_SERVER, true), storage, original);
-    if (path.observe(?manager, changed, 1, 100, true, false, true, 1).status != path.STATUS_DROPPED ||
-        path.observe(?manager, changed, 1, 100, true, true, false, 1).status != path.STATUS_DROPPED ||
-        path.observe(?manager, changed, 1, 100, true, true, true, 1).status != path.STATUS_DROPPED ||
+    if (path.observe(?manager, changed, 1, 100, true, false, true, true, 1).status != path.STATUS_DROPPED ||
+        path.observe(?manager, changed, 1, 100, true, true, false, true, 1).status != path.STATUS_DROPPED ||
+        path.observe(?manager, changed, 1, 100, true, true, true, true, 1).status != path.STATUS_DROPPED ||
         path.find(?manager, changed).status != path.STATUS_EMPTY || paths[0].received_bytes != 0) { ret 1; }
     if (path.confirm_handshake(?manager).status != path.STATUS_OK) { ret 1; }
-    if (path.observe(?manager, original, 1, 100, true, true, true, 2).status != path.STATUS_OK ||
-        path.observe(?manager, original, 1, 100, true, true, false, 3).status != path.STATUS_DROPPED ||
+    if (path.observe(?manager, original, 1, 100, true, true, true, true, 2).status != path.STATUS_OK ||
+        path.observe(?manager, original, 1, 100, true, true, false, true, 3).status != path.STATUS_DROPPED ||
         paths[0].received_bytes != 100) { ret 1; }
     ret 0;
 }
@@ -84,7 +84,8 @@ test "quic.path.simulated: NAT rebinding selects, preserves policy state, and en
     val rebound: path.Endpoint = endpoint(1, 4433, 1, 55001);
     var manager: path.Manager = path.init(config(102, path.ROLE_SERVER, true), storage, original);
     path.confirm_handshake(?manager);
-    val moved: path.Observation = path.observe(?manager, rebound, 10, 400, true, true, true, 10);
+    val moved: path.Observation = path.observe(?manager, rebound, 10, 400,
+        true, true, true, true, 10);
     if (moved.status != path.STATUS_OK || !moved.created || !moved.selected ||
         moved.migration != path.MIGRATION_REBINDING || !moved.needs_validation ||
         moved.reset_congestion || moved.reset_rtt || !moved.reset_ecn ||
@@ -132,7 +133,8 @@ test "quic.path.simulated: disabled migration still permits rebinding and prefer
     var server: path.Manager = path.init(server_config, storage, original);
     path.confirm_handshake(?server);
     val changed_ip: path.Endpoint = endpoint(1, 4433, 2, 55000);
-    val rejected: path.Observation = path.observe(?server, changed_ip, 1, 400, true, true, true, 1);
+    val rejected: path.Observation = path.observe(?server, changed_ip, 1, 400,
+        true, true, true, true, 1);
     if (rejected.status != path.STATUS_DROPPED || !rejected.created || !rejected.needs_validation ||
         path.selected(?server).handle.index != 0) { ret 1; }
 
@@ -159,7 +161,10 @@ test "quic.path.simulated: disabled migration still permits rebinding and prefer
     val prepared: path.PreparedChallenge = path.prepare_challenge(?client, preferred.handle);
     path.publish_challenge(?client, prepared.token, 1);
     if (!path.receive_response(?client, data, 2).ready_to_migrate) { ret 1; }
-    val migrated: path.Observation = path.migrate(?client, preferred.handle, true);
+    val no_connection_id: path.Observation = path.migrate(?client, preferred.handle, true, false);
+    if (no_connection_id.status != path.STATUS_BLOCKED || !no_connection_id.rotate_connection_id ||
+        path.selected(?client).handle.index != 0) { ret 1; }
+    val migrated: path.Observation = path.migrate(?client, preferred.handle, true, true);
     if (!migrated.selected || migrated.migration != path.MIGRATION_PREFERRED ||
         !migrated.reset_congestion || !migrated.reset_rtt || !migrated.reset_ecn ||
         !migrated.rotate_connection_id || path.release(?client, migrated.previous).status != path.STATUS_OK) {
@@ -181,13 +186,27 @@ test "quic.path.simulated: packet number ordering prevents migration rollback" {
     val migrated_endpoint: path.Endpoint = endpoint(1, 4433, 2, 55000);
     var manager: path.Manager = path.init(config(105, path.ROLE_SERVER, true), storage, original);
     path.confirm_handshake(?manager);
-    path.observe(?manager, original, 100, 100, true, true, true, 1);
-    val migrated: path.Observation = path.observe(?manager, migrated_endpoint, 101, 100,
-        true, true, true, 2);
+    path.observe(?manager, original, 100, 100, true, true, true, true, 1);
+    val old_handle: path.Handle = path.selected(?manager).handle;
+    val queued_old: path.SendResult = path.reserve_send(?manager, old_handle, 100, true);
+    val no_connection_id: path.Observation = path.observe(?manager, migrated_endpoint, 101, 100,
+        true, true, true, false, 2);
+    if (no_connection_id.status != path.STATUS_BLOCKED || !no_connection_id.created ||
+        !no_connection_id.rotate_connection_id || no_connection_id.selected) { ret 1; }
+    val migrated: path.Observation = path.observe(?manager, migrated_endpoint, 102, 100,
+        true, true, true, true, 3);
     if (!migrated.selected || migrated.migration != path.MIGRATION_PEER) { ret 1; }
-    val reordered: path.Observation = path.observe(?manager, original, 99, 100, true, true, true, 3);
+    val stale_send: path.OperationResult = path.publish_send(?manager, queued_old.token);
+    if (stale_send.status != path.STATUS_STALE ||
+        path.snapshot(?manager, old_handle).reserved_bytes != 0 ||
+        path.snapshot(?manager, old_handle).sent_bytes != 0) {
+        ret 1;
+    }
+    val reordered: path.Observation = path.observe(?manager, original, 99, 100,
+        true, true, true, true, 4);
     if (reordered.selected || path.selected(?manager).handle.index != migrated.handle.index) { ret 1; }
-    val returned: path.Observation = path.observe(?manager, original, 102, 100, true, true, true, 4);
+    val returned: path.Observation = path.observe(?manager, original, 103, 100,
+        true, true, true, true, 5);
     if (!returned.selected || returned.handle.index != 0 ||
         path.selected(?manager).handle.index != 0 || !returned.reset_congestion || !returned.reset_rtt) {
         ret 1;
@@ -251,13 +270,13 @@ test "quic.path.simulated: PATH_RESPONSE queuing is exact and amplification awar
     if (path.queue_response(?manager, handle, data).error != path.ERROR_CAPACITY) { ret 1; }
     if (path.prepare_response(?manager, handle).status != path.STATUS_BLOCKED) { ret 1; }
     path.confirm_handshake(?manager);
-    path.observe(?manager, initial, 1, 4, false, true, true, 1);
+    path.observe(?manager, initial, 1, 4, false, true, true, true, 1);
     val first: path.PreparedResponse = path.prepare_response(?manager, handle);
     if (first.status != path.STATUS_OK || first.minimum_datagram_size != 0 ||
         first.maximum_datagram_size != 12 || path.publish_response(?manager, first.token).status != path.STATUS_OK) {
         ret 1;
     }
-    path.observe(?manager, initial, 2, 396, false, true, true, 2);
+    path.observe(?manager, initial, 2, 396, false, true, true, true, 2);
     val second: path.PreparedResponse = path.prepare_response(?manager, handle);
     if (second.status != path.STATUS_OK || second.minimum_datagram_size != 1200 ||
         second.maximum_datagram_size != 1200) { ret 1; }
@@ -279,7 +298,8 @@ test "quic.path.simulated: validation timeout reverts and preserves prepared-tok
     val alternate: path.Endpoint = endpoint(1, 4433, 2, 55000);
     var manager: path.Manager = path.init(config(108, path.ROLE_SERVER, true), storage, original);
     path.confirm_handshake(?manager);
-    val moved: path.Observation = path.observe(?manager, alternate, 10, 400, true, true, true, 0);
+    val moved: path.Observation = path.observe(?manager, alternate, 10, 400,
+        true, true, true, true, 0);
     val sent_data: [8]u8 = challenge(10);
     val prepared_data: [8]u8 = challenge(30);
     path.queue_challenge(?manager, moved.handle, sent_data, 100, 80, true, path.VALIDATION_PATH);
@@ -290,13 +310,13 @@ test "quic.path.simulated: validation timeout reverts and preserves prepared-tok
     val timed_out: path.TimeoutResult = path.on_timeout(?manager, 301);
     if (!timed_out.reverted || timed_out.migration != path.MIGRATION_REVERTED ||
         timed_out.selected.index != 0 || !timed_out.reset_congestion || !timed_out.reset_rtt ||
-        !timed_out.reset_ecn || timed_out.connection_lost ||
+        !timed_out.reset_ecn || !timed_out.rotate_connection_id || timed_out.connection_lost ||
         path.receive_response(?manager, sent_data, 302).status != path.STATUS_DROPPED ||
         path.snapshot(?manager, moved.handle).state != path.PATH_FAILED) { ret 1; }
     if (path.cancel_challenge(?manager, prepared.token).status != path.STATUS_STALE ||
         path.release(?manager, moved.handle).status != path.STATUS_OK) { ret 1; }
     val reused: path.Observation = path.observe(?manager, endpoint(1, 4433, 3, 55000), 11, 100,
-        false, true, true, 303);
+        false, true, true, true, 303);
     if (!reused.created || reused.handle.index != moved.handle.index ||
         reused.handle.generation == moved.handle.generation ||
         path.snapshot(?manager, moved.handle).status != path.STATUS_ERROR) { ret 1; }
@@ -341,7 +361,7 @@ test "quic.path.simulated: send reservations cannot overspend or alias a reused 
     var manager: path.Manager = path.init(config(110, path.ROLE_SERVER, false), storage, initial);
     path.confirm_handshake(?manager);
     val handle: path.Handle = path.selected(?manager).handle;
-    path.observe(?manager, initial, 1, 800, false, true, true, 1);
+    path.observe(?manager, initial, 1, 800, false, true, true, true, 1);
     val cancelled: path.SendResult = path.reserve_send(?manager, handle, 1200, true);
     if (path.cancel_send(?manager, cancelled.token).status != path.STATUS_OK) { ret 1; }
     val published: path.SendResult = path.reserve_send(?manager, handle, 1200, true);
@@ -383,6 +403,7 @@ test "quic.path.simulated: DPLPMTUD retries, black-hole fallback, and PTB hints 
     probe = path.prepare_mtu_probe(?manager, handle);
     val first_datagram: path.SendResult = path.reserve_mtu_send(?manager, handle, 1400, true, probe.token);
     if (first_datagram.status != path.STATUS_OK ||
+        path.reserve_mtu_send(?manager, handle, 1400, true, probe.token).error != path.ERROR_TOKEN ||
         path.cancel_mtu_probe(?manager, probe.token).status != path.STATUS_BLOCKED ||
         path.publish_send(?manager, first_datagram.token).status != path.STATUS_OK ||
         path.cancel_mtu_probe(?manager, probe.token).error != path.ERROR_STATE ||
@@ -461,11 +482,11 @@ test "quic.path.simulated: multi-path validation faults revert to the last valid
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
     var manager: path.Manager = path.init(config(113, path.ROLE_SERVER, true), storage, initial);
     path.confirm_handshake(?manager);
-    path.observe(?manager, initial, 10, 100, true, true, true, 0);
+    path.observe(?manager, initial, 10, 100, true, true, true, true, 0);
     val first: path.Observation = path.observe(?manager, endpoint(1, 4433, 2, 55000), 11, 100,
-        true, true, true, 1);
+        true, true, true, true, 1);
     val second: path.Observation = path.observe(?manager, endpoint(1, 4433, 3, 55000), 12, 100,
-        true, true, true, 2);
+        true, true, true, true, 2);
     if (!first.selected || !second.selected || first.handle.index == second.handle.index) { ret 1; }
     val data: [8]u8 = challenge(80);
     path.queue_challenge(?manager, second.handle, data, 100, 100, false, path.VALIDATION_PATH);
@@ -529,7 +550,7 @@ test "quic.path.simulated: probing paths cannot carry non-probing server traffic
     var manager: path.Manager = path.init(config(115, path.ROLE_SERVER, true), storage, initial);
     path.confirm_handshake(?manager);
     val probing: path.Observation = path.observe(?manager, candidate, 1, 400,
-        false, true, true, 10);
+        false, true, true, true, 10);
     if (!probing.created || probing.selected || probing.status != path.STATUS_OK ||
         path.reserve_send(?manager, probing.handle, 100, true).status != path.STATUS_BLOCKED) {
         ret 1;
@@ -543,14 +564,15 @@ test "quic.path.simulated: probing paths cannot carry non-probing server traffic
     val probing_response: path.PreparedResponse = path.prepare_response(?manager, probing.handle);
     if (probing_response.status != path.STATUS_OK || probing_response.require_non_probing ||
         path.cancel_response(?manager, probing_response.token).status != path.STATUS_OK) { ret 1; }
-    val moved: path.Observation = path.observe(?manager, candidate, 2, 400, true, true, true, 11);
+    val moved: path.Observation = path.observe(?manager, candidate, 2, 400,
+        true, true, true, true, 11);
     if (!moved.selected || moved.handle.index != probing.handle.index) { ret 1; }
     path.queue_response(?manager, moved.handle, challenge(110));
     val active_response: path.PreparedResponse = path.prepare_response(?manager, moved.handle);
     if (!active_response.require_non_probing ||
         path.cancel_response(?manager, active_response.token).status != path.STATUS_OK) { ret 1; }
     val received_before: u64 = path.snapshot(?manager, moved.handle).received_bytes;
-    if (path.observe(?manager, candidate, 3, 1, false, true, true, 10).error != path.ERROR_TIME ||
+    if (path.observe(?manager, candidate, 3, 1, false, true, true, true, 10).error != path.ERROR_TIME ||
         path.snapshot(?manager, moved.handle).received_bytes != received_before) { ret 1; }
     ret 0;
 }
@@ -568,8 +590,9 @@ test "quic.path.simulated: failed prior-path revalidation defeats forwarding att
     val candidate: path.Endpoint = endpoint(1, 4433, 2, 55000);
     var manager: path.Manager = path.init(config(116, path.ROLE_SERVER, true), storage, initial);
     path.confirm_handshake(?manager);
-    path.observe(?manager, initial, 10, 100, true, true, true, 1);
-    val moved: path.Observation = path.observe(?manager, candidate, 11, 400, true, true, true, 2);
+    path.observe(?manager, initial, 10, 100, true, true, true, true, 1);
+    val moved: path.Observation = path.observe(?manager, candidate, 11, 400,
+        true, true, true, true, 2);
     val old: path.Handle = moved.previous;
     path.queue_challenge(?manager, old, challenge(1), 100, 100, true, path.VALIDATION_PATH);
     val old_challenge: path.PreparedChallenge = path.prepare_challenge(?manager, old);
@@ -581,7 +604,7 @@ test "quic.path.simulated: failed prior-path revalidation defeats forwarding att
     val prior_failed: path.TimeoutResult = path.on_timeout(?manager, 310);
     if (prior_failed.failed.index != old.index || prior_failed.reverted || prior_failed.connection_lost ||
         path.selected(?manager).handle.index != moved.handle.index ||
-        path.observe(?manager, initial, 12, 100, true, true, true, 311).status != path.STATUS_BLOCKED) {
+        path.observe(?manager, initial, 12, 100, true, true, true, true, 311).status != path.STATUS_BLOCKED) {
         ret 1;
     }
     val candidate_failed: path.TimeoutResult = path.on_timeout(?manager, 310);
@@ -590,7 +613,8 @@ test "quic.path.simulated: failed prior-path revalidation defeats forwarding att
         path.cancel_challenge(?manager, new_challenge.token).status != path.STATUS_STALE) { ret 1; }
     val restarted: path.PathResult = path.restart(?manager, old);
     if (restarted.status != path.STATUS_OK || restarted.handle.generation == old.generation) { ret 1; }
-    val recovered: path.Observation = path.observe(?manager, initial, 12, 100, true, true, true, 312);
+    val recovered: path.Observation = path.observe(?manager, initial, 12, 100,
+        true, true, true, true, 312);
     if (!recovered.selected || recovered.handle.generation != restarted.handle.generation ||
         !recovered.needs_validation) { ret 1; }
     ret 0;
