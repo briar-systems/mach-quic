@@ -14,6 +14,7 @@ fwd quic.congestion.controller;
 fwd quic.congestion.pacer;
 fwd quic.stream.stream;
 fwd quic.stream.datagram;
+fwd quic.path.path;
 fwd quic.transport;
 
 test "quic: version is present" {

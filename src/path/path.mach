@@ -1,0 +1,1952 @@
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+pub val ROLE_CLIENT: u8 = 1;
+pub val ROLE_SERVER: u8 = 2;
+
+pub val ADDRESS_IPV4: u8 = 1;
+pub val ADDRESS_IPV6: u8 = 2;
+
+pub val PATH_FREE: u8 = 0;
+pub val PATH_VALIDATING: u8 = 1;
+pub val PATH_VALIDATED: u8 = 2;
+pub val PATH_FAILED: u8 = 3;
+
+pub val CHALLENGE_QUEUED: u8 = 1;
+pub val CHALLENGE_PREPARED: u8 = 2;
+pub val CHALLENGE_SENT: u8 = 3;
+
+pub val RESPONSE_QUEUED: u8 = 1;
+pub val RESPONSE_PREPARED: u8 = 2;
+
+pub val MIGRATION_NONE: u8 = 0;
+pub val MIGRATION_PEER: u8 = 1;
+pub val MIGRATION_REBINDING: u8 = 2;
+pub val MIGRATION_ACTIVE: u8 = 3;
+pub val MIGRATION_PREFERRED: u8 = 4;
+pub val MIGRATION_REVERTED: u8 = 5;
+
+pub val MTU_TERMINAL_ACKED: u8 = 1;
+pub val MTU_TERMINAL_LOST: u8 = 2;
+
+pub val VALIDATION_PATH: u8 = 1;
+pub val VALIDATION_MTU: u8 = 2;
+
+pub val STATUS_OK: u8 = 1;
+pub val STATUS_EMPTY: u8 = 2;
+pub val STATUS_BLOCKED: u8 = 3;
+pub val STATUS_DROPPED: u8 = 4;
+pub val STATUS_STALE: u8 = 5;
+pub val STATUS_CLOSED: u8 = 6;
+pub val STATUS_ERROR: u8 = 7;
+
+pub val ERROR_NONE: u8 = 0;
+pub val ERROR_STATE: u8 = 1;
+pub val ERROR_CONFIG: u8 = 2;
+pub val ERROR_CAPACITY: u8 = 3;
+pub val ERROR_ADDRESS: u8 = 4;
+pub val ERROR_TOKEN: u8 = 5;
+pub val ERROR_TIME: u8 = 6;
+pub val ERROR_OVERFLOW: u8 = 7;
+pub val ERROR_AMPLIFICATION: u8 = 8;
+pub val ERROR_MIGRATION_DISABLED: u8 = 9;
+pub val ERROR_HANDSHAKE: u8 = 10;
+pub val ERROR_MTU: u8 = 11;
+pub val ERROR_DUPLICATE: u8 = 12;
+
+val MAX_UDP_PAYLOAD: u16 = 65527;
+
+pub rec Address {
+    family: u8;
+    bytes: [16]u8;
+    port: u16;
+    scope_id: u32;
+}
+
+pub rec Endpoint {
+    local: Address;
+    peer: Address;
+}
+
+pub rec Config {
+    source: u64;
+    role: u8;
+    allow_peer_active_migration: bool;
+    peer_disabled_active_migration: bool;
+    retain_port_rebinding_state: bool;
+    initial_address_validated: bool;
+    base_mtu: u16;
+    maximum_mtu: u16;
+    mtu_probe_step: u16;
+    validation_timeout_factor: u8;
+    mtu_probe_attempts: u8;
+    black_hole_threshold: u8;
+}
+
+pub rec Path {
+    endpoint: Endpoint;
+    received_bytes: u64;
+    sent_bytes: u64;
+    reserved_bytes: u64;
+    validation_started_ns: u64;
+    validation_deadline_ns: u64;
+    largest_non_probing_packet: u64;
+    last_received_ns: u64;
+    generation: u64;
+    current_mtu: u16;
+    search_upper_mtu: u16;
+    mtu_probe_size: u16;
+    mtu_probe_generation: u64;
+    mtu_datagram_generation: u64;
+    mtu_probe_losses: u8;
+    black_hole_losses: u8;
+    validation_purpose: u8;
+    state: u8;
+    valid: bool;
+    selected: bool;
+    preferred: bool;
+    locally_created: bool;
+    port_rebinding: bool;
+    address_validated: bool;
+    mtu_validated: bool;
+    has_largest_non_probing: bool;
+    has_received_time: bool;
+    peer_non_probing_received: bool;
+    mtu_probe_prepared: bool;
+    mtu_probe_active: bool;
+}
+
+pub rec Challenge {
+    data: [8]u8;
+    path_index: usize;
+    path_generation: u64;
+    generation: u64;
+    sent_at_ns: u64;
+    timeout_ns: u64;
+    state: u8;
+    purpose: u8;
+    padded: bool;
+    valid: bool;
+}
+
+pub rec Response {
+    data: [8]u8;
+    path_index: usize;
+    path_generation: u64;
+    generation: u64;
+    state: u8;
+    valid: bool;
+}
+
+pub rec SendReservation {
+    path_index: usize;
+    path_generation: u64;
+    generation: u64;
+    bytes: u64;
+    mtu_generation: u64;
+    mtu_probe: bool;
+    non_probing: bool;
+    valid: bool;
+}
+
+pub rec Storage {
+    paths: *Path;
+    path_capacity: usize;
+    challenges: *Challenge;
+    challenge_capacity: usize;
+    responses: *Response;
+    response_capacity: usize;
+    sends: *SendReservation;
+    send_capacity: usize;
+}
+
+pub rec Manager {
+    config: Config;
+    storage: Storage;
+    selected_index: usize;
+    selected_generation: u64;
+    fallback_index: usize;
+    fallback_generation: u64;
+    largest_migration_packet: u64;
+    valid: bool;
+    handshake_confirmed: bool;
+    has_largest_migration_packet: bool;
+    closing: bool;
+}
+
+pub rec Handle {
+    source: u64;
+    index: usize;
+    generation: u64;
+}
+
+pub rec ChallengeToken {
+    source: u64;
+    index: usize;
+    generation: u64;
+    path_index: usize;
+    path_generation: u64;
+}
+
+pub rec ResponseToken {
+    source: u64;
+    index: usize;
+    generation: u64;
+    path_index: usize;
+    path_generation: u64;
+}
+
+pub rec SendToken {
+    source: u64;
+    index: usize;
+    generation: u64;
+    path_index: usize;
+    path_generation: u64;
+    bytes: u64;
+}
+
+pub rec MtuToken {
+    source: u64;
+    path_index: usize;
+    path_generation: u64;
+    generation: u64;
+    size: u16;
+}
+
+pub rec OperationResult {
+    status: u8;
+    error: u8;
+}
+
+pub rec PathResult {
+    status: u8;
+    error: u8;
+    handle: Handle;
+}
+
+pub rec Observation {
+    status: u8;
+    error: u8;
+    handle: Handle;
+    previous: Handle;
+    migration: u8;
+    created: bool;
+    selected: bool;
+    needs_validation: bool;
+    validate_previous: bool;
+    reset_congestion: bool;
+    reset_rtt: bool;
+    reset_ecn: bool;
+    rotate_connection_id: bool;
+}
+
+pub rec PreparedChallenge {
+    status: u8;
+    error: u8;
+    token: ChallengeToken;
+    handle: Handle;
+    endpoint: Endpoint;
+    data: [8]u8;
+    minimum_datagram_size: u16;
+    maximum_datagram_size: u64;
+}
+
+pub rec PreparedResponse {
+    status: u8;
+    error: u8;
+    token: ResponseToken;
+    handle: Handle;
+    endpoint: Endpoint;
+    data: [8]u8;
+    minimum_datagram_size: u16;
+    maximum_datagram_size: u64;
+    require_non_probing: bool;
+}
+
+pub rec SendResult {
+    status: u8;
+    error: u8;
+    token: SendToken;
+    allowance: u64;
+}
+
+pub rec ValidationResult {
+    status: u8;
+    error: u8;
+    handle: Handle;
+    migration: u8;
+    selected: bool;
+    ready_to_migrate: bool;
+    reset_congestion: bool;
+    reset_rtt: bool;
+    reset_ecn: bool;
+}
+
+pub rec TimeoutResult {
+    status: u8;
+    error: u8;
+    failed: Handle;
+    selected: Handle;
+    migration: u8;
+    reverted: bool;
+    mtu_validation_failed: bool;
+    connection_lost: bool;
+    rotate_connection_id: bool;
+    reset_congestion: bool;
+    reset_rtt: bool;
+    reset_ecn: bool;
+}
+
+pub rec MtuPrepared {
+    status: u8;
+    error: u8;
+    token: MtuToken;
+    handle: Handle;
+    size: u16;
+}
+
+pub rec MtuResult {
+    status: u8;
+    error: u8;
+    handle: Handle;
+    current_mtu: u16;
+    next_probe_size: u16;
+    retry: bool;
+    changed: bool;
+    reconfigure_congestion: bool;
+    reconfigure_pacer: bool;
+}
+
+pub rec Snapshot {
+    status: u8;
+    error: u8;
+    endpoint: Endpoint;
+    received_bytes: u64;
+    sent_bytes: u64;
+    reserved_bytes: u64;
+    amplification_allowance: u64;
+    current_mtu: u16;
+    next_probe_size: u16;
+    state: u8;
+    selected: bool;
+    preferred: bool;
+    port_rebinding: bool;
+    address_validated: bool;
+    mtu_validated: bool;
+}
+
+fun next_generation(value: u64) u64 {
+    if (value == 0 - 1::u64) { ret 1; }
+    ret value + 1;
+}
+
+fun invalid_index() usize {
+    ret 0 - 1::usize;
+}
+
+fun checked_add(a: u64, b: u64, output: *u64) bool {
+    if (output == nil || b > (0 - 1::u64) - a) { ret false; }
+    output[0] = a + b;
+    ret true;
+}
+
+fun checked_multiply(a: u64, b: u64, output: *u64) bool {
+    if (output == nil || (a != 0 && b > (0 - 1::u64) / a)) { ret false; }
+    output[0] = a * b;
+    ret true;
+}
+
+fun operation_error(error: u8) OperationResult {
+    var result: OperationResult;
+    result.status = STATUS_ERROR;
+    result.error = error;
+    ret result;
+}
+
+fun path_error(error: u8) PathResult {
+    var result: PathResult;
+    result.status = STATUS_ERROR;
+    result.error = error;
+    ret result;
+}
+
+fun valid_address(value: Address) bool {
+    if (value.port == 0) { ret false; }
+    if (value.family == ADDRESS_IPV4) {
+        var i: usize = 4;
+        for (i < 16) {
+            if (value.bytes[i] != 0) { ret false; }
+            i = i + 1;
+        }
+        ret value.scope_id == 0;
+    }
+    ret value.family == ADDRESS_IPV6;
+}
+
+pub fun ipv4(a: u8, b: u8, c: u8, d: u8, port: u16) Address {
+    var result: Address;
+    result.family = ADDRESS_IPV4;
+    result.bytes[0] = a;
+    result.bytes[1] = b;
+    result.bytes[2] = c;
+    result.bytes[3] = d;
+    result.port = port;
+    ret result;
+}
+
+pub fun ipv6(bytes: [16]u8, port: u16, scope_id: u32) Address {
+    var result: Address;
+    result.family = ADDRESS_IPV6;
+    result.bytes = bytes;
+    result.port = port;
+    result.scope_id = scope_id;
+    ret result;
+}
+
+pub fun address_equal(a: Address, b: Address) bool {
+    if (a.family != b.family || a.port != b.port || a.scope_id != b.scope_id) { ret false; }
+    var length: usize = 16;
+    if (a.family == ADDRESS_IPV4) { length = 4; }
+    var i: usize = 0;
+    for (i < length) {
+        if (a.bytes[i] != b.bytes[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun same_address_without_port(a: Address, b: Address) bool {
+    if (a.family != b.family || a.scope_id != b.scope_id) { ret false; }
+    var length: usize = 16;
+    if (a.family == ADDRESS_IPV4) { length = 4; }
+    var i: usize = 0;
+    for (i < length) {
+        if (a.bytes[i] != b.bytes[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun endpoint_equal(a: Endpoint, b: Endpoint) bool {
+    ret address_equal(a.local, b.local) && address_equal(a.peer, b.peer);
+}
+
+fun port_rebinding(a: Endpoint, b: Endpoint) bool {
+    ret address_equal(a.local, b.local) && same_address_without_port(a.peer, b.peer) &&
+        a.peer.port != b.peer.port;
+}
+
+fun valid_config(config: Config, storage: Storage, initial: Endpoint) bool {
+    if (config.source == 0 || (config.role != ROLE_CLIENT && config.role != ROLE_SERVER)) { ret false; }
+    if (!valid_address(initial.local) || !valid_address(initial.peer)) { ret false; }
+    if (config.base_mtu < 1200 || config.maximum_mtu < config.base_mtu ||
+        config.maximum_mtu > MAX_UDP_PAYLOAD || config.mtu_probe_step == 0) { ret false; }
+    if (config.validation_timeout_factor < 3 || config.mtu_probe_attempts == 0 ||
+        config.black_hole_threshold == 0) { ret false; }
+    if (storage.paths == nil || storage.path_capacity == 0 ||
+        storage.challenges == nil || storage.challenge_capacity == 0 ||
+        storage.responses == nil || storage.response_capacity == 0 ||
+        storage.sends == nil || storage.send_capacity == 0) { ret false; }
+    ret true;
+}
+
+pub fun default_config(source: u64, role: u8, initial_address_validated: bool) Config {
+    var result: Config;
+    result.source = source;
+    result.role = role;
+    result.allow_peer_active_migration = true;
+    result.retain_port_rebinding_state = true;
+    result.initial_address_validated = initial_address_validated;
+    result.base_mtu = 1200;
+    result.maximum_mtu = MAX_UDP_PAYLOAD;
+    result.mtu_probe_step = 128;
+    result.validation_timeout_factor = 3;
+    result.mtu_probe_attempts = 3;
+    result.black_hole_threshold = 3;
+    ret result;
+}
+
+fun reset_path(value: *Path, generation: u64) {
+    value.received_bytes = 0;
+    value.sent_bytes = 0;
+    value.reserved_bytes = 0;
+    value.validation_started_ns = 0;
+    value.validation_deadline_ns = 0;
+    value.largest_non_probing_packet = 0;
+    value.last_received_ns = 0;
+    value.generation = generation;
+    value.current_mtu = 0;
+    value.search_upper_mtu = 0;
+    value.mtu_probe_size = 0;
+    value.mtu_probe_generation = 0;
+    value.mtu_datagram_generation = 0;
+    value.mtu_probe_losses = 0;
+    value.black_hole_losses = 0;
+    value.validation_purpose = 0;
+    value.state = PATH_FREE;
+    value.valid = false;
+    value.selected = false;
+    value.preferred = false;
+    value.locally_created = false;
+    value.port_rebinding = false;
+    value.address_validated = false;
+    value.mtu_validated = false;
+    value.has_largest_non_probing = false;
+    value.has_received_time = false;
+    value.peer_non_probing_received = false;
+    value.mtu_probe_prepared = false;
+    value.mtu_probe_active = false;
+}
+
+fun clear_storage(storage: Storage) {
+    var i: usize = 0;
+    for (i < storage.path_capacity) {
+        reset_path(?storage.paths[i], 0);
+        i = i + 1;
+    }
+    i = 0;
+    for (i < storage.challenge_capacity) {
+        storage.challenges[i].generation = 0;
+        storage.challenges[i].state = 0;
+        storage.challenges[i].valid = false;
+        i = i + 1;
+    }
+    i = 0;
+    for (i < storage.response_capacity) {
+        storage.responses[i].generation = 0;
+        storage.responses[i].state = 0;
+        storage.responses[i].valid = false;
+        i = i + 1;
+    }
+    i = 0;
+    for (i < storage.send_capacity) {
+        storage.sends[i].generation = 0;
+        storage.sends[i].valid = false;
+        i = i + 1;
+    }
+}
+
+fun handle_at(manager: *Manager, index: usize) Handle {
+    var result: Handle;
+    if (manager == nil || index >= manager.storage.path_capacity || !manager.storage.paths[index].valid) {
+        ret result;
+    }
+    result.source = manager.config.source;
+    result.index = index;
+    result.generation = manager.storage.paths[index].generation;
+    ret result;
+}
+
+fun handle_valid(manager: *Manager, value: Handle) bool {
+    ret manager != nil && manager.valid && value.source == manager.config.source &&
+        value.index < manager.storage.path_capacity && manager.storage.paths[value.index].valid &&
+        manager.storage.paths[value.index].generation == value.generation;
+}
+
+pub fun init(config: Config, storage: Storage, initial: Endpoint) Manager {
+    var manager: Manager;
+    manager.selected_index = invalid_index();
+    manager.fallback_index = invalid_index();
+    manager.selected_generation = 0;
+    manager.fallback_generation = 0;
+    manager.largest_migration_packet = 0;
+    manager.valid = false;
+    manager.handshake_confirmed = false;
+    manager.has_largest_migration_packet = false;
+    manager.closing = false;
+    if (!valid_config(config, storage, initial)) { ret manager; }
+    clear_storage(storage);
+    manager.config = config;
+    manager.storage = storage;
+    var first: Path;
+    reset_path(?first, 1);
+    first.endpoint = initial;
+    first.current_mtu = config.base_mtu;
+    first.search_upper_mtu = config.maximum_mtu;
+    first.state = PATH_VALIDATING;
+    first.valid = true;
+    first.selected = true;
+    first.locally_created = true;
+    first.peer_non_probing_received = true;
+    first.address_validated = config.initial_address_validated;
+    first.mtu_validated = config.initial_address_validated;
+    if (first.address_validated) { first.state = PATH_VALIDATED; }
+    storage.paths[0] = first;
+    manager.selected_index = 0;
+    manager.selected_generation = 1;
+    if (first.address_validated) {
+        manager.fallback_index = 0;
+        manager.fallback_generation = 1;
+    }
+    manager.valid = true;
+    ret manager;
+}
+
+pub fun selected(manager: *Manager) PathResult {
+    if (manager == nil || !manager.valid) { ret path_error(ERROR_STATE); }
+    var result: PathResult;
+    result.handle = handle_at(manager, manager.selected_index);
+    if (result.handle.source == 0) { ret path_error(ERROR_STATE); }
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun find(manager: *Manager, endpoint: Endpoint) PathResult {
+    if (manager == nil || !manager.valid) { ret path_error(ERROR_STATE); }
+    if (!valid_address(endpoint.local) || !valid_address(endpoint.peer)) { ret path_error(ERROR_ADDRESS); }
+    var i: usize = 0;
+    for (i < manager.storage.path_capacity) {
+        if (manager.storage.paths[i].valid && endpoint_equal(manager.storage.paths[i].endpoint, endpoint)) {
+            var result: PathResult;
+            result.status = STATUS_OK;
+            result.handle = handle_at(manager, i);
+            ret result;
+        }
+        i = i + 1;
+    }
+    var empty: PathResult;
+    empty.status = STATUS_EMPTY;
+    ret empty;
+}
+
+fun free_path_index(manager: *Manager) usize {
+    var i: usize = 0;
+    for (i < manager.storage.path_capacity) {
+        if (!manager.storage.paths[i].valid) { ret i; }
+        i = i + 1;
+    }
+    ret invalid_index();
+}
+
+fun create_path(manager: *Manager, endpoint: Endpoint, locally_created: bool,
+                preferred: bool, is_rebinding: bool) PathResult {
+    val index: usize = free_path_index(manager);
+    if (index == invalid_index()) { ret path_error(ERROR_CAPACITY); }
+    val generation: u64 = next_generation(manager.storage.paths[index].generation);
+    var path: Path;
+    reset_path(?path, generation);
+    path.endpoint = endpoint;
+    path.current_mtu = manager.config.base_mtu;
+    path.search_upper_mtu = manager.config.maximum_mtu;
+    path.state = PATH_VALIDATING;
+    path.valid = true;
+    path.locally_created = locally_created;
+    path.preferred = preferred;
+    path.port_rebinding = is_rebinding;
+    manager.storage.paths[index] = path;
+    var result: PathResult;
+    result.status = STATUS_OK;
+    result.handle = handle_at(manager, index);
+    ret result;
+}
+
+fun selected_port_rebinding(manager: *Manager, endpoint: Endpoint) bool {
+    if (manager.selected_index >= manager.storage.path_capacity ||
+        !manager.storage.paths[manager.selected_index].valid) { ret false; }
+    ret port_rebinding(manager.storage.paths[manager.selected_index].endpoint, endpoint);
+}
+
+fun activate(manager: *Manager, index: usize, migration: u8) Observation {
+    var result: Observation;
+    result.status = STATUS_OK;
+    result.handle = handle_at(manager, index);
+    result.migration = migration;
+    if (manager.selected_index == index && manager.selected_generation == result.handle.generation) {
+        ret result;
+    }
+    val previous_index: usize = manager.selected_index;
+    if (previous_index < manager.storage.path_capacity && manager.storage.paths[previous_index].valid &&
+        manager.storage.paths[previous_index].generation == manager.selected_generation) {
+        result.previous = handle_at(manager, previous_index);
+        manager.storage.paths[previous_index].selected = false;
+        if (manager.storage.paths[previous_index].address_validated) {
+            if (!manager.storage.paths[index].address_validated) {
+                manager.fallback_index = previous_index;
+                manager.fallback_generation = manager.storage.paths[previous_index].generation;
+            }
+            if (migration == MIGRATION_PEER || migration == MIGRATION_REBINDING) {
+                result.validate_previous = true;
+            }
+        }
+    }
+    manager.storage.paths[index].selected = true;
+    manager.selected_index = index;
+    manager.selected_generation = manager.storage.paths[index].generation;
+    if (manager.storage.paths[index].address_validated) {
+        manager.fallback_index = index;
+        manager.fallback_generation = manager.storage.paths[index].generation;
+    }
+    result.selected = true;
+    val retain: bool = manager.storage.paths[index].port_rebinding &&
+        manager.config.retain_port_rebinding_state;
+    result.reset_congestion = !retain;
+    result.reset_rtt = !retain;
+    result.reset_ecn = true;
+    result.rotate_connection_id = !manager.storage.paths[index].port_rebinding;
+    ret result;
+}
+
+pub fun confirm_handshake(manager: *Manager) OperationResult {
+    if (manager == nil || !manager.valid || manager.closing) { ret operation_error(ERROR_STATE); }
+    manager.handshake_confirmed = true;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes: u64,
+                non_probing: bool, authenticated: bool, fresh: bool,
+                connection_id_available: bool, now_ns: u64) Observation {
+    var result: Observation;
+    if (manager == nil || !manager.valid || manager.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (!authenticated || !fresh) {
+        result.status = STATUS_DROPPED;
+        ret result;
+    }
+    if (!valid_address(endpoint.local) || !valid_address(endpoint.peer) || bytes == 0) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_ADDRESS;
+        ret result;
+    }
+    val found: PathResult = find(manager, endpoint);
+    var index: usize = invalid_index();
+    if (found.status == STATUS_OK) {
+        index = found.handle.index;
+        if (manager.storage.paths[index].state == PATH_FAILED) {
+            result.status = STATUS_BLOCKED;
+            result.handle = found.handle;
+            result.needs_validation = true;
+            ret result;
+        }
+    } or {
+        if (!manager.handshake_confirmed) {
+            result.status = STATUS_DROPPED;
+            ret result;
+        }
+        if (manager.config.role == ROLE_CLIENT) {
+            result.status = STATUS_DROPPED;
+            ret result;
+        }
+        val rebinding: bool = selected_port_rebinding(manager, endpoint);
+        val created: PathResult = create_path(manager, endpoint, false, false, rebinding);
+        if (created.status != STATUS_OK) {
+            result.status = STATUS_ERROR;
+            result.error = created.error;
+            ret result;
+        }
+        index = created.handle.index;
+        result.created = true;
+        result.needs_validation = true;
+    }
+    if (manager.storage.paths[index].has_received_time &&
+        now_ns < manager.storage.paths[index].last_received_ns) {
+        if (result.created) {
+            reset_path(?manager.storage.paths[index], manager.storage.paths[index].generation);
+        }
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TIME;
+        ret result;
+    }
+    var updated_received: u64 = 0;
+    if (!checked_add(manager.storage.paths[index].received_bytes, bytes, ?updated_received)) {
+        if (result.created) { reset_path(?manager.storage.paths[index], manager.storage.paths[index].generation); }
+        result.status = STATUS_ERROR;
+        result.error = ERROR_OVERFLOW;
+        ret result;
+    }
+    manager.storage.paths[index].received_bytes = updated_received;
+    manager.storage.paths[index].last_received_ns = now_ns;
+    manager.storage.paths[index].has_received_time = true;
+    result.handle = handle_at(manager, index);
+    result.status = STATUS_OK;
+    if (!non_probing) { ret result; }
+    manager.storage.paths[index].peer_non_probing_received = true;
+    if (!manager.handshake_confirmed && index != manager.selected_index) {
+        result.status = STATUS_DROPPED;
+        ret result;
+    }
+    manager.storage.paths[index].has_largest_non_probing = true;
+    if (packet_number > manager.storage.paths[index].largest_non_probing_packet) {
+        manager.storage.paths[index].largest_non_probing_packet = packet_number;
+    }
+    if (index == manager.selected_index) {
+        if (!manager.has_largest_migration_packet || packet_number > manager.largest_migration_packet) {
+            manager.largest_migration_packet = packet_number;
+            manager.has_largest_migration_packet = true;
+        }
+        ret result;
+    }
+    if (manager.config.role == ROLE_CLIENT) {
+        result.status = STATUS_DROPPED;
+        ret result;
+    }
+    if (manager.has_largest_migration_packet && packet_number <= manager.largest_migration_packet) {
+        ret result;
+    }
+    val rebinding: bool = manager.storage.paths[index].port_rebinding;
+    if (!manager.config.allow_peer_active_migration && !rebinding) {
+        result.status = STATUS_DROPPED;
+        result.needs_validation = true;
+        ret result;
+    }
+    if (!rebinding && !connection_id_available) {
+        result.status = STATUS_BLOCKED;
+        result.needs_validation = true;
+        result.rotate_connection_id = true;
+        ret result;
+    }
+    manager.largest_migration_packet = packet_number;
+    manager.has_largest_migration_packet = true;
+    var kind: u8 = MIGRATION_PEER;
+    if (rebinding) { kind = MIGRATION_REBINDING; }
+    val changed: Observation = activate(manager, index, kind);
+    result.previous = changed.previous;
+    result.migration = changed.migration;
+    result.selected = changed.selected;
+    result.validate_previous = changed.validate_previous;
+    result.reset_congestion = changed.reset_congestion;
+    result.reset_rtt = changed.reset_rtt;
+    result.reset_ecn = changed.reset_ecn;
+    result.rotate_connection_id = changed.rotate_connection_id;
+    result.needs_validation = !manager.storage.paths[index].address_validated;
+    ret result;
+}
+
+pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult {
+    if (manager == nil || !manager.valid || manager.closing) { ret path_error(ERROR_STATE); }
+    if (!manager.handshake_confirmed) { ret path_error(ERROR_HANDSHAKE); }
+    if (manager.config.role != ROLE_CLIENT) { ret path_error(ERROR_MIGRATION_DISABLED); }
+    if (!valid_address(endpoint.local) || !valid_address(endpoint.peer)) { ret path_error(ERROR_ADDRESS); }
+    val current: PathResult = find(manager, endpoint);
+    if (current.status == STATUS_OK) {
+        if (manager.storage.paths[current.handle.index].state == PATH_FAILED) {
+            var blocked: PathResult;
+            blocked.status = STATUS_BLOCKED;
+            blocked.handle = current.handle;
+            ret blocked;
+        }
+        ret current;
+    }
+    if (!preferred && manager.selected_index < manager.storage.path_capacity &&
+        manager.storage.paths[manager.selected_index].valid &&
+        !address_equal(endpoint.peer, manager.storage.paths[manager.selected_index].endpoint.peer)) {
+        ret path_error(ERROR_ADDRESS);
+    }
+    if (manager.config.peer_disabled_active_migration && !preferred) {
+        ret path_error(ERROR_MIGRATION_DISABLED);
+    }
+    ret create_path(manager, endpoint, true, preferred, selected_port_rebinding(manager, endpoint));
+}
+
+pub fun migrate(manager: *Manager, value: Handle, preferred: bool,
+                connection_id_available: bool) Observation {
+    var result: Observation;
+    if (!handle_valid(manager, value) || manager.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    if (!manager.handshake_confirmed) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_HANDSHAKE;
+        ret result;
+    }
+    if (manager.config.role != ROLE_CLIENT || !manager.storage.paths[value.index].locally_created) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_MIGRATION_DISABLED;
+        ret result;
+    }
+    if (manager.config.peer_disabled_active_migration && !preferred &&
+        !manager.storage.paths[value.index].preferred) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_MIGRATION_DISABLED;
+        ret result;
+    }
+    if (!manager.storage.paths[value.index].address_validated) {
+        result.status = STATUS_BLOCKED;
+        ret result;
+    }
+    if (!manager.storage.paths[value.index].port_rebinding && !connection_id_available) {
+        result.status = STATUS_BLOCKED;
+        result.handle = value;
+        result.rotate_connection_id = true;
+        ret result;
+    }
+    var kind: u8 = MIGRATION_ACTIVE;
+    if (preferred || manager.storage.paths[value.index].preferred) { kind = MIGRATION_PREFERRED; }
+    ret activate(manager, value.index, kind);
+}
+
+fun data_equal(a: [8]u8, b: [8]u8) bool {
+    var i: usize = 0;
+    for (i < 8) {
+        if (a[i] != b[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun free_challenge_index(manager: *Manager) usize {
+    var i: usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        if (!manager.storage.challenges[i].valid) { ret i; }
+        i = i + 1;
+    }
+    ret invalid_index();
+}
+
+fun clear_challenge(manager: *Manager, index: usize) {
+    manager.storage.challenges[index].state = 0;
+    manager.storage.challenges[index].valid = false;
+}
+
+fun challenge_data_available(manager: *Manager, data: [8]u8) bool {
+    var i: usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        if (manager.storage.challenges[i].valid &&
+            data_equal(manager.storage.challenges[i].data, data)) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun queue_challenge(manager: *Manager, value: Handle, data: [8]u8,
+                        current_pto_ns: u64, path_pto_ns: u64,
+                        padded: bool, purpose: u8) OperationResult {
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.storage.paths[value.index].state == PATH_FAILED) { ret operation_error(ERROR_TOKEN); }
+    if (current_pto_ns == 0 || path_pto_ns == 0) { ret operation_error(ERROR_TIME); }
+    if (purpose != VALIDATION_PATH && purpose != VALIDATION_MTU) {
+        ret operation_error(ERROR_CONFIG);
+    }
+    if (purpose == VALIDATION_MTU && !padded) { ret operation_error(ERROR_CONFIG); }
+    if (purpose == VALIDATION_MTU && !manager.storage.paths[value.index].address_validated) {
+        ret operation_error(ERROR_STATE);
+    }
+    if (manager.storage.paths[value.index].validation_deadline_ns != 0 &&
+        manager.storage.paths[value.index].validation_purpose != purpose) {
+        ret operation_error(ERROR_STATE);
+    }
+    var pending: usize = 0;
+    for (pending < manager.storage.challenge_capacity) {
+        if (manager.storage.challenges[pending].valid &&
+            manager.storage.challenges[pending].path_index == value.index &&
+            manager.storage.challenges[pending].path_generation == value.generation &&
+            manager.storage.challenges[pending].purpose != purpose) {
+            ret operation_error(ERROR_STATE);
+        }
+        pending = pending + 1;
+    }
+    if (!challenge_data_available(manager, data)) { ret operation_error(ERROR_DUPLICATE); }
+    val index: usize = free_challenge_index(manager);
+    if (index == invalid_index()) { ret operation_error(ERROR_CAPACITY); }
+    var pto_ns: u64 = current_pto_ns;
+    if (path_pto_ns > pto_ns) { pto_ns = path_pto_ns; }
+    var duration_ns: u64 = 0;
+    if (!checked_multiply(pto_ns, manager.config.validation_timeout_factor::u64, ?duration_ns)) {
+        ret operation_error(ERROR_OVERFLOW);
+    }
+    val generation: u64 = next_generation(manager.storage.challenges[index].generation);
+    var challenge: Challenge;
+    challenge.data = data;
+    challenge.path_index = value.index;
+    challenge.path_generation = value.generation;
+    challenge.generation = generation;
+    challenge.timeout_ns = duration_ns;
+    challenge.state = CHALLENGE_QUEUED;
+    challenge.purpose = purpose;
+    challenge.padded = padded;
+    challenge.valid = true;
+    manager.storage.challenges[index] = challenge;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+fun challenge_token(manager: *Manager, index: usize) ChallengeToken {
+    var result: ChallengeToken;
+    result.source = manager.config.source;
+    result.index = index;
+    result.generation = manager.storage.challenges[index].generation;
+    result.path_index = manager.storage.challenges[index].path_index;
+    result.path_generation = manager.storage.challenges[index].path_generation;
+    ret result;
+}
+
+fun challenge_token_valid(manager: *Manager, token: ChallengeToken) bool {
+    ret manager != nil && manager.valid && token.source == manager.config.source &&
+        token.index < manager.storage.challenge_capacity && manager.storage.challenges[token.index].valid &&
+        manager.storage.challenges[token.index].generation == token.generation &&
+        manager.storage.challenges[token.index].path_index == token.path_index &&
+        manager.storage.challenges[token.index].path_generation == token.path_generation;
+}
+
+pub fun prepare_challenge(manager: *Manager, value: Handle) PreparedChallenge {
+    var result: PreparedChallenge;
+    if (!handle_valid(manager, value) || manager.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    var i: usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        if (manager.storage.challenges[i].valid &&
+            manager.storage.challenges[i].path_index == value.index &&
+            manager.storage.challenges[i].path_generation == value.generation &&
+            manager.storage.challenges[i].state == CHALLENGE_QUEUED) {
+            manager.storage.challenges[i].state = CHALLENGE_PREPARED;
+            result.status = STATUS_OK;
+            result.token = challenge_token(manager, i);
+            result.handle = value;
+            result.endpoint = manager.storage.paths[value.index].endpoint;
+            result.data = manager.storage.challenges[i].data;
+            if (manager.storage.challenges[i].padded) { result.minimum_datagram_size = 1200; }
+            result.maximum_datagram_size = amplification_allowance(manager, value.index);
+            if (result.maximum_datagram_size > manager.storage.paths[value.index].current_mtu) {
+                result.maximum_datagram_size = manager.storage.paths[value.index].current_mtu::u64;
+            }
+            if (result.maximum_datagram_size < 9 ||
+                result.maximum_datagram_size < result.minimum_datagram_size) {
+                manager.storage.challenges[i].state = CHALLENGE_QUEUED;
+                result.status = STATUS_BLOCKED;
+            }
+            ret result;
+        }
+        i = i + 1;
+    }
+    result.status = STATUS_EMPTY;
+    ret result;
+}
+
+pub fun cancel_challenge(manager: *Manager, token: ChallengeToken) OperationResult {
+    if (!challenge_token_valid(manager, token)) {
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    if (manager.storage.challenges[token.index].state != CHALLENGE_PREPARED) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    if (manager.closing || !handle_valid(manager,
+        Handle{source: token.source, index: token.path_index, generation: token.path_generation}) ||
+        manager.storage.paths[token.path_index].state == PATH_FAILED) {
+        clear_challenge(manager, token.index);
+    } or {
+        manager.storage.challenges[token.index].state = CHALLENGE_QUEUED;
+    }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun publish_challenge(manager: *Manager, token: ChallengeToken, now_ns: u64) OperationResult {
+    if (!challenge_token_valid(manager, token)) {
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    if (manager.storage.challenges[token.index].state != CHALLENGE_PREPARED) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    val value: Handle = Handle{source: token.source, index: token.path_index,
+        generation: token.path_generation};
+    if (manager.closing || !handle_valid(manager, value) ||
+        manager.storage.paths[value.index].state == PATH_FAILED) {
+        clear_challenge(manager, token.index);
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    if (manager.storage.paths[value.index].validation_deadline_ns == 0) {
+        var deadline_ns: u64 = 0;
+        if (!checked_add(now_ns, manager.storage.challenges[token.index].timeout_ns, ?deadline_ns)) {
+            ret operation_error(ERROR_OVERFLOW);
+        }
+        manager.storage.paths[value.index].validation_started_ns = now_ns;
+        manager.storage.paths[value.index].validation_deadline_ns = deadline_ns;
+        manager.storage.paths[value.index].validation_purpose =
+            manager.storage.challenges[token.index].purpose;
+    } or {
+        if (manager.storage.paths[value.index].validation_purpose !=
+            manager.storage.challenges[token.index].purpose) { ret operation_error(ERROR_STATE); }
+        if (now_ns < manager.storage.paths[value.index].validation_started_ns ||
+            now_ns >= manager.storage.paths[value.index].validation_deadline_ns) {
+            ret operation_error(ERROR_TIME);
+        }
+    }
+    manager.storage.challenges[token.index].state = CHALLENGE_SENT;
+    manager.storage.challenges[token.index].sent_at_ns = now_ns;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+fun free_path_challenges(manager: *Manager, index: usize, generation: u64, include_prepared: bool) {
+    var i: usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        if (manager.storage.challenges[i].valid &&
+            manager.storage.challenges[i].path_index == index &&
+            manager.storage.challenges[i].path_generation == generation &&
+            (include_prepared || manager.storage.challenges[i].state != CHALLENGE_PREPARED)) {
+            clear_challenge(manager, i);
+        }
+        i = i + 1;
+    }
+}
+
+pub fun receive_response(manager: *Manager, data: [8]u8, now_ns: u64) ValidationResult {
+    var result: ValidationResult;
+    if (manager == nil || !manager.valid || manager.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    var i: usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        if (manager.storage.challenges[i].valid &&
+            manager.storage.challenges[i].state == CHALLENGE_SENT &&
+            data_equal(manager.storage.challenges[i].data, data)) {
+            val index: usize = manager.storage.challenges[i].path_index;
+            val generation: u64 = manager.storage.challenges[i].path_generation;
+            if (index >= manager.storage.path_capacity || !manager.storage.paths[index].valid ||
+                manager.storage.paths[index].generation != generation) {
+                clear_challenge(manager, i);
+                result.status = STATUS_STALE;
+                ret result;
+            }
+            if (now_ns < manager.storage.challenges[i].sent_at_ns) {
+                result.status = STATUS_ERROR;
+                result.error = ERROR_TIME;
+                ret result;
+            }
+            if (manager.storage.paths[index].validation_deadline_ns != 0 &&
+            now_ns >= manager.storage.paths[index].validation_deadline_ns) {
+                result.status = STATUS_DROPPED;
+                ret result;
+            }
+            manager.storage.paths[index].address_validated = true;
+            manager.storage.paths[index].state = PATH_VALIDATED;
+            if (manager.storage.challenges[i].padded) {
+                manager.storage.paths[index].mtu_validated = true;
+            }
+            manager.storage.paths[index].validation_started_ns = 0;
+            manager.storage.paths[index].validation_deadline_ns = 0;
+            manager.storage.paths[index].validation_purpose = 0;
+            clear_challenge(manager, i);
+            result.status = STATUS_OK;
+            result.handle = handle_at(manager, index);
+            result.selected = manager.storage.paths[index].selected;
+            result.ready_to_migrate = manager.storage.paths[index].locally_created &&
+                !manager.storage.paths[index].selected;
+            if (manager.storage.paths[index].port_rebinding) {
+                result.migration = MIGRATION_REBINDING;
+            } or (manager.storage.paths[index].preferred) {
+                result.migration = MIGRATION_PREFERRED;
+            } or (manager.storage.paths[index].locally_created) {
+                result.migration = MIGRATION_ACTIVE;
+            } or {
+                result.migration = MIGRATION_PEER;
+            }
+            if (manager.storage.paths[index].selected) {
+                manager.fallback_index = index;
+                manager.fallback_generation = generation;
+            }
+            free_path_challenges(manager, index, generation, true);
+            ret result;
+        }
+        i = i + 1;
+    }
+    result.status = STATUS_DROPPED;
+    ret result;
+}
+
+fun free_response_index(manager: *Manager) usize {
+    var i: usize = 0;
+    for (i < manager.storage.response_capacity) {
+        if (!manager.storage.responses[i].valid) { ret i; }
+        i = i + 1;
+    }
+    ret invalid_index();
+}
+
+fun clear_response(manager: *Manager, index: usize) {
+    manager.storage.responses[index].state = 0;
+    manager.storage.responses[index].valid = false;
+}
+
+fun free_path_responses(manager: *Manager, index: usize, generation: u64, include_prepared: bool) {
+    var i: usize = 0;
+    for (i < manager.storage.response_capacity) {
+        if (manager.storage.responses[i].valid && manager.storage.responses[i].path_index == index &&
+            manager.storage.responses[i].path_generation == generation &&
+            (include_prepared || manager.storage.responses[i].state != RESPONSE_PREPARED)) {
+            clear_response(manager, i);
+        }
+        i = i + 1;
+    }
+}
+
+pub fun queue_response(manager: *Manager, value: Handle, data: [8]u8) OperationResult {
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.storage.paths[value.index].state == PATH_FAILED) { ret operation_error(ERROR_TOKEN); }
+    val index: usize = free_response_index(manager);
+    if (index == invalid_index()) { ret operation_error(ERROR_CAPACITY); }
+    val generation: u64 = next_generation(manager.storage.responses[index].generation);
+    var response: Response;
+    response.data = data;
+    response.path_index = value.index;
+    response.path_generation = value.generation;
+    response.generation = generation;
+    response.state = RESPONSE_QUEUED;
+    response.valid = true;
+    manager.storage.responses[index] = response;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+fun response_token(manager: *Manager, index: usize) ResponseToken {
+    var result: ResponseToken;
+    result.source = manager.config.source;
+    result.index = index;
+    result.generation = manager.storage.responses[index].generation;
+    result.path_index = manager.storage.responses[index].path_index;
+    result.path_generation = manager.storage.responses[index].path_generation;
+    ret result;
+}
+
+fun response_token_valid(manager: *Manager, token: ResponseToken) bool {
+    ret manager != nil && manager.valid && token.source == manager.config.source &&
+        token.index < manager.storage.response_capacity && manager.storage.responses[token.index].valid &&
+        manager.storage.responses[token.index].generation == token.generation &&
+        manager.storage.responses[token.index].path_index == token.path_index &&
+        manager.storage.responses[token.index].path_generation == token.path_generation;
+}
+
+fun amplification_allowance(manager: *Manager, index: usize) u64 {
+    if (manager.storage.paths[index].state == PATH_FAILED) { ret 0; }
+    if (manager.config.role == ROLE_CLIENT || manager.storage.paths[index].address_validated) {
+        ret 0 - 1::u64;
+    }
+    var limit: u64 = 0;
+    if (!checked_multiply(manager.storage.paths[index].received_bytes, 3, ?limit)) {
+        limit = 0 - 1::u64;
+    }
+    var used: u64 = 0;
+    if (!checked_add(manager.storage.paths[index].sent_bytes,
+        manager.storage.paths[index].reserved_bytes, ?used) || used >= limit) { ret 0; }
+    ret limit - used;
+}
+
+pub fun prepare_response(manager: *Manager, value: Handle) PreparedResponse {
+    var result: PreparedResponse;
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.storage.paths[value.index].state == PATH_FAILED) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    var i: usize = 0;
+    for (i < manager.storage.response_capacity) {
+        if (manager.storage.responses[i].valid &&
+            manager.storage.responses[i].path_index == value.index &&
+            manager.storage.responses[i].path_generation == value.generation &&
+            manager.storage.responses[i].state == RESPONSE_QUEUED) {
+            manager.storage.responses[i].state = RESPONSE_PREPARED;
+            result.status = STATUS_OK;
+            result.token = response_token(manager, i);
+            result.handle = value;
+            result.endpoint = manager.storage.paths[value.index].endpoint;
+            result.data = manager.storage.responses[i].data;
+            result.require_non_probing = manager.storage.paths[value.index].selected;
+            result.maximum_datagram_size = amplification_allowance(manager, value.index);
+            if (result.maximum_datagram_size > manager.storage.paths[value.index].current_mtu) {
+                result.maximum_datagram_size = manager.storage.paths[value.index].current_mtu::u64;
+            }
+            if (result.maximum_datagram_size < 9) {
+                manager.storage.responses[i].state = RESPONSE_QUEUED;
+                result.status = STATUS_BLOCKED;
+                ret result;
+            }
+            if (result.maximum_datagram_size >= 1200) { result.minimum_datagram_size = 1200; }
+            ret result;
+        }
+        i = i + 1;
+    }
+    result.status = STATUS_EMPTY;
+    ret result;
+}
+
+pub fun cancel_response(manager: *Manager, token: ResponseToken) OperationResult {
+    if (!response_token_valid(manager, token)) {
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    if (manager.storage.responses[token.index].state != RESPONSE_PREPARED) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    if (manager.closing || !handle_valid(manager,
+        Handle{source: token.source, index: token.path_index, generation: token.path_generation}) ||
+        manager.storage.paths[token.path_index].state == PATH_FAILED) {
+        clear_response(manager, token.index);
+    } or {
+        manager.storage.responses[token.index].state = RESPONSE_QUEUED;
+    }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun publish_response(manager: *Manager, token: ResponseToken) OperationResult {
+    if (!response_token_valid(manager, token)) {
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    if (manager.storage.responses[token.index].state != RESPONSE_PREPARED) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    clear_response(manager, token.index);
+    var result: OperationResult;
+    if (manager.closing || !handle_valid(manager,
+        Handle{source: token.source, index: token.path_index, generation: token.path_generation}) ||
+        manager.storage.paths[token.path_index].state == PATH_FAILED) {
+        result.status = STATUS_STALE;
+    } or {
+        result.status = STATUS_OK;
+    }
+    ret result;
+}
+
+fun free_send_index(manager: *Manager) usize {
+    var i: usize = 0;
+    for (i < manager.storage.send_capacity) {
+        if (!manager.storage.sends[i].valid) { ret i; }
+        i = i + 1;
+    }
+    ret invalid_index();
+}
+
+fun clear_send(manager: *Manager, index: usize) {
+    manager.storage.sends[index].valid = false;
+}
+
+fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
+                    non_probing: bool, maximum: u64,
+                    mtu_probe: bool, mtu_generation: u64) SendResult {
+    var result: SendResult;
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.storage.paths[value.index].state == PATH_FAILED) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    if (bytes == 0) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_MTU;
+        ret result;
+    }
+    val path: *Path = ?manager.storage.paths[value.index];
+    if (manager.config.role == ROLE_SERVER && non_probing && !path.peer_non_probing_received) {
+        result.status = STATUS_BLOCKED;
+        ret result;
+    }
+    if (non_probing && !path.selected) {
+        result.status = STATUS_BLOCKED;
+        ret result;
+    }
+    if (bytes > maximum) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_MTU;
+        ret result;
+    }
+    result.allowance = amplification_allowance(manager, value.index);
+    if (bytes > result.allowance) {
+        result.status = STATUS_BLOCKED;
+        result.error = ERROR_AMPLIFICATION;
+        ret result;
+    }
+    val index: usize = free_send_index(manager);
+    if (index == invalid_index()) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_CAPACITY;
+        ret result;
+    }
+    var reserved: u64 = 0;
+    if (!checked_add(path.reserved_bytes, bytes, ?reserved)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_OVERFLOW;
+        ret result;
+    }
+    val generation: u64 = next_generation(manager.storage.sends[index].generation);
+    var reservation: SendReservation;
+    reservation.path_index = value.index;
+    reservation.path_generation = value.generation;
+    reservation.generation = generation;
+    reservation.bytes = bytes;
+    reservation.mtu_generation = mtu_generation;
+    reservation.mtu_probe = mtu_probe;
+    reservation.non_probing = non_probing;
+    reservation.valid = true;
+    manager.storage.sends[index] = reservation;
+    path.reserved_bytes = reserved;
+    result.status = STATUS_OK;
+    result.token.source = manager.config.source;
+    result.token.index = index;
+    result.token.generation = generation;
+    result.token.path_index = value.index;
+    result.token.path_generation = value.generation;
+    result.token.bytes = bytes;
+    ret result;
+}
+
+pub fun reserve_send(manager: *Manager, value: Handle, bytes: u64,
+                     non_probing: bool) SendResult {
+    if (!handle_valid(manager, value)) {
+        var result: SendResult;
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    ret reserve_bounded(manager, value, bytes, non_probing,
+        manager.storage.paths[value.index].current_mtu::u64, false, 0);
+}
+
+pub fun reserve_mtu_send(manager: *Manager, value: Handle, bytes: u64,
+                         non_probing: bool, token: MtuToken) SendResult {
+    var result: SendResult;
+    if (!handle_valid(manager, value) || !mtu_token_valid(manager, token) ||
+        token.path_index != value.index || token.path_generation != value.generation ||
+        !manager.storage.paths[value.index].mtu_probe_prepared ||
+        manager.storage.paths[value.index].mtu_probe_active ||
+        manager.storage.paths[value.index].mtu_datagram_generation == token.generation ||
+        mtu_send_reserved(manager, token) || bytes != token.size::u64) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    ret reserve_bounded(manager, value, bytes, non_probing, token.size::u64,
+        true, token.generation);
+}
+
+fun send_token_valid(manager: *Manager, token: SendToken) bool {
+    ret manager != nil && manager.valid && token.source == manager.config.source &&
+        token.index < manager.storage.send_capacity && manager.storage.sends[token.index].valid &&
+        manager.storage.sends[token.index].generation == token.generation &&
+        manager.storage.sends[token.index].path_index == token.path_index &&
+        manager.storage.sends[token.index].path_generation == token.path_generation &&
+        manager.storage.sends[token.index].bytes == token.bytes;
+}
+
+pub fun cancel_send(manager: *Manager, token: SendToken) OperationResult {
+    if (!send_token_valid(manager, token)) {
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    if (token.path_index < manager.storage.path_capacity &&
+        manager.storage.paths[token.path_index].valid &&
+        manager.storage.paths[token.path_index].generation == token.path_generation) {
+        if (manager.storage.paths[token.path_index].reserved_bytes < token.bytes) {
+            ret operation_error(ERROR_STATE);
+        }
+        manager.storage.paths[token.path_index].reserved_bytes =
+            manager.storage.paths[token.path_index].reserved_bytes - token.bytes;
+    }
+    clear_send(manager, token.index);
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun publish_send(manager: *Manager, token: SendToken) OperationResult {
+    if (!send_token_valid(manager, token)) {
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    if (token.path_index >= manager.storage.path_capacity ||
+        !manager.storage.paths[token.path_index].valid ||
+        manager.storage.paths[token.path_index].generation != token.path_generation) {
+        clear_send(manager, token.index);
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    val path: *Path = ?manager.storage.paths[token.path_index];
+    if (path.reserved_bytes < token.bytes) { ret operation_error(ERROR_STATE); }
+    if (manager.closing || path.state == PATH_FAILED ||
+        (manager.storage.sends[token.index].non_probing && !path.selected)) {
+        path.reserved_bytes = path.reserved_bytes - token.bytes;
+        clear_send(manager, token.index);
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    var sent: u64 = 0;
+    if (!checked_add(path.sent_bytes, token.bytes, ?sent)) {
+        ret operation_error(ERROR_OVERFLOW);
+    }
+    path.reserved_bytes = path.reserved_bytes - token.bytes;
+    path.sent_bytes = sent;
+    if (manager.storage.sends[token.index].mtu_probe) {
+        path.mtu_datagram_generation = manager.storage.sends[token.index].mtu_generation;
+    }
+    clear_send(manager, token.index);
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+fun timeout_path(manager: *Manager, index: usize) TimeoutResult {
+    var result: TimeoutResult;
+    val generation: u64 = manager.storage.paths[index].generation;
+    result.status = STATUS_OK;
+    result.failed = handle_at(manager, index);
+    manager.storage.paths[index].state = PATH_FAILED;
+    manager.storage.paths[index].validation_started_ns = 0;
+    manager.storage.paths[index].validation_deadline_ns = 0;
+    manager.storage.paths[index].validation_purpose = 0;
+    free_path_challenges(manager, index, generation, true);
+    free_path_responses(manager, index, generation, true);
+    if (!manager.storage.paths[index].selected) { ret result; }
+    if (manager.fallback_index >= manager.storage.path_capacity ||
+        !manager.storage.paths[manager.fallback_index].valid ||
+        manager.storage.paths[manager.fallback_index].generation != manager.fallback_generation ||
+        manager.storage.paths[manager.fallback_index].state != PATH_VALIDATED ||
+        !manager.storage.paths[manager.fallback_index].address_validated) {
+        manager.storage.paths[index].selected = false;
+        manager.selected_index = invalid_index();
+        manager.selected_generation = 0;
+        result.connection_lost = true;
+        ret result;
+    }
+    manager.storage.paths[index].selected = false;
+    manager.storage.paths[manager.fallback_index].selected = true;
+    manager.selected_index = manager.fallback_index;
+    manager.selected_generation = manager.fallback_generation;
+    result.selected = handle_at(manager, manager.selected_index);
+    result.migration = MIGRATION_REVERTED;
+    result.reverted = true;
+    result.reset_congestion = true;
+    result.reset_rtt = true;
+    result.reset_ecn = true;
+    result.rotate_connection_id = true;
+    ret result;
+}
+
+pub fun on_timeout(manager: *Manager, now_ns: u64) TimeoutResult {
+    var result: TimeoutResult;
+    if (manager == nil || !manager.valid || manager.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    var i: usize = 0;
+    for (i < manager.storage.path_capacity) {
+        if (manager.storage.paths[i].valid && manager.storage.paths[i].validation_deadline_ns != 0 &&
+            now_ns >= manager.storage.paths[i].validation_deadline_ns) {
+            if (manager.storage.paths[i].validation_purpose == VALIDATION_PATH) {
+                ret timeout_path(manager, i);
+            }
+            val generation: u64 = manager.storage.paths[i].generation;
+            manager.storage.paths[i].validation_started_ns = 0;
+            manager.storage.paths[i].validation_deadline_ns = 0;
+            manager.storage.paths[i].validation_purpose = 0;
+            free_path_challenges(manager, i, generation, true);
+            result.status = STATUS_OK;
+            result.failed = handle_at(manager, i);
+            result.mtu_validation_failed = true;
+            ret result;
+        }
+        i = i + 1;
+    }
+    result.status = STATUS_EMPTY;
+    ret result;
+}
+
+fun next_probe(path: *Path, config: Config) u16 {
+    if (path == nil || path.current_mtu >= path.search_upper_mtu) { ret 0; }
+    var candidate: u64 = path.current_mtu::u64 + config.mtu_probe_step::u64;
+    if (candidate > path.search_upper_mtu::u64) { candidate = path.search_upper_mtu::u64; }
+    ret candidate::u16;
+}
+
+pub fun prepare_mtu_probe(manager: *Manager, value: Handle) MtuPrepared {
+    var result: MtuPrepared;
+    if (!handle_valid(manager, value) || manager.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    val path: *Path = ?manager.storage.paths[value.index];
+    if (!path.selected || path.state != PATH_VALIDATED ||
+        !path.address_validated || !path.mtu_validated) {
+        result.status = STATUS_BLOCKED;
+        ret result;
+    }
+    if (path.mtu_probe_prepared || path.mtu_probe_active) {
+        result.status = STATUS_BLOCKED;
+        ret result;
+    }
+    val size: u16 = next_probe(path, manager.config);
+    if (size == 0) {
+        result.status = STATUS_EMPTY;
+        ret result;
+    }
+    path.mtu_probe_generation = next_generation(path.mtu_probe_generation);
+    path.mtu_probe_size = size;
+    path.mtu_probe_prepared = true;
+    result.status = STATUS_OK;
+    result.handle = value;
+    result.size = size;
+    result.token.source = manager.config.source;
+    result.token.path_index = value.index;
+    result.token.path_generation = value.generation;
+    result.token.generation = path.mtu_probe_generation;
+    result.token.size = size;
+    ret result;
+}
+
+fun mtu_token_valid(manager: *Manager, token: MtuToken) bool {
+    ret manager != nil && manager.valid && token.source == manager.config.source &&
+        token.path_index < manager.storage.path_capacity &&
+        manager.storage.paths[token.path_index].valid &&
+        manager.storage.paths[token.path_index].generation == token.path_generation &&
+        manager.storage.paths[token.path_index].mtu_probe_generation == token.generation &&
+        manager.storage.paths[token.path_index].mtu_probe_size == token.size;
+}
+
+fun mtu_send_reserved(manager: *Manager, token: MtuToken) bool {
+    var i: usize = 0;
+    for (i < manager.storage.send_capacity) {
+        if (manager.storage.sends[i].valid && manager.storage.sends[i].mtu_probe &&
+            manager.storage.sends[i].path_index == token.path_index &&
+            manager.storage.sends[i].path_generation == token.path_generation &&
+            manager.storage.sends[i].mtu_generation == token.generation) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+pub fun cancel_mtu_probe(manager: *Manager, token: MtuToken) OperationResult {
+    if (!mtu_token_valid(manager, token)) {
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    val path: *Path = ?manager.storage.paths[token.path_index];
+    if (!path.mtu_probe_prepared || path.mtu_probe_active) { ret operation_error(ERROR_TOKEN); }
+    if (mtu_send_reserved(manager, token)) {
+        var blocked: OperationResult;
+        blocked.status = STATUS_BLOCKED;
+        ret blocked;
+    }
+    if (path.mtu_datagram_generation == token.generation) {
+        ret operation_error(ERROR_STATE);
+    }
+    path.mtu_probe_prepared = false;
+    path.mtu_probe_size = 0;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun publish_mtu_probe(manager: *Manager, token: MtuToken) OperationResult {
+    if (!mtu_token_valid(manager, token)) {
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    val path: *Path = ?manager.storage.paths[token.path_index];
+    if (path.state == PATH_FAILED && path.mtu_probe_prepared && !path.mtu_probe_active &&
+        path.mtu_datagram_generation == token.generation && !mtu_send_reserved(manager, token)) {
+        path.mtu_probe_prepared = false;
+        path.mtu_probe_size = 0;
+        path.mtu_datagram_generation = 0;
+        var stale: OperationResult;
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    if (!path.mtu_probe_prepared || path.mtu_probe_active ||
+        path.mtu_datagram_generation != token.generation || mtu_send_reserved(manager, token)) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    path.mtu_probe_prepared = false;
+    path.mtu_probe_active = true;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun on_mtu_terminal(manager: *Manager, token: MtuToken, terminal: u8) MtuResult {
+    var result: MtuResult;
+    if (!mtu_token_valid(manager, token)) {
+        result.status = STATUS_STALE;
+        ret result;
+    }
+    val path: *Path = ?manager.storage.paths[token.path_index];
+    if (!path.mtu_probe_active || (terminal != MTU_TERMINAL_ACKED && terminal != MTU_TERMINAL_LOST)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    if (path.state == PATH_FAILED) {
+        path.mtu_probe_active = false;
+        path.mtu_probe_size = 0;
+        path.mtu_datagram_generation = 0;
+        result.status = STATUS_STALE;
+        ret result;
+    }
+    path.mtu_probe_active = false;
+    path.mtu_datagram_generation = 0;
+    result.status = STATUS_OK;
+    result.handle = handle_at(manager, token.path_index);
+    if (terminal == MTU_TERMINAL_ACKED) {
+        path.current_mtu = token.size;
+        path.mtu_probe_losses = 0;
+        path.black_hole_losses = 0;
+        result.changed = true;
+        result.reconfigure_congestion = true;
+        result.reconfigure_pacer = true;
+    } or {
+        path.mtu_probe_losses = path.mtu_probe_losses + 1;
+        if (path.mtu_probe_losses < manager.config.mtu_probe_attempts) {
+            result.retry = true;
+        } or {
+            path.mtu_probe_losses = 0;
+            if (token.size > manager.config.base_mtu) {
+                path.search_upper_mtu = token.size - 1;
+            }
+        }
+    }
+    path.mtu_probe_size = 0;
+    result.current_mtu = path.current_mtu;
+    result.next_probe_size = next_probe(path, manager.config);
+    ret result;
+}
+
+pub fun on_large_packet_lost(manager: *Manager, value: Handle, packet_size: u16) MtuResult {
+    var result: MtuResult;
+    if (!handle_valid(manager, value)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    val path: *Path = ?manager.storage.paths[value.index];
+    result.status = STATUS_OK;
+    result.handle = value;
+    result.current_mtu = path.current_mtu;
+    if (packet_size < path.current_mtu || path.current_mtu == manager.config.base_mtu) {
+        ret result;
+    }
+    path.black_hole_losses = path.black_hole_losses + 1;
+    if (path.black_hole_losses < manager.config.black_hole_threshold) { ret result; }
+    if (path.current_mtu > manager.config.base_mtu) {
+        path.search_upper_mtu = path.current_mtu - 1;
+    }
+    path.current_mtu = manager.config.base_mtu;
+    path.black_hole_losses = 0;
+    path.mtu_probe_losses = 0;
+    result.current_mtu = path.current_mtu;
+    result.next_probe_size = next_probe(path, manager.config);
+    result.changed = true;
+    result.reconfigure_congestion = true;
+    result.reconfigure_pacer = true;
+    ret result;
+}
+
+pub fun on_packet_acked(manager: *Manager, value: Handle, packet_size: u16) OperationResult {
+    if (!handle_valid(manager, value)) { ret operation_error(ERROR_TOKEN); }
+    if (packet_size >= manager.storage.paths[value.index].current_mtu) {
+        manager.storage.paths[value.index].black_hole_losses = 0;
+    }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun on_packet_too_big(manager: *Manager, value: Handle, reported_mtu: u16,
+                          quote_authenticated: bool) MtuResult {
+    var result: MtuResult;
+    if (!handle_valid(manager, value)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    result.handle = value;
+    result.current_mtu = manager.storage.paths[value.index].current_mtu;
+    if (!quote_authenticated) {
+        result.status = STATUS_DROPPED;
+        ret result;
+    }
+    if (reported_mtu < manager.config.base_mtu || reported_mtu > manager.config.maximum_mtu) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_MTU;
+        ret result;
+    }
+    val path: *Path = ?manager.storage.paths[value.index];
+    if (reported_mtu < path.search_upper_mtu) { path.search_upper_mtu = reported_mtu; }
+    if (path.current_mtu > reported_mtu) {
+        path.current_mtu = manager.config.base_mtu;
+        path.black_hole_losses = 0;
+        result.changed = true;
+        result.reconfigure_congestion = true;
+        result.reconfigure_pacer = true;
+    }
+    result.status = STATUS_OK;
+    result.current_mtu = path.current_mtu;
+    result.next_probe_size = next_probe(path, manager.config);
+    ret result;
+}
+
+pub fun snapshot(manager: *Manager, value: Handle) Snapshot {
+    var result: Snapshot;
+    if (!handle_valid(manager, value)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    val path: *Path = ?manager.storage.paths[value.index];
+    result.status = STATUS_OK;
+    result.endpoint = path.endpoint;
+    result.received_bytes = path.received_bytes;
+    result.sent_bytes = path.sent_bytes;
+    result.reserved_bytes = path.reserved_bytes;
+    result.amplification_allowance = amplification_allowance(manager, value.index);
+    result.current_mtu = path.current_mtu;
+    result.next_probe_size = next_probe(path, manager.config);
+    result.state = path.state;
+    result.selected = path.selected;
+    result.preferred = path.preferred;
+    result.port_rebinding = path.port_rebinding;
+    result.address_validated = path.address_validated;
+    result.mtu_validated = path.mtu_validated;
+    ret result;
+}
+
+fun path_has_owners(manager: *Manager, index: usize, generation: u64) bool {
+    var i: usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        if (manager.storage.challenges[i].valid && manager.storage.challenges[i].path_index == index &&
+            manager.storage.challenges[i].path_generation == generation) { ret true; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < manager.storage.response_capacity) {
+        if (manager.storage.responses[i].valid && manager.storage.responses[i].path_index == index &&
+            manager.storage.responses[i].path_generation == generation) { ret true; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < manager.storage.send_capacity) {
+        if (manager.storage.sends[i].valid && manager.storage.sends[i].path_index == index &&
+            manager.storage.sends[i].path_generation == generation) { ret true; }
+        i = i + 1;
+    }
+    ret manager.storage.paths[index].mtu_probe_prepared || manager.storage.paths[index].mtu_probe_active;
+}
+
+pub fun restart(manager: *Manager, value: Handle) PathResult {
+    if (!handle_valid(manager, value) || manager.closing ||
+        manager.storage.paths[value.index].state != PATH_FAILED) { ret path_error(ERROR_TOKEN); }
+    if (manager.storage.paths[value.index].selected ||
+        path_has_owners(manager, value.index, value.generation)) {
+        var blocked: PathResult;
+        blocked.status = STATUS_BLOCKED;
+        ret blocked;
+    }
+    val endpoint: Endpoint = manager.storage.paths[value.index].endpoint;
+    val locally_created: bool = manager.storage.paths[value.index].locally_created;
+    val preferred: bool = manager.storage.paths[value.index].preferred;
+    val is_rebinding: bool = manager.storage.paths[value.index].port_rebinding;
+    val generation: u64 = next_generation(value.generation);
+    reset_path(?manager.storage.paths[value.index], generation);
+    manager.storage.paths[value.index].endpoint = endpoint;
+    manager.storage.paths[value.index].current_mtu = manager.config.base_mtu;
+    manager.storage.paths[value.index].search_upper_mtu = manager.config.maximum_mtu;
+    manager.storage.paths[value.index].state = PATH_VALIDATING;
+    manager.storage.paths[value.index].valid = true;
+    manager.storage.paths[value.index].locally_created = locally_created;
+    manager.storage.paths[value.index].preferred = preferred;
+    manager.storage.paths[value.index].port_rebinding = is_rebinding;
+    if (manager.fallback_index == value.index && manager.fallback_generation == value.generation) {
+        manager.fallback_index = invalid_index();
+        manager.fallback_generation = 0;
+    }
+    var result: PathResult;
+    result.status = STATUS_OK;
+    result.handle = handle_at(manager, value.index);
+    ret result;
+}
+
+pub fun release(manager: *Manager, value: Handle) OperationResult {
+    if (!handle_valid(manager, value)) { ret operation_error(ERROR_TOKEN); }
+    if (manager.storage.paths[value.index].selected ||
+        (manager.fallback_index == value.index && manager.fallback_generation == value.generation &&
+            manager.storage.paths[value.index].state != PATH_FAILED) ||
+        path_has_owners(manager, value.index, value.generation)) {
+        var blocked: OperationResult;
+        blocked.status = STATUS_BLOCKED;
+        ret blocked;
+    }
+    val generation: u64 = manager.storage.paths[value.index].generation;
+    if (manager.fallback_index == value.index && manager.fallback_generation == value.generation) {
+        manager.fallback_index = invalid_index();
+        manager.fallback_generation = 0;
+    }
+    reset_path(?manager.storage.paths[value.index], generation);
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun begin_close(manager: *Manager) OperationResult {
+    if (manager == nil || !manager.valid) { ret operation_error(ERROR_STATE); }
+    manager.closing = true;
+    var i: usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        if (manager.storage.challenges[i].valid &&
+            manager.storage.challenges[i].state != CHALLENGE_PREPARED) {
+            clear_challenge(manager, i);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < manager.storage.response_capacity) {
+        if (manager.storage.responses[i].valid &&
+            manager.storage.responses[i].state != RESPONSE_PREPARED) {
+            clear_response(manager, i);
+        }
+        i = i + 1;
+    }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun finish_close(manager: *Manager) OperationResult {
+    if (manager == nil || !manager.valid || !manager.closing) { ret operation_error(ERROR_STATE); }
+    var i: usize = 0;
+    for (i < manager.storage.path_capacity) {
+        if (manager.storage.paths[i].valid && path_has_owners(manager, i,
+            manager.storage.paths[i].generation)) {
+            var blocked: OperationResult;
+            blocked.status = STATUS_BLOCKED;
+            ret blocked;
+        }
+        i = i + 1;
+    }
+    clear_storage(manager.storage);
+    manager.valid = false;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
