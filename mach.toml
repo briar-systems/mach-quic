@@ -62,4 +62,4 @@ ref = "tag/v0.6.0"
 
 [dep.mach-tls]
 git = "https://github.com/briar-systems/mach-tls"
-ref = "commit/9f5e7f9916be4fa15408ca35b0a5061384959fe5"
+ref = "commit/dabb2e20"
