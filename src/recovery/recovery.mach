@@ -1,36 +1,911 @@
+use quic.frame.frame;
+use quic.packet.packet;
+
 use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
 use std.types.size.usize;
+
+pub val TIMER_NONE: u8 = 0;
+pub val TIMER_LOSS: u8 = 1;
+pub val TIMER_PTO: u8 = 2;
+
+pub val EVENT_ACKED: u8 = 1;
+pub val EVENT_LOST: u8 = 2;
+pub val EVENT_DISCARDED: u8 = 3;
+pub val EVENT_RETRY: u8 = 4;
+
+pub val TIMEOUT_NONE: u8 = 0;
+pub val TIMEOUT_LOSS: u8 = 1;
+pub val TIMEOUT_PROBE: u8 = 2;
+pub val TIMEOUT_STALE: u8 = 3;
+pub val TIMEOUT_EARLY: u8 = 4;
+pub val TIMEOUT_ERROR: u8 = 5;
+
+pub val ERROR_NONE: u8 = 0;
+pub val ERROR_STATE: u8 = 1;
+pub val ERROR_SPACE: u8 = 2;
+pub val ERROR_HISTORY_FULL: u8 = 3;
+pub val ERROR_PACKET_NUMBER: u8 = 4;
+pub val ERROR_TIME: u8 = 5;
+pub val ERROR_OVERFLOW: u8 = 6;
+pub val ERROR_ACK: u8 = 7;
+pub val ERROR_EVENT_CAPACITY: u8 = 8;
+pub val ERROR_ECN: u8 = 9;
+
+pub rec Config {
+    initial_rtt_ns: u64;
+    granularity_ns: u64;
+    max_ack_delay_ns: u64;
+    packet_threshold: u64;
+    persistent_congestion_threshold: u8;
+    max_pto_backoff: u8;
+}
 
 pub rec Rtt {
     latest_ns: u64;
     minimum_ns: u64;
     smoothed_ns: u64;
     variance_ns: u64;
+    first_sample_at_ns: u64;
+    has_sample: bool;
 }
 
 pub rec SentPacket {
     number: u64;
     sent_at_ns: u64;
     bytes: usize;
+    owner: u64;
+    ecn: u8;
     ack_eliciting: bool;
     in_flight: bool;
+    sent_after_rtt_sample: bool;
+}
+
+pub rec HistoryStorage {
+    packets: *SentPacket;
+    capacity: usize;
+}
+
+pub rec History {
+    packets: *SentPacket;
+    capacity: usize;
+    len: usize;
+    largest_sent: u64;
+    largest_acked: u64;
+    loss_time_ns: u64;
+    last_ack_eliciting_at_ns: u64;
+    ack_eliciting_in_flight: usize;
+    has_largest_sent: bool;
+    has_largest_acked: bool;
+    active: bool;
+}
+
+pub rec Timer {
+    armed: bool;
+    kind: u8;
+    space: u8;
+    deadline_ns: u64;
+    generation: u64;
+}
+
+pub rec Event {
+    kind: u8;
+    space: u8;
+    number: u64;
+    sent_at_ns: u64;
+    bytes: usize;
+    owner: u64;
+    ecn: u8;
+    ack_eliciting: bool;
+    in_flight: bool;
+    sent_after_rtt_sample: bool;
 }
 
 pub rec Recovery {
-    largest_acked: u64;
-    loss_time_ns: u64;
-    probe_time_ns: u64;
-    probe_count: u32;
+    spaces: [3]History;
     rtt: Rtt;
+    config: Config;
+    timer: Timer;
+    bytes_in_flight: usize;
+    pto_count: u32;
+    last_sent_at_ns: u64;
+    latest_acked_sent_at_ns: u64;
+    persistent_start_ns: u64;
+    persistent_end_ns: u64;
+    valid: bool;
+    has_last_sent: bool;
+    has_latest_acked_sent: bool;
+    persistent_active: bool;
+    handshake_confirmed: bool;
+    handshake_keys_available: bool;
+    peer_address_validated: bool;
+    amplification_blocked: bool;
 }
 
+pub rec OperationResult {
+    ok: bool;
+    error: u8;
+    timer: Timer;
+}
+
+pub rec AckResult {
+    ok: bool;
+    error: u8;
+    event_count: usize;
+    acked_count: usize;
+    lost_count: usize;
+    persistent_congestion: bool;
+    timer: Timer;
+}
+
+pub rec TimeoutResult {
+    status: u8;
+    error: u8;
+    event_count: usize;
+    probe_count: u8;
+    probe_space: u8;
+    probe_owner: u64;
+    persistent_congestion: bool;
+    has_probe_owner: bool;
+    timer: Timer;
+}
+
+pub rec DiscardResult {
+    ok: bool;
+    error: u8;
+    event_count: usize;
+    timer: Timer;
+}
+
+pub fun default_config() Config {
+    var config: Config;
+    config.initial_rtt_ns = 333000000;
+    config.granularity_ns = 1000000;
+    config.max_ack_delay_ns = 25000000;
+    config.packet_threshold = 3;
+    config.persistent_congestion_threshold = 3;
+    config.max_pto_backoff = 31;
+    ret config;
+}
+
+fun index(space: u8) usize {
+    if (space < packet.SPACE_INITIAL || space > packet.SPACE_APPLICATION) { ret 3; }
+    ret (space - packet.SPACE_INITIAL)::usize;
+}
+
+fun saturated_add(a: u64, b: u64) u64 {
+    if (b > (0 - 1::u64) - a) { ret 0 - 1::u64; }
+    ret a + b;
+}
+
+fun saturated_multiply(a: u64, b: u64) u64 {
+    if (a == 0 || b == 0) { ret 0; }
+    if (a > (0 - 1::u64) / b) { ret 0 - 1::u64; }
+    ret a * b;
+}
+
+fun maximum(a: u64, b: u64) u64 {
+    if (a > b) { ret a; }
+    ret b;
+}
+
+fun absolute_difference(a: u64, b: u64) u64 {
+    if (a > b) { ret a - b; }
+    ret b - a;
+}
+
+fun time_threshold(value: u64) u64 {
+    val quotient: u64 = value / 8;
+    val remainder: u64 = value & 7;
+    var threshold: u64 = saturated_add(value, quotient);
+    if (remainder != 0) { threshold = saturated_add(threshold, 1); }
+    ret threshold;
+}
+
+fun next_generation(timer: *Timer) {
+    if (timer.generation == 0 - 1::u64) {
+        timer.generation = 1;
+    } or {
+        timer.generation = timer.generation + 1;
+    }
+}
+
+fun valid_config(config: Config) bool {
+    ret config.initial_rtt_ns > 0 && config.granularity_ns > 0 &&
+        config.packet_threshold >= 3 && config.persistent_congestion_threshold > 0 &&
+        config.max_pto_backoff <= 62;
+}
+
+pub fun init_with_storage(initial: HistoryStorage, handshake: HistoryStorage, application: HistoryStorage, config: Config) Recovery {
+    var recovery: Recovery;
+    recovery.config = config;
+    recovery.rtt.minimum_ns = 0 - 1::u64;
+    recovery.rtt.smoothed_ns = config.initial_rtt_ns;
+    recovery.rtt.variance_ns = config.initial_rtt_ns / 2;
+    if (!valid_config(config) ||
+        initial.packets == nil || handshake.packets == nil || application.packets == nil ||
+        initial.capacity == 0 || handshake.capacity == 0 || application.capacity == 0) {
+        ret recovery;
+    }
+    recovery.spaces[0].packets = initial.packets;
+    recovery.spaces[0].capacity = initial.capacity;
+    recovery.spaces[0].active = true;
+    recovery.spaces[1].packets = handshake.packets;
+    recovery.spaces[1].capacity = handshake.capacity;
+    recovery.spaces[1].active = true;
+    recovery.spaces[2].packets = application.packets;
+    recovery.spaces[2].capacity = application.capacity;
+    recovery.spaces[2].active = true;
+    recovery.valid = true;
+    ret recovery;
+}
+
+# compatibility initializer for connection scaffolding without packet storage
 pub fun init() Recovery {
-    var r: Recovery;
-    r.rtt.minimum_ns = -1::u64;
-    ret r;
+    var empty: HistoryStorage;
+    ret init_with_storage(empty, empty, empty, default_config());
 }
 
-test "quic.recovery.recovery: minimum RTT begins unset" {
-    if (init().rtt.minimum_ns != -1::u64) { ret 1; }
+pub fun update_rtt(recovery: *Recovery, latest_ns: u64, ack_delay_ns: u64, sample_at_ns: u64) bool {
+    if (recovery == nil || latest_ns == 0) { ret false; }
+    recovery.rtt.latest_ns = latest_ns;
+    if (!recovery.rtt.has_sample) {
+        recovery.rtt.minimum_ns = latest_ns;
+        recovery.rtt.smoothed_ns = latest_ns;
+        recovery.rtt.variance_ns = latest_ns / 2;
+        recovery.rtt.first_sample_at_ns = sample_at_ns;
+        recovery.rtt.has_sample = true;
+        ret true;
+    }
+
+    if (latest_ns < recovery.rtt.minimum_ns) { recovery.rtt.minimum_ns = latest_ns; }
+    var bounded_delay: u64 = ack_delay_ns;
+    if (recovery.handshake_confirmed && bounded_delay > recovery.config.max_ack_delay_ns) {
+        bounded_delay = recovery.config.max_ack_delay_ns;
+    }
+    var adjusted: u64 = latest_ns;
+    if (bounded_delay <= latest_ns && recovery.rtt.minimum_ns <= latest_ns - bounded_delay) {
+        adjusted = latest_ns - bounded_delay;
+    }
+    val variation_sample: u64 = absolute_difference(recovery.rtt.smoothed_ns, adjusted);
+    recovery.rtt.variance_ns = (recovery.rtt.variance_ns / 4) * 3 +
+        ((recovery.rtt.variance_ns & 3) * 3 + variation_sample) / 4;
+    recovery.rtt.smoothed_ns = (recovery.rtt.smoothed_ns / 8) * 7 +
+        ((recovery.rtt.smoothed_ns & 7) * 7 + adjusted) / 8;
+    ret true;
+}
+
+fun pto_base(recovery: *Recovery) u64 {
+    val variation: u64 = saturated_multiply(recovery.rtt.variance_ns, 4);
+    ret saturated_add(recovery.rtt.smoothed_ns, maximum(variation, recovery.config.granularity_ns));
+}
+
+fun pto_duration(recovery: *Recovery, application: bool) u64 {
+    var exponent: u8 = recovery.config.max_pto_backoff;
+    if (recovery.pto_count <= recovery.config.max_pto_backoff::u32) {
+        exponent = recovery.pto_count::u8;
+    }
+    val multiplier: u64 = 1::u64 << exponent;
+    var duration: u64 = saturated_multiply(pto_base(recovery), multiplier);
+    if (application) {
+        duration = saturated_add(duration, saturated_multiply(recovery.config.max_ack_delay_ns, multiplier));
+    }
+    ret maximum(duration, recovery.config.granularity_ns);
+}
+
+fun any_ack_eliciting(recovery: *Recovery) bool {
+    var i: usize = 0;
+    for (i < 3) {
+        if (recovery.spaces[i].active && recovery.spaces[i].ack_eliciting_in_flight > 0) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+fun recompute_timer(recovery: *Recovery, now_ns: u64) Timer {
+    next_generation(?recovery.timer);
+    recovery.timer.armed = false;
+    recovery.timer.kind = TIMER_NONE;
+    recovery.timer.deadline_ns = 0;
+    recovery.timer.space = 0;
+
+    var earliest: u64 = 0;
+    var earliest_space: u8 = 0;
+    var i: usize = 0;
+    for (i < 3) {
+        val history: *History = ?recovery.spaces[i];
+        if (history.active && history.loss_time_ns != 0 &&
+            (earliest == 0 || history.loss_time_ns < earliest)) {
+            earliest = history.loss_time_ns;
+            earliest_space = (i + 1)::u8;
+        }
+        i = i + 1;
+    }
+    if (earliest != 0) {
+        recovery.timer.armed = true;
+        recovery.timer.kind = TIMER_LOSS;
+        recovery.timer.space = earliest_space;
+        recovery.timer.deadline_ns = earliest;
+        ret recovery.timer;
+    }
+
+    if (recovery.amplification_blocked) { ret recovery.timer; }
+
+    if (!any_ack_eliciting(recovery)) {
+        if (recovery.peer_address_validated) { ret recovery.timer; }
+        recovery.timer.armed = true;
+        recovery.timer.kind = TIMER_PTO;
+        if (recovery.handshake_keys_available && recovery.spaces[1].active) {
+            recovery.timer.space = packet.SPACE_HANDSHAKE;
+        } or {
+            recovery.timer.space = packet.SPACE_INITIAL;
+        }
+        recovery.timer.deadline_ns = saturated_add(now_ns, pto_duration(recovery, false));
+        ret recovery.timer;
+    }
+
+    i = 0;
+    for (i < 3) {
+        val history: *History = ?recovery.spaces[i];
+        if (history.active && history.ack_eliciting_in_flight > 0) {
+            val space: u8 = (i + 1)::u8;
+            if (space != packet.SPACE_APPLICATION || recovery.handshake_confirmed) {
+                val duration: u64 = pto_duration(recovery, space == packet.SPACE_APPLICATION);
+                val deadline: u64 = saturated_add(history.last_ack_eliciting_at_ns, duration);
+                if (!recovery.timer.armed || deadline < recovery.timer.deadline_ns) {
+                    recovery.timer.armed = true;
+                    recovery.timer.kind = TIMER_PTO;
+                    recovery.timer.space = space;
+                    recovery.timer.deadline_ns = deadline;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    ret recovery.timer;
+}
+
+pub fun timer(recovery: *Recovery) Timer {
+    if (recovery == nil) { var empty: Timer; ret empty; }
+    ret recovery.timer;
+}
+
+fun operation_error(code: u8, current: Timer) OperationResult {
+    var operation: OperationResult;
+    operation.error = code;
+    operation.timer = current;
+    ret operation;
+}
+
+pub fun set_handshake_keys(recovery: *Recovery, available: bool, now_ns: u64) OperationResult {
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret operation_error(ERROR_STATE, empty); }
+    if (recovery.has_last_sent && now_ns < recovery.last_sent_at_ns) { ret operation_error(ERROR_TIME, recovery.timer); }
+    recovery.handshake_keys_available = available;
+    var operation: OperationResult;
+    operation.ok = true;
+    operation.timer = recompute_timer(recovery, now_ns);
+    ret operation;
+}
+
+pub fun confirm_handshake(recovery: *Recovery, now_ns: u64) OperationResult {
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret operation_error(ERROR_STATE, empty); }
+    if (recovery.has_last_sent && now_ns < recovery.last_sent_at_ns) { ret operation_error(ERROR_TIME, recovery.timer); }
+    recovery.handshake_confirmed = true;
+    recovery.peer_address_validated = true;
+    var operation: OperationResult;
+    operation.ok = true;
+    operation.timer = recompute_timer(recovery, now_ns);
+    ret operation;
+}
+
+pub fun set_peer_address_validated(recovery: *Recovery, validated: bool, now_ns: u64) OperationResult {
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret operation_error(ERROR_STATE, empty); }
+    if (recovery.has_last_sent && now_ns < recovery.last_sent_at_ns) { ret operation_error(ERROR_TIME, recovery.timer); }
+    recovery.peer_address_validated = validated;
+    var operation: OperationResult;
+    operation.ok = true;
+    operation.timer = recompute_timer(recovery, now_ns);
+    ret operation;
+}
+
+pub fun set_amplification_blocked(recovery: *Recovery, blocked: bool, now_ns: u64) OperationResult {
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret operation_error(ERROR_STATE, empty); }
+    if (recovery.has_last_sent && now_ns < recovery.last_sent_at_ns) { ret operation_error(ERROR_TIME, recovery.timer); }
+    recovery.amplification_blocked = blocked;
+    var operation: OperationResult;
+    operation.ok = true;
+    operation.timer = recompute_timer(recovery, now_ns);
+    ret operation;
+}
+
+pub fun on_packet_sent(recovery: *Recovery, pn_space: u8, sent: SentPacket) OperationResult {
+    val i: usize = index(pn_space);
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret operation_error(ERROR_STATE, empty); }
+    if (i >= 3 || !recovery.spaces[i].active) { ret operation_error(ERROR_SPACE, recovery.timer); }
+    if (sent.number > packet.MAX_PACKET_NUMBER) { ret operation_error(ERROR_PACKET_NUMBER, recovery.timer); }
+    if (sent.ecn > 3) { ret operation_error(ERROR_ECN, recovery.timer); }
+    val history: *History = ?recovery.spaces[i];
+    if (history.has_largest_sent && sent.number <= history.largest_sent) { ret operation_error(ERROR_PACKET_NUMBER, recovery.timer); }
+    if (history.len >= history.capacity) { ret operation_error(ERROR_HISTORY_FULL, recovery.timer); }
+    if (recovery.has_last_sent && sent.sent_at_ns < recovery.last_sent_at_ns) { ret operation_error(ERROR_TIME, recovery.timer); }
+    if (sent.in_flight && sent.bytes > (0 - 1::usize) - recovery.bytes_in_flight) {
+        ret operation_error(ERROR_OVERFLOW, recovery.timer);
+    }
+
+    var stored: SentPacket = sent;
+    stored.sent_after_rtt_sample = recovery.rtt.has_sample;
+    history.packets[history.len] = stored;
+    history.len = history.len + 1;
+    history.largest_sent = sent.number;
+    history.has_largest_sent = true;
+    if (sent.in_flight) { recovery.bytes_in_flight = recovery.bytes_in_flight + sent.bytes; }
+    if (sent.ack_eliciting && sent.in_flight) {
+        history.last_ack_eliciting_at_ns = sent.sent_at_ns;
+        history.ack_eliciting_in_flight = history.ack_eliciting_in_flight + 1;
+    }
+    recovery.last_sent_at_ns = sent.sent_at_ns;
+    recovery.has_last_sent = true;
+    var operation: OperationResult;
+    operation.ok = true;
+    operation.timer = recovery.timer;
+    if (sent.in_flight) { operation.timer = recompute_timer(recovery, sent.sent_at_ns); }
+    ret operation;
+}
+
+fun valid_ack(ack: *frame.Frame) bool {
+    if (ack == nil || (ack.kind != frame.ACK && ack.kind != frame.ACK_ECN)) { ret false; }
+    if (ack.first_ack_range > ack.largest_acknowledged) { ret false; }
+    if (ack.ack_range_count > 0 && ack.ack_ranges == nil) { ret false; }
+    var smallest: u64 = ack.largest_acknowledged - ack.first_ack_range;
+    var i: usize = 0;
+    for (i < ack.ack_range_count) {
+        val range: frame.AckRange = ack.ack_ranges[i];
+        if (smallest < 2 || range.gap > smallest - 2) { ret false; }
+        val next_largest: u64 = smallest - range.gap - 2;
+        if (range.range > next_largest) { ret false; }
+        smallest = next_largest - range.range;
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun ack_contains(ack: *frame.Frame, number: u64) bool {
+    var largest: u64 = ack.largest_acknowledged;
+    var smallest: u64 = largest - ack.first_ack_range;
+    if (number >= smallest && number <= largest) { ret true; }
+    var i: usize = 0;
+    for (i < ack.ack_range_count) {
+        largest = smallest - ack.ack_ranges[i].gap - 2;
+        smallest = largest - ack.ack_ranges[i].range;
+        if (number >= smallest && number <= largest) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+fun append_event(events: *Event, count: *usize, kind: u8, space: u8, sent: SentPacket) {
+    events[@count].kind = kind;
+    events[@count].space = space;
+    events[@count].number = sent.number;
+    events[@count].sent_at_ns = sent.sent_at_ns;
+    events[@count].bytes = sent.bytes;
+    events[@count].owner = sent.owner;
+    events[@count].ecn = sent.ecn;
+    events[@count].ack_eliciting = sent.ack_eliciting;
+    events[@count].in_flight = sent.in_flight;
+    events[@count].sent_after_rtt_sample = sent.sent_after_rtt_sample;
+    @count = @count + 1;
+}
+
+fun remove_in_flight(recovery: *Recovery, history: *History, sent: SentPacket) {
+    if (sent.in_flight) {
+        recovery.bytes_in_flight = recovery.bytes_in_flight - sent.bytes;
+        if (sent.ack_eliciting) { history.ack_eliciting_in_flight = history.ack_eliciting_in_flight - 1; }
+    }
+}
+
+fun loss_delay(recovery: *Recovery) u64 {
+    ret maximum(time_threshold(maximum(recovery.rtt.latest_ns, recovery.rtt.smoothed_ns)), recovery.config.granularity_ns);
+}
+
+fun detect_lost(recovery: *Recovery, pn_space: u8, now_ns: u64, events: *Event, count: *usize) usize {
+    val i: usize = index(pn_space);
+    val history: *History = ?recovery.spaces[i];
+    history.loss_time_ns = 0;
+    if (!history.has_largest_acked) { ret 0; }
+    val delay: u64 = loss_delay(recovery);
+    val time_ready: bool = now_ns >= delay;
+    var lost_send_time: u64 = 0;
+    if (time_ready) { lost_send_time = now_ns - delay; }
+    var lost_count: usize = 0;
+    var read: usize = 0;
+    var write: usize = 0;
+    for (read < history.len) {
+        val sent: SentPacket = history.packets[read];
+        var lost: bool = false;
+        if (sent.number <= history.largest_acked) {
+            if (history.largest_acked - sent.number >= recovery.config.packet_threshold) { lost = true; }
+            if (time_ready && sent.sent_at_ns <= lost_send_time) { lost = true; }
+        }
+        if (lost) {
+            append_event(events, count, EVENT_LOST, pn_space, sent);
+            remove_in_flight(recovery, history, sent);
+            lost_count = lost_count + 1;
+        } or {
+            history.packets[write] = sent;
+            write = write + 1;
+            if (sent.number <= history.largest_acked) {
+                val candidate: u64 = saturated_add(sent.sent_at_ns, delay);
+                if (history.loss_time_ns == 0 || candidate < history.loss_time_ns) {
+                    history.loss_time_ns = candidate;
+                }
+            }
+        }
+        read = read + 1;
+    }
+    history.len = write;
+    ret lost_count;
+}
+
+fun ack_delay_ns(ack: *frame.Frame, exponent: u8) u64 {
+    if (exponent > 20 || ack.ack_delay > ((0 - 1::u64) >> exponent)) { ret 0 - 1::u64; }
+    ret saturated_multiply(ack.ack_delay << exponent, 1000);
+}
+
+fun persistent_duration(recovery: *Recovery) u64 {
+    val base: u64 = saturated_add(pto_base(recovery), recovery.config.max_ack_delay_ns);
+    ret saturated_multiply(base, recovery.config.persistent_congestion_threshold::u64);
+}
+
+fun update_persistent(recovery: *Recovery, events: *Event, count: usize) bool {
+    var declared: bool = false;
+    var previous_time: u64 = 0;
+    var previous_index: usize = 0;
+    var have_previous: bool = false;
+    var step: usize = 0;
+    for (step < count) {
+        var chosen: usize = count;
+        var i: usize = 0;
+        for (i < count) {
+            val after: bool = !have_previous || events[i].sent_at_ns > previous_time ||
+                (events[i].sent_at_ns == previous_time && i > previous_index);
+            if (after && (chosen == count || events[i].sent_at_ns < events[chosen].sent_at_ns ||
+                (events[i].sent_at_ns == events[chosen].sent_at_ns && i < chosen))) {
+                chosen = i;
+            }
+            i = i + 1;
+        }
+        if (chosen == count) { brk; }
+        val event: Event = events[chosen];
+        previous_time = event.sent_at_ns;
+        previous_index = chosen;
+        have_previous = true;
+
+        if (event.kind == EVENT_ACKED) {
+            if (!recovery.has_latest_acked_sent || event.sent_at_ns > recovery.latest_acked_sent_at_ns) {
+                recovery.latest_acked_sent_at_ns = event.sent_at_ns;
+                recovery.has_latest_acked_sent = true;
+            }
+            if (recovery.persistent_active && event.sent_at_ns >= recovery.persistent_start_ns) {
+                recovery.persistent_active = false;
+            }
+        } or (event.kind == EVENT_LOST && event.ack_eliciting && event.sent_after_rtt_sample) {
+            if (!recovery.has_latest_acked_sent || event.sent_at_ns > recovery.latest_acked_sent_at_ns) {
+                if (!recovery.persistent_active) {
+                    recovery.persistent_start_ns = event.sent_at_ns;
+                    recovery.persistent_end_ns = event.sent_at_ns;
+                    recovery.persistent_active = true;
+                } or {
+                    if (event.sent_at_ns < recovery.persistent_start_ns) { recovery.persistent_start_ns = event.sent_at_ns; }
+                    if (event.sent_at_ns > recovery.persistent_end_ns) { recovery.persistent_end_ns = event.sent_at_ns; }
+                }
+                if (recovery.persistent_end_ns - recovery.persistent_start_ns > persistent_duration(recovery)) {
+                    declared = true;
+                    recovery.persistent_active = false;
+                    if (recovery.rtt.latest_ns > 0) { recovery.rtt.minimum_ns = recovery.rtt.latest_ns; }
+                }
+            }
+        }
+        step = step + 1;
+    }
+    ret declared;
+}
+
+fun ack_error(code: u8, current: Timer) AckResult {
+    var result: AckResult;
+    result.error = code;
+    result.timer = current;
+    ret result;
+}
+
+pub fun on_ack(recovery: *Recovery, pn_space: u8, ack: *frame.Frame, received_at_ns: u64, ack_delay_exponent: u8, events: *Event, capacity: usize) AckResult {
+    val i: usize = index(pn_space);
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret ack_error(ERROR_STATE, empty); }
+    if (i >= 3 || !recovery.spaces[i].active) { ret ack_error(ERROR_SPACE, recovery.timer); }
+    if (recovery.has_last_sent && received_at_ns < recovery.last_sent_at_ns) { ret ack_error(ERROR_TIME, recovery.timer); }
+    if (!valid_ack(ack) || ack_delay_exponent > 20) { ret ack_error(ERROR_ACK, recovery.timer); }
+    val history: *History = ?recovery.spaces[i];
+    if (!history.has_largest_sent || ack.largest_acknowledged > history.largest_sent) {
+        ret ack_error(ERROR_ACK, recovery.timer);
+    }
+    if (history.len > capacity || (history.len > 0 && events == nil)) {
+        ret ack_error(ERROR_EVENT_CAPACITY, recovery.timer);
+    }
+    var read: usize = 0;
+    for (read < history.len) {
+        if (ack_contains(ack, history.packets[read].number) && history.packets[read].sent_at_ns > received_at_ns) {
+            ret ack_error(ERROR_TIME, recovery.timer);
+        }
+        read = read + 1;
+    }
+
+    if (!history.has_largest_acked || ack.largest_acknowledged > history.largest_acked) {
+        history.largest_acked = ack.largest_acknowledged;
+        history.has_largest_acked = true;
+    }
+    var event_count: usize = 0;
+    var acked_count: usize = 0;
+    var write: usize = 0;
+    var largest_newly_acked: SentPacket;
+    var largest_was_new: bool = false;
+    var includes_ack_eliciting: bool = false;
+    read = 0;
+    for (read < history.len) {
+        val sent: SentPacket = history.packets[read];
+        if (ack_contains(ack, sent.number)) {
+            append_event(events, ?event_count, EVENT_ACKED, pn_space, sent);
+            remove_in_flight(recovery, history, sent);
+            acked_count = acked_count + 1;
+            if (sent.ack_eliciting) { includes_ack_eliciting = true; }
+            if (sent.number == ack.largest_acknowledged) {
+                largest_newly_acked = sent;
+                largest_was_new = true;
+            }
+        } or {
+            history.packets[write] = sent;
+            write = write + 1;
+        }
+        read = read + 1;
+    }
+    history.len = write;
+
+    if (acked_count == 0) {
+        var duplicate: AckResult;
+        duplicate.ok = true;
+        duplicate.timer = recovery.timer;
+        ret duplicate;
+    }
+    if (largest_was_new && includes_ack_eliciting) {
+        val latest: u64 = received_at_ns - largest_newly_acked.sent_at_ns;
+        var delay: u64 = 0;
+        if (pn_space == packet.SPACE_APPLICATION) { delay = ack_delay_ns(ack, ack_delay_exponent); }
+        update_rtt(recovery, latest, delay, received_at_ns);
+    }
+
+    val lost_count: usize = detect_lost(recovery, pn_space, received_at_ns, events, ?event_count);
+    val persistent: bool = update_persistent(recovery, events, event_count);
+    if (recovery.peer_address_validated) { recovery.pto_count = 0; }
+    var result: AckResult;
+    result.ok = true;
+    result.event_count = event_count;
+    result.acked_count = acked_count;
+    result.lost_count = lost_count;
+    result.persistent_congestion = persistent;
+    result.timer = recompute_timer(recovery, received_at_ns);
+    ret result;
+}
+
+fun timeout_error(status: u8, error: u8, current: Timer) TimeoutResult {
+    var result: TimeoutResult;
+    result.status = status;
+    result.error = error;
+    result.timer = current;
+    ret result;
+}
+
+fun oldest_probe_owner(history: *History) u64 {
+    var i: usize = 0;
+    for (i < history.len) {
+        if (history.packets[i].ack_eliciting && history.packets[i].in_flight) { ret history.packets[i].owner; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+fun has_probe_owner(history: *History) bool {
+    var i: usize = 0;
+    for (i < history.len) {
+        if (history.packets[i].ack_eliciting && history.packets[i].in_flight) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+pub fun on_timeout(recovery: *Recovery, now_ns: u64, generation: u64, events: *Event, capacity: usize) TimeoutResult {
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret timeout_error(TIMEOUT_ERROR, ERROR_STATE, empty); }
+    if (recovery.has_last_sent && now_ns < recovery.last_sent_at_ns) {
+        ret timeout_error(TIMEOUT_ERROR, ERROR_TIME, recovery.timer);
+    }
+    if (!recovery.timer.armed || generation != recovery.timer.generation) {
+        ret timeout_error(TIMEOUT_STALE, ERROR_NONE, recovery.timer);
+    }
+    if (now_ns < recovery.timer.deadline_ns) {
+        ret timeout_error(TIMEOUT_EARLY, ERROR_NONE, recovery.timer);
+    }
+    val pn_space: u8 = recovery.timer.space;
+    val i: usize = index(pn_space);
+    if (i >= 3 || !recovery.spaces[i].active) { ret timeout_error(TIMEOUT_ERROR, ERROR_SPACE, recovery.timer); }
+
+    if (recovery.timer.kind == TIMER_LOSS) {
+        val history: *History = ?recovery.spaces[i];
+        if (history.len > capacity || (history.len > 0 && events == nil)) {
+            ret timeout_error(TIMEOUT_ERROR, ERROR_EVENT_CAPACITY, recovery.timer);
+        }
+        var event_count: usize = 0;
+        val lost_count: usize = detect_lost(recovery, pn_space, now_ns, events, ?event_count);
+        if (lost_count == 0) { ret timeout_error(TIMEOUT_ERROR, ERROR_STATE, recovery.timer); }
+        val persistent: bool = update_persistent(recovery, events, event_count);
+        var result: TimeoutResult;
+        result.status = TIMEOUT_LOSS;
+        result.event_count = event_count;
+        result.persistent_congestion = persistent;
+        result.timer = recompute_timer(recovery, now_ns);
+        ret result;
+    }
+
+    if (recovery.timer.kind != TIMER_PTO) { ret timeout_error(TIMEOUT_ERROR, ERROR_STATE, recovery.timer); }
+    var result: TimeoutResult;
+    result.status = TIMEOUT_PROBE;
+    result.probe_space = pn_space;
+    result.probe_count = 2;
+    if (!any_ack_eliciting(recovery)) { result.probe_count = 1; }
+    result.probe_owner = oldest_probe_owner(?recovery.spaces[i]);
+    result.has_probe_owner = has_probe_owner(?recovery.spaces[i]);
+    if (recovery.pto_count < 0 - 1::u32) { recovery.pto_count = recovery.pto_count + 1; }
+    result.timer = recompute_timer(recovery, now_ns);
+    ret result;
+}
+
+fun discard_error(code: u8, current: Timer) DiscardResult {
+    var result: DiscardResult;
+    result.error = code;
+    result.timer = current;
+    ret result;
+}
+
+fun clear_space(recovery: *Recovery, pn_space: u8, event_kind: u8, deactivate: bool, now_ns: u64, events: *Event, capacity: usize) DiscardResult {
+    val i: usize = index(pn_space);
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret discard_error(ERROR_STATE, empty); }
+    if (i >= 2 || !recovery.spaces[i].active) { ret discard_error(ERROR_SPACE, recovery.timer); }
+    if (recovery.has_last_sent && now_ns < recovery.last_sent_at_ns) { ret discard_error(ERROR_TIME, recovery.timer); }
+    val history: *History = ?recovery.spaces[i];
+    if (history.len > capacity || (history.len > 0 && events == nil)) {
+        ret discard_error(ERROR_EVENT_CAPACITY, recovery.timer);
+    }
+    var count: usize = 0;
+    var position: usize = 0;
+    for (position < history.len) {
+        val sent: SentPacket = history.packets[position];
+        append_event(events, ?count, event_kind, pn_space, sent);
+        remove_in_flight(recovery, history, sent);
+        position = position + 1;
+    }
+    history.len = 0;
+    history.loss_time_ns = 0;
+    history.last_ack_eliciting_at_ns = 0;
+    history.ack_eliciting_in_flight = 0;
+    history.has_largest_sent = false;
+    history.has_largest_acked = false;
+    history.active = !deactivate;
+    recovery.pto_count = 0;
+    var result: DiscardResult;
+    result.ok = true;
+    result.event_count = count;
+    result.timer = recompute_timer(recovery, now_ns);
+    ret result;
+}
+
+pub fun discard_space(recovery: *Recovery, pn_space: u8, now_ns: u64, events: *Event, capacity: usize) DiscardResult {
+    ret clear_space(recovery, pn_space, EVENT_DISCARDED, true, now_ns, events, capacity);
+}
+
+pub fun on_retry(recovery: *Recovery, now_ns: u64, events: *Event, capacity: usize) DiscardResult {
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret discard_error(ERROR_STATE, empty); }
+    if (recovery.has_last_sent && now_ns < recovery.last_sent_at_ns) { ret discard_error(ERROR_TIME, recovery.timer); }
+    var needed: usize = 0;
+    var i: usize = 0;
+    for (i < 3) {
+        if (recovery.spaces[i].len > capacity - needed) {
+            ret discard_error(ERROR_EVENT_CAPACITY, recovery.timer);
+        }
+        needed = needed + recovery.spaces[i].len;
+        i = i + 1;
+    }
+    if (needed > 0 && events == nil) { ret discard_error(ERROR_EVENT_CAPACITY, recovery.timer); }
+
+    var count: usize = 0;
+    i = 0;
+    for (i < 3) {
+        val history: *History = ?recovery.spaces[i];
+        val largest_sent: u64 = history.largest_sent;
+        val has_largest_sent: bool = history.has_largest_sent;
+        var position: usize = 0;
+        for (position < history.len) {
+            append_event(events, ?count, EVENT_RETRY, (i + 1)::u8, history.packets[position]);
+            position = position + 1;
+        }
+        var reset: History;
+        reset.packets = history.packets;
+        reset.capacity = history.capacity;
+        reset.active = true;
+        reset.largest_sent = largest_sent;
+        reset.has_largest_sent = has_largest_sent;
+        @history = reset;
+        i = i + 1;
+    }
+
+    var rtt: Rtt;
+    rtt.minimum_ns = 0 - 1::u64;
+    rtt.smoothed_ns = recovery.config.initial_rtt_ns;
+    rtt.variance_ns = recovery.config.initial_rtt_ns / 2;
+    recovery.rtt = rtt;
+    recovery.bytes_in_flight = 0;
+    recovery.pto_count = 0;
+    recovery.latest_acked_sent_at_ns = 0;
+    recovery.persistent_start_ns = 0;
+    recovery.persistent_end_ns = 0;
+    recovery.has_latest_acked_sent = false;
+    recovery.persistent_active = false;
+    recovery.handshake_confirmed = false;
+    recovery.handshake_keys_available = false;
+    recovery.peer_address_validated = false;
+    recovery.amplification_blocked = false;
+    recovery.last_sent_at_ns = now_ns;
+    recovery.has_last_sent = true;
+
+    var result: DiscardResult;
+    result.ok = true;
+    result.event_count = count;
+    result.timer = recompute_timer(recovery, now_ns);
+    ret result;
+}
+
+test "quic.recovery.recovery: RFC RTT estimator and PTO arithmetic" {
+    var initial: [4]SentPacket;
+    var handshake: [4]SentPacket;
+    var application: [4]SentPacket;
+    var recovery: Recovery = init_with_storage(
+        HistoryStorage{packets: ?initial[0], capacity: 4},
+        HistoryStorage{packets: ?handshake[0], capacity: 4},
+        HistoryStorage{packets: ?application[0], capacity: 4},
+        default_config()
+    );
+    if (!recovery.valid || recovery.rtt.minimum_ns != 0 - 1::u64) { ret 1; }
+    if (!update_rtt(?recovery, 100000000, 0, 100000000)) { ret 1; }
+    if (recovery.rtt.smoothed_ns != 100000000 || recovery.rtt.variance_ns != 50000000) { ret 1; }
+    recovery.handshake_confirmed = true;
+    if (!update_rtt(?recovery, 120000000, 20000000, 320000000)) { ret 1; }
+    if (recovery.rtt.smoothed_ns != 100000000 || recovery.rtt.variance_ns != 37500000) { ret 1; }
+    if (pto_duration(?recovery, true) != 275000000) { ret 1; }
+    ret 0;
+}
+
+test "quic.recovery.recovery: bounded histories reject overflow transactionally" {
+    var initial: [1]SentPacket;
+    var handshake: [1]SentPacket;
+    var application: [1]SentPacket;
+    var recovery: Recovery = init_with_storage(
+        HistoryStorage{packets: ?initial[0], capacity: 1},
+        HistoryStorage{packets: ?handshake[0], capacity: 1},
+        HistoryStorage{packets: ?application[0], capacity: 1},
+        default_config()
+    );
+    var sent: SentPacket;
+    sent.number = 0; sent.sent_at_ns = 1; sent.bytes = 1200; sent.owner = 7; sent.ack_eliciting = true; sent.in_flight = true;
+    if (!on_packet_sent(?recovery, packet.SPACE_APPLICATION, sent).ok) { ret 1; }
+    sent.number = 1; sent.sent_at_ns = 2;
+    val rejected: OperationResult = on_packet_sent(?recovery, packet.SPACE_APPLICATION, sent);
+    if (rejected.error != ERROR_HISTORY_FULL || recovery.spaces[2].len != 1 || recovery.bytes_in_flight != 1200) { ret 1; }
     ret 0;
 }
