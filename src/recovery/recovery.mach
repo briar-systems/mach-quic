@@ -294,6 +294,11 @@ fun pto_duration(recovery: *Recovery, application: bool) u64 {
     ret maximum(duration, recovery.config.granularity_ns);
 }
 
+pub fun current_pto(recovery: *Recovery, application: bool) u64 {
+    if (recovery == nil || !recovery.valid) { ret 0; }
+    ret pto_duration(recovery, application);
+}
+
 fun any_ack_eliciting(recovery: *Recovery) bool {
     var i: usize = 0;
     for (i < 3) {

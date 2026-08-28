@@ -2372,6 +2372,104 @@ pub fun queue_new_token(core: *Core, data: *u8, length: usize) bool {
     ret true;
 }
 
+pub fun probe_path(core: *Core, endpoint: path_api.Endpoint,
+                   preferred: bool) path_api.PathResult {
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
+        core.closing) {
+        var failed: path_api.PathResult;
+        failed.status = path_api.STATUS_ERROR;
+        failed.error = path_api.ERROR_STATE;
+        ret failed;
+    }
+    ret path_api.probe_scoped(core.paths, core.config.source, endpoint,
+        preferred);
+}
+
+pub fun migrate_path(core: *Core, value: path_api.Handle, preferred: bool,
+                     now_ns: u64) path_api.Observation {
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
+        core.closing || now_ns < core.last_now_ns) {
+        var failed: path_api.Observation;
+        failed.status = path_api.STATUS_ERROR;
+        failed.error = path_api.ERROR_STATE;
+        ret failed;
+    }
+    val migrated: path_api.Observation = path_api.migrate_scoped(core.paths,
+        core.config.source, value, preferred,
+        cid_api.peer_rotation_available(core.cids));
+    if (migrated.status == path_api.STATUS_OK &&
+        !apply_path_signals(core, migrated.reset_congestion,
+            migrated.reset_rtt, migrated.rotate_connection_id, now_ns)) {
+        var failed: path_api.Observation;
+        failed.status = path_api.STATUS_ERROR;
+        failed.error = path_api.ERROR_STATE;
+        ret failed;
+    }
+    if (migrated.status == path_api.STATUS_OK) { core.last_now_ns = now_ns; }
+    ret migrated;
+}
+
+pub fun queue_path_challenge(core: *Core, value: path_api.Handle,
+                             data: [8]u8, padded: bool,
+                             purpose: u8) path_api.OperationResult {
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
+        core.closing) {
+        var failed: path_api.OperationResult;
+        failed.status = path_api.STATUS_ERROR;
+        failed.error = path_api.ERROR_STATE;
+        ret failed;
+    }
+    val pto_ns: u64 = recovery.current_pto(?core.recovery_state, true);
+    if (pto_ns == 0) {
+        var failed: path_api.OperationResult;
+        failed.status = path_api.STATUS_ERROR;
+        failed.error = path_api.ERROR_TIME;
+        ret failed;
+    }
+    ret path_api.queue_challenge_scoped(core.paths, core.config.source, value,
+        data, pto_ns, pto_ns, padded, purpose);
+}
+
+pub fun on_path_packet_too_big(core: *Core, value: path_api.Handle,
+                               reported_mtu: u16,
+                               quote_authenticated: bool,
+                               now_ns: u64) path_api.MtuResult {
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
+        core.closing || now_ns < core.last_now_ns) {
+        var failed: path_api.MtuResult;
+        failed.status = path_api.STATUS_ERROR;
+        failed.error = path_api.ERROR_STATE;
+        ret failed;
+    }
+    val updated: path_api.MtuResult = path_api.on_packet_too_big_scoped(
+        core.paths, core.config.source, value, reported_mtu,
+        quote_authenticated);
+    if (updated.status != path_api.STATUS_OK) { ret updated; }
+    val transport_path: *path_api.Path =
+        ?core.paths.storage.paths[value.index];
+    if (updated.reconfigure_congestion &&
+        !congestion_api.set_max_datagram_size(?transport_path.congestion,
+            updated.current_mtu::u64, now_ns).ok) {
+        var failed: path_api.MtuResult;
+        failed.status = path_api.STATUS_ERROR;
+        failed.error = path_api.ERROR_STATE;
+        ret failed;
+    }
+    if (updated.reconfigure_pacer &&
+        !pacer_api.reconfigure(?transport_path.pacer,
+            pacer_api.default_config(updated.current_mtu::u64,
+                transport_path.congestion.congestion_window), now_ns,
+            transport_path.congestion.congestion_window,
+            core.recovery_state.rtt.smoothed_ns).ok) {
+        var failed: path_api.MtuResult;
+        failed.status = path_api.STATUS_ERROR;
+        failed.error = path_api.ERROR_STATE;
+        ret failed;
+    }
+    core.last_now_ns = now_ns;
+    ret updated;
+}
+
 pub fun received_token(core: *Core) View {
     var result: View;
     if (!core_record_valid(core) || !core.initialized || core.destroyed ||

@@ -646,6 +646,23 @@ pub fun rotate_peer(manager: *Manager) Result {
     ret rotate_peer_scoped(manager, 0);
 }
 
+pub fun peer_rotation_available(manager: *Manager) bool {
+    if (!physical(manager) || !manager.initialized || manager.closing) {
+        ret false;
+    }
+    var current: bool = false;
+    var alternate: bool = false;
+    var i: usize = 0;
+    for (i < manager.storage.peer_capacity) {
+        if (manager.storage.peer[i].state == ENTRY_ACTIVE) {
+            if (manager.storage.peer[i].current) { current = true; }
+            or { alternate = true; }
+        }
+        i = i + 1;
+    }
+    ret current && alternate;
+}
+
 pub fun rotate_peer_scoped(manager: *Manager, core_source: u64) Result {
     var result: Result;
     if (!physical(manager) || !manager.initialized || manager.closing ||

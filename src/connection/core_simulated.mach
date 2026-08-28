@@ -704,3 +704,33 @@ test "quic.connection.core: active manager leases reject unscoped protocol mutat
         fixture.datagrams.core_lease != fixture.engine.config.source) { ret 2; }
     ret 0;
 }
+
+test "quic.connection.core: public path operations retain the core lease" {
+    var fixture: Fixture;
+    if (!initialize(?fixture, transport.CLIENT, true, 1) ||
+        path.confirm_handshake_scoped(?fixture.paths,
+            fixture.engine.config.source).status != path.STATUS_OK) { ret 1; }
+    var candidate: path.Endpoint = path_endpoint(fixture.engine.config.local,
+        fixture.engine.config.peer);
+    candidate.peer.port = candidate.peer.port + 1;
+    val probed: path.PathResult = core.probe_path(?fixture.engine, candidate,
+        true);
+    var challenge: [8]u8 = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    if (probed.status != path.STATUS_OK) { ret 2; }
+    if (core.queue_path_challenge(?fixture.engine, probed.handle, challenge,
+        false, path.VALIDATION_PATH).status != path.STATUS_OK) { ret 4; }
+    if (path.validate_address_scoped(?fixture.paths, fixture.engine.config.source,
+        probed.handle).status != path.STATUS_OK) { ret 5; }
+    val migrated: path.Observation = core.migrate_path(?fixture.engine,
+        probed.handle, true, 2);
+    val selected: path.PathResult = path.selected(?fixture.paths);
+    val mtu: path.MtuResult = core.on_path_packet_too_big(?fixture.engine,
+        probed.handle, 1200, true, 3);
+    if (migrated.status != path.STATUS_OK ||
+        selected.status != path.STATUS_OK ||
+        selected.handle.index != probed.handle.index ||
+        selected.handle.generation != probed.handle.generation ||
+        mtu.status != path.STATUS_OK || fixture.paths.core_lease !=
+            fixture.engine.config.source) { ret 3; }
+    ret 0;
+}
