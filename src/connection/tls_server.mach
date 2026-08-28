@@ -594,11 +594,22 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
             data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
 
+    val binding: Config = Config{verification_time_unix: VERIFICATION_TIME,
+        deadline_ns: 0, entropy_context_size: 1,
+        entropy_secret_context_size: 0};
+
+    # adapter storage that aliases the listener's own handshake input is not a
+    # binding the ownership check may accept
+    var overlapping: handshake_api.Storage = listener_storage();
+    overlapping.receive_data = ?alert_input[0];
+    var rejected: handshake_api.Adapter;
+    if (initialize(?rejected, adapter_config(84), overlapping, ?listener_engine,
+        binding) || rejected.initialized ||
+        rejected.tls_role != 0) { ret 16; }
+
     var adapter: handshake_api.Adapter;
     if (!initialize(?adapter, adapter_config(83), listener_storage(),
-        ?listener_engine, Config{verification_time_unix: VERIFICATION_TIME,
-            deadline_ns: 0, entropy_context_size: 1,
-            entropy_secret_context_size: 0})) { ret 5; }
+        ?listener_engine, binding)) { ret 5; }
     var start: handshake_api.Start;
     start.role = handshake_api.SERVER;
     start.version = packet.VERSION_1;
@@ -621,6 +632,7 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
         ret 15;
     }
 
+
     # a ServerHello where the listener demands a ClientHello
     var malformed: [4]u8 = [4]u8{0x02, 0, 0, 0};
     val ingested: handshake_api.Result = handshake_api.receive(?adapter,
@@ -637,6 +649,12 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
     val state: handshake_api.Snapshot = handshake_api.snapshot(?adapter);
     if (state.terminal_alert != record.UNEXPECTED_MESSAGE_ALERT::u64 ||
         !state.closing || state.handshake_complete) { ret 10; }
+
+    # a listener that has failed is no longer bindable
+    var second: handshake_api.Adapter;
+    if (initialize(?second, adapter_config(85), dialer_storage(),
+        ?listener_engine, binding) || second.initialized ||
+        second.tls_role != 0) { ret 17; }
 
     if (!handshake_api.destroy(?adapter) || adapter.tls_role != 0) { ret 11; }
     var retired: *credentials.Generation = nil;
