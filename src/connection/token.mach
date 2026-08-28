@@ -16,8 +16,8 @@ use std.types.size.usize;
 pub val PURPOSE_RETRY: u8 = 1;
 pub val PURPOSE_ADDRESS: u8 = 2;
 
-pub val TOKEN_SIZE: usize = 89;
-pub val BODY_SIZE: usize = 73;
+pub val TOKEN_SIZE: usize = 110;
+pub val BODY_SIZE: usize = 94;
 pub val TAG_SIZE: usize = 16;
 pub val KEY_SIZE: usize = 32;
 
@@ -92,6 +92,7 @@ pub rec Claims {
     nonce: u64;
     peer: ip.Endpoint;
     original_destination: packet.ConnectionId;
+    retry_source: packet.ConnectionId;
     reservation: Reservation;
 }
 
@@ -213,8 +214,9 @@ fun mac(manager: *Manager, generation: u64, input: *u8, output: *u8) bool {
 }
 
 pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
-             original_destination: packet.ConnectionId, issued_at_ns: u64,
-             nonce: u64, output: *u8, capacity: usize) Result {
+             original_destination: packet.ConnectionId,
+             retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
+             output: *u8, capacity: usize) Result {
     var result: Result;
     if (manager == nil || !manager.initialized || manager.closing) {
         result.status = STATUS_ERROR;
@@ -223,6 +225,9 @@ pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
     }
     if (!valid_purpose(purpose) || original_destination.len == 0 ||
         original_destination.len::usize > packet.MAX_CONNECTION_ID ||
+        retry_source.len::usize > packet.MAX_CONNECTION_ID ||
+        (purpose == PURPOSE_RETRY && retry_source.len == 0) ||
+        (purpose == PURPOSE_ADDRESS && retry_source.len != 0) ||
         issued_at_ns == 0 || nonce == 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_FORMAT;
@@ -243,6 +248,11 @@ pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
     memory.raw_zero(?output[53], packet.MAX_CONNECTION_ID);
     memory.copy[u8](?output[53], ?original_destination.data[0],
         original_destination.len::usize);
+    output[73] = retry_source.len;
+    memory.raw_zero(?output[74], packet.MAX_CONNECTION_ID);
+    if (retry_source.len > 0) {
+        memory.copy[u8](?output[74], ?retry_source.data[0], retry_source.len::usize);
+    }
     var full_tag: [32]u8;
     if (!mac(manager, manager.current_generation, output, ?full_tag[0])) {
         memory.raw_zero(output, TOKEN_SIZE);
@@ -322,7 +332,10 @@ pub fun open(manager: *Manager, input: *u8, length: usize,
     }
     if (input == nil || length != TOKEN_SIZE || input[0] != 'M' || input[1] != 'Q' ||
         input[2] != 'T' || input[3] != '1' || !valid_purpose(input[4]) || input[29] > 1 ||
-        input[52] == 0 || input[52]::usize > packet.MAX_CONNECTION_ID) {
+        input[52] == 0 || input[52]::usize > packet.MAX_CONNECTION_ID ||
+        input[73]::usize > packet.MAX_CONNECTION_ID ||
+        (input[4] == PURPOSE_RETRY && input[73] == 0) ||
+        (input[4] == PURPOSE_ADDRESS && input[73] != 0)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_FORMAT;
         ret result;
@@ -331,6 +344,16 @@ pub fun open(manager: *Manager, input: *u8, length: usize,
     var i: usize = cid_length;
     for (i < packet.MAX_CONNECTION_ID) {
         if (input[53 + i] != 0) {
+            result.status = STATUS_ERROR;
+            result.error = ERROR_FORMAT;
+            ret result;
+        }
+        i = i + 1;
+    }
+    val retry_length: usize = input[73]::usize;
+    i = retry_length;
+    for (i < packet.MAX_CONNECTION_ID) {
+        if (input[74 + i] != 0) {
             result.status = STATUS_ERROR;
             result.error = ERROR_FORMAT;
             ret result;
@@ -379,6 +402,8 @@ pub fun open(manager: *Manager, input: *u8, length: usize,
     result.claims.peer = encoded_peer;
     packet.set_connection_id(?result.claims.original_destination,
         ?input[53], cid_length);
+    packet.set_connection_id(?result.claims.retry_source,
+        ?input[74], retry_length);
     if (input[4] == PURPOSE_RETRY) {
         val replay: Result = reserve_replay(manager, key_generation,
             result.claims.nonce, issued_at_ns + max_age_ns, now_ns);
@@ -476,8 +501,8 @@ test "quic.connection.token: retry tokens bind address and are single use" {
         1, contracts.SecretBytes{data: ?key[0], len: 32});
     val peer: ip.Endpoint = ip.endpoint(192, 0, 2, 10, 4433);
     var encoded: [TOKEN_SIZE]u8;
-    val sealed: Result = seal(?manager, PURPOSE_RETRY, peer, test_id(9), 10, 77,
-        ?encoded[0], TOKEN_SIZE);
+    val sealed: Result = seal(?manager, PURPOSE_RETRY, peer, test_id(9),
+        test_id(19), 10, 77, ?encoded[0], TOKEN_SIZE);
     val opened: Result = open(?manager, ?encoded[0], TOKEN_SIZE, peer, 50);
     if (sealed.status != STATUS_OK || opened.status != STATUS_OK ||
         opened.claims.original_destination.data[0] != 9 ||
@@ -501,7 +526,7 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
     val peer: ip.Endpoint = ip.endpoint(203, 0, 113, 2, 8443);
     var first: [TOKEN_SIZE]u8;
     var second: [TOKEN_SIZE]u8;
-    if (seal(?manager, PURPOSE_RETRY, peer, test_id(1), 10, 1,
+    if (seal(?manager, PURPOSE_RETRY, peer, test_id(1), test_id(11), 10, 1,
         ?first[0], TOKEN_SIZE).status != STATUS_OK) { ret 1; }
     val held: Result = open(?manager, ?first[0], TOKEN_SIZE, peer, 20);
     if (held.status != STATUS_OK || cancel(?manager,
@@ -510,7 +535,8 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
         open(?manager, ?first[0], TOKEN_SIZE, peer, 21).status != STATUS_OK) { ret 3; }
     val old: Result = open(?manager, ?first[0], TOKEN_SIZE, peer, 21);
     if (old.error != ERROR_REPLAY) { ret 4; }
-    if (seal(?manager, PURPOSE_ADDRESS, peer, test_id(2), 30, 2,
+    var no_retry_source: packet.ConnectionId;
+    if (seal(?manager, PURPOSE_ADDRESS, peer, test_id(2), no_retry_source, 30, 2,
         ?second[0], TOKEN_SIZE).status != STATUS_OK ||
         open(?manager, ?second[0], TOKEN_SIZE, peer, 1001).status != STATUS_OK ||
         open(?manager, ?second[0], TOKEN_SIZE, peer, 1031).error != ERROR_EXPIRED) { ret 5; }
