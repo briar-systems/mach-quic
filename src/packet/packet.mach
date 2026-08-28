@@ -101,6 +101,13 @@ pub rec EncodeResult {
     count: usize;
 }
 
+pub rec ProtectedHeaderResult {
+    ok: bool;
+    error: u8;
+    count: usize;
+    packet_number_offset: usize;
+}
+
 pub fun default_limits() Limits {
     var limits: Limits;
     limits.max_packet_size = 65527;
@@ -591,10 +598,113 @@ pub fun encode(b: *binary.Builder, packet: *Packet, limits: Limits) EncodeResult
     ret encoded;
 }
 
+# encodes authenticated header bytes with the ciphertext length in the long header
+pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
+                                ciphertext_length: usize,
+                                limits: Limits) ProtectedHeaderResult {
+    var result: ProtectedHeaderResult;
+    if (b == nil || value == nil || b.order != binary.BIG ||
+        value.header.packet_number_len < 1 || value.header.packet_number_len > 4 ||
+        value.header.packet_number > MAX_PACKET_NUMBER ||
+        value.header.destination.len::usize > MAX_CONNECTION_ID ||
+        value.header.source.len::usize > MAX_CONNECTION_ID ||
+        ciphertext_length < 16 || ciphertext_length > limits.max_packet_size) {
+        result.error = ERROR_OUTPUT;
+        ret result;
+    }
+    val start: usize = b.len;
+    var first: u8 = 0x40 | (value.header.packet_number_len - 1);
+    if (value.header.kind == PACKET_ONE_RTT) {
+        if (value.header.spin) { first = first | 0x20; }
+        if (value.header.key_phase) { first = first | 0x04; }
+        if (!write_ok(binary.builder_write_u8(b, first)) ||
+            !write_ok(binary.builder_write_bytes(b,
+                ?value.header.destination.data[0],
+                value.header.destination.len::usize))) {
+            b.len = start;
+            result.error = ERROR_OUTPUT;
+            ret result;
+        }
+    } or {
+        val bits: u8 = bits_from_kind(value.header.version, value.header.kind);
+        if (bits == 0xff || value.header.kind == PACKET_RETRY ||
+            value.header.kind == PACKET_VERSION_NEGOTIATION) {
+            result.error = ERROR_KIND;
+            ret result;
+        }
+        first = 0xc0 | (bits << 4) | (value.header.packet_number_len - 1);
+        if (!write_ok(binary.builder_write_u8(b, first)) ||
+            !write_ok(binary.builder_write_u32(b, value.header.version)) ||
+            !write_ok(binary.builder_write_u8(b, value.header.destination.len)) ||
+            !write_ok(binary.builder_write_bytes(b,
+                ?value.header.destination.data[0],
+                value.header.destination.len::usize)) ||
+            !write_ok(binary.builder_write_u8(b, value.header.source.len)) ||
+            !write_ok(binary.builder_write_bytes(b, ?value.header.source.data[0],
+                value.header.source.len::usize))) {
+            b.len = start;
+            result.error = ERROR_OUTPUT;
+            ret result;
+        }
+        if (value.header.kind == PACKET_INITIAL) {
+            if (!validate_span(value.token, limits.max_token_size) ||
+                !varint_ok(varint.write(b, value.token.len::u64, 0)) ||
+                !write_ok(binary.builder_write_bytes(b, value.token.data,
+                    value.token.len))) {
+                b.len = start;
+                result.error = ERROR_TOKEN_LENGTH;
+                ret result;
+            }
+        }
+        if (ciphertext_length > limits.max_packet_size -
+            value.header.packet_number_len::usize ||
+            !varint_ok(varint.write(b,
+                value.header.packet_number_len::u64 + ciphertext_length::u64, 0))) {
+            b.len = start;
+            result.error = ERROR_PACKET_LENGTH;
+            ret result;
+        }
+    }
+    result.packet_number_offset = b.len;
+    val truncated: u32 = truncate_packet_number(value.header.packet_number,
+        value.header.packet_number_len);
+    var encoded_number: [4]u8;
+    binary.put_uint(?encoded_number[0], truncated::u64,
+        value.header.packet_number_len::usize, binary.BIG);
+    if (!write_ok(binary.builder_write_bytes(b, ?encoded_number[0],
+        value.header.packet_number_len::usize)) || b.len - start > limits.max_packet_size) {
+        b.len = start;
+        result.error = ERROR_OUTPUT;
+        ret result;
+    }
+    result.ok = true;
+    result.count = b.len - start;
+    result.packet_number_offset = result.packet_number_offset - start;
+    ret result;
+}
+
 test "quic.packet.packet: packet types map to number spaces" {
     if (number_space(PACKET_INITIAL) != SPACE_INITIAL) { ret 1; }
     if (number_space(PACKET_HANDSHAKE) != SPACE_HANDSHAKE) { ret 1; }
     if (number_space(PACKET_ONE_RTT) != SPACE_APPLICATION) { ret 1; }
+    ret 0;
+}
+
+test "quic.packet.packet: protected headers include authentication tag length" {
+    var value: Packet;
+    value.header.kind = PACKET_INITIAL;
+    value.header.version = VERSION_1;
+    value.header.destination.len = 8;
+    value.header.source.len = 8;
+    value.header.packet_number_len = 2;
+    value.header.packet_number = 0x1234;
+    var bytes: [64]u8;
+    var builder: binary.Builder = binary.builder(?bytes[0], 64, binary.BIG);
+    val encoded: ProtectedHeaderResult = encode_protected_header(?builder,
+        ?value, 32, default_limits());
+    if (!encoded.ok || encoded.packet_number_offset != 25 || encoded.count != 27 ||
+        bytes[23] != 0 || bytes[24] != 34 || bytes[25] != 0x12 ||
+        bytes[26] != 0x34) { ret 1; }
     ret 0;
 }
 
@@ -605,6 +715,10 @@ test "quic.packet.packet: RFC packet number reconstruction vectors" {
     if (packet_number_width(0, 0 - 1::u64) != 1) { ret 1; }
     if (packet_number_width(128, 0) != 1) { ret 1; }
     if (packet_number_width(129, 0) != 2) { ret 1; }
+    if (reconstruct_packet_number(MAX_PACKET_NUMBER, 0xffffffff, 4) !=
+        MAX_PACKET_NUMBER ||
+        reconstruct_packet_number(MAX_PACKET_NUMBER + 1, 0xffffffff, 4) !=
+            MAX_PACKET_NUMBER + 1) { ret 1; }
     ret 0;
 }
 

@@ -16,6 +16,17 @@ fwd quic.congestion.pacer;
 fwd quic.stream.stream;
 fwd quic.stream.datagram;
 fwd quic.path.path;
+fwd quic.connection.admission;
+fwd quic.connection.cid;
+fwd quic.connection.token;
+fwd quic.connection.handshake;
+fwd quic.connection.handshake_simulated;
+fwd quic.connection.tls_client;
+fwd quic.connection.tls_server;
+fwd quic.connection.listener;
+fwd quic.connection.negotiation;
+fwd quic.connection.core;
+fwd quic.connection.core_simulated;
 fwd quic.transport;
 fwd quic.transport.simulated;
 

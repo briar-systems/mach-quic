@@ -2,6 +2,7 @@
 
 use stream_api: quic.stream.stream;
 use datagram_api: quic.stream.datagram;
+use quic.connection.ownership;
 
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -15,6 +16,7 @@ use std.types.result.unwrap_err;
 use std.types.result.unwrap_ok;
 use std.system.os;
 use std.sync.cancel;
+use std.sync.atomic;
 use std.sync.mutex;
 use std.io.lifecycle;
 use std.net.ip;
@@ -32,8 +34,9 @@ pub def ConnectionState: u8;
 pub val NEW: ConnectionState = 1;
 pub val HANDSHAKING: ConnectionState = 2;
 pub val ACTIVE: ConnectionState = 3;
-pub val DRAINING: ConnectionState = 4;
-pub val CLOSED: ConnectionState = 5;
+pub val CLOSING: ConnectionState = 4;
+pub val DRAINING: ConnectionState = 5;
+pub val CLOSED: ConnectionState = 6;
 
 pub def Status: u8;
 pub val STATUS_OK: Status = 1;
@@ -90,12 +93,14 @@ pub rec CoreTimer { deadline_ns: u64; generation: u64; armed: bool; }
 pub rec CoreResult {
     status: Status;
     error: u64;
+    provider_error: u64;
     state: ConnectionState;
 }
 
 pub rec CoreDatagram {
     status: Status;
     error: u64;
+    provider_error: u64;
     state: ConnectionState;
     local: ip.Endpoint;
     peer: ip.Endpoint;
@@ -119,6 +124,7 @@ pub def TimerFun: fun(ptr) CoreTimer;
 # callbacks are serialized and may not call back into the same driver
 pub rec Protocol {
     context: ptr;
+    context_size: usize;
     receive: ReceiveFun;
     timeout: TimeoutFun;
     generate: GenerateFun;
@@ -135,6 +141,7 @@ pub rec Generated {
     status: Status;
     error: Error;
     protocol_error: u64;
+    provider_error: u64;
     token: Token;
     local: ip.Endpoint;
     peer: ip.Endpoint;
@@ -151,6 +158,7 @@ pub rec Completion {
     status: Status;
     error: Error;
     protocol_error: u64;
+    provider_error: u64;
     token: Token;
     send_status: SendStatus;
     count: usize;
@@ -161,6 +169,7 @@ pub rec OperationResult {
     status: Status;
     error: Error;
     protocol_error: u64;
+    provider_error: u64;
     state: ConnectionState;
 }
 
@@ -194,6 +203,7 @@ pub rec ReadResult {
     application_error: u64;
     receive_max_data: u64;
     receive_max_stream_data: u64;
+    receive_uncredited: u64;
     fin: bool;
 }
 
@@ -211,6 +221,7 @@ pub rec StreamSnapshot {
     send_cancelled: bool;
     receive_cancelled: bool;
     final_known: bool;
+    receive_uncredited: u64;
 }
 
 pub rec DatagramToken { source: u64; index: usize; generation: u64; }
@@ -283,6 +294,7 @@ pub rec Driver {
     cancellation_reason: cancel.Reason;
     cancellation: cancel.Registration;
     cancellation_attached: bool;
+    callback_owner: i64;
     lock: mutex.Mutex;
     initialized: bool;
     closing: bool;
@@ -296,10 +308,295 @@ fun valid_role(role: Role) bool { ret role == CLIENT || role == SERVER; }
 fun valid_state(state: ConnectionState) bool { ret state >= NEW && state <= CLOSED; }
 
 fun protocol_valid(protocol: *Protocol) bool {
-    ret protocol != nil && protocol.receive::usize != 0 && protocol.timeout::usize != 0 &&
+    ret protocol != nil && protocol.context != nil && protocol.context_size > 0 &&
+        protocol.receive::usize != 0 && protocol.timeout::usize != 0 &&
         protocol.generate::usize != 0 && protocol.complete_send::usize != 0 &&
         protocol.begin_close::usize != 0 && protocol.close_ready::usize != 0 &&
         protocol.finish_close::usize != 0 && protocol.timer::usize != 0;
+}
+
+fun callback_reentry(driver: *Driver) bool {
+    ret driver != nil && atomic.load(?driver.callback_owner) != 0 &&
+        atomic.load(?driver.callback_owner) == os.thread_current_id();
+}
+
+fun callback_intact(driver: *Driver, before: *Driver) bool {
+    ret driver.config.source == before.config.source &&
+        driver.config.max_udp_payload == before.config.max_udp_payload &&
+        driver.config.max_close_reason == before.config.max_close_reason &&
+        driver.protocol.context == before.protocol.context &&
+        driver.protocol.context_size == before.protocol.context_size &&
+        driver.protocol.receive == before.protocol.receive &&
+        driver.protocol.timeout == before.protocol.timeout &&
+        driver.protocol.generate == before.protocol.generate &&
+        driver.protocol.complete_send == before.protocol.complete_send &&
+        driver.protocol.begin_close == before.protocol.begin_close &&
+        driver.protocol.close_ready == before.protocol.close_ready &&
+        driver.protocol.finish_close == before.protocol.finish_close &&
+        driver.protocol.timer == before.protocol.timer &&
+        driver.streams == before.streams &&
+        driver.datagrams == before.datagrams &&
+        driver.operation_scope == before.operation_scope &&
+        driver.storage.sends == before.storage.sends &&
+        driver.storage.send_capacity == before.storage.send_capacity &&
+        driver.state == before.state && driver.role == before.role &&
+        driver.next_slot == before.next_slot &&
+        driver.pending_sends == before.pending_sends &&
+        driver.cancellation_calls == before.cancellation_calls &&
+        driver.last_now_ns == before.last_now_ns &&
+        driver.application_error == before.application_error &&
+        driver.close_mode == before.close_mode &&
+        driver.close_cause == before.close_cause &&
+        driver.terminal_cause == before.terminal_cause &&
+        driver.cancellation_reason == before.cancellation_reason &&
+        driver.cancellation_attached == before.cancellation_attached &&
+        driver.initialized == before.initialized &&
+        driver.closing == before.closing &&
+        atomic.load(?driver.callback_owner) == os.thread_current_id();
+}
+
+fun restore_callback(driver: *Driver, before: *Driver) {
+    val lock: mutex.Mutex = driver.lock;
+    @driver = @before;
+    driver.lock = lock;
+    atomic.store(?driver.callback_owner, 0);
+}
+
+fun callback_receive(driver: *Driver, input: *Datagram) CoreResult {
+    val before: Driver = @driver;
+    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val result: CoreResult = driver.protocol.receive(driver.protocol.context,
+        input);
+    if (!callback_intact(driver, ?before)) {
+        restore_callback(driver, ?before);
+        ret CoreResult{status: STATUS_ERROR, error: 0,
+            provider_error: 0, state: before.state};
+    }
+    atomic.store(?driver.callback_owner, 0);
+    ret result;
+}
+
+fun callback_timeout(driver: *Driver, generation: u64,
+                     now_ns: u64) CoreResult {
+    val before: Driver = @driver;
+    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val result: CoreResult = driver.protocol.timeout(driver.protocol.context,
+        generation, now_ns);
+    if (!callback_intact(driver, ?before)) {
+        restore_callback(driver, ?before);
+        ret CoreResult{status: STATUS_ERROR, error: 0,
+            provider_error: 0, state: before.state};
+    }
+    atomic.store(?driver.callback_owner, 0);
+    ret result;
+}
+
+fun callback_generate(driver: *Driver, output: *u8, capacity: usize,
+                      now_ns: u64) CoreDatagram {
+    val before: Driver = @driver;
+    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val result: CoreDatagram = driver.protocol.generate(
+        driver.protocol.context, output, capacity, now_ns);
+    if (!callback_intact(driver, ?before)) {
+        restore_callback(driver, ?before);
+        ret CoreDatagram{status: STATUS_ERROR, error: 0,
+            provider_error: 0, state: before.state};
+    }
+    atomic.store(?driver.callback_owner, 0);
+    ret result;
+}
+
+fun callback_complete_send(driver: *Driver, owner: u64,
+                           send_status: SendStatus, count: usize,
+                           now_ns: u64) CoreResult {
+    val before: Driver = @driver;
+    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val result: CoreResult = driver.protocol.complete_send(
+        driver.protocol.context, owner, send_status, count, now_ns);
+    if (!callback_intact(driver, ?before)) {
+        restore_callback(driver, ?before);
+        ret CoreResult{status: STATUS_ERROR, error: 0,
+            provider_error: 0, state: before.state};
+    }
+    atomic.store(?driver.callback_owner, 0);
+    ret result;
+}
+
+fun callback_begin_close(driver: *Driver, abortive: bool,
+                         application_error: u64, reason: *u8,
+                         reason_length: usize, now_ns: u64) CoreResult {
+    val before: Driver = @driver;
+    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val result: CoreResult = driver.protocol.begin_close(
+        driver.protocol.context, abortive, application_error, reason,
+        reason_length, now_ns);
+    if (!callback_intact(driver, ?before)) {
+        restore_callback(driver, ?before);
+        ret CoreResult{status: STATUS_ERROR, error: 0,
+            provider_error: 0, state: before.state};
+    }
+    atomic.store(?driver.callback_owner, 0);
+    ret result;
+}
+
+fun callback_timer(driver: *Driver) CoreTimer {
+    val before: Driver = @driver;
+    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val result: CoreTimer = driver.protocol.timer(driver.protocol.context);
+    if (!callback_intact(driver, ?before)) {
+        restore_callback(driver, ?before);
+        var failed: CoreTimer;
+        ret failed;
+    }
+    atomic.store(?driver.callback_owner, 0);
+    ret result;
+}
+
+fun callback_close_ready(driver: *Driver) bool {
+    val before: Driver = @driver;
+    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val result: bool = driver.protocol.close_ready(driver.protocol.context);
+    if (!callback_intact(driver, ?before)) {
+        restore_callback(driver, ?before);
+        ret false;
+    }
+    atomic.store(?driver.callback_owner, 0);
+    ret result;
+}
+
+fun callback_finish_close(driver: *Driver) bool {
+    val before: Driver = @driver;
+    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val result: bool = driver.protocol.finish_close(driver.protocol.context);
+    if (!callback_intact(driver, ?before)) {
+        restore_callback(driver, ?before);
+        ret false;
+    }
+    atomic.store(?driver.callback_owner, 0);
+    ret result;
+}
+
+fun ownership_valid(driver: *Driver, protocol: *Protocol,
+                    streams: *stream_api.Manager,
+                    datagrams: *datagram_api.Queue, scope: *cancel.Scope,
+                    storage: *Storage) bool {
+    if (driver == nil || protocol == nil || streams == nil || datagrams == nil ||
+        scope == nil || storage == nil) { ret false; }
+    var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
+    var ranges: [18]ownership.Range;
+    ranges[0] = ownership.bytes(driver::*u8, $size_of(Driver),
+        ownership.ZERO_FORBIDDEN);
+    ranges[1] = ownership.array(storage.sends::*u8, storage.send_capacity,
+        $size_of(SendSlot), ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.bytes((?streams.config)::*u8,
+        $size_of(stream_api.Manager), ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.array(streams.storage.streams::*u8,
+        streams.storage.stream_capacity, $size_of(stream_api.Stream),
+        ownership.ZERO_FORBIDDEN);
+    ranges[4] = ownership.array(streams.storage.attempts::*u8,
+        streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
+        ownership.ZERO_FORBIDDEN);
+    ranges[5] = ownership.bytes(streams.storage.send_data,
+        streams.storage.send_data_length, ownership.ZERO_FORBIDDEN);
+    ranges[6] = ownership.array(streams.storage.send_pending::*u8,
+        streams.storage.send_state_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[7] = ownership.array(streams.storage.send_acked::*u8,
+        streams.storage.send_state_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[8] = ownership.bytes(streams.storage.send_inflight,
+        streams.storage.send_state_length, ownership.ZERO_FORBIDDEN);
+    ranges[9] = ownership.bytes(streams.storage.receive_data,
+        streams.storage.receive_data_length, ownership.ZERO_FORBIDDEN);
+    ranges[10] = ownership.array(streams.storage.receive_present::*u8,
+        streams.storage.receive_state_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[11] = ownership.bytes((?datagrams.config)::*u8,
+        $size_of(datagram_api.Queue), ownership.ZERO_FORBIDDEN);
+    ranges[12] = ownership.array(datagrams.storage.send_entries::*u8,
+        datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
+        datagram_zero);
+    ranges[13] = ownership.bytes(datagrams.storage.send_bytes,
+        datagrams.storage.send_bytes_length, datagram_zero);
+    ranges[14] = ownership.array(datagrams.storage.receive_entries::*u8,
+        datagrams.storage.receive_capacity, $size_of(datagram_api.Entry),
+        datagram_zero);
+    ranges[15] = ownership.bytes(datagrams.storage.receive_bytes,
+        datagrams.storage.receive_bytes_length, datagram_zero);
+    ranges[16] = ownership.bytes(scope::*u8, $size_of(cancel.Scope),
+        ownership.ZERO_FORBIDDEN);
+    ranges[17] = ownership.bytes(protocol.context::*u8, protocol.context_size,
+        ownership.ZERO_FORBIDDEN);
+    ret ownership.all_disjoint(?ranges[0], 18);
+}
+
+fun borrowed_disjoint(driver: *Driver, borrowed: ownership.Range) bool {
+    if (!borrowed.valid) { ret false; }
+    var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (!driver.datagrams.config.enabled) {
+        datagram_zero = ownership.ZERO_ALLOWED;
+    }
+    var ranges: [18]ownership.Range;
+    ranges[0] = ownership.bytes(driver::*u8, $size_of(Driver),
+        ownership.ZERO_FORBIDDEN);
+    ranges[1] = ownership.array(driver.storage.sends::*u8,
+        driver.storage.send_capacity, $size_of(SendSlot),
+        ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.bytes((?driver.streams.config)::*u8,
+        $size_of(stream_api.Manager), ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.array(driver.streams.storage.streams::*u8,
+        driver.streams.storage.stream_capacity, $size_of(stream_api.Stream),
+        ownership.ZERO_FORBIDDEN);
+    ranges[4] = ownership.array(driver.streams.storage.attempts::*u8,
+        driver.streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
+        ownership.ZERO_FORBIDDEN);
+    ranges[5] = ownership.bytes(driver.streams.storage.send_data,
+        driver.streams.storage.send_data_length, ownership.ZERO_FORBIDDEN);
+    ranges[6] = ownership.array(driver.streams.storage.send_pending::*u8,
+        driver.streams.storage.send_state_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[7] = ownership.array(driver.streams.storage.send_acked::*u8,
+        driver.streams.storage.send_state_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[8] = ownership.bytes(driver.streams.storage.send_inflight,
+        driver.streams.storage.send_state_length, ownership.ZERO_FORBIDDEN);
+    ranges[9] = ownership.bytes(driver.streams.storage.receive_data,
+        driver.streams.storage.receive_data_length, ownership.ZERO_FORBIDDEN);
+    ranges[10] = ownership.array(driver.streams.storage.receive_present::*u8,
+        driver.streams.storage.receive_state_length, $size_of(bool),
+        ownership.ZERO_FORBIDDEN);
+    ranges[11] = ownership.bytes((?driver.datagrams.config)::*u8,
+        $size_of(datagram_api.Queue), ownership.ZERO_FORBIDDEN);
+    ranges[12] = ownership.array(driver.datagrams.storage.send_entries::*u8,
+        driver.datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
+        datagram_zero);
+    ranges[13] = ownership.bytes(driver.datagrams.storage.send_bytes,
+        driver.datagrams.storage.send_bytes_length, datagram_zero);
+    ranges[14] = ownership.array(driver.datagrams.storage.receive_entries::*u8,
+        driver.datagrams.storage.receive_capacity, $size_of(datagram_api.Entry),
+        datagram_zero);
+    ranges[15] = ownership.bytes(driver.datagrams.storage.receive_bytes,
+        driver.datagrams.storage.receive_bytes_length, datagram_zero);
+    ranges[16] = ownership.bytes(driver.operation_scope::*u8,
+        $size_of(cancel.Scope), ownership.ZERO_FORBIDDEN);
+    ranges[17] = ownership.bytes(driver.protocol.context::*u8,
+        driver.protocol.context_size, ownership.ZERO_FORBIDDEN);
+    var i: usize = 0;
+    for (i < 18) {
+        if (!ownership.disjoint(borrowed, ranges[i])) { ret false; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < driver.storage.send_capacity) {
+        if (driver.storage.sends[i].state != SLOT_FREE &&
+            !ownership.disjoint(borrowed,
+                ownership.bytes(driver.storage.sends[i].buffer,
+                    driver.storage.sends[i].capacity,
+                    ownership.ZERO_FORBIDDEN))) { ret false; }
+        i = i + 1;
+    }
+    ret true;
 }
 
 fun next_generation(value: u64) u64 {
@@ -313,6 +610,7 @@ fun state_transition(current: ConnectionState, next: ConnectionState) bool {
     if (current == NEW) { ret true; }
     if (current == HANDSHAKING) { ret next >= HANDSHAKING; }
     if (current == ACTIVE) { ret next >= ACTIVE; }
+    if (current == CLOSING) { ret next >= CLOSING; }
     if (current == DRAINING) { ret next >= DRAINING; }
     ret next == CLOSED;
 }
@@ -395,18 +693,18 @@ fun begin_components(driver: *Driver) bool {
 fun apply_state(driver: *Driver, state: ConnectionState) bool {
     if (state == 0 || state == driver.state) { ret true; }
     if (!state_transition(driver.state, state)) { ret false; }
-    if (state >= DRAINING && driver.state < DRAINING) {
+    if (state >= CLOSING && driver.state < CLOSING) {
         if (!begin_components(driver)) { ret false; }
         driver.closing = true;
-        driver.state = DRAINING;
     }
-    if (state < DRAINING) { driver.state = state; }
+    driver.state = state;
     ret true;
 }
 
 fun normalize_core(driver: *Driver, core: CoreResult) OperationResult {
     var result: OperationResult;
     result.protocol_error = core.error;
+    result.provider_error = core.provider_error;
     if (core.status < STATUS_OK || core.status > STATUS_ERROR || !apply_state(driver, core.state)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_PROTOCOL;
@@ -432,8 +730,8 @@ fun begin_close_locked(driver: *Driver, abortive: bool, cause: lifecycle.Cause,
     if (!update_now(driver, now_ns)) { ret operation_error(ERROR_TIME); }
     if (driver.closing) {
         if (abortive && driver.close_mode == lifecycle.GRACEFUL) {
-            val core: CoreResult = driver.protocol.begin_close(driver.protocol.context,
-                true, application_error, reason, reason_length, now_ns);
+            val core: CoreResult = callback_begin_close(driver, true,
+                application_error, reason, reason_length, now_ns);
             val escalated: OperationResult = normalize_core(driver, core);
             if (escalated.status == STATUS_ERROR) { ret escalated; }
             driver.close_mode = lifecycle.ABORTIVE;
@@ -442,24 +740,25 @@ fun begin_close_locked(driver: *Driver, abortive: bool, cause: lifecycle.Cause,
         ret OperationResult{status: STATUS_OK, error: ERROR_NONE,
             protocol_error: 0, state: driver.state};
     }
-    val core: CoreResult = driver.protocol.begin_close(driver.protocol.context,
-        abortive, application_error, reason, reason_length, now_ns);
+    val core: CoreResult = callback_begin_close(driver, abortive,
+        application_error, reason, reason_length, now_ns);
     val normalized: OperationResult = normalize_core(driver, core);
     if (normalized.status == STATUS_ERROR) { ret normalized; }
-    if (!begin_components(driver)) { ret operation_error(ERROR_STATE); }
-    driver.closing = true;
-    driver.state = DRAINING;
+    if (!driver.closing || driver.state < CLOSING) {
+        ret operation_error(ERROR_STATE);
+    }
     driver.close_mode = lifecycle.GRACEFUL;
     if (abortive) { driver.close_mode = lifecycle.ABORTIVE; }
     driver.close_cause = cause;
     driver.terminal_cause = cause;
     driver.application_error = application_error;
     ret OperationResult{status: STATUS_OK, error: ERROR_NONE,
-        protocol_error: 0, state: DRAINING};
+        protocol_error: 0, state: driver.state};
 }
 
 fun cancellation_callback(context: ptr, reason: cancel.Reason) {
     val driver: *Driver = context::*Driver;
+    if (callback_reentry(driver)) { ret; }
     mutex.lock(?driver.lock);
     driver.cancellation_attached = false;
     driver.cancellation_reason = reason;
@@ -472,7 +771,9 @@ fun cancellation_callback(context: ptr, reason: cancel.Reason) {
 fun init_driver(driver: *Driver, role: Role, config: Config, protocol: Protocol,
                 streams: *stream_api.Manager, datagrams: *datagram_api.Queue,
                 scope: *cancel.Scope, storage: Storage) bool {
-    if (driver == nil || driver.initialized || !valid_role(role) || config.source == 0 ||
+    if (driver == nil || !ownership.bytes(driver::*u8, $size_of(Driver),
+            ownership.ZERO_FORBIDDEN).valid || driver.initialized ||
+        !valid_role(role) || config.source == 0 ||
         config.max_udp_payload < 1200 || config.max_udp_payload > 65527 ||
         !protocol_valid(?protocol) || streams == nil || !streams.valid ||
         datagrams == nil || !datagrams.valid || scope == nil ||
@@ -480,25 +781,36 @@ fun init_driver(driver: *Driver, role: Role, config: Config, protocol: Protocol,
         storage.send_capacity == 0 || storage.send_capacity > 0xffffffff ||
         streams.config.source != config.source || datagrams.config.source != config.source ||
         (role == CLIENT && streams.config.role != stream_api.ROLE_CLIENT) ||
-        (role == SERVER && streams.config.role != stream_api.ROLE_SERVER)) { ret false; }
-    driver.config = config;
-    driver.protocol = protocol;
-    driver.streams = streams;
-    driver.datagrams = datagrams;
-    driver.operation_scope = scope;
-    driver.storage = storage;
-    driver.state = HANDSHAKING;
-    driver.role = role;
-    driver.next_slot = 0;
-    driver.pending_sends = 0;
-    driver.cancellation_calls = 0;
-    driver.last_now_ns = 0;
-    driver.application_error = 0;
-    driver.close_mode = lifecycle.GRACEFUL;
-    driver.close_cause = lifecycle.EXPLICIT;
-    driver.terminal_cause = lifecycle.EXPLICIT;
-    driver.cancellation_reason = cancel.ACTIVE;
-    driver.lock = mutex.make();
+        (role == SERVER && streams.config.role != stream_api.ROLE_SERVER) ||
+        !ownership_valid(driver, ?protocol, streams, datagrams, scope,
+            ?storage)) { ret false; }
+    val original: Driver = @driver;
+    var candidate: Driver;
+    candidate.config = config;
+    candidate.protocol = protocol;
+    candidate.streams = streams;
+    candidate.datagrams = datagrams;
+    candidate.operation_scope = scope;
+    candidate.storage = storage;
+    candidate.state = HANDSHAKING;
+    candidate.role = role;
+    candidate.close_mode = lifecycle.GRACEFUL;
+    candidate.close_cause = lifecycle.EXPLICIT;
+    candidate.terminal_cause = lifecycle.EXPLICIT;
+    candidate.cancellation_reason = cancel.ACTIVE;
+    candidate.lock = mutex.make();
+    cancel.init_registration(?candidate.cancellation);
+    candidate.initialized = true;
+    candidate.cancellation_attached = true;
+    @driver = candidate;
+    mutex.lock(?driver.lock);
+    val attached: cancel.Reason = cancel.attach(scope, ?driver.cancellation,
+        cancellation_callback, driver::ptr);
+    if (attached != cancel.ACTIVE) {
+        mutex.unlock(?driver.lock);
+        @driver = original;
+        ret false;
+    }
     var i: usize = 0;
     for (i < storage.send_capacity) {
         storage.sends[i].state = SLOT_FREE;
@@ -506,16 +818,7 @@ fun init_driver(driver: *Driver, role: Role, config: Config, protocol: Protocol,
         storage.sends[i].buffer = nil;
         i = i + 1;
     }
-    cancel.init_registration(?driver.cancellation);
-    driver.initialized = true;
-    driver.cancellation_attached = true;
-    val attached: cancel.Reason = cancel.attach(scope, ?driver.cancellation,
-        cancellation_callback, driver::ptr);
-    if (attached != cancel.ACTIVE) {
-        driver.cancellation_attached = false;
-        driver.initialized = false;
-        ret false;
-    }
+    mutex.unlock(?driver.lock);
     ret true;
 }
 
@@ -590,8 +893,20 @@ fun release_slot(driver: *Driver, slot: *SendSlot) {
 }
 
 pub fun receive_datagram(driver: *Driver, input: *Datagram) OperationResult {
-    if (driver == nil || input == nil || !driver.initialized ||
-        (input.length > 0 && input.data == nil) || input.length > driver.config.max_udp_payload) {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
+    if (driver == nil || input == nil || !driver.initialized) {
+        ret operation_error(ERROR_BUFFER);
+    }
+    val input_record: ownership.Range = ownership.bytes(input::*u8,
+        $size_of(Datagram), ownership.ZERO_FORBIDDEN);
+    if (!borrowed_disjoint(driver, input_record)) {
+        ret operation_error(ERROR_BUFFER);
+    }
+    val input_data: ownership.Range = ownership.bytes(input.data, input.length,
+        ownership.ZERO_ALLOWED);
+    if (!input_data.valid || !borrowed_disjoint(driver, input_data) ||
+        !ownership.disjoint(input_record, input_data) ||
+        input.length > driver.config.max_udp_payload) {
         ret operation_error(ERROR_BUFFER);
     }
     mutex.lock(?driver.lock);
@@ -613,7 +928,7 @@ pub fun receive_datagram(driver: *Driver, input: *Datagram) OperationResult {
         mutex.unlock(?driver.lock);
         ret operation_error(ERROR_TIME);
     }
-    val core: CoreResult = driver.protocol.receive(driver.protocol.context, input);
+    val core: CoreResult = callback_receive(driver, input);
     val result: OperationResult = normalize_core(driver, core);
     mutex.unlock(?driver.lock);
     ret result;
@@ -621,7 +936,10 @@ pub fun receive_datagram(driver: *Driver, input: *Datagram) OperationResult {
 
 pub fun receive_native(driver: *Driver, packet: *net_types.Packet,
                        bound_local: ip.Endpoint, received_at_ns: u64, ecn: u8) OperationResult {
-    if (packet == nil || packet.truncated || packet.length > packet.capacity ||
+    if (driver == nil || !driver.initialized || packet == nil ||
+        !borrowed_disjoint(driver, ownership.bytes(packet::*u8,
+            $size_of(net_types.Packet), ownership.ZERO_FORBIDDEN)) ||
+        packet.truncated || packet.length > packet.capacity ||
         (packet.length > 0 && packet.buffer == nil)) { ret operation_error(ERROR_BUFFER); }
     var local: ip.Endpoint = bound_local;
     if (packet.has_local_destination) {
@@ -635,12 +953,13 @@ pub fun receive_native(driver: *Driver, packet: *net_types.Packet,
 
 pub fun timer(driver: *Driver) Timer {
     var result: Timer;
+    if (callback_reentry(driver)) { ret result; }
     if (driver == nil || !driver.initialized) { ret result; }
     mutex.lock(?driver.lock);
     if (driver.state != CLOSED && !(driver.closing &&
         driver.close_mode == lifecycle.ABORTIVE) && driver.operation_scope != nil &&
         cancel.reason(driver.operation_scope) == cancel.ACTIVE) {
-        val core: CoreTimer = driver.protocol.timer(driver.protocol.context);
+        val core: CoreTimer = callback_timer(driver);
         if (core.armed && core.generation != 0) {
             result.source = driver.config.source;
             result.deadline_ns = core.deadline_ns;
@@ -653,6 +972,7 @@ pub fun timer(driver: *Driver) Timer {
 }
 
 pub fun on_timeout(driver: *Driver, value: Timer, now_ns: u64) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized || !value.armed ||
         value.source != driver.config.source || value.generation == 0) {
         ret operation_error(ERROR_TOKEN);
@@ -674,7 +994,7 @@ pub fun on_timeout(driver: *Driver, value: Timer, now_ns: u64) OperationResult {
         mutex.unlock(?driver.lock);
         ret operation_error(ERROR_TIME);
     }
-    val current: CoreTimer = driver.protocol.timer(driver.protocol.context);
+    val current: CoreTimer = callback_timer(driver);
     if (!current.armed || current.generation != value.generation ||
         current.deadline_ns != value.deadline_ns) {
         val state: ConnectionState = driver.state;
@@ -689,8 +1009,7 @@ pub fun on_timeout(driver: *Driver, value: Timer, now_ns: u64) OperationResult {
             protocol_error: 0, state: state};
     }
     driver.last_now_ns = now_ns;
-    val core: CoreResult = driver.protocol.timeout(driver.protocol.context,
-        value.generation, now_ns);
+    val core: CoreResult = callback_timeout(driver, value.generation, now_ns);
     val result: OperationResult = normalize_core(driver, core);
     mutex.unlock(?driver.lock);
     ret result;
@@ -699,7 +1018,13 @@ pub fun on_timeout(driver: *Driver, value: Timer, now_ns: u64) OperationResult {
 pub fun generate(driver: *Driver, scope: *cancel.Scope, buffer: *u8,
                  capacity: usize, now_ns: u64, context: usize) Generated {
     var result: Generated;
-    if (driver == nil || !driver.initialized || buffer == nil || capacity == 0 || scope == nil) {
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (driver == nil || !driver.initialized || buffer == nil || capacity == 0 ||
+        scope == nil) {
         result.status = STATUS_ERROR;
         result.error = ERROR_BUFFER;
         ret result;
@@ -709,6 +1034,13 @@ pub fun generate(driver: *Driver, scope: *cancel.Scope, buffer: *u8,
         mutex.unlock(?driver.lock);
         result.status = STATUS_CANCELLED;
         result.error = ERROR_CANCELLED;
+        ret result;
+    }
+    if (!borrowed_disjoint(driver, ownership.bytes(buffer, capacity,
+            ownership.ZERO_FORBIDDEN))) {
+        mutex.unlock(?driver.lock);
+        result.status = STATUS_ERROR;
+        result.error = ERROR_BUFFER;
         ret result;
     }
     if (driver.state == CLOSED || (driver.closing && driver.close_mode == lifecycle.ABORTIVE)) {
@@ -731,8 +1063,9 @@ pub fun generate(driver: *Driver, scope: *cancel.Scope, buffer: *u8,
         result.error = ERROR_CAPACITY;
         ret result;
     }
-    val core: CoreDatagram = driver.protocol.generate(driver.protocol.context,
-        buffer, available, now_ns);
+    val core: CoreDatagram = callback_generate(driver, buffer, available,
+        now_ns);
+    result.provider_error = core.provider_error;
     val status_ok: bool = core.status >= STATUS_OK && core.status <= STATUS_ERROR;
     val state_ok: bool = state_transition(driver.state, core.state);
     val empty_shape: bool = core.status != STATUS_OK && core.count == 0;
@@ -800,12 +1133,13 @@ fun complete_locked(driver: *Driver, slot: *SendSlot, send_status: SendStatus,
         completion.error = ERROR_NATIVE;
         ret completion;
     }
-    val core: CoreResult = driver.protocol.complete_send(driver.protocol.context,
-        slot.owner, send_status, count, now_ns);
+    val core: CoreResult = callback_complete_send(driver, slot.owner,
+        send_status, count, now_ns);
     val normalized: OperationResult = normalize_core(driver, core);
     completion.status = normalized.status;
     completion.error = normalized.error;
     completion.protocol_error = normalized.protocol_error;
+    completion.provider_error = normalized.provider_error;
     release_slot(driver, slot);
     ret completion;
 }
@@ -814,6 +1148,11 @@ pub fun complete_send(driver: *Driver, token: Token, send_status: SendStatus,
                       count: usize, now_ns: u64) Completion {
     var result: Completion;
     result.token = token;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
@@ -838,6 +1177,10 @@ pub fun cancel_send(driver: *Driver, token: Token, now_ns: u64) Completion {
 
 pub fun submit_native(driver: *Driver, network: *net_async.Driver, socket: *udp.Socket,
                       scope: *cancel.Scope, token: Token) Result[io_runtime.Token, io_error.Error] {
+    if (callback_reentry(driver)) {
+        ret err[io_runtime.Token, io_error.Error](
+            io_error.from_code(os.EBUSY, io_error.OP_SEND));
+    }
     if (driver == nil || !driver.initialized || network == nil || socket == nil || scope == nil) {
         ret err[io_runtime.Token, io_error.Error](
             io_error.from_code(os.EINVAL, io_error.OP_SEND));
@@ -868,6 +1211,11 @@ pub fun submit_native(driver: *Driver, network: *net_async.Driver, socket: *udp.
 pub fun complete_native(driver: *Driver, native: *io_runtime.Completion,
                         now_ns: u64) Completion {
     var result: Completion;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized || native == nil ||
         native.kind != io_runtime.SEND_TO) {
         result.status = STATUS_ERROR;
@@ -911,6 +1259,11 @@ pub fun complete_native(driver: *Driver, native: *io_runtime.Completion,
 pub fun operation_snapshot(driver: *Driver, token: Token) Generated {
     var result: Generated;
     result.token = token;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
@@ -943,6 +1296,11 @@ fun app_available(driver: *Driver) bool {
 
 pub fun open_stream(driver: *Driver, direction: Direction) OpenResult {
     var result: OpenResult;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized ||
         (direction != BIDIRECTIONAL && direction != UNIDIRECTIONAL)) {
         result.status = STATUS_ERROR;
@@ -971,6 +1329,11 @@ pub fun open_stream(driver: *Driver, direction: Direction) OpenResult {
 
 pub fun accept_stream(driver: *Driver) OpenResult {
     var result: OpenResult;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
@@ -993,6 +1356,11 @@ pub fun accept_stream(driver: *Driver) OpenResult {
 
 pub fun write_stream(driver: *Driver, value: Stream, data: *u8, length: usize) WriteResult {
     var result: WriteResult;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized || (length > 0 && data == nil)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_BUFFER;
@@ -1020,6 +1388,7 @@ pub fun write_stream(driver: *Driver, value: Stream, data: *u8, length: usize) W
 }
 
 pub fun finish_stream(driver: *Driver, value: Stream) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
     mutex.lock(?driver.lock);
     if (!app_available(driver)) {
@@ -1042,6 +1411,11 @@ pub fun finish_stream(driver: *Driver, value: Stream) OperationResult {
 
 pub fun read_stream(driver: *Driver, value: Stream, output: *u8, capacity: usize) ReadResult {
     var result: ReadResult;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized || (capacity > 0 && output == nil)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_BUFFER;
@@ -1064,13 +1438,40 @@ pub fun read_stream(driver: *Driver, value: Stream, output: *u8, capacity: usize
     result.application_error = read.application_error;
     result.receive_max_data = read.receive_max_data;
     result.receive_max_stream_data = read.receive_max_stream_data;
+    result.receive_uncredited = read.receive_uncredited;
     result.fin = read.fin;
+    mutex.unlock(?driver.lock);
+    ret result;
+}
+
+pub fun credit_stream(driver: *Driver, value: Stream, count: u64) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
+    if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
+    mutex.lock(?driver.lock);
+    if (driver.state == CLOSED) {
+        mutex.unlock(?driver.lock);
+        ret operation_error(ERROR_STATE);
+    }
+    val internal: stream_api.OperationResult = stream_api.credit(driver.streams,
+        stream_handle(value), count);
+    var result: OperationResult;
+    result.status = status_from_stream(internal.status);
+    result.state = driver.state;
+    if (internal.error == stream_api.ERROR_TOKEN) {
+        result.status = STATUS_STALE;
+        result.error = ERROR_TOKEN;
+    }
+    if (result.status == STATUS_ERROR) {
+        result.error = ERROR_STREAM;
+        result.protocol_error = internal.error::u64;
+    }
     mutex.unlock(?driver.lock);
     ret result;
 }
 
 fun stream_operation(driver: *Driver, value: Stream, receive: bool,
                      error_code: u64) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
     mutex.lock(?driver.lock);
     if (driver.state == CLOSED) {
@@ -1104,6 +1505,7 @@ pub fun cancel_stream_receive(driver: *Driver, value: Stream, error_code: u64) O
 }
 
 pub fun release_stream(driver: *Driver, value: Stream) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
     mutex.lock(?driver.lock);
     if (driver.state == CLOSED) {
@@ -1126,6 +1528,11 @@ pub fun release_stream(driver: *Driver, value: Stream) OperationResult {
 
 pub fun stream_snapshot(driver: *Driver, value: Stream) StreamSnapshot {
     var result: StreamSnapshot;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
@@ -1146,6 +1553,7 @@ pub fun stream_snapshot(driver: *Driver, value: Stream) StreamSnapshot {
         result.send_cancelled = current.send_cancelled;
         result.receive_cancelled = current.receive_cancelled;
         result.final_known = current.final_known;
+        result.receive_uncredited = current.receive_uncredited;
     } or {
         result.status = STATUS_STALE;
         result.error = ERROR_TOKEN;
@@ -1156,6 +1564,11 @@ pub fun stream_snapshot(driver: *Driver, value: Stream) StreamSnapshot {
 
 pub fun send_datagram(driver: *Driver, data: *u8, length: usize) DatagramResult {
     var result: DatagramResult;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized || (length > 0 && data == nil)) {
         result.status = STATUS_ERROR;
         result.error = ERROR_BUFFER;
@@ -1178,6 +1591,7 @@ pub fun send_datagram(driver: *Driver, data: *u8, length: usize) DatagramResult 
 }
 
 pub fun cancel_datagram(driver: *Driver, value: DatagramToken) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
     mutex.lock(?driver.lock);
     if (driver.state == CLOSED) {
@@ -1199,6 +1613,11 @@ pub fun cancel_datagram(driver: *Driver, value: DatagramToken) OperationResult {
 
 pub fun next_datagram(driver: *Driver) ReceivedDatagram {
     var result: ReceivedDatagram;
+    if (callback_reentry(driver)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
     if (driver == nil || !driver.initialized) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
@@ -1222,6 +1641,7 @@ pub fun next_datagram(driver: *Driver) ReceivedDatagram {
 }
 
 pub fun release_datagram(driver: *Driver, value: DatagramToken) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
     mutex.lock(?driver.lock);
     if (driver.state == CLOSED) {
@@ -1243,7 +1663,10 @@ pub fun release_datagram(driver: *Driver, value: DatagramToken) OperationResult 
 
 pub fun begin_close(driver: *Driver, application_error: u64, reason: *u8,
                     reason_length: usize, now_ns: u64) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
+    if (!borrowed_disjoint(driver, ownership.bytes(reason, reason_length,
+            ownership.ZERO_ALLOWED))) { ret operation_error(ERROR_BUFFER); }
     mutex.lock(?driver.lock);
     val result: OperationResult = begin_close_locked(driver, false, lifecycle.EXPLICIT,
         application_error, reason, reason_length, now_ns);
@@ -1252,6 +1675,7 @@ pub fun begin_close(driver: *Driver, application_error: u64, reason: *u8,
 }
 
 pub fun cancel_connection(driver: *Driver) bool {
+    if (callback_reentry(driver)) { ret false; }
     if (driver == nil || !driver.initialized) { ret false; }
     mutex.lock(?driver.lock);
     if (driver.state == CLOSED || driver.operation_scope == nil) {
@@ -1273,21 +1697,23 @@ pub fun cancel_connection(driver: *Driver) bool {
 }
 
 pub fun finish_close(driver: *Driver) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
     mutex.lock(?driver.lock);
-    if (!driver.closing || driver.state != DRAINING) {
+    if (!driver.closing || (driver.state != DRAINING &&
+        driver.state != CLOSED)) {
         mutex.unlock(?driver.lock);
         ret operation_error(ERROR_STATE);
     }
     if (driver.pending_sends != 0 || driver.cancellation_calls != 0 ||
         !stream_storage_drained(driver.streams) ||
         driver.datagrams.send_count != 0 || driver.datagrams.delivered_count != 0 ||
-        !driver.protocol.close_ready(driver.protocol.context)) {
+        !callback_close_ready(driver)) {
         mutex.unlock(?driver.lock);
         ret OperationResult{status: STATUS_BLOCKED, error: ERROR_CAPACITY,
             protocol_error: 0, state: DRAINING};
     }
-    if (!driver.protocol.finish_close(driver.protocol.context)) {
+    if (!callback_finish_close(driver)) {
         mutex.unlock(?driver.lock);
         ret operation_error(ERROR_PROTOCOL);
     }
@@ -1313,6 +1739,7 @@ pub fun finish_close(driver: *Driver) OperationResult {
 
 pub fun snapshot(driver: *Driver) Snapshot {
     var result: Snapshot;
+    if (callback_reentry(driver)) { ret result; }
     if (driver == nil || !driver.initialized) { ret result; }
     mutex.lock(?driver.lock);
     result.source = driver.config.source;

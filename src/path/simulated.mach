@@ -4,6 +4,13 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 
+fun initialize_manager(config: path.Config, storage: path.Storage,
+                       initial: path.Endpoint) path.Manager {
+    var manager: path.Manager;
+    path.initialize(?manager, config, storage, initial);
+    ret manager;
+}
+
 fun config(source: u64, role: u8, validated: bool) path.Config {
     var result: path.Config;
     result.source = source;
@@ -59,7 +66,7 @@ test "quic.path.simulated: unauthenticated, duplicate, and pre-handshake peer ch
         sends: ?sends[0], send_capacity: 4};
     val original: path.Endpoint = endpoint(1, 4433, 1, 55000);
     val changed: path.Endpoint = endpoint(1, 4433, 1, 55001);
-    var manager: path.Manager = path.init(config(101, path.ROLE_SERVER, true), storage, original);
+    var manager: path.Manager = initialize_manager(config(101, path.ROLE_SERVER, true), storage, original);
     if (path.observe(?manager, changed, 1, 100, true, false, true, true, 1).status != path.STATUS_DROPPED ||
         path.observe(?manager, changed, 1, 100, true, true, false, true, 1).status != path.STATUS_DROPPED ||
         path.observe(?manager, changed, 1, 100, true, true, true, true, 1).status != path.STATUS_DROPPED ||
@@ -82,7 +89,7 @@ test "quic.path.simulated: NAT rebinding selects, preserves policy state, and en
         sends: ?sends[0], send_capacity: 4};
     val original: path.Endpoint = endpoint(1, 4433, 1, 55000);
     val rebound: path.Endpoint = endpoint(1, 4433, 1, 55001);
-    var manager: path.Manager = path.init(config(102, path.ROLE_SERVER, true), storage, original);
+    var manager: path.Manager = initialize_manager(config(102, path.ROLE_SERVER, true), storage, original);
     path.confirm_handshake(?manager);
     val moved: path.Observation = path.observe(?manager, rebound, 10, 400,
         true, true, true, true, 10);
@@ -130,7 +137,7 @@ test "quic.path.simulated: disabled migration still permits rebinding and prefer
     val original: path.Endpoint = endpoint(1, 4433, 1, 55000);
     var server_config: path.Config = config(103, path.ROLE_SERVER, true);
     server_config.allow_peer_active_migration = false;
-    var server: path.Manager = path.init(server_config, storage, original);
+    var server: path.Manager = initialize_manager(server_config, storage, original);
     path.confirm_handshake(?server);
     val changed_ip: path.Endpoint = endpoint(1, 4433, 2, 55000);
     val rejected: path.Observation = path.observe(?server, changed_ip, 1, 400,
@@ -148,13 +155,19 @@ test "quic.path.simulated: disabled migration still permits rebinding and prefer
         sends: ?client_sends[0], send_capacity: 2};
     var client_config: path.Config = config(104, path.ROLE_CLIENT, true);
     client_config.peer_disabled_active_migration = true;
-    var client: path.Manager = path.init(client_config, client_storage, original);
+    var client: path.Manager = initialize_manager(client_config, client_storage, original);
     path.confirm_handshake(?client);
+    val original_handle: path.Handle = path.selected(?client).handle;
+    if (path.configure_transport(?client, original_handle, 333000000,
+        0).status != path.STATUS_OK) { ret 1; }
     val alternate: path.Endpoint = endpoint(2, 4434, 1, 55000);
     if (path.probe(?client, alternate, false).error != path.ERROR_MIGRATION_DISABLED) { ret 1; }
     val preferred: path.PathResult = path.probe(?client, alternate, true);
     val data: [8]u8 = challenge(40);
-    if (preferred.status != path.STATUS_OK) { ret 1; }
+    if (preferred.status != path.STATUS_OK ||
+        path.configure_transport(?client, preferred.handle, 333000000,
+            0).status != path.STATUS_OK) { ret 1; }
+    client_paths[original_handle.index].congestion.congestion_window = 5000;
     val queued: path.OperationResult = path.queue_challenge(?client, preferred.handle, data,
         100, 100, true, path.VALIDATION_PATH);
     if (queued.status != path.STATUS_OK) { ret 1; }
@@ -167,7 +180,12 @@ test "quic.path.simulated: disabled migration still permits rebinding and prefer
     val migrated: path.Observation = path.migrate(?client, preferred.handle, true, true);
     if (!migrated.selected || migrated.migration != path.MIGRATION_PREFERRED ||
         !migrated.reset_congestion || !migrated.reset_rtt || !migrated.reset_ecn ||
-        !migrated.rotate_connection_id || path.release(?client, migrated.previous).status != path.STATUS_OK) {
+        !migrated.rotate_connection_id ||
+        client_paths[preferred.handle.index].congestion.congestion_window == 5000 ||
+        path.retain_recovery(?client, migrated.previous).status != path.STATUS_OK ||
+        path.release(?client, migrated.previous).status != path.STATUS_BLOCKED ||
+        path.release_recovery(?client, migrated.previous).status != path.STATUS_OK ||
+        path.release(?client, migrated.previous).status != path.STATUS_OK) {
         ret 1;
     }
     ret 0;
@@ -184,7 +202,7 @@ test "quic.path.simulated: packet number ordering prevents migration rollback" {
         sends: ?sends[0], send_capacity: 4};
     val original: path.Endpoint = endpoint(1, 4433, 1, 55000);
     val migrated_endpoint: path.Endpoint = endpoint(1, 4433, 2, 55000);
-    var manager: path.Manager = path.init(config(105, path.ROLE_SERVER, true), storage, original);
+    var manager: path.Manager = initialize_manager(config(105, path.ROLE_SERVER, true), storage, original);
     path.confirm_handshake(?manager);
     path.observe(?manager, original, 100, 100, true, true, true, true, 1);
     val old_handle: path.Handle = path.selected(?manager).handle;
@@ -196,10 +214,10 @@ test "quic.path.simulated: packet number ordering prevents migration rollback" {
     val migrated: path.Observation = path.observe(?manager, migrated_endpoint, 102, 100,
         true, true, true, true, 3);
     if (!migrated.selected || migrated.migration != path.MIGRATION_PEER) { ret 1; }
-    val stale_send: path.OperationResult = path.publish_send(?manager, queued_old.token);
-    if (stale_send.status != path.STATUS_STALE ||
+    val completed_send: path.OperationResult = path.publish_send(?manager, queued_old.token);
+    if (completed_send.status != path.STATUS_OK ||
         path.snapshot(?manager, old_handle).reserved_bytes != 0 ||
-        path.snapshot(?manager, old_handle).sent_bytes != 0) {
+        path.snapshot(?manager, old_handle).sent_bytes != 100) {
         ret 1;
     }
     val reordered: path.Observation = path.observe(?manager, original, 99, 100,
@@ -224,7 +242,7 @@ test "quic.path.simulated: challenge and response ownership rejects stale genera
         responses: ?responses[0], response_capacity: 1,
         sends: ?sends[0], send_capacity: 1};
     val original: path.Endpoint = endpoint(1, 4433, 1, 55000);
-    var manager: path.Manager = path.init(config(106, path.ROLE_CLIENT, true), storage, original);
+    var manager: path.Manager = initialize_manager(config(106, path.ROLE_CLIENT, true), storage, original);
     path.confirm_handshake(?manager);
     val handle: path.Handle = path.selected(?manager).handle;
     val first_queued: path.OperationResult = path.queue_response(?manager, handle, challenge(1));
@@ -261,7 +279,7 @@ test "quic.path.simulated: PATH_RESPONSE queuing is exact and amplification awar
         responses: ?responses[0], response_capacity: 2,
         sends: ?sends[0], send_capacity: 2};
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
-    var manager: path.Manager = path.init(config(107, path.ROLE_SERVER, false), storage, initial);
+    var manager: path.Manager = initialize_manager(config(107, path.ROLE_SERVER, false), storage, initial);
     val handle: path.Handle = path.selected(?manager).handle;
     val data: [8]u8 = challenge(5);
     val first_queued: path.OperationResult = path.queue_response(?manager, handle, data);
@@ -296,7 +314,7 @@ test "quic.path.simulated: validation timeout reverts and preserves prepared-tok
         sends: ?sends[0], send_capacity: 2};
     val original: path.Endpoint = endpoint(1, 4433, 1, 55000);
     val alternate: path.Endpoint = endpoint(1, 4433, 2, 55000);
-    var manager: path.Manager = path.init(config(108, path.ROLE_SERVER, true), storage, original);
+    var manager: path.Manager = initialize_manager(config(108, path.ROLE_SERVER, true), storage, original);
     path.confirm_handshake(?manager);
     val moved: path.Observation = path.observe(?manager, alternate, 10, 400,
         true, true, true, true, 0);
@@ -333,7 +351,7 @@ test "quic.path.simulated: MTU-only validation timeout does not invalidate an ad
         responses: ?responses[0], response_capacity: 1,
         sends: ?sends[0], send_capacity: 1};
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
-    var manager: path.Manager = path.init(config(109, path.ROLE_CLIENT, true), storage, initial);
+    var manager: path.Manager = initialize_manager(config(109, path.ROLE_CLIENT, true), storage, initial);
     val handle: path.Handle = path.selected(?manager).handle;
     paths[0].mtu_validated = false;
     val data: [8]u8 = challenge(50);
@@ -358,7 +376,7 @@ test "quic.path.simulated: send reservations cannot overspend or alias a reused 
         responses: ?responses[0], response_capacity: 1,
         sends: ?sends[0], send_capacity: 2};
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
-    var manager: path.Manager = path.init(config(110, path.ROLE_SERVER, false), storage, initial);
+    var manager: path.Manager = initialize_manager(config(110, path.ROLE_SERVER, false), storage, initial);
     path.confirm_handshake(?manager);
     val handle: path.Handle = path.selected(?manager).handle;
     path.observe(?manager, initial, 1, 800, false, true, true, true, 1);
@@ -393,7 +411,7 @@ test "quic.path.simulated: DPLPMTUD retries, black-hole fallback, and PTB hints 
         responses: ?responses[0], response_capacity: 1,
         sends: ?sends[0], send_capacity: 2};
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
-    var manager: path.Manager = path.init(config(111, path.ROLE_CLIENT, true), storage, initial);
+    var manager: path.Manager = initialize_manager(config(111, path.ROLE_CLIENT, true), storage, initial);
     val handle: path.Handle = path.selected(?manager).handle;
     var probe: path.MtuPrepared = path.prepare_mtu_probe(?manager, handle);
     if (probe.status != path.STATUS_OK || probe.size != 1400 ||
@@ -454,7 +472,7 @@ test "quic.path.simulated: duplicate paths and capacity failure are transactiona
         responses: ?responses[0], response_capacity: 1,
         sends: ?sends[0], send_capacity: 1};
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
-    var manager: path.Manager = path.init(config(112, path.ROLE_CLIENT, true), storage, initial);
+    var manager: path.Manager = initialize_manager(config(112, path.ROLE_CLIENT, true), storage, initial);
     path.confirm_handshake(?manager);
     val alternate: path.Endpoint = endpoint(2, 4434, 1, 55000);
     val first: path.PathResult = path.probe(?manager, alternate, false);
@@ -480,7 +498,7 @@ test "quic.path.simulated: multi-path validation faults revert to the last valid
         responses: ?responses[0], response_capacity: 2,
         sends: ?sends[0], send_capacity: 2};
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
-    var manager: path.Manager = path.init(config(113, path.ROLE_SERVER, true), storage, initial);
+    var manager: path.Manager = initialize_manager(config(113, path.ROLE_SERVER, true), storage, initial);
     path.confirm_handshake(?manager);
     path.observe(?manager, initial, 10, 100, true, true, true, true, 0);
     val first: path.Observation = path.observe(?manager, endpoint(1, 4433, 2, 55000), 11, 100,
@@ -516,7 +534,7 @@ test "quic.path.simulated: two-phase close drains every external owner" {
         responses: ?responses[0], response_capacity: 2,
         sends: ?sends[0], send_capacity: 2};
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
-    var manager: path.Manager = path.init(config(114, path.ROLE_CLIENT, true), storage, initial);
+    var manager: path.Manager = initialize_manager(config(114, path.ROLE_CLIENT, true), storage, initial);
     val handle: path.Handle = path.selected(?manager).handle;
     path.queue_challenge(?manager, handle, challenge(1), 100, 100, true, path.VALIDATION_PATH);
     val challenge_owner: path.PreparedChallenge = path.prepare_challenge(?manager, handle);
@@ -547,7 +565,7 @@ test "quic.path.simulated: probing paths cannot carry non-probing server traffic
         sends: ?sends[0], send_capacity: 2};
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
     val candidate: path.Endpoint = endpoint(1, 4433, 2, 55000);
-    var manager: path.Manager = path.init(config(115, path.ROLE_SERVER, true), storage, initial);
+    var manager: path.Manager = initialize_manager(config(115, path.ROLE_SERVER, true), storage, initial);
     path.confirm_handshake(?manager);
     val probing: path.Observation = path.observe(?manager, candidate, 1, 400,
         false, true, true, true, 10);
@@ -588,7 +606,7 @@ test "quic.path.simulated: failed prior-path revalidation defeats forwarding att
         sends: ?sends[0], send_capacity: 1};
     val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
     val candidate: path.Endpoint = endpoint(1, 4433, 2, 55000);
-    var manager: path.Manager = path.init(config(116, path.ROLE_SERVER, true), storage, initial);
+    var manager: path.Manager = initialize_manager(config(116, path.ROLE_SERVER, true), storage, initial);
     path.confirm_handshake(?manager);
     path.observe(?manager, initial, 10, 100, true, true, true, true, 1);
     val moved: path.Observation = path.observe(?manager, candidate, 11, 400,

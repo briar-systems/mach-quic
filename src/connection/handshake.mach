@@ -1,0 +1,2442 @@
+# production-shaped tls handshake adapter for quic crypto streams
+
+use quic.crypto.protection;
+use quic.connection.ownership;
+use quic.packet.packet;
+
+use crypto.encoding.keys;
+use crypto.secret;
+use std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+use std.types.string.str_len;
+use tls_cert: tls.cert;
+use tls_credentials: tls.cert.credentials;
+use tls_client_api: tls.client;
+use tls_server_api: tls.server;
+use tls_engine: tls.engine;
+use tls_config: tls.config;
+use tls_error_api: tls.error;
+use tls_record: tls.record;
+use tls.tls13;
+use tls.tls13.key_schedule;
+
+pub def Role: u8;
+pub val CLIENT: Role = 1;
+pub val SERVER: Role = 2;
+
+pub def Level: u8;
+pub val INITIAL: Level = 1;
+pub val EARLY: Level = 2;
+pub val HANDSHAKE: Level = 3;
+pub val APPLICATION: Level = 4;
+
+pub def Status: u8;
+pub val STATUS_OK: Status = 1;
+pub val STATUS_MORE: Status = 2;
+pub val STATUS_EMPTY: Status = 3;
+pub val STATUS_STALE: Status = 4;
+pub val STATUS_BLOCKED: Status = 5;
+pub val STATUS_CLOSED: Status = 6;
+pub val STATUS_ERROR: Status = 7;
+
+pub def Error: u8;
+pub val ERROR_NONE: Error = 0;
+pub val ERROR_STATE: Error = 1;
+pub val ERROR_CONFIG: Error = 2;
+pub val ERROR_BUFFER: Error = 3;
+pub val ERROR_LIMIT: Error = 4;
+pub val ERROR_OFFSET: Error = 5;
+pub val ERROR_CONFLICT: Error = 6;
+pub val ERROR_PROVIDER: Error = 7;
+pub val ERROR_EVENT: Error = 8;
+pub val ERROR_TOKEN: Error = 9;
+pub val ERROR_SECRET: Error = 10;
+pub val ERROR_TRANSITION: Error = 11;
+pub val ERROR_REJECTED: Error = 12;
+pub val ERROR_OVERFLOW: Error = 13;
+
+pub val PROVIDER_TLS_ERROR_BASE: u64 = 0x10000;
+pub val PROVIDER_BINDING_CONFIG: u64 = 0x20001;
+pub val PROVIDER_BINDING_LEVEL: u64 = 0x20002;
+pub val PROVIDER_BINDING_OFFSET: u64 = 0x20003;
+pub val PROVIDER_BINDING_TIME: u64 = 0x20004;
+pub val PROVIDER_BINDING_DEADLINE: u64 = 0x20005;
+pub val PROVIDER_BINDING_STATE: u64 = 0x20006;
+pub val PROVIDER_BINDING_EVENT: u64 = 0x20007;
+
+pub def EventKind: u8;
+pub val EVENT_CRYPTO: EventKind = 1;
+pub val EVENT_TRAFFIC_SECRET: EventKind = 2;
+pub val EVENT_PEER_TRANSPORT_PARAMETERS: EventKind = 3;
+pub val EVENT_EARLY_DATA: EventKind = 4;
+pub val EVENT_AUTHENTICATION: EventKind = 5;
+pub val EVENT_HANDSHAKE_COMPLETE: EventKind = 6;
+pub val EVENT_ALERT: EventKind = 7;
+
+pub val DIRECTION_SEND: u8 = 1;
+pub val DIRECTION_RECEIVE: u8 = 2;
+
+pub val EARLY_NOT_OFFERED: u8 = 1;
+pub val EARLY_ACCEPTED: u8 = 2;
+pub val EARLY_REJECTED: u8 = 3;
+
+pub val AUTHENTICATED: u8 = 1;
+pub val AUTHENTICATION_FAILED: u8 = 2;
+
+pub val TERMINAL_ACKED: u8 = 1;
+pub val TERMINAL_LOST: u8 = 2;
+
+pub val RESTART_RETRY: u8 = 1;
+pub val RESTART_VERSION_NEGOTIATION: u8 = 2;
+
+pub val ATTEMPT_FREE: u8 = 0;
+pub val ATTEMPT_PREPARED: u8 = 1;
+pub val ATTEMPT_PUBLISHED: u8 = 2;
+
+pub rec View { data: *u8; length: usize; }
+pub rec SecretView { data: *^u8; length: usize; }
+
+pub rec Start {
+    role: Role;
+    version: u32;
+    server_name: View;
+    alpn: View;
+    local_transport_parameters: View;
+    now_ns: u64;
+    enable_early_data: bool;
+}
+
+pub rec ProviderResult {
+    status: Status;
+    error: u64;
+}
+
+# provider data and secrets remain borrowed until complete_event
+pub rec ProviderEvent {
+    token: u64;
+    kind: EventKind;
+    level: Level;
+    direction: u8;
+    algorithm: protection.Algorithm;
+    generation: u64;
+    offset: u64;
+    data: View;
+    secret: SecretView;
+    disposition: u8;
+    alert: u64;
+}
+
+pub def StartFun: fun(ptr, *^u8, *Start) ProviderResult;
+pub def IngestFun: fun(ptr, *^u8, Level, u64, *u8, usize, u64) ProviderResult;
+pub def RestartFun: fun(ptr, *^u8, u8, u32, u64) ProviderResult;
+pub def PollFun: fun(ptr, *^u8, u64) ProviderResult;
+pub def NextEventFun: fun(ptr, *^u8, *ProviderEvent) bool;
+pub def CompleteEventFun: fun(ptr, *^u8, u64, bool) bool;
+pub def CloseFun: fun(ptr, *^u8, u64, u64) ProviderResult;
+pub def DestroyFun: fun(ptr, *^u8) bool;
+
+pub rec Protocol {
+    context: ptr;
+    context_size: usize;
+    secret_context: *^u8;
+    secret_context_size: usize;
+    start: StartFun;
+    ingest: IngestFun;
+    restart: RestartFun;
+    poll: PollFun;
+    next_event: NextEventFun;
+    complete_event: CompleteEventFun;
+    close: CloseFun;
+    destroy: DestroyFun;
+    initialized: bool;
+}
+
+pub rec LevelState {
+    receive_contiguous: u64;
+    receive_highest: u64;
+    send_length: u64;
+    send_acked: u64;
+}
+
+pub rec Attempt {
+    offset: u64;
+    length: usize;
+    generation: u64;
+    level: Level;
+    state: u8;
+}
+
+pub rec Storage {
+    receive_data: *u8;
+    receive_present: *bool;
+    receive_length: usize;
+    receive_stride: usize;
+    send_data: *u8;
+    send_pending: *bool;
+    send_acked: *bool;
+    send_inflight: *u16;
+    send_length: usize;
+    send_stride: usize;
+    attempts: *Attempt;
+    attempt_capacity: usize;
+}
+
+pub rec Config {
+    source: u64;
+    max_crypto_per_level: usize;
+    max_event_data: usize;
+    max_peer_identity: usize;
+}
+
+pub rec Adapter {
+    config: Config;
+    storage: Storage;
+    protocol: Protocol;
+    levels: [4]LevelState;
+    secret_generation: [8]u64;
+    event: ProviderEvent;
+    tls_client: *tls_client_api.Client;
+    tls_server: *tls_server_api.Server;
+    tls_verification_time_unix: i64;
+    tls_deadline_ns: u64;
+    tls_entropy_context_size: usize;
+    tls_entropy_secret_context_size: usize;
+    tls_last_now_ns: u64;
+    tls_receive_offsets: [3]u64;
+    tls_send_offsets: [3]u64;
+    tls_active_token: u64;
+    tls_active_length: usize;
+    tls_active_level: tls_engine.Level;
+    tls_active_kind: tls_engine.EventKind;
+    tls_error: u64;
+    event_generation: u64;
+    event_active: bool;
+    peer_parameters_received: bool;
+    early_data_received: bool;
+    authentication_received: bool;
+    handshake_complete: bool;
+    terminal_alert: u64;
+    role: Role;
+    version: u32;
+    next_attempt: usize;
+    core_lease: u64;
+    initialized: bool;
+    started: bool;
+    closing: bool;
+    destroyed: bool;
+    # zero until a real mach-tls provider is bound, then CLIENT or SERVER
+    tls_role: Role;
+    transition_active: bool;
+}
+
+pub rec EventToken {
+    source: u64;
+    generation: u64;
+    provider_token: u64;
+}
+
+pub rec Event {
+    status: Status;
+    error: Error;
+    provider_error: u64;
+    token: EventToken;
+    kind: EventKind;
+    level: Level;
+    direction: u8;
+    algorithm: protection.Algorithm;
+    generation: u64;
+    data: View;
+    secret: SecretView;
+    disposition: u8;
+    alert: u64;
+}
+
+pub rec AttemptToken {
+    source: u64;
+    index: usize;
+    generation: u64;
+}
+
+pub rec Prepared {
+    status: Status;
+    error: Error;
+    token: AttemptToken;
+    level: Level;
+    offset: u64;
+    data: View;
+}
+
+pub rec Result {
+    status: Status;
+    error: Error;
+    provider_error: u64;
+    consumed: usize;
+}
+
+pub rec Snapshot {
+    role: Role;
+    version: u32;
+    event_active: bool;
+    peer_parameters_received: bool;
+    early_data_received: bool;
+    authentication_received: bool;
+    handshake_complete: bool;
+    terminal_alert: u64;
+    initialized: bool;
+    started: bool;
+    closing: bool;
+    destroyed: bool;
+}
+
+fun valid_role(role: Role) bool { ret role == CLIENT || role == SERVER; }
+fun valid_level(level: Level) bool { ret level >= INITIAL && level <= APPLICATION; }
+fun valid_direction(direction: u8) bool {
+    ret direction == DIRECTION_SEND || direction == DIRECTION_RECEIVE;
+}
+
+fun protocol_valid(protocol: *Protocol) bool {
+    ret protocol != nil && protocol.initialized && protocol.context != nil &&
+        protocol.context_size > 0 && protocol.secret_context != nil &&
+        protocol.secret_context_size > 0 && protocol.start != nil &&
+        protocol.ingest != nil && protocol.restart != nil && protocol.poll != nil &&
+        protocol.next_event != nil && protocol.complete_event != nil &&
+        protocol.close != nil && protocol.destroy != nil;
+}
+
+fun provider_context_valid(adapter: *Adapter, storage: Storage,
+                           protocol: *Protocol) bool {
+    if (!protocol_valid(protocol)) { ret false; }
+    val context: ownership.Range = ownership.bytes(protocol.context::*u8,
+        protocol.context_size, ownership.ZERO_FORBIDDEN);
+    var ranges: [9]ownership.Range;
+    ranges[0] = ownership.bytes((?adapter.config)::*u8, $size_of(Adapter),
+        ownership.ZERO_FORBIDDEN);
+    ranges[1] = ownership.bytes(storage.receive_data, storage.receive_length,
+        ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.array(storage.receive_present::*u8,
+        storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.bytes(storage.send_data, storage.send_length,
+        ownership.ZERO_FORBIDDEN);
+    ranges[4] = ownership.array(storage.send_pending::*u8,
+        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    ranges[5] = ownership.array(storage.send_acked::*u8,
+        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    ranges[6] = ownership.array(storage.send_inflight::*u8,
+        storage.send_length, $size_of(u16), ownership.ZERO_FORBIDDEN);
+    ranges[7] = ownership.array(storage.attempts::*u8,
+        storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
+    ranges[8] = context;
+    ret ownership.all_disjoint(?ranges[0], 9);
+}
+
+fun tls_anchor_disjoint(anchor: ownership.Range, owned: *ownership.Range,
+                        count: usize) bool {
+    if (!anchor.valid) { ret false; }
+    var i: usize = 0;
+    for (i < count) {
+        if (!ownership.disjoint(anchor, owned[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun tls_client_record(value: *tls_client_api.Client) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.state)::usize;
+    val offset: usize = $offset_of(tls_client_api.Client, state);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_client_api.Client), ownership.ZERO_FORBIDDEN);
+}
+
+fun tls_config_record(value: *tls_config.ClientConfig) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.limits)::usize;
+    val offset: usize = $offset_of(tls_config.ClientConfig, limits);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_config.ClientConfig), ownership.ZERO_FORBIDDEN);
+}
+
+fun tls_server_record(value: *tls_server_api.Server) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.state)::usize;
+    val offset: usize = $offset_of(tls_server_api.Server, state);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_server_api.Server), ownership.ZERO_FORBIDDEN);
+}
+
+fun tls_server_config_record(value: *tls_config.ServerConfig) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.limits)::usize;
+    val offset: usize = $offset_of(tls_config.ServerConfig, limits);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_config.ServerConfig), ownership.ZERO_FORBIDDEN);
+}
+
+fun store_record(value: *tls_credentials.Store) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.initialized)::usize;
+    val offset: usize = $offset_of(tls_credentials.Store, initialized);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_credentials.Store), ownership.ZERO_FORBIDDEN);
+}
+
+# an identity holds secret key material, so its address is taken through a
+# public member rather than cast wholesale
+fun identity_array(value: *tls_credentials.Identity, count: usize) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.server_name)::usize;
+    val offset: usize = $offset_of(tls_credentials.Identity, server_name);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.array((address - offset)::*u8, count,
+        $size_of(tls_credentials.Identity), ownership.ZERO_FORBIDDEN);
+}
+
+fun generation_record(value: *tls_credentials.Generation) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.borrows)::usize;
+    val offset: usize = $offset_of(tls_credentials.Generation, borrows);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_credentials.Generation), ownership.ZERO_FORBIDDEN);
+}
+
+fun trust_record(value: *tls_cert.TrustStore) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.len)::usize;
+    val offset: usize = $offset_of(tls_cert.TrustStore, len);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_cert.TrustStore), ownership.ZERO_FORBIDDEN);
+}
+
+fun entropy_record(value: *secret.Entropy) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.initialized)::usize;
+    val offset: usize = $offset_of(secret.Entropy, initialized);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8, $size_of(secret.Entropy),
+        ownership.ZERO_FORBIDDEN);
+}
+
+fun identity_record(value: *tls_credentials.Identity) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.server_name)::usize;
+    val offset: usize = $offset_of(tls_credentials.Identity, server_name);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8,
+        $size_of(tls_credentials.Identity), ownership.ZERO_FORBIDDEN);
+}
+
+fun private_key_record(value: *keys.PrivateKey) ownership.Range {
+    if (value == nil) { var empty: ownership.Range; ret empty; }
+    val address: usize = (?value.algorithm)::usize;
+    val offset: usize = $offset_of(keys.PrivateKey, algorithm);
+    if (address < offset) { var empty: ownership.Range; ret empty; }
+    ret ownership.bytes((address - offset)::*u8, $size_of(keys.PrivateKey),
+        ownership.ZERO_FORBIDDEN);
+}
+
+# every welded secret a mach-tls key schedule can hold, in one place, so both
+# roles and every external caller ask the same question
+fun schedule_secrets_disjoint(schedule: *key_schedule.Schedule, data: *^u8,
+                              length: usize) bool {
+    ret ownership.secret_disjoint(data, length,
+            ?schedule.early_secret.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.client_early_traffic.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.early_exporter_master.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.handshake_secret.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.client_handshake_traffic.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.server_handshake_traffic.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.master_secret.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.client_application_traffic.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.server_application_traffic.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.exporter_master.data[0], 48) &&
+        ownership.secret_disjoint(data, length,
+            ?schedule.resumption_master.data[0], 48);
+}
+
+fun identity_key_disjoint(identity: *tls_credentials.Identity, data: *^u8,
+                          length: usize) bool {
+    if (identity == nil || identity.private_key == nil ||
+        identity.private_key.material.data == nil) { ret true; }
+    ret ownership.secret_disjoint(data, length,
+        identity.private_key.material.data, identity.private_key.material.len);
+}
+
+# a listener's key material lives in the published generation, so every
+# identity it can select is checked, not only the one a lease happens to hold
+fun store_keys_disjoint(store: *tls_credentials.Store, data: *^u8,
+                        length: usize) bool {
+    if (store == nil || store.current == nil) { ret true; }
+    val generation: *tls_credentials.Generation = store.current;
+    var i: usize = 0;
+    for (i < generation.identity_len) {
+        if (!identity_key_disjoint(?generation.identities[i], data, length)) {
+            ret false;
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun tls_client_secrets_disjoint(value: *tls_client_api.Client, data: *^u8,
+                                length: usize) bool {
+    ret ownership.secret_disjoint(data, length, ?value.private_key[0], 32) &&
+        schedule_secrets_disjoint(?value.schedule, data, length) &&
+        identity_key_disjoint(value.config.client_identity, data, length);
+}
+
+fun tls_server_secrets_disjoint(value: *tls_server_api.Server, data: *^u8,
+                                length: usize) bool {
+    ret ownership.secret_disjoint(data, length, ?value.private_key[0], 32) &&
+        schedule_secrets_disjoint(?value.schedule, data, length) &&
+        store_keys_disjoint(value.config.credentials, data, length);
+}
+
+fun tls_secret_context_valid(value: *tls_client_api.Client,
+                             secret_context_size: usize) bool {
+    val entropy: *secret.Entropy = value.config.entropy;
+    if ((entropy.secret_context == nil && secret_context_size != 0) ||
+        (entropy.secret_context != nil && secret_context_size == 0)) {
+        ret false;
+    }
+    if (secret_context_size == 0) { ret true; }
+    ret tls_client_secrets_disjoint(value, entropy.secret_context,
+        secret_context_size);
+}
+
+fun tls_server_secret_context_valid(value: *tls_server_api.Server,
+                                    secret_context_size: usize) bool {
+    val entropy: *secret.Entropy = value.config.entropy;
+    if ((entropy.secret_context == nil && secret_context_size != 0) ||
+        (entropy.secret_context != nil && secret_context_size == 0)) {
+        ret false;
+    }
+    if (secret_context_size == 0) { ret true; }
+    ret tls_server_secrets_disjoint(value, entropy.secret_context,
+        secret_context_size);
+}
+
+fun tls_client_context_valid(adapter: *Adapter, storage: Storage,
+                             value: *tls_client_api.Client,
+                             context_size: usize,
+                             secret_context_size: usize) bool {
+    if (value == nil || value.config == nil || value.config.entropy == nil) {
+        ret false;
+    }
+    val entropy: *secret.Entropy = value.config.entropy;
+    if ((entropy.context == nil && context_size != 0) ||
+        (entropy.context != nil && context_size == 0)) { ret false; }
+    var context_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (context_size == 0) { context_zero = ownership.ZERO_ALLOWED; }
+    var owned: [15]ownership.Range;
+    owned[0] = ownership.bytes((?adapter.config)::*u8, $size_of(Adapter),
+        ownership.ZERO_FORBIDDEN);
+    owned[1] = ownership.bytes(storage.receive_data, storage.receive_length,
+        ownership.ZERO_FORBIDDEN);
+    owned[2] = ownership.array(storage.receive_present::*u8,
+        storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[3] = ownership.bytes(storage.send_data, storage.send_length,
+        ownership.ZERO_FORBIDDEN);
+    owned[4] = ownership.array(storage.send_pending::*u8,
+        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[5] = ownership.array(storage.send_acked::*u8,
+        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[6] = ownership.array(storage.send_inflight::*u8,
+        storage.send_length, $size_of(u16), ownership.ZERO_FORBIDDEN);
+    owned[7] = ownership.array(storage.attempts::*u8,
+        storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
+    owned[8] = tls_client_record(value);
+    owned[9] = ownership.bytes(value.storage.input,
+        value.storage.input_capacity, ownership.ZERO_FORBIDDEN);
+    owned[10] = ownership.bytes(value.storage.output,
+        value.storage.output_capacity, ownership.ZERO_FORBIDDEN);
+    owned[11] = ownership.bytes(value.storage.hello,
+        value.storage.hello_capacity, ownership.ZERO_FORBIDDEN);
+    owned[12] = ownership.array(value.storage.certificates::*u8,
+        value.storage.certificate_capacity, $size_of(tls_cert.Certificate),
+        ownership.ZERO_FORBIDDEN);
+    owned[13] = ownership.bytes(value.storage.peer_parameters,
+        value.storage.peer_parameters_capacity, ownership.ZERO_FORBIDDEN);
+    owned[14] = ownership.bytes(entropy.context::*u8, context_size,
+        context_zero);
+    if (!ownership.all_disjoint(?owned[0], 15) ||
+        !tls_secret_context_valid(value, secret_context_size)) { ret false; }
+
+    val identity: *tls_credentials.Identity = value.config.client_identity;
+    if (!ownership.contains(owned[8], tls_config_record(value.config)) ||
+        !ownership.contains(owned[8], entropy_record(entropy)) ||
+        !ownership.contains(owned[8], trust_record(value.config.trust)) ||
+        (identity != nil &&
+            !ownership.contains(owned[8], identity_record(identity)))) {
+        ret false;
+    }
+
+    val server_name_length: usize = value.config.server_name.len;
+    if (server_name_length == 0 ||
+        !tls_anchor_disjoint(ownership.bytes(value.config.server_name.data,
+            server_name_length, ownership.ZERO_FORBIDDEN),
+            ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.alpn::*u8,
+            value.config.alpn_len, $size_of(tls_config.ProtocolName),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.trust.anchors::*u8,
+            value.config.trust.len, $size_of(tls_cert.Certificate),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.versions::*u8,
+            value.config.version_len, $size_of(u16), ownership.ZERO_FORBIDDEN),
+            ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.suites::*u8,
+            value.config.suite_len, $size_of(tls13.CipherSuite),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.groups::*u8,
+            value.config.group_len, $size_of(tls13.NamedGroup),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.signatures::*u8,
+            value.config.signature_len, $size_of(tls13.SignatureScheme),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.bytes(value.extra.data.data,
+            value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 15)) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < value.config.alpn_len) {
+        if (!tls_anchor_disjoint(ownership.bytes(value.config.alpn[i].data,
+            value.config.alpn[i].len, ownership.ZERO_FORBIDDEN),
+            ?owned[0], 15)) { ret false; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < value.config.trust.len) {
+        if (!tls_anchor_disjoint(ownership.bytes(
+            value.config.trust.anchors[i].der,
+            value.config.trust.anchors[i].der_len,
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+        i = i + 1;
+    }
+    if (identity != nil) {
+        if (!tls_anchor_disjoint(ownership.array(identity.chain.certificates::*u8,
+                identity.chain.len, $size_of(tls_cert.Certificate),
+                ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+            !tls_anchor_disjoint(private_key_record(identity.private_key),
+                ?owned[0], 15)) { ret false; }
+        i = 0;
+        for (i < identity.chain.len) {
+            if (!tls_anchor_disjoint(ownership.bytes(
+                identity.chain.certificates[i].der,
+                identity.chain.certificates[i].der_len,
+                ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+            i = i + 1;
+        }
+    }
+    ret true;
+}
+
+fun tls_server_context_valid(adapter: *Adapter, storage: Storage,
+                             value: *tls_server_api.Server,
+                             context_size: usize,
+                             secret_context_size: usize) bool {
+    if (value == nil || value.config == nil || value.config.entropy == nil ||
+        value.config.credentials == nil ||
+        value.config.credentials.current == nil) { ret false; }
+    val entropy: *secret.Entropy = value.config.entropy;
+    if ((entropy.context == nil && context_size != 0) ||
+        (entropy.context != nil && context_size == 0)) { ret false; }
+    var context_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (context_size == 0) { context_zero = ownership.ZERO_ALLOWED; }
+    var owned: [15]ownership.Range;
+    owned[0] = ownership.bytes((?adapter.config)::*u8, $size_of(Adapter),
+        ownership.ZERO_FORBIDDEN);
+    owned[1] = ownership.bytes(storage.receive_data, storage.receive_length,
+        ownership.ZERO_FORBIDDEN);
+    owned[2] = ownership.array(storage.receive_present::*u8,
+        storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[3] = ownership.bytes(storage.send_data, storage.send_length,
+        ownership.ZERO_FORBIDDEN);
+    owned[4] = ownership.array(storage.send_pending::*u8,
+        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[5] = ownership.array(storage.send_acked::*u8,
+        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[6] = ownership.array(storage.send_inflight::*u8,
+        storage.send_length, $size_of(u16), ownership.ZERO_FORBIDDEN);
+    owned[7] = ownership.array(storage.attempts::*u8,
+        storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
+    owned[8] = tls_server_record(value);
+    owned[9] = ownership.bytes(value.storage.input,
+        value.storage.input_capacity, ownership.ZERO_FORBIDDEN);
+    owned[10] = ownership.bytes(value.storage.output,
+        value.storage.output_capacity, ownership.ZERO_FORBIDDEN);
+    owned[11] = ownership.bytes(value.storage.hello,
+        value.storage.hello_capacity, ownership.ZERO_FORBIDDEN);
+    owned[12] = ownership.array(value.storage.certificates::*u8,
+        value.storage.certificate_capacity, $size_of(tls_cert.Certificate),
+        ownership.ZERO_FORBIDDEN);
+    owned[13] = ownership.bytes(value.storage.peer_parameters,
+        value.storage.peer_parameters_capacity, ownership.ZERO_FORBIDDEN);
+    owned[14] = ownership.bytes(entropy.context::*u8, context_size,
+        context_zero);
+    if (!ownership.all_disjoint(?owned[0], 15) ||
+        !tls_server_secret_context_valid(value, secret_context_size)) {
+        ret false;
+    }
+
+    # server.init copies the configuration and entropy into the record and
+    # repoints config at those copies; the credential store stays borrowed
+    if (!ownership.contains(owned[8], tls_server_config_record(value.config)) ||
+        !ownership.contains(owned[8], entropy_record(entropy))) { ret false; }
+
+    val generation: *tls_credentials.Generation = value.config.credentials.current;
+    if (!tls_anchor_disjoint(store_record(value.config.credentials),
+            ?owned[0], 15) ||
+        !tls_anchor_disjoint(generation_record(generation), ?owned[0], 15) ||
+        !tls_anchor_disjoint(identity_array(generation.identities,
+            generation.identity_len), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.alpn::*u8,
+            value.config.alpn_len, $size_of(tls_config.ProtocolName),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.versions::*u8,
+            value.config.version_len, $size_of(u16), ownership.ZERO_FORBIDDEN),
+            ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.suites::*u8,
+            value.config.suite_len, $size_of(tls13.CipherSuite),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.groups::*u8,
+            value.config.group_len, $size_of(tls13.NamedGroup),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.array(value.config.signatures::*u8,
+            value.config.signature_len, $size_of(tls13.SignatureScheme),
+            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        !tls_anchor_disjoint(ownership.bytes(value.extra.data.data,
+            value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 15)) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < value.config.alpn_len) {
+        if (!tls_anchor_disjoint(ownership.bytes(value.config.alpn[i].data,
+            value.config.alpn[i].len, ownership.ZERO_FORBIDDEN),
+            ?owned[0], 15)) { ret false; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < generation.identity_len) {
+        val identity: *tls_credentials.Identity = ?generation.identities[i];
+        if (!tls_anchor_disjoint(ownership.bytes(identity.server_name.data,
+                identity.server_name.len, ownership.ZERO_ALLOWED),
+                ?owned[0], 15) ||
+            !tls_anchor_disjoint(ownership.array(identity.chain.certificates::*u8,
+                identity.chain.len, $size_of(tls_cert.Certificate),
+                ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+            !tls_anchor_disjoint(private_key_record(identity.private_key),
+                ?owned[0], 15)) { ret false; }
+        var chain: usize = 0;
+        for (chain < identity.chain.len) {
+            if (!tls_anchor_disjoint(ownership.bytes(
+                identity.chain.certificates[chain].der,
+                identity.chain.certificates[chain].der_len,
+                ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+            chain = chain + 1;
+        }
+        i = i + 1;
+    }
+    val client_trust: *tls_cert.TrustStore = generation.client_trust;
+    if (client_trust != nil) {
+        if (!tls_anchor_disjoint(trust_record(client_trust), ?owned[0], 15) ||
+            !tls_anchor_disjoint(ownership.array(client_trust.anchors::*u8,
+                client_trust.len, $size_of(tls_cert.Certificate),
+                ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+        i = 0;
+        for (i < client_trust.len) {
+            if (!tls_anchor_disjoint(ownership.bytes(
+                client_trust.anchors[i].der, client_trust.anchors[i].der_len,
+                ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+            i = i + 1;
+        }
+    }
+    ret true;
+}
+
+fun callback_intact(adapter: *Adapter, before: *Adapter) bool {
+    var intact: bool =
+        adapter.config.source == before.config.source &&
+        adapter.config.max_crypto_per_level == before.config.max_crypto_per_level &&
+        adapter.config.max_event_data == before.config.max_event_data &&
+        adapter.config.max_peer_identity == before.config.max_peer_identity &&
+        adapter.storage.receive_data == before.storage.receive_data &&
+        adapter.storage.receive_present == before.storage.receive_present &&
+        adapter.storage.receive_length == before.storage.receive_length &&
+        adapter.storage.receive_stride == before.storage.receive_stride &&
+        adapter.storage.send_data == before.storage.send_data &&
+        adapter.storage.send_pending == before.storage.send_pending &&
+        adapter.storage.send_acked == before.storage.send_acked &&
+        adapter.storage.send_inflight == before.storage.send_inflight &&
+        adapter.storage.send_length == before.storage.send_length &&
+        adapter.storage.send_stride == before.storage.send_stride &&
+        adapter.storage.attempts == before.storage.attempts &&
+        adapter.storage.attempt_capacity == before.storage.attempt_capacity &&
+        adapter.protocol.context == before.protocol.context &&
+        adapter.protocol.context_size == before.protocol.context_size &&
+        adapter.protocol.secret_context == before.protocol.secret_context &&
+        adapter.protocol.secret_context_size == before.protocol.secret_context_size &&
+        adapter.protocol.start == before.protocol.start &&
+        adapter.protocol.ingest == before.protocol.ingest &&
+        adapter.protocol.restart == before.protocol.restart &&
+        adapter.protocol.poll == before.protocol.poll &&
+        adapter.protocol.next_event == before.protocol.next_event &&
+        adapter.protocol.complete_event == before.protocol.complete_event &&
+        adapter.protocol.close == before.protocol.close &&
+        adapter.protocol.destroy == before.protocol.destroy &&
+        adapter.protocol.initialized == before.protocol.initialized &&
+        adapter.tls_role == before.tls_role &&
+        adapter.tls_client == before.tls_client &&
+        adapter.tls_server == before.tls_server &&
+        adapter.tls_entropy_context_size ==
+            before.tls_entropy_context_size &&
+        adapter.tls_entropy_secret_context_size ==
+            before.tls_entropy_secret_context_size &&
+        adapter.core_lease == before.core_lease &&
+        adapter.initialized == before.initialized &&
+        adapter.started == before.started && adapter.closing == before.closing &&
+        adapter.destroyed == before.destroyed && adapter.transition_active;
+    var i: usize = 0;
+    for (intact && i < 4) {
+        intact = adapter.levels[i].receive_contiguous ==
+                before.levels[i].receive_contiguous &&
+            adapter.levels[i].receive_highest == before.levels[i].receive_highest &&
+            adapter.levels[i].send_length == before.levels[i].send_length &&
+            adapter.levels[i].send_acked == before.levels[i].send_acked;
+        i = i + 1;
+    }
+    i = 0;
+    for (intact && i < 8) {
+        intact = adapter.secret_generation[i] == before.secret_generation[i];
+        i = i + 1;
+    }
+    if (intact) {
+        adapter.transition_active = false;
+        ret true;
+    }
+    @adapter = @before;
+    adapter.transition_active = false;
+    adapter.closing = true;
+    ret false;
+}
+
+fun next_generation(value: u64) u64 {
+    var next: u64 = value + 1;
+    if (next == 0) { next = 1; }
+    ret next;
+}
+
+fun level_index(level: Level) usize { ret (level - 1)::usize; }
+
+fun level_base(stride: usize, level: Level) usize {
+    ret level_index(level) * stride;
+}
+
+fun secret_index(level: Level, direction: u8) usize {
+    ret level_index(level) * 2 + (direction - 1)::usize;
+}
+
+fun failed(code: Error) Result {
+    ret Result{status: STATUS_ERROR, error: code};
+}
+
+fun provider_failed(provider_error: u64) Result {
+    ret Result{status: STATUS_ERROR, error: ERROR_PROVIDER,
+        provider_error: provider_error};
+}
+
+fun tls_error(value: tls_error_api.Error) u64 {
+    ret PROVIDER_TLS_ERROR_BASE + value::u64;
+}
+
+fun tls_bytes_equal(first: *u8, first_length: usize,
+                    second: *u8, second_length: usize) bool {
+    if (first_length != second_length ||
+        (first_length > 0 && (first == nil || second == nil))) { ret false; }
+    var i: usize = 0;
+    for (i < first_length) {
+        if (first[i] != second[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun tls_level_index(value: tls_engine.Level) usize {
+    ret (value - tls_engine.INITIAL)::usize;
+}
+
+fun tls_level(value: tls_engine.Level, output: *Level) bool {
+    if (output == nil) { ret false; }
+    if (value == tls_engine.INITIAL) { output[0] = INITIAL; ret true; }
+    if (value == tls_engine.HANDSHAKE) { output[0] = HANDSHAKE; ret true; }
+    if (value == tls_engine.APPLICATION) { output[0] = APPLICATION; ret true; }
+    ret false;
+}
+
+fun provider_level(value: Level, output: *tls_engine.Level) bool {
+    if (output == nil) { ret false; }
+    if (value == INITIAL) { output[0] = tls_engine.INITIAL; ret true; }
+    if (value == HANDSHAKE) { output[0] = tls_engine.HANDSHAKE; ret true; }
+    if (value == APPLICATION) { output[0] = tls_engine.APPLICATION; ret true; }
+    ret false;
+}
+
+fun tls_direction(value: tls_engine.Direction, output: *u8) bool {
+    if (output == nil) { ret false; }
+    if (value == tls_engine.SEND) { output[0] = DIRECTION_SEND; ret true; }
+    if (value == tls_engine.RECEIVE) {
+        output[0] = DIRECTION_RECEIVE;
+        ret true;
+    }
+    ret false;
+}
+
+fun tls_algorithm(value: tls13.CipherSuite,
+                  output: *protection.Algorithm) bool {
+    if (output == nil) { ret false; }
+    if (value == tls13.AES_128_GCM_SHA256) {
+        output[0] = protection.AES_128_GCM_SHA256;
+        ret true;
+    }
+    if (value == tls13.AES_256_GCM_SHA384) {
+        output[0] = protection.AES_256_GCM_SHA384;
+        ret true;
+    }
+    if (value == tls13.CHACHA20_POLY1305_SHA256) {
+        output[0] = protection.CHACHA20_POLY1305_SHA256;
+        ret true;
+    }
+    ret false;
+}
+
+fun tls_time(adapter: *Adapter, now_ns: u64) bool {
+    if (now_ns < adapter.tls_last_now_ns) {
+        adapter.tls_error = PROVIDER_BINDING_TIME;
+        ret false;
+    }
+    adapter.tls_last_now_ns = now_ns;
+    if (adapter.tls_deadline_ns != 0 && now_ns >= adapter.tls_deadline_ns) {
+        adapter.tls_error = PROVIDER_BINDING_DEADLINE;
+        ret false;
+    }
+    ret true;
+}
+
+# the two mach-tls roles are shape-identical for every operation the adapter
+# drives, so the role is resolved once here and nowhere else; `restart` is the
+# one client-only member and rejects a server binding rather than reaching for
+# a call that does not exist
+fun tls_bound(adapter: *Adapter) bool {
+    ret adapter.tls_role == CLIENT || adapter.tls_role == SERVER;
+}
+
+fun tls_api_start(adapter: *Adapter, verification_time: i64) tls_engine.Result {
+    if (adapter.tls_role == SERVER) {
+        ret tls_server_api.start(adapter.tls_server, verification_time);
+    }
+    ret tls_client_api.start(adapter.tls_client, verification_time);
+}
+
+fun tls_api_ingest(adapter: *Adapter, level: tls_engine.Level, data: *u8,
+                   length: usize) tls_engine.Result {
+    if (adapter.tls_role == SERVER) {
+        ret tls_server_api.ingest(adapter.tls_server, level, data, length);
+    }
+    ret tls_client_api.ingest(adapter.tls_client, level, data, length);
+}
+
+fun tls_api_poll(adapter: *Adapter) tls_engine.Result {
+    if (adapter.tls_role == SERVER) { ret tls_server_api.poll(adapter.tls_server); }
+    ret tls_client_api.poll(adapter.tls_client);
+}
+
+fun tls_api_next_event(adapter: *Adapter, output: *tls_engine.Event) bool {
+    if (adapter.tls_role == SERVER) {
+        ret tls_server_api.next_event(adapter.tls_server, output);
+    }
+    ret tls_client_api.next_event(adapter.tls_client, output);
+}
+
+fun tls_api_complete_event(adapter: *Adapter, token: u64,
+                           accepted: bool) bool {
+    if (adapter.tls_role == SERVER) {
+        ret tls_server_api.complete_event(adapter.tls_server, token, accepted);
+    }
+    ret tls_client_api.complete_event(adapter.tls_client, token, accepted);
+}
+
+fun tls_api_close(adapter: *Adapter,
+                  description: tls_record.AlertDescription) tls_engine.Result {
+    if (adapter.tls_role == SERVER) {
+        ret tls_server_api.close(adapter.tls_server, description);
+    }
+    ret tls_client_api.close(adapter.tls_client, description);
+}
+
+fun tls_api_destroy(adapter: *Adapter) bool {
+    if (adapter.tls_role == SERVER) { ret tls_server_api.destroy(adapter.tls_server); }
+    ret tls_client_api.destroy(adapter.tls_client);
+}
+
+fun tls_api_snapshot(adapter: *Adapter) tls_engine.Snapshot {
+    if (adapter.tls_role == SERVER) {
+        ret tls_server_api.snapshot(adapter.tls_server);
+    }
+    ret tls_client_api.snapshot(adapter.tls_client);
+}
+
+# a failure that queued a protocol alert is a handshake outcome to deliver, not
+# a binding error; the client tracks that as a flag it clears on delivery, and
+# the server as an alert still sitting in its event queue
+fun tls_api_alert_pending(adapter: *Adapter) bool {
+    if (adapter.tls_role == SERVER) {
+        ret adapter.tls_server.pending_alert != tls_record.NO_ALERT &&
+            tls_server_api.snapshot(adapter.tls_server).output_pending;
+    }
+    ret adapter.tls_client.alert_pending;
+}
+
+fun tls_client_start_matches(adapter: *Adapter, value: *Start) bool {
+    if (adapter.tls_client == nil || adapter.tls_client.config == nil ||
+        value.role != CLIENT) { ret false; }
+    val configuration: *tls_config.ClientConfig = adapter.tls_client.config;
+    ret configuration.alpn_len == 1 && configuration.alpn != nil &&
+        tls_bytes_equal(value.server_name.data, value.server_name.length,
+            configuration.server_name.data, configuration.server_name.len) &&
+        tls_bytes_equal(value.alpn.data, value.alpn.length,
+            configuration.alpn[0].data, configuration.alpn[0].len) &&
+        adapter.tls_client.extra.kind ==
+            tls_client_api.QUIC_TRANSPORT_PARAMETERS &&
+        adapter.tls_client.peer_extension ==
+            tls_client_api.QUIC_TRANSPORT_PARAMETERS &&
+        tls_bytes_equal(value.local_transport_parameters.data,
+            value.local_transport_parameters.length,
+            adapter.tls_client.extra.data.data,
+            adapter.tls_client.extra.data.len);
+}
+
+# a listener learns the server name from the peer's SNI and selects one of its
+# configured protocols, so the start descriptor asserts membership rather than
+# the client's single-offer equality
+fun tls_server_start_matches(adapter: *Adapter, value: *Start) bool {
+    if (adapter.tls_server == nil || adapter.tls_server.config == nil ||
+        value.role != SERVER || value.server_name.length != 0 ||
+        value.server_name.data != nil) { ret false; }
+    val configuration: *tls_config.ServerConfig = adapter.tls_server.config;
+    if (configuration.alpn_len == 0 || configuration.alpn == nil) { ret false; }
+    var offered: bool = false;
+    var i: usize = 0;
+    for (i < configuration.alpn_len) {
+        if (tls_bytes_equal(value.alpn.data, value.alpn.length,
+            configuration.alpn[i].data, configuration.alpn[i].len)) {
+            offered = true;
+        }
+        i = i + 1;
+    }
+    ret offered &&
+        adapter.tls_server.extra.kind ==
+            tls_server_api.QUIC_TRANSPORT_PARAMETERS &&
+        adapter.tls_server.peer_extension ==
+            tls_server_api.QUIC_TRANSPORT_PARAMETERS &&
+        tls_bytes_equal(value.local_transport_parameters.data,
+            value.local_transport_parameters.length,
+            adapter.tls_server.extra.data.data,
+            adapter.tls_server.extra.data.len);
+}
+
+fun tls_start_matches(adapter: *Adapter, value: *Start) bool {
+    if (adapter == nil || value == nil ||
+        (value.version != packet.VERSION_1 && value.version != packet.VERSION_2) ||
+        value.enable_early_data) { ret false; }
+    if (adapter.tls_role == SERVER) {
+        ret tls_server_start_matches(adapter, value);
+    }
+    if (adapter.tls_role == CLIENT) {
+        ret tls_client_start_matches(adapter, value);
+    }
+    ret false;
+}
+
+fun tls_provider_result(adapter: *Adapter, value: tls_engine.Result,
+                        accept_more: bool) ProviderResult {
+    if (value.status == tls_engine.OK || value.status == tls_engine.COMPLETE ||
+        (accept_more && value.status == tls_engine.MORE)) {
+        adapter.tls_error = 0;
+        ret ProviderResult{status: STATUS_OK};
+    }
+    if (value.status == tls_engine.MORE) {
+        adapter.tls_error = 0;
+        ret ProviderResult{status: STATUS_MORE};
+    }
+    if (value.status == tls_engine.BLOCKED) {
+        adapter.tls_error = 0;
+        ret ProviderResult{status: STATUS_BLOCKED};
+    }
+    adapter.tls_error = tls_error(value.error);
+    ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+}
+
+fun tls_start(adapter: *Adapter, value: *Start) ProviderResult {
+    if (!tls_start_matches(adapter, value)) {
+        adapter.tls_error = PROVIDER_BINDING_CONFIG;
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    if (!tls_time(adapter, value.now_ns)) {
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    ret tls_provider_result(adapter, tls_api_start(adapter,
+        adapter.tls_verification_time_unix), false);
+}
+
+fun tls_ingest(adapter: *Adapter, level: Level, offset: u64, data: *u8,
+               length: usize, now_ns: u64) ProviderResult {
+    var mapped: tls_engine.Level;
+    if (!provider_level(level, ?mapped)) {
+        adapter.tls_error = PROVIDER_BINDING_LEVEL;
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    val index: usize = tls_level_index(mapped);
+    if (offset != adapter.tls_receive_offsets[index]) {
+        adapter.tls_error = PROVIDER_BINDING_OFFSET;
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    if (!tls_time(adapter, now_ns)) {
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    val consumed: tls_engine.Result = tls_api_ingest(adapter, mapped, data,
+        length);
+    var result: ProviderResult;
+    if (consumed.status == tls_engine.FAILED && tls_api_alert_pending(adapter)) {
+        adapter.tls_error = 0;
+        result.status = STATUS_OK;
+    } or {
+        result = tls_provider_result(adapter, consumed, true);
+    }
+    if (result.status == STATUS_OK) {
+        adapter.tls_receive_offsets[index] = offset + length::u64;
+    }
+    ret result;
+}
+
+fun tls_restart(adapter: *Adapter, reason: u8, version: u32,
+                now_ns: u64) ProviderResult {
+    if (adapter.tls_role != CLIENT ||
+        (version != packet.VERSION_1 && version != packet.VERSION_2) ||
+        adapter.tls_active_token != 0) {
+        adapter.tls_error = PROVIDER_BINDING_STATE;
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    var mapped: u8 = tls_client_api.RESTART_RETRY;
+    if (reason == RESTART_VERSION_NEGOTIATION) {
+        mapped = tls_client_api.RESTART_VERSION_NEGOTIATION;
+    } or (reason != RESTART_RETRY) {
+        adapter.tls_error = PROVIDER_BINDING_STATE;
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    if (!tls_time(adapter, now_ns)) {
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    val result: ProviderResult = tls_provider_result(adapter,
+        tls_client_api.restart(adapter.tls_client, mapped), false);
+    if (result.status != STATUS_OK) { ret result; }
+    if (reason == RESTART_RETRY) {
+        adapter.tls_receive_offsets[0] = 0;
+        adapter.tls_send_offsets[0] = 0;
+    } or {
+        var i: usize = 0;
+        for (i < 3) {
+            adapter.tls_receive_offsets[i] = 0;
+            adapter.tls_send_offsets[i] = 0;
+            i = i + 1;
+        }
+    }
+    ret result;
+}
+
+fun tls_poll(adapter: *Adapter, now_ns: u64) ProviderResult {
+    if (adapter.tls_active_token != 0 || !tls_time(adapter, now_ns)) {
+        if (adapter.tls_error == 0) {
+            adapter.tls_error = PROVIDER_BINDING_STATE;
+        }
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    val value: tls_engine.Result = tls_api_poll(adapter);
+    if (value.status == tls_engine.FAILED && tls_api_alert_pending(adapter)) {
+        adapter.tls_error = 0;
+        ret ProviderResult{status: STATUS_OK};
+    }
+    if (value.status == tls_engine.COMPLETE) {
+        adapter.tls_error = 0;
+        ret ProviderResult{status: STATUS_EMPTY};
+    }
+    ret tls_provider_result(adapter, value, false);
+}
+
+fun tls_event(adapter: *Adapter, output: *ProviderEvent) bool {
+    if (adapter.tls_active_token != 0 || output == nil) { ret false; }
+    var input: tls_engine.Event;
+    if (!tls_api_next_event(adapter, ?input)) { ret false; }
+    if (input.token == 0 || input.kind < tls_engine.CRYPTO ||
+        input.kind > tls_engine.ALERT) {
+        tls_api_complete_event(adapter, input.token, false);
+        adapter.tls_error = PROVIDER_BINDING_EVENT;
+        ret false;
+    }
+    output.token = input.token;
+    if (input.kind == tls_engine.CRYPTO) { output.kind = EVENT_CRYPTO; }
+    if (input.kind == tls_engine.TRAFFIC_SECRET) {
+        output.kind = EVENT_TRAFFIC_SECRET;
+    }
+    if (input.kind == tls_engine.PEER_PARAMETERS) {
+        output.kind = EVENT_PEER_TRANSPORT_PARAMETERS;
+    }
+    if (input.kind == tls_engine.EARLY_DATA) { output.kind = EVENT_EARLY_DATA; }
+    if (input.kind == tls_engine.AUTHENTICATION) {
+        output.kind = EVENT_AUTHENTICATION;
+    }
+    if (input.kind == tls_engine.HANDSHAKE_COMPLETE) {
+        output.kind = EVENT_HANDSHAKE_COMPLETE;
+    }
+    if (input.kind == tls_engine.ALERT) { output.kind = EVENT_ALERT; }
+    if (input.kind == tls_engine.CRYPTO ||
+        input.kind == tls_engine.TRAFFIC_SECRET ||
+        input.kind == tls_engine.PEER_PARAMETERS ||
+        input.kind == tls_engine.HANDSHAKE_COMPLETE) {
+        if (!tls_level(input.level, ?output.level)) {
+            tls_api_complete_event(adapter, input.token, false);
+            adapter.tls_error = PROVIDER_BINDING_EVENT;
+            ret false;
+        }
+    }
+    if (input.kind == tls_engine.CRYPTO) {
+        output.offset = adapter.tls_send_offsets[tls_level_index(input.level)];
+        output.data = View{data: input.data.data, length: input.data.len};
+    }
+    if (input.kind == tls_engine.TRAFFIC_SECRET) {
+        if (!tls_direction(input.direction, ?output.direction) ||
+            !tls_algorithm(input.suite, ?output.algorithm)) {
+            tls_api_complete_event(adapter, input.token, false);
+            adapter.tls_error = PROVIDER_BINDING_EVENT;
+            ret false;
+        }
+        output.generation = input.generation;
+        output.secret = SecretView{data: input.secret.data, length: input.secret.len};
+    }
+    if (input.kind == tls_engine.PEER_PARAMETERS ||
+        input.kind == tls_engine.AUTHENTICATION) {
+        output.data = View{data: input.data.data, length: input.data.len};
+    }
+    if (input.kind == tls_engine.EARLY_DATA ||
+        input.kind == tls_engine.AUTHENTICATION) {
+        output.disposition = input.disposition;
+    }
+    if (input.kind == tls_engine.ALERT) { output.alert = input.alert::u64; }
+    adapter.tls_active_token = input.token;
+    adapter.tls_active_length = input.data.len;
+    adapter.tls_active_level = input.level;
+    adapter.tls_active_kind = input.kind;
+    ret true;
+}
+
+fun tls_complete_event(adapter: *Adapter, token: u64, accepted: bool) bool {
+    if (token == 0 || token != adapter.tls_active_token) { ret false; }
+    val length: usize = adapter.tls_active_length;
+    val level: tls_engine.Level = adapter.tls_active_level;
+    val kind: tls_engine.EventKind = adapter.tls_active_kind;
+    if (!tls_api_complete_event(adapter, token, accepted)) { ret false; }
+    adapter.tls_active_token = 0;
+    adapter.tls_active_length = 0;
+    adapter.tls_active_level = 0;
+    adapter.tls_active_kind = 0;
+    if (accepted && kind == tls_engine.CRYPTO) {
+        val index: usize = tls_level_index(level);
+        adapter.tls_send_offsets[index] =
+            adapter.tls_send_offsets[index] + length::u64;
+    }
+    if (!accepted) { adapter.tls_error = PROVIDER_BINDING_EVENT; }
+    ret true;
+}
+
+fun tls_close(adapter: *Adapter, alert: u64, now_ns: u64) ProviderResult {
+    if (alert > 255 || adapter.tls_active_token != 0 ||
+        now_ns < adapter.tls_last_now_ns) {
+        adapter.tls_error = PROVIDER_BINDING_STATE;
+        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    }
+    adapter.tls_last_now_ns = now_ns;
+    val state: tls_engine.Snapshot = tls_api_snapshot(adapter);
+    if (state.status != tls_engine.FAILED && state.status != tls_engine.CLOSED) {
+        ret tls_provider_result(adapter, tls_api_close(adapter,
+            alert::tls_record.AlertDescription), false);
+    }
+    adapter.tls_error = 0;
+    ret ProviderResult{status: STATUS_OK};
+}
+
+fun storage_valid(adapter: *Adapter, config: Config, storage: Storage) bool {
+    val adapter_range: ownership.Range = ownership.bytes(
+        (?adapter.config)::*u8, $size_of(Adapter), ownership.ZERO_FORBIDDEN);
+    if (!adapter_range.valid ||
+        config.source == 0 || config.max_crypto_per_level == 0 ||
+        config.max_event_data == 0 || config.max_peer_identity == 0 ||
+        storage.receive_stride < config.max_crypto_per_level ||
+        storage.send_stride < config.max_crypto_per_level ||
+        storage.receive_stride > storage.receive_length / 4 ||
+        storage.send_stride > storage.send_length / 4 ||
+        storage.attempt_capacity == 0) { ret false; }
+    var ranges: [8]ownership.Range;
+    ranges[0] = adapter_range;
+    ranges[1] = ownership.bytes(storage.receive_data, storage.receive_length,
+        ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.array(storage.receive_present::*u8,
+        storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    ranges[3] = ownership.bytes(storage.send_data, storage.send_length,
+        ownership.ZERO_FORBIDDEN);
+    ranges[4] = ownership.array(storage.send_pending::*u8, storage.send_length,
+        $size_of(bool), ownership.ZERO_FORBIDDEN);
+    ranges[5] = ownership.array(storage.send_acked::*u8, storage.send_length,
+        $size_of(bool), ownership.ZERO_FORBIDDEN);
+    ranges[6] = ownership.array(storage.send_inflight::*u8, storage.send_length,
+        $size_of(u16), ownership.ZERO_FORBIDDEN);
+    ranges[7] = ownership.array(storage.attempts::*u8, storage.attempt_capacity,
+        $size_of(Attempt), ownership.ZERO_FORBIDDEN);
+    ret ownership.all_disjoint(?ranges[0], 8);
+}
+
+fun init_base(adapter: *Adapter, config: Config, storage: Storage) bool {
+    if (config.source == 0 || config.max_crypto_per_level == 0 ||
+        config.max_event_data == 0 || config.max_peer_identity == 0 ||
+        !storage_valid(adapter, config, storage) || adapter.initialized) { ret false; }
+    memory.raw_zero(storage.receive_data, storage.receive_length);
+    memory.raw_zero(storage.receive_present, storage.receive_length);
+    memory.raw_zero(storage.send_data, storage.send_length);
+    memory.raw_zero(storage.send_pending, storage.send_length);
+    memory.raw_zero(storage.send_acked, storage.send_length);
+    memory.raw_zero(storage.send_inflight, storage.send_length * 2);
+    var i: usize = 0;
+    for (i < storage.attempt_capacity) {
+        storage.attempts[i].state = ATTEMPT_FREE;
+        storage.attempts[i].generation = next_generation(storage.attempts[i].generation);
+        i = i + 1;
+    }
+    adapter.config = config;
+    adapter.storage = storage;
+    adapter.protocol.initialized = false;
+    adapter.tls_client = nil;
+    adapter.tls_server = nil;
+    adapter.tls_role = 0;
+    adapter.transition_active = false;
+    adapter.destroyed = false;
+    adapter.initialized = true;
+    ret true;
+}
+
+fun adapter_record_valid(adapter: *Adapter) bool {
+    ret ownership.bytes((?adapter.config)::*u8, $size_of(Adapter),
+        ownership.ZERO_FORBIDDEN).valid;
+}
+
+fun adapter_valid(adapter: *Adapter) bool {
+    if (!adapter_record_valid(adapter) || !adapter.initialized) { ret false; }
+    ret storage_valid(adapter, adapter.config, adapter.storage);
+}
+
+fun borrowed_disjoint(adapter: *Adapter, borrowed: ownership.Range) bool {
+    if (!borrowed.valid) { ret false; }
+    if (!ownership.disjoint(borrowed, ownership.bytes((?adapter.config)::*u8,
+        $size_of(Adapter), ownership.ZERO_FORBIDDEN))) { ret false; }
+    var owned: [7]ownership.Range;
+    owned[0] = ownership.bytes(adapter.storage.receive_data,
+        adapter.storage.receive_length, ownership.ZERO_FORBIDDEN);
+    owned[1] = ownership.array(adapter.storage.receive_present::*u8,
+        adapter.storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[2] = ownership.bytes(adapter.storage.send_data,
+        adapter.storage.send_length, ownership.ZERO_FORBIDDEN);
+    owned[3] = ownership.array(adapter.storage.send_pending::*u8,
+        adapter.storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[4] = ownership.array(adapter.storage.send_acked::*u8,
+        adapter.storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
+    owned[5] = ownership.array(adapter.storage.send_inflight::*u8,
+        adapter.storage.send_length, $size_of(u16), ownership.ZERO_FORBIDDEN);
+    owned[6] = ownership.array(adapter.storage.attempts::*u8,
+        adapter.storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
+    var i: usize = 0;
+    for (i < 7) {
+        if (!ownership.disjoint(borrowed, owned[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+pub fun initialize(adapter: *Adapter, config: Config, storage: Storage,
+                   protocol: Protocol) bool {
+    if (!provider_context_valid(adapter, storage, ?protocol) ||
+        !init_base(adapter, config, storage)) {
+        ret false;
+    }
+    adapter.protocol = protocol;
+    ret true;
+}
+
+pub fun lease_core(adapter: *Adapter, source: u64) bool {
+    if (!adapter_valid(adapter) || source == 0 || adapter.core_lease != 0 ||
+        adapter.started || adapter.closing || adapter.destroyed) { ret false; }
+    adapter.core_lease = source;
+    ret true;
+}
+
+pub fun release_core(adapter: *Adapter, source: u64) bool {
+    if (!adapter_valid(adapter) || source == 0 ||
+        adapter.core_lease != source || adapter.started) { ret false; }
+    adapter.core_lease = 0;
+    ret true;
+}
+
+pub fun initialize_tls_client(adapter: *Adapter, config: Config, storage: Storage,
+                              value: *tls_client_api.Client,
+                              verification_time_unix: i64,
+                              deadline_ns: u64,
+                              entropy_context_size: usize,
+                              entropy_secret_context_size: usize) bool {
+    if (value == nil) { ret false; }
+    val state_address: usize = (?value.state)::usize;
+    val state_offset: usize = $offset_of(tls_client_api.Client, state);
+    if (state_address < state_offset ||
+        !ownership.bytes((state_address - state_offset)::*u8,
+            $size_of(tls_client_api.Client), ownership.ZERO_FORBIDDEN).valid) {
+        ret false;
+    }
+    val state: tls_engine.Snapshot = tls_client_api.snapshot(value);
+    if (value.config == nil ||
+        value.extra.kind != tls_client_api.QUIC_TRANSPORT_PARAMETERS ||
+        value.peer_extension != tls_client_api.QUIC_TRANSPORT_PARAMETERS ||
+        state.status != tls_engine.MORE || state.output_pending ||
+        state.event_active || value.hello_len != 0 || value.retry_count != 0 ||
+        value.server_hello_seen) {
+        ret false;
+    }
+    if (!tls_client_context_valid(adapter, storage, value,
+        entropy_context_size, entropy_secret_context_size) ||
+        !init_base(adapter, config, storage)) { ret false; }
+    adapter.tls_client = value;
+    adapter.tls_verification_time_unix = verification_time_unix;
+    adapter.tls_deadline_ns = deadline_ns;
+    adapter.tls_entropy_context_size = entropy_context_size;
+    adapter.tls_entropy_secret_context_size = entropy_secret_context_size;
+    adapter.tls_role = CLIENT;
+    ret true;
+}
+
+pub fun initialize_tls_server(adapter: *Adapter, config: Config, storage: Storage,
+                              value: *tls_server_api.Server,
+                              verification_time_unix: i64,
+                              deadline_ns: u64,
+                              entropy_context_size: usize,
+                              entropy_secret_context_size: usize) bool {
+    if (value == nil) { ret false; }
+    val state_address: usize = (?value.state)::usize;
+    val state_offset: usize = $offset_of(tls_server_api.Server, state);
+    if (state_address < state_offset ||
+        !ownership.bytes((state_address - state_offset)::*u8,
+            $size_of(tls_server_api.Server), ownership.ZERO_FORBIDDEN).valid) {
+        ret false;
+    }
+    val state: tls_engine.Snapshot = tls_server_api.snapshot(value);
+    # a listener has no ClientHello of its own to retain, so freshness is the
+    # absence of every artefact a started handshake would have produced
+    if (value.config == nil ||
+        value.extra.kind != tls_server_api.QUIC_TRANSPORT_PARAMETERS ||
+        value.peer_extension != tls_server_api.QUIC_TRANSPORT_PARAMETERS ||
+        state.status != tls_engine.MORE || state.output_pending ||
+        state.event_active || value.hello_len != 0 || value.retry_count != 0 ||
+        value.input_len != 0 || value.output_used != 0 ||
+        value.queue_len != 0 || value.session_id_len != 0 ||
+        value.public_key_len != 0 || value.lease_held ||
+        value.authenticated || value.client_certificate_seen) {
+        ret false;
+    }
+    if (!tls_server_context_valid(adapter, storage, value,
+        entropy_context_size, entropy_secret_context_size) ||
+        !init_base(adapter, config, storage)) { ret false; }
+    adapter.tls_server = value;
+    adapter.tls_verification_time_unix = verification_time_unix;
+    adapter.tls_deadline_ns = deadline_ns;
+    adapter.tls_entropy_context_size = entropy_context_size;
+    adapter.tls_entropy_secret_context_size = entropy_secret_context_size;
+    adapter.tls_role = SERVER;
+    ret true;
+}
+
+pub val PROVIDER_RANGE_CAPACITY: usize = 10;
+
+# the adapter owns which provider is bound, so it answers every question about
+# that provider's memory itself; no caller reaches through to the binding
+pub fun provider_ranges(adapter: *Adapter, output: *ownership.Range,
+                        capacity: usize) bool {
+    if (output == nil || capacity < PROVIDER_RANGE_CAPACITY) { ret false; }
+    var used: usize = 0;
+    var context_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (tls_bound(adapter)) { context_zero = ownership.ZERO_ALLOWED; }
+    output[0] = ownership.bytes(adapter.protocol.context::*u8,
+        adapter.protocol.context_size, context_zero);
+    used = 1;
+    if (tls_bound(adapter)) {
+        var entropy: *secret.Entropy = nil;
+        var record: ownership.Range;
+        var provider_storage: [5]ownership.Range;
+        if (adapter.tls_role == SERVER) {
+            val value: *tls_server_api.Server = adapter.tls_server;
+            if (value == nil || value.config == nil ||
+                value.config.entropy == nil) { ret false; }
+            entropy = value.config.entropy;
+            record = tls_server_record(value);
+            provider_storage[0] = ownership.bytes(value.storage.input,
+                value.storage.input_capacity, ownership.ZERO_FORBIDDEN);
+            provider_storage[1] = ownership.bytes(value.storage.output,
+                value.storage.output_capacity, ownership.ZERO_FORBIDDEN);
+            provider_storage[2] = ownership.bytes(value.storage.hello,
+                value.storage.hello_capacity, ownership.ZERO_FORBIDDEN);
+            provider_storage[3] = ownership.array(
+                value.storage.certificates::*u8,
+                value.storage.certificate_capacity,
+                $size_of(tls_cert.Certificate), ownership.ZERO_FORBIDDEN);
+            provider_storage[4] = ownership.bytes(value.storage.peer_parameters,
+                value.storage.peer_parameters_capacity, ownership.ZERO_FORBIDDEN);
+        } or {
+            val value: *tls_client_api.Client = adapter.tls_client;
+            if (value == nil || value.config == nil ||
+                value.config.entropy == nil) { ret false; }
+            entropy = value.config.entropy;
+            record = tls_client_record(value);
+            provider_storage[0] = ownership.bytes(value.storage.input,
+                value.storage.input_capacity, ownership.ZERO_FORBIDDEN);
+            provider_storage[1] = ownership.bytes(value.storage.output,
+                value.storage.output_capacity, ownership.ZERO_FORBIDDEN);
+            provider_storage[2] = ownership.bytes(value.storage.hello,
+                value.storage.hello_capacity, ownership.ZERO_FORBIDDEN);
+            provider_storage[3] = ownership.array(
+                value.storage.certificates::*u8,
+                value.storage.certificate_capacity,
+                $size_of(tls_cert.Certificate), ownership.ZERO_FORBIDDEN);
+            provider_storage[4] = ownership.bytes(value.storage.peer_parameters,
+                value.storage.peer_parameters_capacity, ownership.ZERO_FORBIDDEN);
+        }
+        # the configuration and entropy records are copies inside the provider
+        # record, so they are not separate ranges: initialization already
+        # asserted containment
+        if (!record.valid) { ret false; }
+        output[1] = record;
+        var i: usize = 0;
+        for (i < 5) {
+            output[2 + i] = provider_storage[i];
+            i = i + 1;
+        }
+        var entropy_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+        if (adapter.tls_entropy_context_size == 0) {
+            entropy_zero = ownership.ZERO_ALLOWED;
+        }
+        output[7] = ownership.bytes(entropy.context::*u8,
+            adapter.tls_entropy_context_size, entropy_zero);
+        used = 8;
+    }
+    for (used < capacity) {
+        output[used] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
+        used = used + 1;
+    }
+    ret true;
+}
+
+pub fun provider_secrets_disjoint(adapter: *Adapter, data: *^u8,
+                                  length: usize) bool {
+    if (!tls_bound(adapter)) {
+        ret ownership.secret_disjoint(adapter.protocol.secret_context,
+            adapter.protocol.secret_context_size, data, length);
+    }
+    var entropy: *secret.Entropy = nil;
+    if (adapter.tls_role == SERVER) {
+        val value: *tls_server_api.Server = adapter.tls_server;
+        if (value == nil || value.config == nil ||
+            value.config.entropy == nil) { ret false; }
+        entropy = value.config.entropy;
+        if (!tls_server_secrets_disjoint(value, data, length)) { ret false; }
+    } or {
+        val value: *tls_client_api.Client = adapter.tls_client;
+        if (value == nil || value.config == nil ||
+            value.config.entropy == nil) { ret false; }
+        entropy = value.config.entropy;
+        if (!tls_client_secrets_disjoint(value, data, length)) { ret false; }
+    }
+    if ((entropy.secret_context == nil &&
+            adapter.tls_entropy_secret_context_size != 0) ||
+        (entropy.secret_context != nil &&
+            adapter.tls_entropy_secret_context_size == 0)) { ret false; }
+    if (entropy.secret_context == nil) { ret true; }
+    ret ownership.secret_disjoint(entropy.secret_context,
+        adapter.tls_entropy_secret_context_size, data, length);
+}
+
+pub fun start(adapter: *Adapter, value: *Start) Result {
+    val value_range: ownership.Range = ownership.bytes(value::*u8,
+        $size_of(Start), ownership.ZERO_FORBIDDEN);
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 ||
+        !value_range.valid || !borrowed_disjoint(adapter, value_range) ||
+        adapter.started ||
+        adapter.closing || !valid_role(value.role) || value.version == 0 ||
+        !ownership.bytes(value.server_name.data, value.server_name.length,
+            ownership.ZERO_ALLOWED).valid ||
+        !ownership.bytes(value.alpn.data, value.alpn.length,
+            ownership.ZERO_FORBIDDEN).valid ||
+        !ownership.bytes(value.local_transport_parameters.data,
+            value.local_transport_parameters.length,
+            ownership.ZERO_FORBIDDEN).valid ||
+        value.local_transport_parameters.length > adapter.config.max_event_data) {
+        ret failed(ERROR_STATE);
+    }
+    val role: Role = value.role;
+    val version: u32 = value.version;
+    var provider_start: Start = @value;
+    var result: ProviderResult;
+    if (tls_bound(adapter)) {
+        result = tls_start(adapter, ?provider_start);
+    } or {
+        adapter.transition_active = true;
+        val before: Adapter = @adapter;
+        result = adapter.protocol.start(adapter.protocol.context,
+            adapter.protocol.secret_context, ?provider_start);
+        if (!callback_intact(adapter, ?before)) {
+            ret provider_failed(PROVIDER_BINDING_STATE);
+        }
+    }
+    if (result.status != STATUS_OK) {
+        adapter.closing = true;
+        ret provider_failed(result.error);
+    }
+    adapter.role = role;
+    adapter.version = version;
+    adapter.started = true;
+    ret Result{status: STATUS_OK};
+}
+
+fun receive_bounds(adapter: *Adapter, level: Level, offset: u64,
+                   length: usize) bool {
+    if (!valid_level(level) || offset > adapter.config.max_crypto_per_level::u64 ||
+        length > adapter.config.max_crypto_per_level) { ret false; }
+    ret length::u64 <= adapter.config.max_crypto_per_level::u64 - offset;
+}
+
+pub fun receive(adapter: *Adapter, level: Level, offset: u64, data: *u8,
+                length: usize, now_ns: u64) Result {
+    val input: ownership.Range = ownership.bytes(data, length,
+        ownership.ZERO_FORBIDDEN);
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 || !adapter.started ||
+        adapter.closing || adapter.event_active || !input.valid ||
+        !borrowed_disjoint(adapter, input) ||
+        !receive_bounds(adapter, level, offset, length)) { ret failed(ERROR_STATE); }
+    val index: usize = level_index(level);
+    val base: usize = level_base(adapter.storage.receive_stride, level);
+    var i: usize = 0;
+    for (i < length) {
+        val position: usize = offset::usize + i;
+        if (adapter.storage.receive_present[base + position] &&
+            adapter.storage.receive_data[base + position] != data[i]) {
+            ret failed(ERROR_CONFLICT);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < length) {
+        val position: usize = offset::usize + i;
+        adapter.storage.receive_data[base + position] = data[i];
+        adapter.storage.receive_present[base + position] = true;
+        i = i + 1;
+    }
+    val end: u64 = offset + length::u64;
+    if (end > adapter.levels[index].receive_highest) {
+        adapter.levels[index].receive_highest = end;
+    }
+    val begin: u64 = adapter.levels[index].receive_contiguous;
+    var contiguous: u64 = begin;
+    for (contiguous < adapter.levels[index].receive_highest &&
+        adapter.storage.receive_present[base + contiguous::usize]) {
+        contiguous = contiguous + 1;
+    }
+    if (contiguous == begin) { ret Result{status: STATUS_MORE, consumed: length}; }
+    var provider: ProviderResult;
+    if (tls_bound(adapter)) {
+        provider = tls_ingest(adapter, level, begin,
+            ?adapter.storage.receive_data[base + begin::usize],
+            (contiguous - begin)::usize, now_ns);
+    } or {
+        adapter.transition_active = true;
+        val before: Adapter = @adapter;
+        provider = adapter.protocol.ingest(adapter.protocol.context,
+            adapter.protocol.secret_context, level, begin,
+            ?adapter.storage.receive_data[base + begin::usize],
+            (contiguous - begin)::usize, now_ns);
+        if (!callback_intact(adapter, ?before)) {
+            ret provider_failed(PROVIDER_BINDING_STATE);
+        }
+    }
+    if (provider.status != STATUS_OK) {
+        adapter.closing = true;
+        ret provider_failed(provider.error);
+    }
+    adapter.levels[index].receive_contiguous = contiguous;
+    ret Result{status: STATUS_OK, consumed: length};
+}
+
+fun valid_secret_event(adapter: *Adapter, event: *ProviderEvent) bool {
+    if (!valid_level(event.level) || event.level == INITIAL ||
+        !valid_direction(event.direction) || event.generation == 0 ||
+        event.secret.data == nil || event.secret.length !=
+            protection.hash_size(event.algorithm)) { ret false; }
+    if (event.level == EARLY) {
+        if ((adapter.role == CLIENT && event.direction != DIRECTION_SEND) ||
+            (adapter.role == SERVER && event.direction != DIRECTION_RECEIVE) ||
+            event.generation != 1) { ret false; }
+    }
+    if (event.level == HANDSHAKE && event.generation != 1) { ret false; }
+    if (event.level == APPLICATION && event.generation != 1) { ret false; }
+    val index: usize = secret_index(event.level, event.direction);
+    if (event.generation != adapter.secret_generation[index] + 1) { ret false; }
+    if (event.level == APPLICATION &&
+        adapter.secret_generation[secret_index(HANDSHAKE, event.direction)] == 0) {
+        ret false;
+    }
+    ret true;
+}
+
+fun valid_event(adapter: *Adapter, event: *ProviderEvent) bool {
+    if (event.token == 0 || event.kind < EVENT_CRYPTO || event.kind > EVENT_ALERT) {
+        ret false;
+    }
+    if (event.kind == EVENT_CRYPTO) {
+        if (!valid_level(event.level) ||
+            !borrowed_disjoint(adapter, ownership.bytes(event.data.data,
+                event.data.length, ownership.ZERO_FORBIDDEN)) ||
+            event.data.length > adapter.config.max_event_data ||
+            event.offset != adapter.levels[level_index(event.level)].send_length ||
+            !receive_bounds(adapter, event.level, event.offset, event.data.length)) {
+            ret false;
+        }
+    }
+    if (event.kind == EVENT_TRAFFIC_SECRET && !valid_secret_event(adapter, event)) {
+        ret false;
+    }
+    if (event.kind == EVENT_PEER_TRANSPORT_PARAMETERS &&
+        (adapter.peer_parameters_received || event.data.length >
+            adapter.config.max_event_data ||
+        !borrowed_disjoint(adapter, ownership.bytes(event.data.data,
+            event.data.length, ownership.ZERO_FORBIDDEN)))) {
+        ret false;
+    }
+    if (event.kind == EVENT_EARLY_DATA &&
+        (adapter.early_data_received || event.disposition < EARLY_NOT_OFFERED ||
+        event.disposition > EARLY_REJECTED)) { ret false; }
+    if (event.kind == EVENT_AUTHENTICATION &&
+        (adapter.authentication_received || event.disposition < AUTHENTICATED ||
+        event.disposition > AUTHENTICATION_FAILED ||
+        event.data.length > adapter.config.max_peer_identity ||
+        !borrowed_disjoint(adapter, ownership.bytes(event.data.data,
+            event.data.length, ownership.ZERO_ALLOWED)))) { ret false; }
+    # a QUIC server must authenticate to its peer, so a client always reaches
+    # an authentication decision; a listener only reaches one when it asked for
+    # a client certificate, which is credential policy the adapter does not own
+    if (event.kind == EVENT_HANDSHAKE_COMPLETE &&
+        (adapter.handshake_complete || !adapter.peer_parameters_received ||
+        !adapter.early_data_received ||
+        (adapter.role == CLIENT && !adapter.authentication_received) ||
+        adapter.secret_generation[secret_index(APPLICATION, DIRECTION_SEND)] == 0 ||
+        adapter.secret_generation[secret_index(APPLICATION, DIRECTION_RECEIVE)] == 0)) {
+        ret false;
+    }
+    if (event.kind == EVENT_ALERT && event.alert > 255) { ret false; }
+    ret true;
+}
+
+pub fun next_event(adapter: *Adapter) Event {
+    var result: Event;
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 || !adapter.started || adapter.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (adapter.event_active) {
+        result.status = STATUS_BLOCKED;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    var event: ProviderEvent;
+    var available: bool = false;
+    if (tls_bound(adapter)) {
+        available = tls_event(adapter, ?event);
+    } or {
+        adapter.transition_active = true;
+        val before: Adapter = @adapter;
+        available = adapter.protocol.next_event(adapter.protocol.context,
+            adapter.protocol.secret_context, ?event);
+        if (!callback_intact(adapter, ?before)) {
+            result.status = STATUS_ERROR;
+            result.error = ERROR_PROVIDER;
+            result.provider_error = PROVIDER_BINDING_STATE;
+            ret result;
+        }
+    }
+    if (!available) {
+        if (tls_bound(adapter) && adapter.tls_error != 0) {
+            result.status = STATUS_ERROR;
+            result.error = ERROR_PROVIDER;
+            result.provider_error = adapter.tls_error;
+            ret result;
+        }
+        result.status = STATUS_EMPTY;
+        ret result;
+    }
+    if (!valid_event(adapter, ?event)) {
+        if (tls_bound(adapter)) {
+            tls_complete_event(adapter, event.token, false);
+        } or {
+            adapter.transition_active = true;
+            val before: Adapter = @adapter;
+            val rejected: bool = adapter.protocol.complete_event(
+                adapter.protocol.context,
+                adapter.protocol.secret_context, event.token, false);
+            if (!callback_intact(adapter, ?before) || !rejected) {
+                result.provider_error = PROVIDER_BINDING_EVENT;
+            }
+        }
+        adapter.closing = true;
+        result.status = STATUS_ERROR;
+        result.error = ERROR_EVENT;
+        ret result;
+    }
+    adapter.event = event;
+    adapter.event_generation = next_generation(adapter.event_generation);
+    adapter.event_active = true;
+    result.status = STATUS_OK;
+    result.token = EventToken{source: adapter.config.source,
+        generation: adapter.event_generation, provider_token: event.token};
+    result.kind = event.kind;
+    result.level = event.level;
+    result.direction = event.direction;
+    result.algorithm = event.algorithm;
+    result.generation = event.generation;
+    result.data = event.data;
+    result.secret = event.secret;
+    result.disposition = event.disposition;
+    result.alert = event.alert;
+    ret result;
+}
+
+fun event_matches(adapter: *Adapter, token: EventToken) bool {
+    ret adapter_valid(adapter) && !adapter.transition_active &&
+        adapter.core_lease == 0 && adapter.event_active &&
+        token.source == adapter.config.source &&
+        token.generation == adapter.event_generation &&
+        token.provider_token == adapter.event.token;
+}
+
+fun append_crypto(adapter: *Adapter, event: *ProviderEvent) bool {
+    val index: usize = level_index(event.level);
+    val offset: usize = event.offset::usize;
+    val base: usize = level_base(adapter.storage.send_stride, event.level);
+    var i: usize = 0;
+    for (i < event.data.length) {
+        adapter.storage.send_data[base + offset + i] = event.data.data[i];
+        adapter.storage.send_pending[base + offset + i] = true;
+        adapter.storage.send_acked[base + offset + i] = false;
+        adapter.storage.send_inflight[base + offset + i] = 0;
+        i = i + 1;
+    }
+    adapter.levels[index].send_length = event.offset + event.data.length::u64;
+    ret true;
+}
+
+fun rollback_crypto(adapter: *Adapter, event: *ProviderEvent) {
+    val index: usize = level_index(event.level);
+    val offset: usize = event.offset::usize;
+    val base: usize = level_base(adapter.storage.send_stride, event.level);
+    var i: usize = 0;
+    for (i < event.data.length) {
+        adapter.storage.send_data[base + offset + i] = 0;
+        adapter.storage.send_pending[base + offset + i] = false;
+        adapter.storage.send_acked[base + offset + i] = false;
+        adapter.storage.send_inflight[base + offset + i] = 0;
+        i = i + 1;
+    }
+    adapter.levels[index].send_length = event.offset;
+}
+
+pub fun complete_event(adapter: *Adapter, token: EventToken, accepted: bool) Result {
+    if (!event_matches(adapter, token)) { ret failed(ERROR_TOKEN); }
+    val event: ProviderEvent = adapter.event;
+    if (accepted && event.kind == EVENT_CRYPTO && !append_crypto(adapter, ?event)) {
+        ret failed(ERROR_BUFFER);
+    }
+    var completed: bool = false;
+    if (tls_bound(adapter)) {
+        completed = tls_complete_event(adapter, event.token, accepted);
+    } or {
+        adapter.transition_active = true;
+        val before: Adapter = @adapter;
+        completed = adapter.protocol.complete_event(adapter.protocol.context,
+            adapter.protocol.secret_context, event.token, accepted);
+        if (!callback_intact(adapter, ?before)) { completed = false; }
+    }
+    if (!completed) {
+        if (accepted && event.kind == EVENT_CRYPTO) {
+            rollback_crypto(adapter, ?event);
+        }
+        adapter.closing = true;
+        ret provider_failed(PROVIDER_BINDING_EVENT);
+    }
+    adapter.event_active = false;
+    adapter.event_generation = next_generation(adapter.event_generation);
+    if (!accepted) {
+        adapter.closing = true;
+        ret failed(ERROR_REJECTED);
+    }
+    if (event.kind == EVENT_TRAFFIC_SECRET) {
+        adapter.secret_generation[secret_index(event.level, event.direction)] =
+            event.generation;
+    }
+    if (event.kind == EVENT_PEER_TRANSPORT_PARAMETERS) {
+        adapter.peer_parameters_received = true;
+    }
+    if (event.kind == EVENT_EARLY_DATA) { adapter.early_data_received = true; }
+    if (event.kind == EVENT_AUTHENTICATION) {
+        adapter.authentication_received = true;
+    }
+    if (event.kind == EVENT_HANDSHAKE_COMPLETE) { adapter.handshake_complete = true; }
+    if (event.kind == EVENT_ALERT) {
+        adapter.terminal_alert = event.alert;
+        adapter.closing = true;
+    }
+    ret Result{status: STATUS_OK};
+}
+
+fun claim_attempt(adapter: *Adapter) usize {
+    var offset: usize = 0;
+    for (offset < adapter.storage.attempt_capacity) {
+        val i: usize = (adapter.next_attempt + offset) % adapter.storage.attempt_capacity;
+        if (adapter.storage.attempts[i].state == ATTEMPT_FREE) {
+            adapter.next_attempt = (i + 1) % adapter.storage.attempt_capacity;
+            ret i;
+        }
+        offset = offset + 1;
+    }
+    ret adapter.storage.attempt_capacity;
+}
+
+fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
+                    probe: bool) Prepared {
+    var result: Prepared;
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 || !adapter.started || adapter.closing ||
+        !valid_level(level) || maximum == 0) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    val index: usize = level_index(level);
+    val base: usize = level_base(adapter.storage.send_stride, level);
+    var begin: usize = 0;
+    for (begin < adapter.levels[index].send_length::usize &&
+        ((!adapter.storage.send_pending[base + begin] &&
+        !(probe && !adapter.storage.send_acked[base + begin])) ||
+        adapter.storage.send_acked[base + begin] ||
+        (!probe && adapter.storage.send_inflight[base + begin] != 0) ||
+        adapter.storage.send_inflight[base + begin] == 0xffff)) {
+        begin = begin + 1;
+    }
+    if (begin == adapter.levels[index].send_length::usize) {
+        result.status = STATUS_EMPTY;
+        ret result;
+    }
+    var end: usize = begin;
+    for (end < adapter.levels[index].send_length::usize && end - begin < maximum &&
+        (adapter.storage.send_pending[base + end] ||
+        (probe && !adapter.storage.send_acked[base + end])) &&
+        !adapter.storage.send_acked[base + end] &&
+        (probe || adapter.storage.send_inflight[base + end] == 0) &&
+        adapter.storage.send_inflight[base + end] != 0xffff) {
+        end = end + 1;
+    }
+    val attempt_index: usize = claim_attempt(adapter);
+    if (attempt_index == adapter.storage.attempt_capacity) {
+        result.status = STATUS_BLOCKED;
+        result.error = ERROR_LIMIT;
+        ret result;
+    }
+    val attempt: *Attempt = ?adapter.storage.attempts[attempt_index];
+    attempt.generation = next_generation(attempt.generation);
+    attempt.offset = begin::u64;
+    attempt.length = end - begin;
+    attempt.level = level;
+    attempt.state = ATTEMPT_PREPARED;
+    var i: usize = begin;
+    for (i < end) {
+        adapter.storage.send_inflight[base + i] =
+            adapter.storage.send_inflight[base + i] + 1;
+        i = i + 1;
+    }
+    result.status = STATUS_OK;
+    result.token = AttemptToken{source: adapter.config.source, index: attempt_index,
+        generation: attempt.generation};
+    result.level = level;
+    result.offset = begin::u64;
+    result.data = View{data: ?adapter.storage.send_data[base + begin],
+        length: end - begin};
+    ret result;
+}
+
+pub fun prepare(adapter: *Adapter, level: Level, maximum: usize) Prepared {
+    ret prepare_attempt(adapter, level, maximum, false);
+}
+
+pub fun prepare_probe(adapter: *Adapter, level: Level,
+                      maximum: usize) Prepared {
+    ret prepare_attempt(adapter, level, maximum, true);
+}
+
+fun attempt_for(adapter: *Adapter, token: AttemptToken) *Attempt {
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 ||
+        token.source != adapter.config.source ||
+        token.index >= adapter.storage.attempt_capacity) { ret nil; }
+    val attempt: *Attempt = ?adapter.storage.attempts[token.index];
+    if (attempt.state == ATTEMPT_FREE || attempt.generation != token.generation) { ret nil; }
+    ret attempt;
+}
+
+fun release_attempt(adapter: *Adapter, attempt: *Attempt, pending: bool, acked: bool) {
+    val base: usize = level_base(adapter.storage.send_stride, attempt.level);
+    var i: usize = attempt.offset::usize;
+    val end: usize = i + attempt.length;
+    for (i < end) {
+        if (adapter.storage.send_inflight[base + i] > 0) {
+            adapter.storage.send_inflight[base + i] =
+                adapter.storage.send_inflight[base + i] - 1;
+        }
+        if (acked) {
+            adapter.storage.send_acked[base + i] = true;
+            adapter.storage.send_pending[base + i] = false;
+        } or (pending && !adapter.storage.send_acked[base + i]) {
+            adapter.storage.send_pending[base + i] = true;
+        }
+        i = i + 1;
+    }
+    attempt.state = ATTEMPT_FREE;
+    attempt.generation = next_generation(attempt.generation);
+}
+
+pub fun cancel_prepared(adapter: *Adapter, token: AttemptToken) Result {
+    val attempt: *Attempt = attempt_for(adapter, token);
+    if (attempt == nil || attempt.state != ATTEMPT_PREPARED) { ret failed(ERROR_TOKEN); }
+    release_attempt(adapter, attempt, true, false);
+    ret Result{status: STATUS_OK};
+}
+
+pub fun publish(adapter: *Adapter, token: AttemptToken) Result {
+    val attempt: *Attempt = attempt_for(adapter, token);
+    if (attempt == nil || attempt.state != ATTEMPT_PREPARED) { ret failed(ERROR_TOKEN); }
+    val base: usize = level_base(adapter.storage.send_stride, attempt.level);
+    var i: usize = attempt.offset::usize;
+    val end: usize = i + attempt.length;
+    for (i < end) { adapter.storage.send_pending[base + i] = false; i = i + 1; }
+    attempt.state = ATTEMPT_PUBLISHED;
+    ret Result{status: STATUS_OK};
+}
+
+pub fun on_terminal(adapter: *Adapter, token: AttemptToken, terminal: u8) Result {
+    val attempt: *Attempt = attempt_for(adapter, token);
+    if (attempt == nil || attempt.state != ATTEMPT_PUBLISHED ||
+        (terminal != TERMINAL_ACKED && terminal != TERMINAL_LOST)) {
+        ret failed(ERROR_TOKEN);
+    }
+    release_attempt(adapter, attempt, terminal == TERMINAL_LOST,
+        terminal == TERMINAL_ACKED);
+    ret Result{status: STATUS_OK};
+}
+
+fun clear_level(adapter: *Adapter, level: Level) {
+    val index: usize = level_index(level);
+    val receive_base: usize = level_base(adapter.storage.receive_stride, level);
+    val send_base: usize = level_base(adapter.storage.send_stride, level);
+    memory.raw_zero(?adapter.storage.receive_data[receive_base],
+        adapter.storage.receive_stride);
+    memory.raw_zero(?adapter.storage.receive_present[receive_base],
+        adapter.storage.receive_stride);
+    memory.raw_zero(?adapter.storage.send_data[send_base],
+        adapter.storage.send_stride);
+    memory.raw_zero(?adapter.storage.send_pending[send_base],
+        adapter.storage.send_stride);
+    memory.raw_zero(?adapter.storage.send_acked[send_base],
+        adapter.storage.send_stride);
+    memory.raw_zero(?adapter.storage.send_inflight[send_base],
+        adapter.storage.send_stride * 2);
+    var state: LevelState;
+    adapter.levels[index] = state;
+    var i: usize = 0;
+    for (i < adapter.storage.attempt_capacity) {
+        if (adapter.storage.attempts[i].state != ATTEMPT_FREE &&
+            adapter.storage.attempts[i].level == level) {
+            adapter.storage.attempts[i].state = ATTEMPT_FREE;
+            adapter.storage.attempts[i].generation =
+                next_generation(adapter.storage.attempts[i].generation);
+        }
+        i = i + 1;
+    }
+}
+
+pub fun restart(adapter: *Adapter, reason: u8, version: u32, now_ns: u64) Result {
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 || !adapter.started || adapter.closing ||
+        adapter.role != CLIENT || adapter.handshake_complete || adapter.event_active ||
+        version == 0 || (reason != RESTART_RETRY &&
+        reason != RESTART_VERSION_NEGOTIATION)) { ret failed(ERROR_STATE); }
+    var provider: ProviderResult;
+    if (tls_bound(adapter)) {
+        provider = tls_restart(adapter, reason, version, now_ns);
+    } or {
+        adapter.transition_active = true;
+        val before: Adapter = @adapter;
+        provider = adapter.protocol.restart(adapter.protocol.context,
+            adapter.protocol.secret_context, reason, version, now_ns);
+        if (!callback_intact(adapter, ?before)) {
+            ret provider_failed(PROVIDER_BINDING_STATE);
+        }
+    }
+    if (provider.status != STATUS_OK) {
+        adapter.closing = true;
+        ret provider_failed(provider.error);
+    }
+    if (reason == RESTART_RETRY) {
+        clear_level(adapter, INITIAL);
+    } or {
+        var level: Level = INITIAL;
+        for (level <= APPLICATION) {
+            clear_level(adapter, level);
+            level = level + 1;
+        }
+        var secret: usize = 0;
+        for (secret < 8) {
+            adapter.secret_generation[secret] = 0;
+            secret = secret + 1;
+        }
+        adapter.peer_parameters_received = false;
+        adapter.early_data_received = false;
+        adapter.authentication_received = false;
+        adapter.handshake_complete = false;
+        adapter.terminal_alert = 0;
+    }
+    adapter.version = version;
+    ret Result{status: STATUS_OK};
+}
+
+pub fun on_retry(adapter: *Adapter, version: u32, now_ns: u64) Result {
+    ret restart(adapter, RESTART_RETRY, version, now_ns);
+}
+
+pub fun on_version_negotiation(adapter: *Adapter, version: u32,
+                               now_ns: u64) Result {
+    ret restart(adapter, RESTART_VERSION_NEGOTIATION, version, now_ns);
+}
+
+pub fun poll(adapter: *Adapter, now_ns: u64) Result {
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 || !adapter.started || adapter.closing ||
+        adapter.event_active) { ret failed(ERROR_STATE); }
+    var provider: ProviderResult;
+    if (tls_bound(adapter)) {
+        provider = tls_poll(adapter, now_ns);
+    } or {
+        adapter.transition_active = true;
+        val before: Adapter = @adapter;
+        provider = adapter.protocol.poll(adapter.protocol.context,
+            adapter.protocol.secret_context, now_ns);
+        if (!callback_intact(adapter, ?before)) {
+            ret provider_failed(PROVIDER_BINDING_STATE);
+        }
+    }
+    if (provider.status != STATUS_OK && provider.status != STATUS_EMPTY &&
+        provider.status != STATUS_MORE) {
+        adapter.closing = true;
+        ret provider_failed(provider.error);
+    }
+    ret Result{status: provider.status, provider_error: provider.error};
+}
+
+pub fun close(adapter: *Adapter, alert: u64, now_ns: u64) Result {
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 || !adapter.started || adapter.closing ||
+        adapter.event_active || alert > 255) { ret failed(ERROR_STATE); }
+    var provider: ProviderResult;
+    if (tls_bound(adapter)) {
+        provider = tls_close(adapter, alert, now_ns);
+    } or {
+        adapter.transition_active = true;
+        val before: Adapter = @adapter;
+        provider = adapter.protocol.close(adapter.protocol.context,
+            adapter.protocol.secret_context, alert, now_ns);
+        if (!callback_intact(adapter, ?before)) {
+            ret provider_failed(PROVIDER_BINDING_STATE);
+        }
+    }
+    if (provider.status != STATUS_OK) {
+        adapter.closing = true;
+        ret provider_failed(provider.error);
+    }
+    adapter.closing = true;
+    adapter.terminal_alert = alert;
+    ret Result{status: STATUS_OK};
+}
+
+pub fun destroy(adapter: *Adapter) bool {
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 || adapter.destroyed || adapter.event_active) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < adapter.storage.attempt_capacity) {
+        if (adapter.storage.attempts[i].state != ATTEMPT_FREE) { ret false; }
+        i = i + 1;
+    }
+    var provider_destroyed: bool = false;
+    if (tls_bound(adapter)) {
+        provider_destroyed = tls_api_destroy(adapter);
+    } or {
+        adapter.transition_active = true;
+        val before: Adapter = @adapter;
+        provider_destroyed = adapter.protocol.destroy(adapter.protocol.context,
+            adapter.protocol.secret_context);
+        if (!callback_intact(adapter, ?before)) { ret false; }
+    }
+    if (!provider_destroyed) { ret false; }
+    adapter.tls_client = nil;
+    adapter.tls_server = nil;
+    adapter.tls_role = 0;
+    memory.raw_zero(adapter.storage.receive_data, adapter.storage.receive_length);
+    memory.raw_zero(adapter.storage.receive_present, adapter.storage.receive_length);
+    memory.raw_zero(adapter.storage.send_data, adapter.storage.send_length);
+    memory.raw_zero(adapter.storage.send_pending, adapter.storage.send_length);
+    memory.raw_zero(adapter.storage.send_acked, adapter.storage.send_length);
+    memory.raw_zero(adapter.storage.send_inflight, adapter.storage.send_length * 2);
+    adapter.initialized = false;
+    adapter.destroyed = true;
+    adapter.core_lease = 0;
+    ret true;
+}
+
+fun enter_core_scope(adapter: *Adapter, source: u64) bool {
+    if (!adapter_valid(adapter) || source == 0 ||
+        adapter.core_lease != source) { ret false; }
+    adapter.core_lease = 0;
+    ret true;
+}
+
+fun leave_core_scope(adapter: *Adapter, source: u64) {
+    if (adapter_record_valid(adapter) && adapter.initialized) {
+        adapter.core_lease = source;
+    }
+}
+
+pub fun start_scoped(adapter: *Adapter, source: u64, value: *Start) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = start(adapter, value);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun receive_scoped(adapter: *Adapter, source: u64, level: Level,
+                       offset: u64, data: *u8, length: usize,
+                       now_ns: u64) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = receive(adapter, level, offset, data, length, now_ns);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun next_event_scoped(adapter: *Adapter, source: u64) Event {
+    if (!enter_core_scope(adapter, source)) {
+        var failed_event: Event;
+        failed_event.status = STATUS_ERROR;
+        failed_event.error = ERROR_STATE;
+        ret failed_event;
+    }
+    val result: Event = next_event(adapter);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun complete_event_scoped(adapter: *Adapter, source: u64,
+                              token: EventToken, accepted: bool) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = complete_event(adapter, token, accepted);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun prepare_scoped(adapter: *Adapter, source: u64, level: Level,
+                       maximum: usize) Prepared {
+    if (!enter_core_scope(adapter, source)) {
+        var failed_prepare: Prepared;
+        failed_prepare.status = STATUS_ERROR;
+        failed_prepare.error = ERROR_STATE;
+        ret failed_prepare;
+    }
+    val result: Prepared = prepare(adapter, level, maximum);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun prepare_probe_scoped(adapter: *Adapter, source: u64, level: Level,
+                             maximum: usize) Prepared {
+    if (!enter_core_scope(adapter, source)) {
+        var failed_prepare: Prepared;
+        failed_prepare.status = STATUS_ERROR;
+        failed_prepare.error = ERROR_STATE;
+        ret failed_prepare;
+    }
+    val result: Prepared = prepare_probe(adapter, level, maximum);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun cancel_prepared_scoped(adapter: *Adapter, source: u64,
+                              token: AttemptToken) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = cancel_prepared(adapter, token);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun publish_scoped(adapter: *Adapter, source: u64,
+                       token: AttemptToken) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = publish(adapter, token);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun on_terminal_scoped(adapter: *Adapter, source: u64,
+                           token: AttemptToken, terminal: u8) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = on_terminal(adapter, token, terminal);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun on_retry_scoped(adapter: *Adapter, source: u64, version: u32,
+                        now_ns: u64) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = on_retry(adapter, version, now_ns);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun on_version_negotiation_scoped(adapter: *Adapter, source: u64,
+                                      version: u32, now_ns: u64) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = on_version_negotiation(adapter, version, now_ns);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun poll_scoped(adapter: *Adapter, source: u64, now_ns: u64) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = poll(adapter, now_ns);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun close_scoped(adapter: *Adapter, source: u64, alert: u64,
+                     now_ns: u64) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = close(adapter, alert, now_ns);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun destroy_scoped(adapter: *Adapter, source: u64) bool {
+    if (!enter_core_scope(adapter, source)) { ret false; }
+    val result: bool = destroy(adapter);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun snapshot(adapter: *Adapter) Snapshot {
+    var value: Snapshot;
+    if (!adapter_record_valid(adapter)) { ret value; }
+    value.role = adapter.role;
+    value.version = adapter.version;
+    value.event_active = adapter.event_active;
+    value.peer_parameters_received = adapter.peer_parameters_received;
+    value.early_data_received = adapter.early_data_received;
+    value.authentication_received = adapter.authentication_received;
+    value.handshake_complete = adapter.handshake_complete;
+    value.terminal_alert = adapter.terminal_alert;
+    value.initialized = adapter.initialized;
+    value.started = adapter.started;
+    value.closing = adapter.closing;
+    value.destroyed = adapter.destroyed;
+    ret value;
+}
+
+test "quic.connection.handshake: mach-tls levels suites and directions map exactly" {
+    var level: Level;
+    var direction: u8;
+    var algorithm: protection.Algorithm;
+    if (!tls_level(tls_engine.INITIAL, ?level) || level != INITIAL ||
+        !tls_level(tls_engine.HANDSHAKE, ?level) || level != HANDSHAKE ||
+        !tls_level(tls_engine.APPLICATION, ?level) || level != APPLICATION ||
+        tls_level(0, ?level)) { ret 1; }
+    if (!tls_direction(tls_engine.SEND, ?direction) ||
+        direction != DIRECTION_SEND ||
+        !tls_direction(tls_engine.RECEIVE, ?direction) ||
+        direction != DIRECTION_RECEIVE || tls_direction(0, ?direction)) { ret 2; }
+    if (!tls_algorithm(tls13.AES_128_GCM_SHA256, ?algorithm) ||
+        algorithm != protection.AES_128_GCM_SHA256 ||
+        !tls_algorithm(tls13.AES_256_GCM_SHA384, ?algorithm) ||
+        algorithm != protection.AES_256_GCM_SHA384 ||
+        !tls_algorithm(tls13.CHACHA20_POLY1305_SHA256, ?algorithm) ||
+        algorithm != protection.CHACHA20_POLY1305_SHA256 ||
+        tls_algorithm(0, ?algorithm)) { ret 3; }
+    ret 0;
+}
+
+test "quic.connection.handshake: restart is a client-only provider member" {
+    var adapter: Adapter;
+    adapter.tls_role = SERVER;
+    adapter.tls_error = 0;
+    val rejected: ProviderResult = tls_restart(?adapter, RESTART_RETRY,
+        packet.VERSION_1, 1);
+    if (rejected.status != STATUS_ERROR ||
+        rejected.error != PROVIDER_BINDING_STATE ||
+        adapter.tls_error != PROVIDER_BINDING_STATE) { ret 1; }
+    if (!tls_bound(?adapter)) { ret 2; }
+    adapter.tls_role = 0;
+    if (tls_bound(?adapter)) { ret 3; }
+    ret 0;
+}

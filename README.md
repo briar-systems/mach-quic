@@ -44,15 +44,13 @@ output. Protocol fields accept the non-minimal varint encodings allowed by RFC
 - `stream.datagram` owns optional RFC 9221 send and receive queues.
 - `path.path` owns network-path identity, validation, migration, per-path
   amplification accounting, and DPLPMTUD policy.
-- `transport` composes the parts into a connection without owning HTTP semantics.
+- `connection.core` composes packet protection, handshake, recovery, congestion,
+  paths, connection IDs, streams, datagrams, and close into one serialized QUIC
+  connection without owning UDP or HTTP semantics.
+- `transport` owns the version-neutral application and UDP driver contracts.
 
-HTTP/3 will consume QUIC streams and the version-neutral message contracts from
-`mach-http`. It does not belong in the QUIC transport layer. QPACK and HTTP/3 frame
-processing will be added with the HTTP/3 engine once the connection core is implemented.
-
-The remaining handshake and connection-core work is tracked separately from the
-completed wire, packet-protection, recovery, congestion, path, stream, datagram,
-and public driver layers.
+HTTP/3 consumes QUIC streams and the version-neutral message contracts from
+`mach-http`. It does not belong in the QUIC transport layer.
 
 ## Packet protection contracts
 
@@ -129,14 +127,13 @@ loss recovery without reusing packet numbers.
 
 ## Congestion contracts
 
-Congestion state is per network path and shared by all packet number spaces on
-that path. `congestion.controller` provides NewReno and CUBIC behind one bounded,
-allocation-free contract. Recovery remains authoritative for packet history and
-bytes in flight. Before an ACK, timeout, key discard, or Retry mutates recovery,
-the connection saves the prior flight size. It then passes recovery's immutable
-terminal event batch, that saved flight size, the current RTT, validated ECN
-state with its triggering packet send time, and the persistent-congestion result
-to `controller.on_recovery`.
+Congestion state and bytes in flight are per network path and shared by all packet
+number spaces on that path. `congestion.controller` provides NewReno and CUBIC
+behind one bounded, allocation-free contract. Recovery remains authoritative for
+connection-wide packet history. Each immutable terminal event carries an owner
+that pins its exact path until completion. The connection dispatches ACK, loss,
+discard, ECN, and persistent-congestion signals to that saved path's controller
+and pacer even after migration.
 
 Controller updates are transactional. Unknown events, impossible byte totals,
 backward time, and arithmetic overflow leave the controller unchanged. ACKs are
@@ -156,11 +153,11 @@ through the explicit probe input. It still passes through the pacer.
 `congestion.pacer` uses a token bucket capped at the standard initial congestion
 window and a default rate of 1.25 times congestion window divided by smoothed RTT.
 ACK-only packets bypass pacing and do not consume pacing budget. Every schedule is
-generation tagged. Publishing, cancelling, synchronizing a changed RTT or window,
-reconfiguring a PMTU or pacing policy, or resetting a path invalidates older
-schedules. A successful send is charged
-only by `pacer.publish`, so a queued packet that is rebuilt, cancelled, or rejected
-does not consume budget.
+generation tagged. Synchronizing RTT or congestion-window changes and applying a
+PMTU reconfiguration preserve the one outstanding send schedule. Publishing or
+cancelling settles only that exact token. A successful send is charged only by
+`pacer.publish`, so a queued packet that is rebuilt, cancelled, or rejected does
+not consume budget.
 
 The connection driver serializes recovery, congestion, and pacing publication for
 one path. After a controller or RTT update it calls `pacer.sync` before acting on
@@ -222,11 +219,12 @@ non-probing traffic there.
 Server amplification accounting is independent per unvalidated path. A send first
 reserves its fully encoded datagram size. Concurrent reservations cannot exceed
 three times authenticated bytes received. Publication charges the path, while
-cancellation returns the reservation. A failed path or connection close makes a
-prepared publication stale and returns its reserved bytes. A non-probing
-reservation likewise becomes stale if migration selects another path before the
-datagram publishes. Probing work remains usable on a non-selected path. The driver
-calls frame publication only after its containing datagram publication succeeds.
+cancellation returns the reservation. Once reserved, the exact path handle and
+byte charge remain completion-owned across migration, path failure, and connection
+close. Publication therefore remains valid until that send is published or
+cancelled, while new reservations observe the current selected path and close
+state. Probing work remains usable on a non-selected path. The driver calls frame
+publication only after its containing datagram publication succeeds.
 
 Congestion, pacing, ECN validation, and PMTU state belong to the path handle, while
 QUIC packet-number spaces and recovery history remain connection-wide. The driver
@@ -278,8 +276,20 @@ range, and the ring remains pinned until every duplicate terminates.
 Receive processing charges only increases in a stream's highest offset. Duplicate
 and reordered bytes do not consume connection credit twice. Conflicting overlap,
 flow-control violations, stream exhaustion, invalid direction, and inconsistent
-final sizes publish no state. `read` copies only the contiguous prefix and returns
-the exact new MAX_DATA and MAX_STREAM_DATA values after consumption. RESET_STREAM,
+final sizes publish no state. `read` copies only the contiguous prefix and reports
+the current MAX_DATA and MAX_STREAM_DATA values without changing either.
+
+Delivery and flow-control credit are separate operations. `read` moves bytes into
+caller storage and adds them to the stream's outstanding uncredited total; it
+returns no window. `credit` returns exactly the bytes whose caller ownership has
+ended and rejects any amount above that outstanding total. A peer therefore cannot
+be invited to send more because the driver handed bytes over, only because the
+caller released them. This is what lets a caller hold delivered bytes — a
+QPACK-blocked field section, an application-held DATA payload — without the
+receive window being sized against the driver's ring instead of against what the
+application actually holds. Cancelling a receive side, acknowledging a reset, and
+releasing a stream each reconcile the outstanding total exactly once, so
+abandoning a stream returns its window rather than leaking it. RESET_STREAM,
 STOP_SENDING, application cancellation, and FIN each retain their distinct
 terminal and retransmission ownership. Delayed frames for a released stream are
 recognized from the cumulative stream counters and discarded instead of being
@@ -287,6 +297,11 @@ misclassified as frames that exceed the advertised stream limit.
 Frame-level flow-control entry points implement the RFC stream-creation rules for
 MAX_STREAM_DATA and STREAM_DATA_BLOCKED and return the current exact limit for a
 driver response without exposing private lookup state.
+Consumed receive credit is queued as generation-owned MAX_DATA,
+MAX_STREAM_DATA, and MAX_STREAMS work. Cancellation returns the exact maximum to
+the queue, loss retransmits it, and only acknowledgment advances the advertised
+limit. A zero peer send limit remains zero until authenticated peer transport
+parameters are bound exactly once.
 
 The manager is serialized by the connection driver. `begin_close` prevents new
 application work and cancels unsent work, while published and prepared attempt
@@ -303,22 +318,132 @@ be released immediately. Send publication frees a datagram only after its frame
 has been copied into a successfully published packet. DATAGRAM frames are never
 given retransmission ownership.
 
-The receive queue rejects admission with an explicit capacity result before
-copying when it is full. Delivery borrows the queue's copied payload until
+The receive queue reports capacity before copying when it is full. The connection
+drops that DATAGRAM without closing, as required for an unreliable extension, and
+charges the peer's negotiated limit against the complete encoded frame size.
+Delivery borrows the queue's copied payload until
 `release`. Two-phase close preserves delivered receive payloads and prepared send
 payloads until their owners release or cancel them. The DATAGRAM form without a
 Length field consumes the remainder of a QUIC packet and must therefore be
 selected only for the final frame. The length-bearing form can be composed with
-later frames.
+later frames. The connection core always emits the length-bearing form, so
+required QUIC padding is never interpreted as application payload.
+
+## Connection core contracts
+
+`connection.core` is allocation-free and serialized. `Core` contains public
+protocol state. `Secrets` contains the TLS adapter, packet keys, and secret
+plaintext scratch. Every operation takes both records explicitly, so secret-welded
+state is never erased through a generic public pointer. Both records and all
+caller-supplied storage keep fixed addresses until `finish_close` succeeds.
+Every aggregate helper uses pointer-output `initialize` operations. They validate
+inclusive pointer ranges, checked array products, and pairwise disjoint output,
+configuration, and owned-storage regions before clearing or publishing anything.
+Core initialization additionally validates one combined ownership set containing
+Core, Secrets, handshake, CID, path, stream, DATAGRAM, and every nested backing
+array. A mixed secret/public record is anchored through its first public field
+before its complete range is admitted. Reinitializing a live object is rejected
+without changing its prior state.
+
+Client and server initialization binds the initial connection IDs and path,
+derives Initial keys, starts TLS with the exact ALPN, server name, role, QUIC
+version, and encoded local transport parameters, and initializes independent
+packet-number and recovery spaces. The client validates Version Negotiation and
+Retry identity before restarting. Restart releases every prepared and published
+owner, resets the required packet-number spaces, rotates the Retry destination
+connection ID, preserves the original destination identity, rederives Initial
+keys, and restarts TLS with an explicit reason. Stateless server preflight parses
+and validates Initial packets before connection allocation. Listener admission
+charges connection and peer capacity before token validation or state allocation.
+The listener exclusively leases its admission and token managers until close.
+The core transactionally leases handshake, CID, path, stream, and DATAGRAM
+managers before the first provider callback and releases every acquired lease on
+failure. Protocol-side mutations require the matching lease-scoped entry point,
+while application stream and DATAGRAM operations retain their documented public
+surface. A second connection owner cannot mutate a leased manager.
+The peer's sequence-zero stateless reset token is installed separately from later
+NEW_CONNECTION_ID tokens and participates in collision and reset matching.
+
+The TLS adapter is a strict event and ownership boundary. The provider receives
+contiguous CRYPTO input with its encryption level, offset, and monotonic time. It
+publishes bounded CRYPTO output, directional traffic-secret generations, peer
+transport parameters, early-data disposition, peer-authentication disposition,
+handshake completion, and terminal alerts. Each borrowed event remains provider
+owned until `complete_event`. Each prepared CRYPTO range is cancelled or
+published, then remains recovery-owned until ACK, loss, key discard, Retry, or
+terminal connection drain. `poll` lets an asynchronous provider advance without
+inventing network input. Retry and Version Negotiation are explicit provider
+restart events rather than implicit fallback behavior.
+
+`connection.handshake.initialize_tls_client` binds a caller-owned
+`tls.client.Client` directly to
+that adapter. The binding is typed because a TLS client contains welded secret
+state and cannot safely pass through an untyped callback context. Its ownership
+descriptor includes the entropy provider's public and secret context sizes. The
+binding validates the client record, every nested writable TLS buffer, immutable
+configuration anchor, persistent TLS secret, and entropy context against the
+adapter and connection storage before initialization. It also validates
+the exact SNI, single ALPN, QUIC transport-parameter extension, client role, and
+QUIC version before starting. Certificate verification uses a separate Unix
+verification time, while the optional handshake deadline and all connection
+timers remain absolute monotonic nanoseconds. TLS Initial, Handshake, and
+Application levels, all three TLS 1.3 suites, both directions, traffic-secret
+generations, peer parameters, early-data disposition, authentication, completion,
+and alerts map without inference. Provider failures retain their exact raw error
+alongside the QUIC transport failure. TLS failures that own a terminal alert are
+forwarded through the alert event before teardown.
+
+The binding independently accounts for every accepted ingress and emitted egress
+CRYPTO byte. Retry and Version Negotiation clear QUIC CRYPTO ownership, reset the
+appropriate offsets, and require `mach-tls` to republish its retained ClientHello
+at Initial offset zero. Packet loss and cancellation affect only QUIC's copied
+CRYPTO ranges. They never invalidate a borrowed TLS event or cause TLS to
+regenerate handshake state.
+
+Authenticated datagrams are opened before frame state is published. Duplicate
+packet numbers and unauthenticated paths publish no frame effects. The core
+enforces per-path pre-authentication amplification limits, peer transport
+parameters, stream and connection flow control, connection-ID limits, path
+validation, congestion admission, pacing, DPLPMTUD, and packet-history capacity.
+Generated datagrams have one opaque owner. `complete_send` either cancels the
+entire preparation or atomically transfers its frame, path, pacing, and recovery
+ownership after a full UDP send. RTT, congestion, or migration changes between
+generation and completion do not invalidate that exact send transaction. ACK,
+loss, Retry, key discard, and teardown settle each owner exactly once.
+
+Timers are generation-tagged and cover idle timeout, closing, draining, recovery,
+delayed ACK, and path validation. Graceful close can retransmit CONNECTION_CLOSE until
+draining begins. Draining and abortive close reject all further receive and
+non-close generation work. Both
+paths first drain prepared and recovery-owned work. `finish_close` then destroys
+the TLS provider and all packet keys, zeroes secret scratch, and invalidates CID
+and path storage.
+
+The core exposes direct transport-shaped `receive`, `generate`, `complete_send`,
+`timer`, `on_timeout`, `begin_close`, `close_ready`, and `finish_close`
+operations. It also exposes lease-safe path probing, validation work, active
+migration, and authenticated Packet Too Big handling without releasing manager
+ownership. A UDP or application driver owns the stable `Core` and `Secrets`
+records and serializes those calls. This direct split is intentional because the
+generic public driver context cannot erase secret-welded state.
+
+The adapter contract is covered by deterministic simulated providers and the real
+`mach-tls` client provider. Client CRYPTO ownership, loss, Retry, Version
+Negotiation, malformed-alert forwarding, deadlines, and destruction are exercised
+against the exact pinned TLS client. Issue #3 still cannot close because a real
+`mach-tls` server handshake provider does not exist and major-implementation UDP
+interoperability has not yet been demonstrated. No simulated or fallback provider
+is selected by the production client path.
 
 ## Connection driver contracts
 
-`transport.Driver` is the version-neutral client and server boundary. HTTP/3 can
-open, accept, read, write, finish, cancel, inspect, and release streams through
+`transport.Driver` is the version-neutral client and server application boundary. HTTP/3 can
+open, accept, read, credit, write, finish, cancel, inspect, and release streams through
 driver-owned public handles. It can send and receive QUIC DATAGRAM values and
 inspect connection state without importing packet, crypto, recovery, congestion,
-path, or stream implementation modules. The future connection core plugs into the
-serialized `Protocol` callback boundary behind this API.
+path, or stream implementation modules. A connection owner adapts the core's
+direct serialized operations to its UDP scheduling boundary while retaining
+`Secrets` in secret-welded storage.
 
 The driver, its stream and DATAGRAM managers, protocol context, cancellation
 scope, output slots, and every buffer referenced by an active output token have
@@ -333,7 +458,8 @@ Incoming UDP payloads are borrowed only for the synchronous `receive_datagram`
 callback. `receive_native` maps a completed `std.net.async.types.Packet` into the
 same contract, including destination-address and interface metadata. Stream writes
 and application DATAGRAM sends copy their inputs before returning. Stream reads
-copy into application storage. Received application DATAGRAM views remain borrowed
+copy into application storage and return no flow-control credit; `credit_stream`
+returns it once the caller has finished with those exact bytes. Received application DATAGRAM views remain borrowed
 until their exact `DatagramToken` is released.
 
 `generate` writes one protected QUIC datagram into caller storage and transfers
@@ -351,7 +477,10 @@ Timers are absolute monotonic deadlines carrying the driver source and protocol
 generation. `on_timeout` revalidates both the deadline and generation before
 advancing driver time. Early and obsolete observations do not affect later work.
 Protocol callbacks are invoked under the connection lock and cannot reenter the
-same driver. They must be transactional on non-OK returns. Successful generation
+same driver. Same-thread reentry is rejected before lock acquisition. Immutable
+driver anchors and lifecycle state are snapshotted around each callback, and
+unauthorized callback mutation is restored and reported as a protocol error.
+Callbacks must be transactional on non-OK returns. Successful generation
 owns exactly one opaque send owner until its terminal callback.
 
 The connection cancellation scope may be a child of a process or listener scope.
@@ -372,7 +501,8 @@ separately.
 
 ## Development
 
-Dependencies use pinned Git tags.
+Dependencies use exact Git tags or commit pins. The temporary `mach-tls` commit
+pin remains until its client handshake is released as a tag.
 
 ```sh
 mach dep pull .
