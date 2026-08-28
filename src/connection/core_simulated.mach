@@ -552,6 +552,7 @@ test "quic.connection.core: authenticated Retry rotates Initial identity and own
     var input: transport.Datagram = transport.Datagram{
         local: fixture.engine.config.local, peer: fixture.engine.config.peer,
         data: ?datagram_bytes[0], length: builder.len, received_at_ns: 4};
+    fixture.engine.expected_packet_numbers[0] = 9;
     val received: transport.CoreResult = core.receive(?fixture.engine,
         ?fixture.secrets, ?input);
     val selected: cid.Selected = cid.current(?fixture.cids, false);
@@ -563,6 +564,8 @@ test "quic.connection.core: authenticated Retry rotates Initial identity and own
     if (fixture.engine.recovery_state.bytes_in_flight != 0) { ret 66; }
     if (core.snapshot(?fixture.engine).active_owners != 0) { ret 67; }
     if (negotiation.token(?fixture.engine.negotiation).len != 3) { ret 68; }
+    if (fixture.engine.packet_numbers[0] != 1 ||
+        fixture.engine.expected_packet_numbers[0] != 9) { ret 69; }
     ret 0;
 }
 

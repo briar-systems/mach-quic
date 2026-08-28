@@ -518,6 +518,20 @@ pub fun receive_retire(manager: *Manager, sequence: u64) Result {
 
 pub fun receive_retire_scoped(manager: *Manager, core_source: u64,
                               sequence: u64) Result {
+    val current: Selected = current(manager, true);
+    if (current.status != STATUS_OK) {
+        var failed: Result;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    ret receive_retire_in_packet_scoped(manager, core_source, sequence,
+        current.handle.sequence);
+}
+
+pub fun receive_retire_in_packet_scoped(manager: *Manager, core_source: u64,
+                                         sequence: u64,
+                                         destination_sequence: u64) Result {
     var result: Result;
     if (!physical(manager) || !manager.initialized || manager.closing ||
         !scope_allowed(manager, core_source)) {
@@ -538,7 +552,7 @@ pub fun receive_retire_scoped(manager: *Manager, core_source: u64,
         result.handle = handle(manager, index, true);
         ret result;
     }
-    if (entry.current) {
+    if (entry.sequence == destination_sequence) {
         result.status = STATUS_ERROR;
         result.error = ERROR_RETIRE_CURRENT;
         ret result;
@@ -548,6 +562,30 @@ pub fun receive_retire_scoped(manager: *Manager, core_source: u64,
     result.status = STATUS_OK;
     result.handle = handle(manager, index, true);
     result.replacement_needed = manager.local_active < manager.config.local_active_limit;
+    ret result;
+}
+
+pub fun match_local(manager: *Manager, id: *packet.ConnectionId) Selected {
+    var result: Selected;
+    if (!physical(manager) || !manager.initialized || id == nil) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    var i: usize = 0;
+    for (i < manager.storage.local_capacity) {
+        if (manager.storage.local[i].state == ENTRY_ACTIVE &&
+            packet.connection_id_equal(?manager.storage.local[i].id, id)) {
+            result.status = STATUS_OK;
+            result.handle = handle(manager, i, true);
+            result.id = manager.storage.local[i].id;
+            result.reset_token = manager.storage.local[i].reset_token;
+            ret result;
+        }
+        i = i + 1;
+    }
+    result.status = STATUS_STALE;
+    result.error = ERROR_TOKEN;
     ret result;
 }
 
@@ -881,7 +919,7 @@ test "quic.connection.cid: malformed duplicates and active limits do not mutate 
     ret 0;
 }
 
-test "quic.connection.cid: local retirement requires a replacement before current id retirement" {
+test "quic.connection.cid: retirement follows the packet destination across active ids" {
     var local: [3]Entry;
     var peer: [4]Entry;
     var manager: Manager;
@@ -890,9 +928,13 @@ test "quic.connection.cid: local retirement requires a replacement before curren
         peer: ?peer[0], peer_capacity: 4}, make_id(1), make_id(10))) { ret 1; }
     if (receive_retire(?manager, 0).error != ERROR_RETIRE_CURRENT) { ret 1; }
     val issued: Result = issue_local(?manager, 1, make_id(40), make_token(40));
-    if (issued.status != STATUS_OK || select(?manager, issued.handle).status != STATUS_OK) { ret 2; }
-    val retired: Result = receive_retire(?manager, 0);
-    if (retired.status != STATUS_OK || !retired.replacement_needed) { ret 3; }
+    val matched: Selected = match_local(?manager, ?local[issued.handle.index].id);
+    if (issued.status != STATUS_OK || matched.status != STATUS_OK ||
+        matched.handle.sequence != 1) { ret 2; }
+    val retired: Result = receive_retire_in_packet_scoped(?manager, 0, 0, 1);
+    if (retired.status != STATUS_OK || !retired.replacement_needed ||
+        receive_retire_in_packet_scoped(?manager, 0, 1, 1).error !=
+            ERROR_RETIRE_CURRENT) { ret 3; }
     if (!begin_close(?manager) || !finish_close(?manager) || snapshot(?manager).initialized) { ret 4; }
     ret 0;
 }

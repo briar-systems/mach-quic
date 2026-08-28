@@ -864,6 +864,8 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         streams.config.send_peer_bidirectional_limit != 0 ||
         streams.config.send_unidirectional_limit != 0 ||
         datagrams.config.source != config.source ||
+        (datagrams.config.enabled && (datagrams.peer_limit_bound ||
+            datagrams.config.peer_max_frame_size != 0)) ||
         (config.role == transport_api.CLIENT &&
         (paths.config.role != path_api.ROLE_CLIENT ||
         streams.config.role != stream_api.ROLE_CLIENT ||
@@ -1143,7 +1145,10 @@ fun accept_parameters(core: *Core, event: *handshake_api.Event) bool {
         }
         core.idle_timer_enabled = true;
     }
-    core.datagrams.config.peer_max_frame_size = parameters.max_datagram_frame_size;
+    if (core.datagrams.config.enabled &&
+        datagram_api.bind_peer_limit_scoped(core.datagrams, core.config.source,
+            parameters.max_datagram_frame_size::usize).status !=
+            datagram_api.STATUS_OK) { ret false; }
     ret true;
 }
 
@@ -1350,13 +1355,19 @@ fun envelope(data: *u8, length: usize, offset: usize,
     ret result;
 }
 
-fun local_destination_valid(core: *Core, value: *packet.ConnectionId,
-                            kind: u8) bool {
-    val selected: cid_api.Selected = cid_api.current(core.cids, true);
-    if (selected.status == cid_api.STATUS_OK &&
-        packet.connection_id_equal(?selected.id, value)) { ret true; }
-    ret kind == packet.PACKET_INITIAL && packet.connection_id_equal(value,
-        ?core.config.initial_secret_destination);
+fun local_destination(core: *Core, value: *packet.ConnectionId,
+                      kind: u8) cid_api.Selected {
+    val matched: cid_api.Selected = cid_api.match_local(core.cids, value);
+    if (matched.status == cid_api.STATUS_OK) { ret matched; }
+    var result: cid_api.Selected;
+    if (kind == packet.PACKET_INITIAL && packet.connection_id_equal(value,
+            ?core.config.initial_secret_destination)) {
+        result.status = cid_api.STATUS_OK;
+        result.id = @value;
+        ret result;
+    }
+    result.status = cid_api.STATUS_STALE;
+    ret result;
 }
 
 fun receive_keys(core: *Core, secrets: *Secrets,
@@ -1602,6 +1613,18 @@ fun stateless_reset(core: *Core, data: *u8, length: usize) bool {
     ret matched != 0;
 }
 
+fun enter_stateless_reset(core: *Core, now_ns: u64) bool {
+    if (!begin_application_close(core)) { ret false; }
+    core.closing = true;
+    core.close_queued = false;
+    core.peer_close_received = true;
+    core.close_started_ns = now_ns;
+    core.close_deadline_ns = saturated_add(now_ns,
+        core.config.drain_timeout_ns);
+    core.state = transport_api.DRAINING;
+    ret true;
+}
+
 fun frame_allowed(core: *Core, level: handshake_api.Level,
                   value: *frame.Frame) bool {
     if ((value.kind == frame.ACK || value.kind == frame.ACK_ECN) &&
@@ -1652,7 +1675,8 @@ fun stream_failure(core: *Core, error: u8) bool {
 
 fun process_frame(core: *Core, secrets: *Secrets,
                   level: handshake_api.Level, space: u8,
-                  receive_path: path_api.Handle, value: *frame.Frame,
+                  receive_path: path_api.Handle,
+                  receive_destination: cid_api.Handle, value: *frame.Frame,
                   encoded_frame_size: usize, now_ns: u64) bool {
     if (!frame_allowed(core, level, value)) {
         core.close_error = PROTOCOL_VIOLATION;
@@ -1786,8 +1810,9 @@ fun process_frame(core: *Core, secrets: *Secrets,
         ret false;
     }
     if (value.kind == frame.RETIRE_CONNECTION_ID) {
-        val received: cid_api.Result = cid_api.receive_retire_scoped(core.cids,
-            core.config.source, value.sequence);
+        val received: cid_api.Result = cid_api.receive_retire_in_packet_scoped(
+            core.cids, core.config.source, value.sequence,
+            receive_destination.sequence);
         if (received.status != cid_api.STATUS_ERROR) { ret true; }
         if (received.error == cid_api.ERROR_CAPACITY ||
             received.error == cid_api.ERROR_STATE) {
@@ -1847,7 +1872,8 @@ fun scan_plaintext(core: *Core, plaintext: *u8, length: usize,
 
 fun apply_plaintext(core: *Core, secrets: *Secrets,
                     level: handshake_api.Level, space: u8,
-                    receive_path: path_api.Handle, plaintext: *u8,
+                    receive_path: path_api.Handle,
+                    receive_destination: cid_api.Handle, plaintext: *u8,
                     length: usize, now_ns: u64) bool {
     var decoder: binary.Decoder = binary.decoder(plaintext, length, binary.BIG);
     for (decoder.pos < decoder.len) {
@@ -1859,6 +1885,7 @@ fun apply_plaintext(core: *Core, secrets: *Secrets,
                 ack_capacity: core.storage.frame_ack_capacity}, ?value);
         if (decoded.status != frame.STATUS_DONE ||
             !process_frame(core, secrets, level, space, receive_path,
+                receive_destination,
                 ?value, decoder.pos - frame_begin, now_ns)) { ret false; }
         if (core.peer_close_received) { brk; }
     }
@@ -1911,9 +1938,9 @@ fun restart_client(core: *Core, secrets: *Secrets, value: negotiation_api.Result
     core.probes_remaining = 0;
     core.probe_space = 0;
     core.probe_owner = 0;
-    core.packet_numbers[0] = 0;
-    core.expected_packet_numbers[0] = 0;
     if (value.restart == negotiation_api.RESTART_VERSION) {
+        core.packet_numbers[0] = 0;
+        core.expected_packet_numbers[0] = 0;
         core.packet_numbers[1] = 0;
         core.packet_numbers[2] = 0;
         core.expected_packet_numbers[1] = 0;
@@ -1958,7 +1985,14 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     if (value.version != 0 && value.version != core.config.version) {
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
-    if (!local_destination_valid(core, ?value.destination, value.kind)) {
+    val receive_destination: cid_api.Selected = local_destination(core,
+        ?value.destination, value.kind);
+    if (receive_destination.status != cid_api.STATUS_OK) {
+        if (value.kind == packet.PACKET_ONE_RTT &&
+            stateless_reset(core, input.data, input.length) &&
+            !enter_stateless_reset(core, input.received_at_ns)) {
+            ret fail(core, INTERNAL_ERROR, input.received_at_ns);
+        }
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
     val level: handshake_api.Level = level_for_kind(value.kind);
@@ -1988,16 +2022,9 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         if (level == handshake_api.APPLICATION && opened.error ==
             protection.AUTH_FAILED && stateless_reset(core, input.data,
                 input.length)) {
-            if (!begin_application_close(core)) {
+            if (!enter_stateless_reset(core, input.received_at_ns)) {
                 ret fail(core, INTERNAL_ERROR, input.received_at_ns);
             }
-            core.closing = true;
-            core.close_queued = false;
-            core.peer_close_received = true;
-            core.close_started_ns = input.received_at_ns;
-            core.close_deadline_ns = saturated_add(input.received_at_ns,
-                core.config.drain_timeout_ns);
-            core.state = transport_api.DRAINING;
         }
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
@@ -2068,8 +2095,9 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         input.received_at_ns)) {
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
-    if (!apply_plaintext(core, secrets, level, space, observed.handle, plaintext,
-        opened.written, input.received_at_ns)) {
+    if (!apply_plaintext(core, secrets, level, space, observed.handle,
+        receive_destination.handle, plaintext, opened.written,
+        input.received_at_ns)) {
         var failure: u64 = PROTOCOL_VIOLATION;
         if (core.close_error != NO_ERROR) { failure = core.close_error; }
         ret fail(core, failure, input.received_at_ns);
@@ -2120,6 +2148,12 @@ pub fun receive(core: *Core, secrets: *Secrets,
         val value: Envelope = envelope(input.data, input.length, offset,
             selected.id.len);
         if (!value.valid || value.length == 0) {
+            if (input.length - offset >= 21 &&
+                (input.data[offset] & 0xc0) == 0x40 &&
+                stateless_reset(core, input.data, input.length) &&
+                !enter_stateless_reset(core, input.received_at_ns)) {
+                ret fail(core, INTERNAL_ERROR, input.received_at_ns);
+            }
             ret core_result(core, transport_api.STATUS_OK, 0);
         }
         var received: transport_api.CoreResult;
