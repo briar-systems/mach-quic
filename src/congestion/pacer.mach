@@ -158,7 +158,8 @@ pub fun reconfigure(state: *State, config: Config, now_ns: u64,
         result.error = ERROR_STATE;
         ret result;
     }
-    if (!valid_config(config)) {
+    if (!valid_config(config) || congestion_window < config.max_datagram_size ||
+        congestion_window > MAX_EXACT_VALUE || smoothed_rtt_ns == 0) {
         result.error = ERROR_CONFIG;
         ret result;
     }
@@ -346,6 +347,7 @@ test "quic.congestion.pacer: reconfiguration is bounded and transactional" {
     invalid.maximum_burst = 24000;
     if (reconfigure(?state, invalid, 0, 12000, 100000000).ok || state.generation != generation) { ret 1; }
     val replacement: Config = default_config(1400, 14000);
+    if (reconfigure(?state, replacement, 0, 1200, 100000000).ok || state.generation != generation) { ret 1; }
     if (!reconfigure(?state, replacement, 0, 12000, 100000000).ok ||
         state.config.max_datagram_size != 1400 || state.budget != 12000.0 ||
         state.generation == generation) { ret 1; }
