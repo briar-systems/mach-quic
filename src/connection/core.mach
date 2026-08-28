@@ -1707,6 +1707,10 @@ fun process_frame(core: *Core, secrets: *Secrets,
             core.close_error = PROTOCOL_VIOLATION;
             ret false;
         }
+        if (value.data.len == 0) {
+            core.close_error = FRAME_ENCODING_ERROR;
+            ret false;
+        }
         if (value.data.len > core.storage.received_token_capacity) {
             core.close_error = INTERNAL_ERROR;
             ret false;
@@ -2184,7 +2188,8 @@ pub fun queue_new_token(core: *Core, data: *u8, length: usize) bool {
         ownership.ZERO_FORBIDDEN);
     if (!core_record_valid(core) || !core.initialized || core.destroyed || core.closing ||
         core.role != transport_api.SERVER || !core.handshake_confirmed ||
-        !borrowed_disjoint(core, input) || length > core.storage.send_token_capacity ||
+        length == 0 || !borrowed_disjoint(core, input) ||
+        length > core.storage.send_token_capacity ||
         core.send_token_queued || core.send_token_prepared) { ret false; }
     memory.copy[u8](core.storage.send_token, data, length);
     core.send_token_length = length;

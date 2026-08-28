@@ -478,6 +478,24 @@ fun external_disjoint(listener: *Listener, value: ownership.Range) bool {
     ret true;
 }
 
+pub fun issue_address_token(listener: *Listener, peer: ip.Endpoint,
+                            now_ns: u64, nonce: u64, output: *u8,
+                            capacity: usize) token.Result {
+    if (!physical(listener) || !listener.initialized || listener.closing ||
+        now_ns == 0 || nonce == 0 || capacity < token.TOKEN_SIZE ||
+        !external_disjoint(listener, ownership.bytes(output, capacity,
+            ownership.ZERO_FORBIDDEN))) {
+        var failed: token.Result;
+        failed.status = token.STATUS_ERROR;
+        failed.error = token.ERROR_CONFIG;
+        ret failed;
+    }
+    var empty: packet.ConnectionId;
+    ret token.seal_scoped(listener.token_manager, listener.config.source,
+        token.PURPOSE_ADDRESS, peer, empty, empty, now_ns, nonce, output,
+        capacity);
+}
+
 pub fun preflight(listener: *Listener, request: *Request) Result {
     var result: Result;
     if (!physical(listener) || !listener.initialized || listener.closing ||
@@ -839,6 +857,15 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
         negotiated.output_count != 27 || output[0] != 0xb5 ||
         binary.get_uint(?output[19], 4, binary.BIG)::u32 != packet.VERSION_2 ||
         binary.get_uint(?output[23], 4, binary.BIG)::u32 != packet.VERSION_1) { ret 1; }
+    var address_token: [token.TOKEN_SIZE]u8;
+    val issued: token.Result = issue_address_token(?listener, request.peer, 2,
+        7, ?address_token[0], token.TOKEN_SIZE);
+    val opened: token.Result = token.open_scoped(?token_manager, 503,
+        ?address_token[0], issued.count, request.peer, 3);
+    if (issued.status != token.STATUS_OK || opened.status != token.STATUS_OK ||
+        opened.claims.purpose != token.PURPOSE_ADDRESS ||
+        opened.claims.original_destination.len != 0 ||
+        opened.claims.retry_source.len != 0) { ret 2; }
     ct.zeroize(?key[0], 32);
     ret 0;
 }
