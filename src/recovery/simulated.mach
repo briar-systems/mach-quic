@@ -29,7 +29,7 @@ test "quic.recovery.simulated: reordering and duplicate ACKs preserve terminal o
     var initial: [8]recovery.SentPacket;
     var handshake: [8]recovery.SentPacket;
     var application: [8]recovery.SentPacket;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 8},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 8},
         recovery.HistoryStorage{packets: ?application[0], capacity: 8},
@@ -63,7 +63,7 @@ test "quic.recovery.simulated: time threshold fires deterministically" {
     var application: [4]recovery.SentPacket;
     var config: recovery.Config = recovery.default_config();
     config.initial_rtt_ns = 100000000;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 4},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 4},
         recovery.HistoryStorage{packets: ?application[0], capacity: 4},
@@ -89,7 +89,7 @@ test "quic.recovery.simulated: timer generations close both ACK and timeout race
     var application: [4]recovery.SentPacket;
     var config: recovery.Config = recovery.default_config();
     config.initial_rtt_ns = 100000000;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 4},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 4},
         recovery.HistoryStorage{packets: ?application[0], capacity: 4},
@@ -118,7 +118,7 @@ test "quic.recovery.simulated: packet spaces and key discard remain independent"
     var initial: [4]recovery.SentPacket;
     var handshake: [4]recovery.SentPacket;
     var application: [4]recovery.SentPacket;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 4},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 4},
         recovery.HistoryStorage{packets: ?application[0], capacity: 4},
@@ -141,7 +141,7 @@ test "quic.recovery.simulated: Retry transfers owners without reusing packet num
     var initial: [3]recovery.SentPacket;
     var handshake: [3]recovery.SentPacket;
     var application: [3]recovery.SentPacket;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 3},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 3},
         recovery.HistoryStorage{packets: ?application[0], capacity: 3},
@@ -179,7 +179,7 @@ test "quic.recovery.simulated: packet-threshold loss never crosses number spaces
     var initial: [6]recovery.SentPacket;
     var handshake: [2]recovery.SentPacket;
     var application: [2]recovery.SentPacket;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 6},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 2},
         recovery.HistoryStorage{packets: ?application[0], capacity: 2},
@@ -206,7 +206,7 @@ test "quic.recovery.simulated: early, stale, and amplification timer transitions
     var application: [2]recovery.SentPacket;
     var config: recovery.Config = recovery.default_config();
     config.initial_rtt_ns = 1000000;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 3},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 2},
         recovery.HistoryStorage{packets: ?application[0], capacity: 2},
@@ -230,7 +230,7 @@ test "quic.recovery.simulated: malformed ACK and output exhaustion leave recover
     var initial: [2]recovery.SentPacket;
     var handshake: [2]recovery.SentPacket;
     var application: [4]recovery.SentPacket;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 2},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 2},
         recovery.HistoryStorage{packets: ?application[0], capacity: 4},
@@ -259,7 +259,7 @@ test "quic.recovery.simulated: sustained loss establishes persistent congestion"
     var application: [8]recovery.SentPacket;
     var config: recovery.Config = recovery.default_config();
     config.initial_rtt_ns = 100000000;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 8},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 8},
         recovery.HistoryStorage{packets: ?application[0], capacity: 8},
@@ -294,7 +294,7 @@ test "quic.recovery.simulated: arithmetic saturation cannot wrap timers or fligh
     var initial: [2]recovery.SentPacket;
     var handshake: [2]recovery.SentPacket;
     var application: [2]recovery.SentPacket;
-    var state: recovery.Recovery = recovery.init_with_storage(
+    var state: recovery.Recovery = recovery.init(
         recovery.HistoryStorage{packets: ?initial[0], capacity: 2},
         recovery.HistoryStorage{packets: ?handshake[0], capacity: 2},
         recovery.HistoryStorage{packets: ?application[0], capacity: 2},

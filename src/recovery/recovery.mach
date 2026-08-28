@@ -217,7 +217,7 @@ fun valid_config(config: Config) bool {
         config.max_pto_backoff <= 62;
 }
 
-pub fun init_with_storage(initial: HistoryStorage, handshake: HistoryStorage, application: HistoryStorage, config: Config) Recovery {
+pub fun init(initial: HistoryStorage, handshake: HistoryStorage, application: HistoryStorage, config: Config) Recovery {
     var recovery: Recovery;
     recovery.config = config;
     recovery.rtt.minimum_ns = 0 - 1::u64;
@@ -239,12 +239,6 @@ pub fun init_with_storage(initial: HistoryStorage, handshake: HistoryStorage, ap
     recovery.spaces[2].active = true;
     recovery.valid = true;
     ret recovery;
-}
-
-# compatibility initializer for connection scaffolding without packet storage
-pub fun init() Recovery {
-    var empty: HistoryStorage;
-    ret init_with_storage(empty, empty, empty, default_config());
 }
 
 pub fun update_rtt(recovery: *Recovery, latest_ns: u64, ack_delay_ns: u64, sample_at_ns: u64) bool {
@@ -875,7 +869,7 @@ test "quic.recovery.recovery: RFC RTT estimator and PTO arithmetic" {
     var initial: [4]SentPacket;
     var handshake: [4]SentPacket;
     var application: [4]SentPacket;
-    var recovery: Recovery = init_with_storage(
+    var recovery: Recovery = init(
         HistoryStorage{packets: ?initial[0], capacity: 4},
         HistoryStorage{packets: ?handshake[0], capacity: 4},
         HistoryStorage{packets: ?application[0], capacity: 4},
@@ -895,7 +889,7 @@ test "quic.recovery.recovery: bounded histories reject overflow transactionally"
     var initial: [1]SentPacket;
     var handshake: [1]SentPacket;
     var application: [1]SentPacket;
-    var recovery: Recovery = init_with_storage(
+    var recovery: Recovery = init(
         HistoryStorage{packets: ?initial[0], capacity: 1},
         HistoryStorage{packets: ?handshake[0], capacity: 1},
         HistoryStorage{packets: ?application[0], capacity: 1},

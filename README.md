@@ -55,8 +55,9 @@ number spaces. Exhausted history rejects a packet before publication. Exhausted
 ACK range storage evicts the oldest ranges and advances a receive floor so an
 evicted packet number can never be accepted again.
 
-`recovery.ack.build` returns an ACK frame, the largest acknowledged packet number,
-and a receive generation. A successful packet send is published with
+`recovery.init` binds the three sent-history buffers and validates the recovery
+configuration. `recovery.ack.build` returns an ACK frame, the largest acknowledged
+packet number, and a receive generation. A successful packet send is published with
 `on_ack_sent` using that generation. A stale completion cannot clear ACK work that
 arrived after the frame was built. The saved largest acknowledged value can later
 be supplied to `on_ack_packet_acked` to release old receive ranges. ACK scheduling
