@@ -328,6 +328,11 @@ test "quic.connection.handshake: crypto output survives cancellation, loss, retr
         handshake.on_retry(?fixture.adapter, 1, 20).status != handshake.STATUS_OK ||
         handshake.publish(?fixture.adapter, before_retry.token).error !=
             handshake.ERROR_TOKEN || fixture.provider.retries != 1) { ret 5; }
+    output[0] = 'c';
+    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 2,
+        kind: handshake.EVENT_CRYPTO, level: handshake.INITIAL, offset: 0,
+        data: handshake.View{data: ?output[0], length: 8}}) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 8; }
     val final: handshake.Prepared = handshake.prepare(?fixture.adapter,
         handshake.INITIAL, 8);
     if (final.status != handshake.STATUS_OK || final.data.length != 8 ||
