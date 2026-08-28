@@ -1,0 +1,756 @@
+# production-shaped tls handshake adapter for quic crypto streams
+
+use quic.crypto.protection;
+
+use std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+pub def Role: u8;
+pub val CLIENT: Role = 1;
+pub val SERVER: Role = 2;
+
+pub def Level: u8;
+pub val INITIAL: Level = 1;
+pub val EARLY: Level = 2;
+pub val HANDSHAKE: Level = 3;
+pub val APPLICATION: Level = 4;
+
+pub def Status: u8;
+pub val STATUS_OK: Status = 1;
+pub val STATUS_MORE: Status = 2;
+pub val STATUS_EMPTY: Status = 3;
+pub val STATUS_STALE: Status = 4;
+pub val STATUS_BLOCKED: Status = 5;
+pub val STATUS_CLOSED: Status = 6;
+pub val STATUS_ERROR: Status = 7;
+
+pub def Error: u8;
+pub val ERROR_NONE: Error = 0;
+pub val ERROR_STATE: Error = 1;
+pub val ERROR_CONFIG: Error = 2;
+pub val ERROR_BUFFER: Error = 3;
+pub val ERROR_LIMIT: Error = 4;
+pub val ERROR_OFFSET: Error = 5;
+pub val ERROR_CONFLICT: Error = 6;
+pub val ERROR_PROVIDER: Error = 7;
+pub val ERROR_EVENT: Error = 8;
+pub val ERROR_TOKEN: Error = 9;
+pub val ERROR_SECRET: Error = 10;
+pub val ERROR_TRANSITION: Error = 11;
+pub val ERROR_REJECTED: Error = 12;
+pub val ERROR_OVERFLOW: Error = 13;
+
+pub def EventKind: u8;
+pub val EVENT_CRYPTO: EventKind = 1;
+pub val EVENT_TRAFFIC_SECRET: EventKind = 2;
+pub val EVENT_PEER_TRANSPORT_PARAMETERS: EventKind = 3;
+pub val EVENT_EARLY_DATA: EventKind = 4;
+pub val EVENT_AUTHENTICATION: EventKind = 5;
+pub val EVENT_HANDSHAKE_COMPLETE: EventKind = 6;
+pub val EVENT_ALERT: EventKind = 7;
+
+pub val DIRECTION_SEND: u8 = 1;
+pub val DIRECTION_RECEIVE: u8 = 2;
+
+pub val EARLY_NOT_OFFERED: u8 = 1;
+pub val EARLY_ACCEPTED: u8 = 2;
+pub val EARLY_REJECTED: u8 = 3;
+
+pub val AUTHENTICATED: u8 = 1;
+pub val AUTHENTICATION_FAILED: u8 = 2;
+
+pub val TERMINAL_ACKED: u8 = 1;
+pub val TERMINAL_LOST: u8 = 2;
+
+pub val ATTEMPT_FREE: u8 = 0;
+pub val ATTEMPT_PREPARED: u8 = 1;
+pub val ATTEMPT_PUBLISHED: u8 = 2;
+
+pub rec View { data: *u8; length: usize; }
+pub rec SecretView { data: *^u8; length: usize; }
+
+pub rec Start {
+    role: Role;
+    version: u32;
+    server_name: View;
+    alpn: View;
+    local_transport_parameters: View;
+    now_ns: u64;
+    enable_early_data: bool;
+}
+
+pub rec ProviderResult {
+    status: Status;
+    error: u64;
+}
+
+# provider data and secrets remain borrowed until complete_event
+pub rec ProviderEvent {
+    token: u64;
+    kind: EventKind;
+    level: Level;
+    direction: u8;
+    algorithm: protection.Algorithm;
+    generation: u64;
+    offset: u64;
+    data: View;
+    secret: SecretView;
+    disposition: u8;
+    alert: u64;
+}
+
+pub def StartFun: fun(ptr, *^u8, *Start) ProviderResult;
+pub def IngestFun: fun(ptr, *^u8, Level, u64, *u8, usize, u64) ProviderResult;
+pub def RetryFun: fun(ptr, *^u8, u32, u64) ProviderResult;
+pub def NextEventFun: fun(ptr, *^u8, *ProviderEvent) bool;
+pub def CompleteEventFun: fun(ptr, *^u8, u64, bool) bool;
+pub def CloseFun: fun(ptr, *^u8, u64, u64) ProviderResult;
+pub def DestroyFun: fun(ptr, *^u8) bool;
+
+pub rec Protocol {
+    context: ptr;
+    secret_context: *^u8;
+    start: StartFun;
+    ingest: IngestFun;
+    retry: RetryFun;
+    next_event: NextEventFun;
+    complete_event: CompleteEventFun;
+    close: CloseFun;
+    destroy: DestroyFun;
+    initialized: bool;
+}
+
+pub rec LevelState {
+    receive_contiguous: u64;
+    receive_highest: u64;
+    send_length: u64;
+    send_acked: u64;
+}
+
+pub rec Attempt {
+    offset: u64;
+    length: usize;
+    generation: u64;
+    level: Level;
+    state: u8;
+}
+
+pub rec Storage {
+    receive_data: *u8;
+    receive_present: *bool;
+    receive_length: usize;
+    receive_stride: usize;
+    send_data: *u8;
+    send_pending: *bool;
+    send_acked: *bool;
+    send_inflight: *u16;
+    send_length: usize;
+    send_stride: usize;
+    attempts: *Attempt;
+    attempt_capacity: usize;
+}
+
+pub rec Config {
+    source: u64;
+    max_crypto_per_level: usize;
+    max_event_data: usize;
+    max_peer_identity: usize;
+}
+
+pub rec Adapter {
+    config: Config;
+    storage: Storage;
+    protocol: Protocol;
+    levels: [4]LevelState;
+    secret_generation: [8]u64;
+    event: ProviderEvent;
+    event_generation: u64;
+    event_active: bool;
+    peer_parameters_received: bool;
+    early_data_received: bool;
+    authentication_received: bool;
+    handshake_complete: bool;
+    terminal_alert: u64;
+    role: Role;
+    version: u32;
+    next_attempt: usize;
+    initialized: bool;
+    started: bool;
+    closing: bool;
+    destroyed: bool;
+}
+
+pub rec EventToken {
+    source: u64;
+    generation: u64;
+    provider_token: u64;
+}
+
+pub rec Event {
+    status: Status;
+    error: Error;
+    provider_error: u64;
+    token: EventToken;
+    kind: EventKind;
+    level: Level;
+    direction: u8;
+    algorithm: protection.Algorithm;
+    generation: u64;
+    data: View;
+    secret: SecretView;
+    disposition: u8;
+    alert: u64;
+}
+
+pub rec AttemptToken {
+    source: u64;
+    index: usize;
+    generation: u64;
+}
+
+pub rec Prepared {
+    status: Status;
+    error: Error;
+    token: AttemptToken;
+    level: Level;
+    offset: u64;
+    data: View;
+}
+
+pub rec Result {
+    status: Status;
+    error: Error;
+    provider_error: u64;
+    consumed: usize;
+}
+
+pub rec Snapshot {
+    role: Role;
+    version: u32;
+    event_active: bool;
+    peer_parameters_received: bool;
+    early_data_received: bool;
+    authentication_received: bool;
+    handshake_complete: bool;
+    terminal_alert: u64;
+    initialized: bool;
+    started: bool;
+    closing: bool;
+    destroyed: bool;
+}
+
+fun valid_role(role: Role) bool { ret role == CLIENT || role == SERVER; }
+fun valid_level(level: Level) bool { ret level >= INITIAL && level <= APPLICATION; }
+fun valid_direction(direction: u8) bool {
+    ret direction == DIRECTION_SEND || direction == DIRECTION_RECEIVE;
+}
+
+fun protocol_valid(protocol: *Protocol) bool {
+    ret protocol != nil && protocol.initialized;
+}
+
+fun next_generation(value: u64) u64 {
+    var next: u64 = value + 1;
+    if (next == 0) { next = 1; }
+    ret next;
+}
+
+fun level_index(level: Level) usize { ret (level - 1)::usize; }
+
+fun level_base(stride: usize, level: Level) usize {
+    ret level_index(level) * stride;
+}
+
+fun secret_index(level: Level, direction: u8) usize {
+    ret level_index(level) * 2 + (direction - 1)::usize;
+}
+
+fun failed(code: Error) Result {
+    ret Result{status: STATUS_ERROR, error: code};
+}
+
+fun provider_failed(provider_error: u64) Result {
+    ret Result{status: STATUS_ERROR, error: ERROR_PROVIDER,
+        provider_error: provider_error};
+}
+
+pub fun init(config: Config, storage: Storage, protocol: Protocol) Adapter {
+    var adapter: Adapter;
+    if (config.source == 0 || config.max_crypto_per_level == 0 ||
+        config.max_event_data == 0 || config.max_peer_identity == 0 ||
+        !protocol_valid(?protocol) || storage.receive_data == nil ||
+        storage.receive_present == nil || storage.send_data == nil ||
+        storage.send_pending == nil || storage.send_acked == nil ||
+        storage.send_inflight == nil || storage.attempts == nil ||
+        storage.receive_stride < config.max_crypto_per_level ||
+        storage.send_stride < config.max_crypto_per_level ||
+        storage.receive_stride > storage.receive_length / 4 ||
+        storage.send_stride > storage.send_length / 4 ||
+        storage.attempt_capacity == 0) { ret adapter; }
+    memory.raw_zero(storage.receive_data, storage.receive_length);
+    memory.raw_zero(storage.receive_present, storage.receive_length);
+    memory.raw_zero(storage.send_data, storage.send_length);
+    memory.raw_zero(storage.send_pending, storage.send_length);
+    memory.raw_zero(storage.send_acked, storage.send_length);
+    memory.raw_zero(storage.send_inflight, storage.send_length * 2);
+    var i: usize = 0;
+    for (i < storage.attempt_capacity) {
+        storage.attempts[i].state = ATTEMPT_FREE;
+        storage.attempts[i].generation = next_generation(storage.attempts[i].generation);
+        i = i + 1;
+    }
+    adapter.config = config;
+    adapter.storage = storage;
+    adapter.protocol = protocol;
+    adapter.initialized = true;
+    ret adapter;
+}
+
+pub fun start(adapter: *Adapter, value: *Start) Result {
+    if (adapter == nil || value == nil || !adapter.initialized || adapter.started ||
+        adapter.closing || !valid_role(value.role) || value.version == 0 ||
+        (value.server_name.length > 0 && value.server_name.data == nil) ||
+        value.alpn.length == 0 || value.alpn.data == nil ||
+        value.local_transport_parameters.length == 0 ||
+        value.local_transport_parameters.data == nil ||
+        value.local_transport_parameters.length > adapter.config.max_event_data) {
+        ret failed(ERROR_STATE);
+    }
+    val result: ProviderResult = adapter.protocol.start(adapter.protocol.context,
+        adapter.protocol.secret_context, value);
+    if (result.status != STATUS_OK) { ret provider_failed(result.error); }
+    adapter.role = value.role;
+    adapter.version = value.version;
+    adapter.started = true;
+    ret Result{status: STATUS_OK};
+}
+
+fun receive_bounds(adapter: *Adapter, level: Level, offset: u64,
+                   length: usize) bool {
+    if (!valid_level(level) || offset > adapter.config.max_crypto_per_level::u64 ||
+        length > adapter.config.max_crypto_per_level) { ret false; }
+    ret length::u64 <= adapter.config.max_crypto_per_level::u64 - offset;
+}
+
+pub fun receive(adapter: *Adapter, level: Level, offset: u64, data: *u8,
+                length: usize, now_ns: u64) Result {
+    if (adapter == nil || !adapter.initialized || !adapter.started || adapter.closing ||
+        adapter.event_active || length == 0 || data == nil ||
+        !receive_bounds(adapter, level, offset, length)) { ret failed(ERROR_STATE); }
+    val index: usize = level_index(level);
+    val base: usize = level_base(adapter.storage.receive_stride, level);
+    var i: usize = 0;
+    for (i < length) {
+        val position: usize = offset::usize + i;
+        if (adapter.storage.receive_present[base + position] &&
+            adapter.storage.receive_data[base + position] != data[i]) {
+            ret failed(ERROR_CONFLICT);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < length) {
+        val position: usize = offset::usize + i;
+        adapter.storage.receive_data[base + position] = data[i];
+        adapter.storage.receive_present[base + position] = true;
+        i = i + 1;
+    }
+    val end: u64 = offset + length::u64;
+    if (end > adapter.levels[index].receive_highest) {
+        adapter.levels[index].receive_highest = end;
+    }
+    val begin: u64 = adapter.levels[index].receive_contiguous;
+    var contiguous: u64 = begin;
+    for (contiguous < adapter.levels[index].receive_highest &&
+        adapter.storage.receive_present[base + contiguous::usize]) {
+        contiguous = contiguous + 1;
+    }
+    if (contiguous == begin) { ret Result{status: STATUS_MORE, consumed: length}; }
+    val provider: ProviderResult = adapter.protocol.ingest(adapter.protocol.context,
+        adapter.protocol.secret_context, level, begin,
+        ?adapter.storage.receive_data[base + begin::usize],
+        (contiguous - begin)::usize, now_ns);
+    if (provider.status != STATUS_OK) { ret provider_failed(provider.error); }
+    adapter.levels[index].receive_contiguous = contiguous;
+    ret Result{status: STATUS_OK, consumed: length};
+}
+
+fun valid_secret_event(adapter: *Adapter, event: *ProviderEvent) bool {
+    if (!valid_level(event.level) || event.level == INITIAL ||
+        !valid_direction(event.direction) || event.generation == 0 ||
+        event.secret.data == nil || event.secret.length !=
+            protection.hash_size(event.algorithm)) { ret false; }
+    if (event.level == EARLY) {
+        if ((adapter.role == CLIENT && event.direction != DIRECTION_SEND) ||
+            (adapter.role == SERVER && event.direction != DIRECTION_RECEIVE) ||
+            event.generation != 1) { ret false; }
+    }
+    if (event.level == HANDSHAKE && event.generation != 1) { ret false; }
+    val index: usize = secret_index(event.level, event.direction);
+    if (event.generation != adapter.secret_generation[index] + 1) { ret false; }
+    if (event.level == APPLICATION &&
+        adapter.secret_generation[secret_index(HANDSHAKE, event.direction)] == 0) {
+        ret false;
+    }
+    ret true;
+}
+
+fun valid_event(adapter: *Adapter, event: *ProviderEvent) bool {
+    if (event.token == 0 || event.kind < EVENT_CRYPTO || event.kind > EVENT_ALERT) {
+        ret false;
+    }
+    if (event.kind == EVENT_CRYPTO) {
+        if (!valid_level(event.level) || event.data.data == nil || event.data.length == 0 ||
+            event.data.length > adapter.config.max_event_data ||
+            event.offset != adapter.levels[level_index(event.level)].send_length ||
+            !receive_bounds(adapter, event.level, event.offset, event.data.length)) {
+            ret false;
+        }
+    }
+    if (event.kind == EVENT_TRAFFIC_SECRET && !valid_secret_event(adapter, event)) {
+        ret false;
+    }
+    if (event.kind == EVENT_PEER_TRANSPORT_PARAMETERS &&
+        (adapter.peer_parameters_received || event.data.data == nil ||
+        event.data.length == 0 || event.data.length > adapter.config.max_event_data)) {
+        ret false;
+    }
+    if (event.kind == EVENT_EARLY_DATA &&
+        (adapter.early_data_received || event.disposition < EARLY_NOT_OFFERED ||
+        event.disposition > EARLY_REJECTED)) { ret false; }
+    if (event.kind == EVENT_AUTHENTICATION &&
+        (adapter.authentication_received || event.disposition < AUTHENTICATED ||
+        event.disposition > AUTHENTICATION_FAILED ||
+        event.data.length > adapter.config.max_peer_identity ||
+        (event.data.length > 0 && event.data.data == nil))) { ret false; }
+    if (event.kind == EVENT_HANDSHAKE_COMPLETE &&
+        (adapter.handshake_complete || !adapter.peer_parameters_received ||
+        !adapter.early_data_received || !adapter.authentication_received ||
+        adapter.secret_generation[secret_index(APPLICATION, DIRECTION_SEND)] == 0 ||
+        adapter.secret_generation[secret_index(APPLICATION, DIRECTION_RECEIVE)] == 0)) {
+        ret false;
+    }
+    if (event.kind == EVENT_ALERT && event.alert > 255) { ret false; }
+    ret true;
+}
+
+pub fun next_event(adapter: *Adapter) Event {
+    var result: Event;
+    if (adapter == nil || !adapter.initialized || !adapter.started || adapter.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    if (adapter.event_active) {
+        result.status = STATUS_BLOCKED;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    var event: ProviderEvent;
+    if (!adapter.protocol.next_event(adapter.protocol.context,
+        adapter.protocol.secret_context, ?event)) {
+        result.status = STATUS_EMPTY;
+        ret result;
+    }
+    if (!valid_event(adapter, ?event)) {
+        adapter.protocol.complete_event(adapter.protocol.context,
+            adapter.protocol.secret_context, event.token, false);
+        adapter.closing = true;
+        result.status = STATUS_ERROR;
+        result.error = ERROR_EVENT;
+        ret result;
+    }
+    adapter.event = event;
+    adapter.event_generation = next_generation(adapter.event_generation);
+    adapter.event_active = true;
+    result.status = STATUS_OK;
+    result.token = EventToken{source: adapter.config.source,
+        generation: adapter.event_generation, provider_token: event.token};
+    result.kind = event.kind;
+    result.level = event.level;
+    result.direction = event.direction;
+    result.algorithm = event.algorithm;
+    result.generation = event.generation;
+    result.data = event.data;
+    result.secret = event.secret;
+    result.disposition = event.disposition;
+    result.alert = event.alert;
+    ret result;
+}
+
+fun event_matches(adapter: *Adapter, token: EventToken) bool {
+    ret adapter != nil && adapter.initialized && adapter.event_active &&
+        token.source == adapter.config.source &&
+        token.generation == adapter.event_generation &&
+        token.provider_token == adapter.event.token;
+}
+
+fun append_crypto(adapter: *Adapter, event: *ProviderEvent) bool {
+    val index: usize = level_index(event.level);
+    val offset: usize = event.offset::usize;
+    val base: usize = level_base(adapter.storage.send_stride, event.level);
+    var i: usize = 0;
+    for (i < event.data.length) {
+        adapter.storage.send_data[base + offset + i] = event.data.data[i];
+        adapter.storage.send_pending[base + offset + i] = true;
+        adapter.storage.send_acked[base + offset + i] = false;
+        adapter.storage.send_inflight[base + offset + i] = 0;
+        i = i + 1;
+    }
+    adapter.levels[index].send_length = event.offset + event.data.length::u64;
+    ret true;
+}
+
+pub fun complete_event(adapter: *Adapter, token: EventToken, accepted: bool) Result {
+    if (!event_matches(adapter, token)) { ret failed(ERROR_TOKEN); }
+    val event: ProviderEvent = adapter.event;
+    if (accepted && event.kind == EVENT_CRYPTO && !append_crypto(adapter, ?event)) {
+        ret failed(ERROR_BUFFER);
+    }
+    if (!adapter.protocol.complete_event(adapter.protocol.context,
+        adapter.protocol.secret_context, event.token, accepted)) {
+        ret provider_failed(event.token);
+    }
+    adapter.event_active = false;
+    adapter.event_generation = next_generation(adapter.event_generation);
+    if (!accepted) {
+        adapter.closing = true;
+        ret failed(ERROR_REJECTED);
+    }
+    if (event.kind == EVENT_TRAFFIC_SECRET) {
+        adapter.secret_generation[secret_index(event.level, event.direction)] =
+            event.generation;
+    }
+    if (event.kind == EVENT_PEER_TRANSPORT_PARAMETERS) {
+        adapter.peer_parameters_received = true;
+    }
+    if (event.kind == EVENT_EARLY_DATA) { adapter.early_data_received = true; }
+    if (event.kind == EVENT_AUTHENTICATION) {
+        adapter.authentication_received = true;
+    }
+    if (event.kind == EVENT_HANDSHAKE_COMPLETE) { adapter.handshake_complete = true; }
+    if (event.kind == EVENT_ALERT) {
+        adapter.terminal_alert = event.alert;
+        adapter.closing = true;
+    }
+    ret Result{status: STATUS_OK};
+}
+
+fun claim_attempt(adapter: *Adapter) usize {
+    var offset: usize = 0;
+    for (offset < adapter.storage.attempt_capacity) {
+        val i: usize = (adapter.next_attempt + offset) % adapter.storage.attempt_capacity;
+        if (adapter.storage.attempts[i].state == ATTEMPT_FREE) {
+            adapter.next_attempt = (i + 1) % adapter.storage.attempt_capacity;
+            ret i;
+        }
+        offset = offset + 1;
+    }
+    ret adapter.storage.attempt_capacity;
+}
+
+pub fun prepare(adapter: *Adapter, level: Level, maximum: usize) Prepared {
+    var result: Prepared;
+    if (adapter == nil || !adapter.initialized || !adapter.started || adapter.closing ||
+        !valid_level(level) || maximum == 0) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    val index: usize = level_index(level);
+    val base: usize = level_base(adapter.storage.send_stride, level);
+    var begin: usize = 0;
+    for (begin < adapter.levels[index].send_length::usize &&
+        (!adapter.storage.send_pending[base + begin] ||
+        adapter.storage.send_acked[base + begin] ||
+        adapter.storage.send_inflight[base + begin] != 0)) { begin = begin + 1; }
+    if (begin == adapter.levels[index].send_length::usize) {
+        result.status = STATUS_EMPTY;
+        ret result;
+    }
+    var end: usize = begin;
+    for (end < adapter.levels[index].send_length::usize && end - begin < maximum &&
+        adapter.storage.send_pending[base + end] &&
+        !adapter.storage.send_acked[base + end] &&
+        adapter.storage.send_inflight[base + end] == 0) { end = end + 1; }
+    val attempt_index: usize = claim_attempt(adapter);
+    if (attempt_index == adapter.storage.attempt_capacity) {
+        result.status = STATUS_BLOCKED;
+        result.error = ERROR_LIMIT;
+        ret result;
+    }
+    val attempt: *Attempt = ?adapter.storage.attempts[attempt_index];
+    attempt.generation = next_generation(attempt.generation);
+    attempt.offset = begin::u64;
+    attempt.length = end - begin;
+    attempt.level = level;
+    attempt.state = ATTEMPT_PREPARED;
+    var i: usize = begin;
+    for (i < end) {
+        adapter.storage.send_inflight[base + i] =
+            adapter.storage.send_inflight[base + i] + 1;
+        i = i + 1;
+    }
+    result.status = STATUS_OK;
+    result.token = AttemptToken{source: adapter.config.source, index: attempt_index,
+        generation: attempt.generation};
+    result.level = level;
+    result.offset = begin::u64;
+    result.data = View{data: ?adapter.storage.send_data[base + begin],
+        length: end - begin};
+    ret result;
+}
+
+fun attempt_for(adapter: *Adapter, token: AttemptToken) *Attempt {
+    if (adapter == nil || !adapter.initialized || token.source != adapter.config.source ||
+        token.index >= adapter.storage.attempt_capacity) { ret nil; }
+    val attempt: *Attempt = ?adapter.storage.attempts[token.index];
+    if (attempt.state == ATTEMPT_FREE || attempt.generation != token.generation) { ret nil; }
+    ret attempt;
+}
+
+fun release_attempt(adapter: *Adapter, attempt: *Attempt, pending: bool, acked: bool) {
+    val base: usize = level_base(adapter.storage.send_stride, attempt.level);
+    var i: usize = attempt.offset::usize;
+    val end: usize = i + attempt.length;
+    for (i < end) {
+        if (adapter.storage.send_inflight[base + i] > 0) {
+            adapter.storage.send_inflight[base + i] =
+                adapter.storage.send_inflight[base + i] - 1;
+        }
+        if (acked) {
+            adapter.storage.send_acked[base + i] = true;
+            adapter.storage.send_pending[base + i] = false;
+        } or (pending && !adapter.storage.send_acked[base + i]) {
+            adapter.storage.send_pending[base + i] = true;
+        }
+        i = i + 1;
+    }
+    attempt.state = ATTEMPT_FREE;
+    attempt.generation = next_generation(attempt.generation);
+}
+
+pub fun cancel_prepared(adapter: *Adapter, token: AttemptToken) Result {
+    val attempt: *Attempt = attempt_for(adapter, token);
+    if (attempt == nil || attempt.state != ATTEMPT_PREPARED) { ret failed(ERROR_TOKEN); }
+    release_attempt(adapter, attempt, true, false);
+    ret Result{status: STATUS_OK};
+}
+
+pub fun publish(adapter: *Adapter, token: AttemptToken) Result {
+    val attempt: *Attempt = attempt_for(adapter, token);
+    if (attempt == nil || attempt.state != ATTEMPT_PREPARED) { ret failed(ERROR_TOKEN); }
+    val base: usize = level_base(adapter.storage.send_stride, attempt.level);
+    var i: usize = attempt.offset::usize;
+    val end: usize = i + attempt.length;
+    for (i < end) { adapter.storage.send_pending[base + i] = false; i = i + 1; }
+    attempt.state = ATTEMPT_PUBLISHED;
+    ret Result{status: STATUS_OK};
+}
+
+pub fun on_terminal(adapter: *Adapter, token: AttemptToken, terminal: u8) Result {
+    val attempt: *Attempt = attempt_for(adapter, token);
+    if (attempt == nil || attempt.state != ATTEMPT_PUBLISHED ||
+        (terminal != TERMINAL_ACKED && terminal != TERMINAL_LOST)) {
+        ret failed(ERROR_TOKEN);
+    }
+    release_attempt(adapter, attempt, terminal == TERMINAL_LOST,
+        terminal == TERMINAL_ACKED);
+    ret Result{status: STATUS_OK};
+}
+
+fun reset_level(adapter: *Adapter, level: Level, reset_send: bool) {
+    val index: usize = level_index(level);
+    val receive_base: usize = level_base(adapter.storage.receive_stride, level);
+    memory.raw_zero(?adapter.storage.receive_data[receive_base],
+        adapter.storage.receive_stride);
+    memory.raw_zero(?adapter.storage.receive_present[receive_base],
+        adapter.storage.receive_stride);
+    adapter.levels[index].receive_contiguous = 0;
+    adapter.levels[index].receive_highest = 0;
+    if (reset_send) {
+        val send_base: usize = level_base(adapter.storage.send_stride, level);
+        var i: usize = 0;
+        for (i < adapter.levels[index].send_length::usize) {
+            adapter.storage.send_pending[send_base + i] = true;
+            adapter.storage.send_acked[send_base + i] = false;
+            adapter.storage.send_inflight[send_base + i] = 0;
+            i = i + 1;
+        }
+    }
+    var i: usize = 0;
+    for (i < adapter.storage.attempt_capacity) {
+        if (adapter.storage.attempts[i].state != ATTEMPT_FREE &&
+            adapter.storage.attempts[i].level == level) {
+            adapter.storage.attempts[i].state = ATTEMPT_FREE;
+            adapter.storage.attempts[i].generation =
+                next_generation(adapter.storage.attempts[i].generation);
+        }
+        i = i + 1;
+    }
+}
+
+pub fun on_retry(adapter: *Adapter, version: u32, now_ns: u64) Result {
+    if (adapter == nil || !adapter.initialized || !adapter.started || adapter.closing ||
+        adapter.role != CLIENT || adapter.handshake_complete || adapter.event_active ||
+        version == 0) { ret failed(ERROR_STATE); }
+    val provider: ProviderResult = adapter.protocol.retry(adapter.protocol.context,
+        adapter.protocol.secret_context, version, now_ns);
+    if (provider.status != STATUS_OK) { ret provider_failed(provider.error); }
+    reset_level(adapter, INITIAL, true);
+    adapter.version = version;
+    ret Result{status: STATUS_OK};
+}
+
+pub fun close(adapter: *Adapter, alert: u64, now_ns: u64) Result {
+    if (adapter == nil || !adapter.initialized || !adapter.started || adapter.closing ||
+        adapter.event_active || alert > 255) { ret failed(ERROR_STATE); }
+    val provider: ProviderResult = adapter.protocol.close(adapter.protocol.context,
+        adapter.protocol.secret_context, alert, now_ns);
+    if (provider.status != STATUS_OK) { ret provider_failed(provider.error); }
+    adapter.closing = true;
+    adapter.terminal_alert = alert;
+    ret Result{status: STATUS_OK};
+}
+
+pub fun destroy(adapter: *Adapter) bool {
+    if (adapter == nil || !adapter.initialized || adapter.destroyed ||
+        adapter.event_active) { ret false; }
+    var i: usize = 0;
+    for (i < adapter.storage.attempt_capacity) {
+        if (adapter.storage.attempts[i].state != ATTEMPT_FREE) { ret false; }
+        i = i + 1;
+    }
+    if (!adapter.protocol.destroy(adapter.protocol.context,
+        adapter.protocol.secret_context)) { ret false; }
+    memory.raw_zero(adapter.storage.receive_data, adapter.storage.receive_length);
+    memory.raw_zero(adapter.storage.receive_present, adapter.storage.receive_length);
+    memory.raw_zero(adapter.storage.send_data, adapter.storage.send_length);
+    memory.raw_zero(adapter.storage.send_pending, adapter.storage.send_length);
+    memory.raw_zero(adapter.storage.send_acked, adapter.storage.send_length);
+    memory.raw_zero(adapter.storage.send_inflight, adapter.storage.send_length * 2);
+    adapter.initialized = false;
+    adapter.destroyed = true;
+    ret true;
+}
+
+pub fun snapshot(adapter: *Adapter) Snapshot {
+    var value: Snapshot;
+    if (adapter == nil) { ret value; }
+    value.role = adapter.role;
+    value.version = adapter.version;
+    value.event_active = adapter.event_active;
+    value.peer_parameters_received = adapter.peer_parameters_received;
+    value.early_data_received = adapter.early_data_received;
+    value.authentication_received = adapter.authentication_received;
+    value.handshake_complete = adapter.handshake_complete;
+    value.terminal_alert = adapter.terminal_alert;
+    value.initialized = adapter.initialized;
+    value.started = adapter.started;
+    value.closing = adapter.closing;
+    value.destroyed = adapter.destroyed;
+    ret value;
+}

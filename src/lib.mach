@@ -19,6 +19,8 @@ fwd quic.path.path;
 fwd quic.connection.admission;
 fwd quic.connection.cid;
 fwd quic.connection.token;
+fwd quic.connection.handshake;
+fwd quic.connection.handshake_simulated;
 fwd quic.transport;
 fwd quic.transport.simulated;
 

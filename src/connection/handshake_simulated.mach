@@ -1,0 +1,355 @@
+use handshake: quic.connection.handshake;
+use protection: quic.crypto.protection;
+
+use std.crypto.ct;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+rec PublicEvent {
+    token: u64;
+    kind: u8;
+    level: u8;
+    direction: u8;
+    algorithm: protection.Algorithm;
+    generation: u64;
+    offset: u64;
+    data: handshake.View;
+    secret_length: usize;
+    disposition: u8;
+    alert: u64;
+}
+
+rec Provider {
+    events: [16]PublicEvent;
+    event_count: usize;
+    next_event: usize;
+    active_token: u64;
+    ingested: [256]u8;
+    ingested_length: usize;
+    ingested_calls: usize;
+    completed: usize;
+    rejected: usize;
+    retries: usize;
+    closes: usize;
+    started: bool;
+    destroyed: bool;
+}
+
+rec Fixture {
+    receive_data: [256]u8;
+    receive_present: [256]bool;
+    send_data: [256]u8;
+    send_pending: [256]bool;
+    send_acked: [256]bool;
+    send_inflight: [256]u16;
+    attempts: [16]handshake.Attempt;
+    secret: [32]^u8;
+    provider: Provider;
+    adapter: handshake.Adapter;
+}
+
+fun provider_result(status: u8, error: u64) handshake.ProviderResult {
+    ret handshake.ProviderResult{status: status, error: error};
+}
+
+fun start_provider(context: ptr, secret_context: *^u8,
+                   value: *handshake.Start) handshake.ProviderResult {
+    val provider: *Provider = context::*Provider;
+    if (provider.started || value == nil || value.version == 0 ||
+        value.local_transport_parameters.length == 0) {
+        ret provider_result(handshake.STATUS_ERROR, 1);
+    }
+    provider.started = true;
+    ret provider_result(handshake.STATUS_OK, 0);
+}
+
+fun ingest_provider(context: ptr, secret_context: *^u8, level: u8, offset: u64,
+                    data: *u8, length: usize, now_ns: u64) handshake.ProviderResult {
+    val provider: *Provider = context::*Provider;
+    if (!provider.started || level < handshake.INITIAL ||
+        level > handshake.APPLICATION || offset != provider.ingested_length::u64 ||
+        data == nil || length == 0 || length > 256 - provider.ingested_length ||
+        now_ns == 0 - 1::u64) { ret provider_result(handshake.STATUS_ERROR, 2); }
+    var i: usize = 0;
+    for (i < length) {
+        provider.ingested[provider.ingested_length + i] = data[i];
+        i = i + 1;
+    }
+    provider.ingested_length = provider.ingested_length + length;
+    provider.ingested_calls = provider.ingested_calls + 1;
+    ret provider_result(handshake.STATUS_OK, 0);
+}
+
+fun retry_provider(context: ptr, secret_context: *^u8, version: u32,
+                   now_ns: u64) handshake.ProviderResult {
+    val provider: *Provider = context::*Provider;
+    if (!provider.started || version == 0 || now_ns == 0 - 1::u64) {
+        ret provider_result(handshake.STATUS_ERROR, 3);
+    }
+    provider.retries = provider.retries + 1;
+    ret provider_result(handshake.STATUS_OK, 0);
+}
+
+fun next_provider_event(context: ptr, secret_context: *^u8,
+                        output: *handshake.ProviderEvent) bool {
+    val provider: *Provider = context::*Provider;
+    if (output == nil || provider.active_token != 0 ||
+        provider.next_event >= provider.event_count) { ret false; }
+    val source: PublicEvent = provider.events[provider.next_event];
+    output.token = source.token;
+    output.kind = source.kind;
+    output.level = source.level;
+    output.direction = source.direction;
+    output.algorithm = source.algorithm;
+    output.generation = source.generation;
+    output.offset = source.offset;
+    output.data = source.data;
+    output.secret = handshake.SecretView{data: secret_context,
+        length: source.secret_length};
+    output.disposition = source.disposition;
+    output.alert = source.alert;
+    provider.active_token = output.token;
+    ret true;
+}
+
+fun complete_provider_event(context: ptr, secret_context: *^u8,
+                            token: u64, accepted: bool) bool {
+    val provider: *Provider = context::*Provider;
+    if (provider.active_token == 0 || provider.active_token != token) { ret false; }
+    provider.active_token = 0;
+    provider.next_event = provider.next_event + 1;
+    provider.completed = provider.completed + 1;
+    if (!accepted) { provider.rejected = provider.rejected + 1; }
+    ret true;
+}
+
+fun close_provider(context: ptr, secret_context: *^u8, alert: u64,
+                   now_ns: u64) handshake.ProviderResult {
+    val provider: *Provider = context::*Provider;
+    if (!provider.started || alert > 255 || now_ns == 0 - 1::u64) {
+        ret provider_result(handshake.STATUS_ERROR, 4);
+    }
+    provider.closes = provider.closes + 1;
+    ret provider_result(handshake.STATUS_OK, 0);
+}
+
+fun destroy_provider(context: ptr, secret_context: *^u8) bool {
+    val provider: *Provider = context::*Provider;
+    if (provider.active_token != 0 || provider.destroyed) { ret false; }
+    provider.destroyed = true;
+    ret true;
+}
+
+fun make_fixture(fixture: *Fixture, source: u64) bool {
+    val storage: handshake.Storage = handshake.Storage{
+        receive_data: ?fixture.receive_data[0],
+        receive_present: ?fixture.receive_present[0], receive_length: 256,
+        receive_stride: 64, send_data: ?fixture.send_data[0],
+        send_pending: ?fixture.send_pending[0], send_acked: ?fixture.send_acked[0],
+        send_inflight: ?fixture.send_inflight[0], send_length: 256, send_stride: 64,
+        attempts: ?fixture.attempts[0], attempt_capacity: 16
+    };
+    val protocol: handshake.Protocol = handshake.Protocol{
+        context: (?fixture.provider)::ptr, secret_context: ?fixture.secret[0],
+        start: start_provider,
+        ingest: ingest_provider, retry: retry_provider,
+        next_event: next_provider_event, complete_event: complete_provider_event,
+        close: close_provider, destroy: destroy_provider, initialized: true
+    };
+    fixture.adapter = handshake.init(handshake.Config{source: source,
+        max_crypto_per_level: 64, max_event_data: 64, max_peer_identity: 64},
+        storage, protocol);
+    var alpn: [2]u8 = [2]u8{'h', '3'};
+    var parameters: [3]u8 = [3]u8{1, 0, 0};
+    var start: handshake.Start;
+    start.role = handshake.CLIENT;
+    start.version = 1;
+    start.alpn = handshake.View{data: ?alpn[0], length: 2};
+    start.local_transport_parameters = handshake.View{data: ?parameters[0], length: 3};
+    start.now_ns = 1;
+    ret handshake.start(?fixture.adapter, ?start).status == handshake.STATUS_OK;
+}
+
+fun queue_event(provider: *Provider, event: handshake.ProviderEvent) bool {
+    if (provider.event_count >= 16) { ret false; }
+    val index: usize = provider.event_count;
+    provider.events[index].token = event.token;
+    provider.events[index].kind = event.kind;
+    provider.events[index].level = event.level;
+    provider.events[index].direction = event.direction;
+    provider.events[index].algorithm = event.algorithm;
+    provider.events[index].generation = event.generation;
+    provider.events[index].offset = event.offset;
+    provider.events[index].data = event.data;
+    provider.events[index].secret_length = event.secret.length;
+    provider.events[index].disposition = event.disposition;
+    provider.events[index].alert = event.alert;
+    provider.event_count = provider.event_count + 1;
+    ret true;
+}
+
+fun accept_next(adapter: *handshake.Adapter, expected: u8) bool {
+    val event: handshake.Event = handshake.next_event(adapter);
+    if (event.status != handshake.STATUS_OK || event.kind != expected) { ret false; }
+    ret handshake.complete_event(adapter, event.token, true).status == handshake.STATUS_OK;
+}
+
+test "quic.connection.handshake: every-byte crypto fragmentation is reassembled exactly once" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 401)) { ret 1; }
+    var message: [16]u8;
+    var i: usize = 0;
+    for (i < 16) { message[i] = i::u8 + 1; i = i + 1; }
+    i = 16;
+    for (i > 0) {
+        i = i - 1;
+        val received: handshake.Result = handshake.receive(?fixture.adapter,
+            handshake.HANDSHAKE, i::u64, ?message[i], 1, 10 + (16 - i)::u64);
+        if (received.status != handshake.STATUS_MORE && i != 0) { ret 2; }
+        if (i == 0 && received.status != handshake.STATUS_OK) { ret 3; }
+    }
+    if (fixture.provider.ingested_calls != 1 ||
+        fixture.provider.ingested_length != 16) { ret 4; }
+    i = 0;
+    for (i < 16) {
+        if (fixture.provider.ingested[i] != message[i]) { ret 5; }
+        i = i + 1;
+    }
+    if (handshake.receive(?fixture.adapter, handshake.HANDSHAKE, 4,
+        ?message[4], 1, 30).status != handshake.STATUS_MORE) { ret 6; }
+    message[4] = message[4] ^ 1;
+    if (handshake.receive(?fixture.adapter, handshake.HANDSHAKE, 4,
+        ?message[4], 1, 31).error != handshake.ERROR_CONFLICT) { ret 7; }
+    if (!handshake.destroy(?fixture.adapter) || !fixture.provider.destroyed) { ret 8; }
+    ret 0;
+}
+
+test "quic.connection.handshake: event transitions expose secrets and peer decisions serially" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 402)) { ret 1; }
+    var secret: [32]^u8;
+    var parameters: [4]u8 = [4]u8{3, 2, 1, 0};
+    var identity: [3]u8 = [3]u8{'c', 'a', '1'};
+    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 1,
+            kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.HANDSHAKE,
+            direction: handshake.DIRECTION_SEND,
+            algorithm: protection.AES_128_GCM_SHA256, generation: 1,
+            secret: handshake.SecretView{data: ?secret[0], length: 32}}) ||
+        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 2,
+            kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.HANDSHAKE,
+            direction: handshake.DIRECTION_RECEIVE,
+            algorithm: protection.AES_128_GCM_SHA256, generation: 1,
+            secret: handshake.SecretView{data: ?secret[0], length: 32}}) ||
+        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 3,
+            kind: handshake.EVENT_PEER_TRANSPORT_PARAMETERS,
+            data: handshake.View{data: ?parameters[0], length: 4}}) ||
+        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 4,
+            kind: handshake.EVENT_EARLY_DATA,
+            disposition: handshake.EARLY_NOT_OFFERED}) ||
+        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 5,
+            kind: handshake.EVENT_AUTHENTICATION,
+            disposition: handshake.AUTHENTICATED,
+            data: handshake.View{data: ?identity[0], length: 3}}) ||
+        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 6,
+            kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.APPLICATION,
+            direction: handshake.DIRECTION_SEND,
+            algorithm: protection.AES_128_GCM_SHA256, generation: 1,
+            secret: handshake.SecretView{data: ?secret[0], length: 32}}) ||
+        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 7,
+            kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.APPLICATION,
+            direction: handshake.DIRECTION_RECEIVE,
+            algorithm: protection.AES_128_GCM_SHA256, generation: 1,
+            secret: handshake.SecretView{data: ?secret[0], length: 32}}) ||
+        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 8,
+            kind: handshake.EVENT_HANDSHAKE_COMPLETE})) { ret 2; }
+    val first: handshake.Event = handshake.next_event(?fixture.adapter);
+    if (first.status != handshake.STATUS_OK ||
+        handshake.next_event(?fixture.adapter).status != handshake.STATUS_BLOCKED ||
+        handshake.complete_event(?fixture.adapter, handshake.EventToken{source: 999,
+            generation: first.token.generation,
+            provider_token: first.token.provider_token}, true).error !=
+            handshake.ERROR_TOKEN || handshake.complete_event(?fixture.adapter,
+            first.token, true).status != handshake.STATUS_OK) { ret 3; }
+    if (!accept_next(?fixture.adapter, handshake.EVENT_TRAFFIC_SECRET) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_PEER_TRANSPORT_PARAMETERS) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_EARLY_DATA) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_AUTHENTICATION) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_TRAFFIC_SECRET) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_TRAFFIC_SECRET) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_HANDSHAKE_COMPLETE)) { ret 4; }
+    val snapshot: handshake.Snapshot = handshake.snapshot(?fixture.adapter);
+    if (!snapshot.peer_parameters_received || !snapshot.early_data_received ||
+        !snapshot.authentication_received || !snapshot.handshake_complete ||
+        fixture.provider.completed != 8) { ret 5; }
+    ct.zeroize(?secret[0], 32);
+    if (!handshake.destroy(?fixture.adapter)) { ret 6; }
+    ret 0;
+}
+
+test "quic.connection.handshake: crypto output survives cancellation, loss, retry, and ack" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 403)) { ret 1; }
+    var output: [8]u8 = [8]u8{'c', 'l', 'i', 'e', 'n', 't', '-', 'h'};
+    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 1,
+        kind: handshake.EVENT_CRYPTO, level: handshake.INITIAL, offset: 0,
+        data: handshake.View{data: ?output[0], length: 8}}) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 2; }
+    output[0] = 'x';
+    val cancelled: handshake.Prepared = handshake.prepare(?fixture.adapter,
+        handshake.INITIAL, 4);
+    if (cancelled.status != handshake.STATUS_OK || cancelled.data.data[0] != 'c' ||
+        handshake.cancel_prepared(?fixture.adapter, cancelled.token).status !=
+            handshake.STATUS_OK) { ret 3; }
+    val lost: handshake.Prepared = handshake.prepare(?fixture.adapter,
+        handshake.INITIAL, 4);
+    if (handshake.publish(?fixture.adapter, lost.token).status != handshake.STATUS_OK ||
+        handshake.on_terminal(?fixture.adapter, lost.token,
+            handshake.TERMINAL_LOST).status != handshake.STATUS_OK) { ret 4; }
+    val stale: handshake.AttemptToken = lost.token;
+    val before_retry: handshake.Prepared = handshake.prepare(?fixture.adapter,
+        handshake.INITIAL, 8);
+    if (before_retry.status != handshake.STATUS_OK ||
+        handshake.on_retry(?fixture.adapter, 1, 20).status != handshake.STATUS_OK ||
+        handshake.publish(?fixture.adapter, before_retry.token).error !=
+            handshake.ERROR_TOKEN || fixture.provider.retries != 1) { ret 5; }
+    val final: handshake.Prepared = handshake.prepare(?fixture.adapter,
+        handshake.INITIAL, 8);
+    if (final.status != handshake.STATUS_OK || final.data.length != 8 ||
+        handshake.publish(?fixture.adapter, final.token).status != handshake.STATUS_OK ||
+        handshake.on_terminal(?fixture.adapter, final.token,
+            handshake.TERMINAL_ACKED).status != handshake.STATUS_OK ||
+        handshake.prepare(?fixture.adapter, handshake.INITIAL, 8).status !=
+            handshake.STATUS_EMPTY || handshake.on_terminal(?fixture.adapter, stale,
+            handshake.TERMINAL_ACKED).error != handshake.ERROR_TOKEN) { ret 6; }
+    if (!handshake.destroy(?fixture.adapter)) { ret 7; }
+    ret 0;
+}
+
+test "quic.connection.handshake: invalid provider events and rejection are terminal" {
+    var invalid: Fixture;
+    if (!make_fixture(?invalid, 404)) { ret 1; }
+    var secret: [32]^u8;
+    if (!queue_event(?invalid.provider, handshake.ProviderEvent{token: 1,
+        kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.APPLICATION,
+        direction: handshake.DIRECTION_SEND,
+        algorithm: protection.AES_128_GCM_SHA256, generation: 1,
+        secret: handshake.SecretView{data: ?secret[0], length: 32}})) { ret 2; }
+    if (handshake.next_event(?invalid.adapter).error != handshake.ERROR_EVENT ||
+        invalid.provider.rejected != 1 || !handshake.snapshot(?invalid.adapter).closing ||
+        !handshake.destroy(?invalid.adapter)) { ret 3; }
+
+    var rejected: Fixture;
+    if (!make_fixture(?rejected, 405)) { ret 4; }
+    var parameters: [1]u8 = [1]u8{0};
+    if (!queue_event(?rejected.provider, handshake.ProviderEvent{token: 1,
+        kind: handshake.EVENT_PEER_TRANSPORT_PARAMETERS,
+        data: handshake.View{data: ?parameters[0], length: 1}})) { ret 5; }
+    val event: handshake.Event = handshake.next_event(?rejected.adapter);
+    if (event.status != handshake.STATUS_OK || handshake.complete_event(?rejected.adapter,
+        event.token, false).error != handshake.ERROR_REJECTED ||
+        rejected.provider.rejected != 1 || !handshake.destroy(?rejected.adapter)) { ret 6; }
+    ct.zeroize(?secret[0], 32);
+    ret 0;
+}
