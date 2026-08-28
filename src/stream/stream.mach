@@ -1,18 +1,242 @@
-use std.types.bool.bool;
+use quic.packet.packet;
+use quic.wire.varint;
 
-pub val STREAM_OPEN: u8 = 1;
-pub val STREAM_SEND_CLOSED: u8 = 2;
-pub val STREAM_RECV_CLOSED: u8 = 3;
-pub val STREAM_CLOSED: u8 = 4;
-pub val STREAM_RESET: u8 = 5;
+use std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+pub val ROLE_CLIENT: u8 = 1;
+pub val ROLE_SERVER: u8 = 2;
+
+pub val DIRECTION_BIDIRECTIONAL: u8 = 1;
+pub val DIRECTION_UNIDIRECTIONAL: u8 = 2;
+
+pub val SEND_STREAM: u8 = 1;
+pub val SEND_RESET: u8 = 2;
+pub val SEND_STOP: u8 = 3;
+
+pub val TERMINAL_ACKED: u8 = 1;
+pub val TERMINAL_LOST: u8 = 2;
+
+pub val STATUS_OK: u8 = 1;
+pub val STATUS_EMPTY: u8 = 2;
+pub val STATUS_BLOCKED: u8 = 3;
+pub val STATUS_RESET: u8 = 4;
+pub val STATUS_FINISHED: u8 = 5;
+pub val STATUS_CANCELLED: u8 = 6;
+pub val STATUS_STALE: u8 = 7;
+pub val STATUS_ERROR: u8 = 8;
+
+pub val ERROR_NONE: u8 = 0;
+pub val ERROR_STATE: u8 = 1;
+pub val ERROR_STREAM_LIMIT: u8 = 2;
+pub val ERROR_CAPACITY: u8 = 3;
+pub val ERROR_DIRECTION: u8 = 4;
+pub val ERROR_FLOW_CONTROL: u8 = 5;
+pub val ERROR_FINAL_SIZE: u8 = 6;
+pub val ERROR_DATA_CONFLICT: u8 = 7;
+pub val ERROR_TOKEN: u8 = 8;
+pub val ERROR_OVERFLOW: u8 = 9;
+pub val ERROR_CANCELLED: u8 = 10;
+
+val ATTEMPT_FREE: u8 = 0;
+val ATTEMPT_RESERVED: u8 = 1;
+val ATTEMPT_ACTIVE: u8 = 2;
+val MAX_STREAM_COUNT: u64 = 1 << 60;
+
+pub rec Config {
+    source: u64;
+    role: u8;
+    local_bidirectional_limit: u64;
+    local_unidirectional_limit: u64;
+    peer_bidirectional_limit: u64;
+    peer_unidirectional_limit: u64;
+    send_max_data: u64;
+    receive_max_data: u64;
+    send_local_bidirectional_limit: u64;
+    send_peer_bidirectional_limit: u64;
+    send_unidirectional_limit: u64;
+    receive_local_bidirectional_limit: u64;
+    receive_peer_bidirectional_limit: u64;
+    receive_unidirectional_limit: u64;
+}
 
 pub rec Stream {
     id: u64;
-    state: u8;
-    send_offset: u64;
-    recv_offset: u64;
+    generation: u64;
+    accept_sequence: u64;
+    send_base: u64;
+    send_write: u64;
     send_limit: u64;
-    recv_limit: u64;
+    receive_read: u64;
+    receive_highest: u64;
+    receive_limit: u64;
+    final_size: u64;
+    send_used: usize;
+    active_attempts: usize;
+    send_error: u64;
+    receive_error: u64;
+    active: bool;
+    local: bool;
+    unidirectional: bool;
+    accepted: bool;
+    can_send: bool;
+    can_receive: bool;
+    send_finished: bool;
+    send_closed: bool;
+    send_cancelled: bool;
+    fin_pending: bool;
+    fin_acked: bool;
+    fin_inflight: u8;
+    reset_pending: bool;
+    reset_acked: bool;
+    reset_inflight: u8;
+    receive_closed: bool;
+    receive_cancelled: bool;
+    final_known: bool;
+    reset_received: bool;
+    stop_pending: bool;
+    stop_acked: bool;
+    stop_inflight: u8;
+    stop_received: bool;
+    has_prepared: bool;
+}
+
+pub rec Attempt {
+    generation: u64;
+    stream_index: usize;
+    stream_generation: u64;
+    offset: u64;
+    length: usize;
+    kind: u8;
+    state: u8;
+    fin: bool;
+}
+
+pub rec Storage {
+    streams: *Stream;
+    stream_capacity: usize;
+    send_data: *u8;
+    send_data_length: usize;
+    send_pending: *bool;
+    send_acked: *bool;
+    send_inflight: *u8;
+    send_state_length: usize;
+    send_stride: usize;
+    receive_data: *u8;
+    receive_data_length: usize;
+    receive_present: *bool;
+    receive_state_length: usize;
+    receive_stride: usize;
+    attempts: *Attempt;
+    attempt_capacity: usize;
+}
+
+pub rec Manager {
+    config: Config;
+    storage: Storage;
+    local_bidirectional_opened: u64;
+    local_unidirectional_opened: u64;
+    peer_bidirectional_opened: u64;
+    peer_unidirectional_opened: u64;
+    send_committed: u64;
+    receive_committed: u64;
+    send_max_data: u64;
+    receive_max_data: u64;
+    accept_sequence: u64;
+    active_streams: usize;
+    active_attempts: usize;
+    valid: bool;
+    closing: bool;
+}
+
+pub rec Handle {
+    source: u64;
+    index: usize;
+    generation: u64;
+    id: u64;
+}
+
+pub rec AttemptToken {
+    source: u64;
+    index: usize;
+    generation: u64;
+}
+
+pub rec CreateResult {
+    status: u8;
+    error: u8;
+    handle: Handle;
+    stream_limit_blocked: bool;
+    storage_blocked: bool;
+}
+
+pub rec WriteResult {
+    status: u8;
+    error: u8;
+    count: usize;
+    connection_blocked: bool;
+    stream_blocked: bool;
+    storage_blocked: bool;
+}
+
+pub rec ReadResult {
+    status: u8;
+    error: u8;
+    count: usize;
+    final_size: u64;
+    application_error: u64;
+    receive_max_data: u64;
+    receive_max_stream_data: u64;
+    fin: bool;
+}
+
+pub rec ReceiveResult {
+    ok: bool;
+    error: u8;
+    handle: Handle;
+    new_streams: usize;
+    connection_delta: u64;
+}
+
+pub rec Prepared {
+    ok: bool;
+    status: u8;
+    error: u8;
+    token: AttemptToken;
+    handle: Handle;
+    data: packet.Span;
+    offset: u64;
+    final_size: u64;
+    application_error: u64;
+    kind: u8;
+    fin: bool;
+}
+
+pub rec OperationResult {
+    status: u8;
+    error: u8;
+    receive_max_data: u64;
+    receive_max_stream_data: u64;
+    peer_max_streams: u64;
+}
+
+pub rec Snapshot {
+    ok: bool;
+    error: u8;
+    id: u64;
+    send_offset: u64;
+    receive_offset: u64;
+    final_size: u64;
+    send_error: u64;
+    receive_error: u64;
+    send_closed: bool;
+    receive_closed: bool;
+    send_cancelled: bool;
+    receive_cancelled: bool;
+    final_known: bool;
 }
 
 pub fun initiated_by_server(id: u64) bool {
@@ -21,6 +245,1062 @@ pub fun initiated_by_server(id: u64) bool {
 
 pub fun unidirectional(id: u64) bool {
     ret (id & 2) != 0;
+}
+
+fun local_initiator(manager: *Manager, id: u64) bool {
+    val server: bool = manager.config.role == ROLE_SERVER;
+    ret initiated_by_server(id) == server;
+}
+
+fun minimum(a: u64, b: u64) u64 {
+    if (a < b) { ret a; }
+    ret b;
+}
+
+fun minimum_size(a: usize, b: usize) usize {
+    if (a < b) { ret a; }
+    ret b;
+}
+
+fun checked_storage(count: usize, stride: usize, length: usize) bool {
+    if (count == 0 || stride == 0 || count > (0 - 1::usize) / stride) { ret false; }
+    ret count * stride <= length;
+}
+
+fun valid_config(config: Config, storage: Storage) bool {
+    if (config.source == 0 || (config.role != ROLE_CLIENT && config.role != ROLE_SERVER)) { ret false; }
+    if (config.local_bidirectional_limit > MAX_STREAM_COUNT || config.local_unidirectional_limit > MAX_STREAM_COUNT ||
+        config.peer_bidirectional_limit > MAX_STREAM_COUNT || config.peer_unidirectional_limit > MAX_STREAM_COUNT) { ret false; }
+    if (config.send_max_data > varint.MAX || config.receive_max_data > varint.MAX ||
+        config.send_local_bidirectional_limit > varint.MAX || config.send_peer_bidirectional_limit > varint.MAX ||
+        config.send_unidirectional_limit > varint.MAX || config.receive_local_bidirectional_limit > varint.MAX ||
+        config.receive_peer_bidirectional_limit > varint.MAX || config.receive_unidirectional_limit > varint.MAX) { ret false; }
+    if (storage.streams == nil || storage.attempts == nil || storage.send_data == nil ||
+        storage.send_pending == nil || storage.send_acked == nil || storage.send_inflight == nil ||
+        storage.receive_data == nil || storage.receive_present == nil ||
+        storage.stream_capacity == 0 || storage.attempt_capacity == 0) { ret false; }
+    if (!checked_storage(storage.stream_capacity, storage.send_stride, storage.send_data_length) ||
+        !checked_storage(storage.stream_capacity, storage.send_stride, storage.send_state_length) ||
+        !checked_storage(storage.stream_capacity, storage.receive_stride, storage.receive_data_length) ||
+        !checked_storage(storage.stream_capacity, storage.receive_stride, storage.receive_state_length)) { ret false; }
+    val receive_capacity: u64 = storage.stream_capacity::u64 * storage.receive_stride::u64;
+    if (config.receive_max_data > receive_capacity ||
+        config.receive_local_bidirectional_limit > storage.receive_stride::u64 ||
+        config.receive_peer_bidirectional_limit > storage.receive_stride::u64 ||
+        config.receive_unidirectional_limit > storage.receive_stride::u64) { ret false; }
+    ret true;
+}
+
+fun next_generation(value: u64) u64 {
+    if (value == 0 - 1::u64) { ret 1; }
+    ret value + 1;
+}
+
+pub fun init(config: Config, storage: Storage) Manager {
+    var manager: Manager;
+    manager.config = config;
+    manager.storage = storage;
+    if (!valid_config(config, storage)) { ret manager; }
+    var i: usize = 0;
+    for (i < storage.stream_capacity) {
+        storage.streams[i].generation = 1;
+        storage.streams[i].active = false;
+        i = i + 1;
+    }
+    i = 0;
+    for (i < storage.attempt_capacity) {
+        storage.attempts[i].generation = 1;
+        storage.attempts[i].state = ATTEMPT_FREE;
+        i = i + 1;
+    }
+    manager.send_max_data = config.send_max_data;
+    manager.receive_max_data = config.receive_max_data;
+    manager.accept_sequence = 1;
+    manager.valid = true;
+    ret manager;
+}
+
+fun handle(manager: *Manager, index: usize) Handle {
+    var value: Handle;
+    value.source = manager.config.source;
+    value.index = index;
+    value.generation = manager.storage.streams[index].generation;
+    value.id = manager.storage.streams[index].id;
+    ret value;
+}
+
+fun valid_handle(manager: *Manager, value: Handle) bool {
+    if (manager == nil || !manager.valid || value.source != manager.config.source ||
+        value.index >= manager.storage.stream_capacity) { ret false; }
+    val stream: Stream = manager.storage.streams[value.index];
+    ret stream.active && stream.generation == value.generation && stream.id == value.id;
+}
+
+fun stream_index(manager: *Manager, id: u64) usize {
+    var i: usize = 0;
+    for (i < manager.storage.stream_capacity) {
+        if (manager.storage.streams[i].active && manager.storage.streams[i].id == id) { ret i; }
+        i = i + 1;
+    }
+    ret manager.storage.stream_capacity;
+}
+
+fun free_index(manager: *Manager) usize {
+    var i: usize = 0;
+    for (i < manager.storage.stream_capacity && manager.storage.streams[i].active) { i = i + 1; }
+    ret i;
+}
+
+fun clear_slot(manager: *Manager, index: usize) {
+    var i: usize = 0;
+    val send_start: usize = index * manager.storage.send_stride;
+    for (i < manager.storage.send_stride) {
+        manager.storage.send_pending[send_start + i] = false;
+        manager.storage.send_acked[send_start + i] = false;
+        manager.storage.send_inflight[send_start + i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    val receive_start: usize = index * manager.storage.receive_stride;
+    for (i < manager.storage.receive_stride) {
+        manager.storage.receive_present[receive_start + i] = false;
+        i = i + 1;
+    }
+}
+
+fun send_limit(config: Config, local: bool, uni: bool) u64 {
+    if (uni) {
+        if (local) { ret config.send_unidirectional_limit; }
+        ret 0;
+    }
+    if (local) { ret config.send_local_bidirectional_limit; }
+    ret config.send_peer_bidirectional_limit;
+}
+
+fun receive_limit(config: Config, local: bool, uni: bool) u64 {
+    if (uni) {
+        if (!local) { ret config.receive_unidirectional_limit; }
+        ret 0;
+    }
+    if (local) { ret config.receive_local_bidirectional_limit; }
+    ret config.receive_peer_bidirectional_limit;
+}
+
+fun initialize_stream(manager: *Manager, index: usize, id: u64, local: bool, accepted: bool) {
+    val generation: u64 = manager.storage.streams[index].generation;
+    var stream: Stream;
+    stream.id = id;
+    stream.generation = generation;
+    stream.active = true;
+    stream.local = local;
+    stream.unidirectional = unidirectional(id);
+    stream.accepted = accepted;
+    stream.can_send = !stream.unidirectional || local;
+    stream.can_receive = !stream.unidirectional || !local;
+    stream.send_closed = !stream.can_send;
+    stream.receive_closed = !stream.can_receive;
+    stream.send_limit = send_limit(manager.config, local, stream.unidirectional);
+    stream.receive_limit = receive_limit(manager.config, local, stream.unidirectional);
+    stream.accept_sequence = manager.accept_sequence;
+    manager.accept_sequence = manager.accept_sequence + 1;
+    manager.storage.streams[index] = stream;
+    clear_slot(manager, index);
+    manager.active_streams = manager.active_streams + 1;
+}
+
+fun create_error(code: u8) CreateResult {
+    var result: CreateResult;
+    result.status = STATUS_ERROR;
+    result.error = code;
+    ret result;
+}
+
+pub fun open(manager: *Manager, direction: u8) CreateResult {
+    if (manager == nil || !manager.valid || manager.closing) { ret create_error(ERROR_STATE); }
+    if (direction != DIRECTION_BIDIRECTIONAL && direction != DIRECTION_UNIDIRECTIONAL) {
+        ret create_error(ERROR_DIRECTION);
+    }
+    val uni: bool = direction == DIRECTION_UNIDIRECTIONAL;
+    var opened: u64 = manager.local_bidirectional_opened;
+    var limit: u64 = manager.config.local_bidirectional_limit;
+    if (uni) {
+        opened = manager.local_unidirectional_opened;
+        limit = manager.config.local_unidirectional_limit;
+    }
+    if (opened >= limit) {
+        var blocked: CreateResult = create_error(ERROR_STREAM_LIMIT);
+        blocked.status = STATUS_BLOCKED;
+        blocked.stream_limit_blocked = true;
+        ret blocked;
+    }
+    val index: usize = free_index(manager);
+    if (index == manager.storage.stream_capacity) {
+        var blocked: CreateResult = create_error(ERROR_CAPACITY);
+        blocked.status = STATUS_BLOCKED;
+        blocked.storage_blocked = true;
+        ret blocked;
+    }
+    var initiator: u64 = 0;
+    if (manager.config.role == ROLE_SERVER) { initiator = 1; }
+    var direction_bit: u64 = 0;
+    if (uni) { direction_bit = 2; }
+    val id: u64 = opened * 4 + initiator + direction_bit;
+    initialize_stream(manager, index, id, true, true);
+    if (uni) { manager.local_unidirectional_opened = opened + 1; }
+    or { manager.local_bidirectional_opened = opened + 1; }
+    var result: CreateResult;
+    result.status = STATUS_OK;
+    result.handle = handle(manager, index);
+    ret result;
+}
+
+fun peer_open(manager: *Manager, id: u64) CreateResult {
+    if (id > varint.MAX || local_initiator(manager, id)) { ret create_error(ERROR_DIRECTION); }
+    val existing: usize = stream_index(manager, id);
+    if (existing < manager.storage.stream_capacity) {
+        var found: CreateResult;
+        found.status = STATUS_OK;
+        found.handle = handle(manager, existing);
+        ret found;
+    }
+    val uni: bool = unidirectional(id);
+    val ordinal: u64 = id >> 2;
+    var opened: u64 = manager.peer_bidirectional_opened;
+    var limit: u64 = manager.config.peer_bidirectional_limit;
+    if (uni) {
+        opened = manager.peer_unidirectional_opened;
+        limit = manager.config.peer_unidirectional_limit;
+    }
+    if (ordinal >= limit || ordinal < opened) { ret create_error(ERROR_STREAM_LIMIT); }
+    val needed: u64 = ordinal + 1 - opened;
+    if (needed > manager.storage.stream_capacity::u64 - manager.active_streams::u64) {
+        ret create_error(ERROR_CAPACITY);
+    }
+    var created: u64 = 0;
+    var requested: Handle;
+    var initiator: u64 = 0;
+    if (manager.config.role == ROLE_CLIENT) { initiator = 1; }
+    var direction_bit: u64 = 0;
+    if (uni) { direction_bit = 2; }
+    for (created < needed) {
+        val index: usize = free_index(manager);
+        val stream_id: u64 = (opened + created) * 4 + initiator + direction_bit;
+        initialize_stream(manager, index, stream_id, false, false);
+        if (stream_id == id) { requested = handle(manager, index); }
+        created = created + 1;
+    }
+    if (uni) { manager.peer_unidirectional_opened = ordinal + 1; }
+    or { manager.peer_bidirectional_opened = ordinal + 1; }
+    var result: CreateResult;
+    result.status = STATUS_OK;
+    result.handle = requested;
+    ret result;
+}
+
+pub fun accept(manager: *Manager) CreateResult {
+    if (manager == nil || !manager.valid) { ret create_error(ERROR_STATE); }
+    var chosen: usize = manager.storage.stream_capacity;
+    var sequence: u64 = 0;
+    var i: usize = 0;
+    for (i < manager.storage.stream_capacity) {
+        val stream: Stream = manager.storage.streams[i];
+        if (stream.active && !stream.local && !stream.accepted &&
+            (chosen == manager.storage.stream_capacity || stream.accept_sequence < sequence)) {
+            chosen = i;
+            sequence = stream.accept_sequence;
+        }
+        i = i + 1;
+    }
+    if (chosen == manager.storage.stream_capacity) {
+        var empty: CreateResult;
+        empty.status = STATUS_EMPTY;
+        ret empty;
+    }
+    manager.storage.streams[chosen].accepted = true;
+    var result: CreateResult;
+    result.status = STATUS_OK;
+    result.handle = handle(manager, chosen);
+    ret result;
+}
+
+fun operation_error(code: u8) OperationResult {
+    var result: OperationResult;
+    result.status = STATUS_ERROR;
+    result.error = code;
+    ret result;
+}
+
+pub fun update_max_data(manager: *Manager, maximum: u64) OperationResult {
+    if (manager == nil || !manager.valid) { ret operation_error(ERROR_STATE); }
+    if (maximum > varint.MAX) { ret operation_error(ERROR_OVERFLOW); }
+    if (maximum > manager.send_max_data) { manager.send_max_data = maximum; }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun update_max_stream_data(manager: *Manager, value: Handle, maximum: u64) OperationResult {
+    if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (!stream.can_send) { ret operation_error(ERROR_DIRECTION); }
+    if (maximum > varint.MAX) { ret operation_error(ERROR_OVERFLOW); }
+    if (maximum > stream.send_limit) { stream.send_limit = maximum; }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun update_max_streams(manager: *Manager, direction: u8, maximum: u64) OperationResult {
+    if (manager == nil || !manager.valid) { ret operation_error(ERROR_STATE); }
+    if (maximum > MAX_STREAM_COUNT) { ret operation_error(ERROR_OVERFLOW); }
+    if (direction == DIRECTION_BIDIRECTIONAL) {
+        if (maximum > manager.config.local_bidirectional_limit) { manager.config.local_bidirectional_limit = maximum; }
+    } or (direction == DIRECTION_UNIDIRECTIONAL) {
+        if (maximum > manager.config.local_unidirectional_limit) { manager.config.local_unidirectional_limit = maximum; }
+    } or { ret operation_error(ERROR_DIRECTION); }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun write(manager: *Manager, value: Handle, data: *u8, length: usize) WriteResult {
+    var result: WriteResult;
+    if (!valid_handle(manager, value) || manager.closing) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (!stream.can_send) { result.status = STATUS_ERROR; result.error = ERROR_DIRECTION; ret result; }
+    if (stream.send_cancelled || stream.stop_received) { result.status = STATUS_CANCELLED; result.error = ERROR_CANCELLED; ret result; }
+    if (stream.send_finished || stream.send_closed) { result.status = STATUS_FINISHED; ret result; }
+    if (length > 0 && data == nil) { result.status = STATUS_ERROR; result.error = ERROR_STATE; ret result; }
+    val storage_allowance: usize = manager.storage.send_stride - stream.send_used;
+    var stream_allowance: u64 = 0;
+    if (stream.send_write < stream.send_limit) { stream_allowance = stream.send_limit - stream.send_write; }
+    var connection_allowance: u64 = 0;
+    if (manager.send_committed < manager.send_max_data) { connection_allowance = manager.send_max_data - manager.send_committed; }
+    var count: usize = minimum_size(length, storage_allowance);
+    if (count::u64 > stream_allowance) { count = stream_allowance::usize; }
+    if (count::u64 > connection_allowance) { count = connection_allowance::usize; }
+    if (count::u64 > varint.MAX - stream.send_write) { count = (varint.MAX - stream.send_write)::usize; }
+    var i: usize = 0;
+    for (i < count) {
+        val offset: u64 = stream.send_write + i::u64;
+        val position: usize = value.index * manager.storage.send_stride + (offset % manager.storage.send_stride::u64)::usize;
+        manager.storage.send_data[position] = data[i];
+        manager.storage.send_pending[position] = true;
+        manager.storage.send_acked[position] = false;
+        manager.storage.send_inflight[position] = 0;
+        i = i + 1;
+    }
+    stream.send_write = stream.send_write + count::u64;
+    stream.send_used = stream.send_used + count;
+    manager.send_committed = manager.send_committed + count::u64;
+    result.count = count;
+    result.connection_blocked = count < length && connection_allowance <= count::u64;
+    result.stream_blocked = count < length && stream_allowance <= count::u64;
+    result.storage_blocked = count < length && storage_allowance <= count;
+    if (count == length) { result.status = STATUS_OK; }
+    or { result.status = STATUS_BLOCKED; }
+    ret result;
+}
+
+pub fun finish(manager: *Manager, value: Handle) OperationResult {
+    if (!valid_handle(manager, value) || manager.closing) { ret operation_error(ERROR_TOKEN); }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (!stream.can_send) { ret operation_error(ERROR_DIRECTION); }
+    if (stream.send_cancelled || stream.stop_received) { ret operation_error(ERROR_CANCELLED); }
+    if (!stream.send_finished) {
+        stream.send_finished = true;
+        stream.fin_pending = true;
+    }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+fun cancel_send_inner(stream: *Stream, error_code: u64) {
+    stream.send_cancelled = true;
+    stream.send_error = error_code;
+    stream.reset_pending = !stream.reset_acked;
+    stream.fin_pending = false;
+}
+
+pub fun cancel_send(manager: *Manager, value: Handle, error_code: u64) OperationResult {
+    if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
+    if (error_code > varint.MAX) { ret operation_error(ERROR_OVERFLOW); }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (!stream.can_send) { ret operation_error(ERROR_DIRECTION); }
+    if (!stream.send_closed && !stream.send_cancelled) { cancel_send_inner(stream, error_code); }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+fun grant_connection(manager: *Manager, count: u64) {
+    manager.receive_max_data = minimum(varint.MAX, manager.receive_max_data + minimum(count, varint.MAX - manager.receive_max_data));
+}
+
+fun clear_receive(manager: *Manager, index: usize) {
+    var i: usize = 0;
+    val start: usize = index * manager.storage.receive_stride;
+    for (i < manager.storage.receive_stride) {
+        manager.storage.receive_present[start + i] = false;
+        i = i + 1;
+    }
+}
+
+pub fun cancel_receive(manager: *Manager, value: Handle, error_code: u64) OperationResult {
+    if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
+    if (error_code > varint.MAX) { ret operation_error(ERROR_OVERFLOW); }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (!stream.can_receive) { ret operation_error(ERROR_DIRECTION); }
+    if (!stream.receive_closed && !stream.receive_cancelled) {
+        val discarded: u64 = stream.receive_highest - stream.receive_read;
+        grant_connection(manager, discarded);
+        stream.receive_read = stream.receive_highest;
+        clear_receive(manager, value.index);
+        stream.receive_cancelled = true;
+        stream.receive_error = error_code;
+        stream.stop_pending = true;
+    }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    result.receive_max_data = manager.receive_max_data;
+    ret result;
+}
+
+fun attempt_token(manager: *Manager, index: usize) AttemptToken {
+    var value: AttemptToken;
+    value.source = manager.config.source;
+    value.index = index;
+    value.generation = manager.storage.attempts[index].generation;
+    ret value;
+}
+
+fun valid_attempt(manager: *Manager, value: AttemptToken, state: u8) bool {
+    if (manager == nil || !manager.valid || value.source != manager.config.source ||
+        value.index >= manager.storage.attempt_capacity) { ret false; }
+    val attempt: Attempt = manager.storage.attempts[value.index];
+    ret attempt.generation == value.generation && attempt.state == state;
+}
+
+fun free_attempt(manager: *Manager, index: usize) {
+    val attempt: *Attempt = ?manager.storage.attempts[index];
+    attempt.state = ATTEMPT_FREE;
+    attempt.generation = next_generation(attempt.generation);
+}
+
+fun prepared_error(status: u8, code: u8) Prepared {
+    var result: Prepared;
+    result.status = status;
+    result.error = code;
+    ret result;
+}
+
+pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: bool) Prepared {
+    if (!valid_handle(manager, value) || manager.closing) { ret prepared_error(STATUS_ERROR, ERROR_TOKEN); }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (stream.has_prepared) { ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY); }
+    var attempt_index: usize = 0;
+    for (attempt_index < manager.storage.attempt_capacity && manager.storage.attempts[attempt_index].state != ATTEMPT_FREE) {
+        attempt_index = attempt_index + 1;
+    }
+    if (attempt_index == manager.storage.attempt_capacity) { ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY); }
+    var kind: u8 = 0;
+    var offset: u64 = 0;
+    var length: usize = 0;
+    var include_fin: bool = false;
+    if ((stream.reset_pending || (probe && stream.reset_inflight > 0 && !stream.reset_acked)) &&
+        stream.reset_inflight < 255) {
+        kind = SEND_RESET;
+    } or ((stream.stop_pending || (probe && stream.stop_inflight > 0 && !stream.stop_acked)) &&
+        stream.stop_inflight < 255) {
+        kind = SEND_STOP;
+    } or (!stream.send_cancelled && stream.can_send && maximum_bytes > 0) {
+        var cursor: u64 = stream.send_base;
+        for (cursor < stream.send_write) {
+            val position: usize = value.index * manager.storage.send_stride +
+                (cursor % manager.storage.send_stride::u64)::usize;
+            val eligible: bool = manager.storage.send_pending[position] ||
+                (probe && !manager.storage.send_acked[position]);
+            if (eligible && manager.storage.send_inflight[position] < 255) { brk; }
+            cursor = cursor + 1;
+        }
+        if (cursor < stream.send_write) {
+            offset = cursor;
+            val ring: usize = (cursor % manager.storage.send_stride::u64)::usize;
+            val contiguous: usize = manager.storage.send_stride - ring;
+            val remaining: u64 = stream.send_write - cursor;
+            length = minimum_size(maximum_bytes, contiguous);
+            if (length::u64 > remaining) { length = remaining::usize; }
+            var i: usize = 0;
+            for (i < length) {
+                val position: usize = value.index * manager.storage.send_stride + ring + i;
+                val eligible: bool = manager.storage.send_pending[position] ||
+                    (probe && !manager.storage.send_acked[position]);
+                if (!eligible || manager.storage.send_inflight[position] == 255) { length = i; brk; }
+                i = i + 1;
+            }
+            if (length > 0) {
+                kind = SEND_STREAM;
+                include_fin = offset + length::u64 == stream.send_write && stream.send_finished &&
+                    !stream.fin_acked && stream.fin_inflight < 255 && (stream.fin_pending || probe);
+            }
+        } or (stream.send_finished && !stream.fin_acked &&
+            (stream.fin_pending || (probe && stream.fin_inflight > 0)) && stream.fin_inflight < 255) {
+            kind = SEND_STREAM;
+            offset = stream.send_write;
+            include_fin = true;
+        }
+    }
+    if (kind == 0) {
+        var empty: Prepared;
+        empty.status = STATUS_EMPTY;
+        ret empty;
+    }
+    val attempt: *Attempt = ?manager.storage.attempts[attempt_index];
+    attempt.stream_index = value.index;
+    attempt.stream_generation = value.generation;
+    attempt.offset = offset;
+    attempt.length = length;
+    attempt.kind = kind;
+    attempt.fin = include_fin;
+    attempt.state = ATTEMPT_RESERVED;
+    stream.has_prepared = true;
+    var result: Prepared;
+    result.ok = true;
+    result.status = STATUS_OK;
+    result.token = attempt_token(manager, attempt_index);
+    result.handle = value;
+    result.kind = kind;
+    result.offset = offset;
+    result.fin = include_fin;
+    if (kind == SEND_STREAM && length > 0) {
+        result.data.data = ?manager.storage.send_data[value.index * manager.storage.send_stride +
+            (offset % manager.storage.send_stride::u64)::usize];
+        result.data.len = length;
+    }
+    if (kind == SEND_RESET) {
+        result.final_size = stream.send_write;
+        result.application_error = stream.send_error;
+    }
+    if (kind == SEND_STOP) { result.application_error = stream.receive_error; }
+    ret result;
+}
+
+pub fun cancel_prepared(manager: *Manager, prepared: Prepared) OperationResult {
+    if (!prepared.ok || !valid_attempt(manager, prepared.token, ATTEMPT_RESERVED)) {
+        var stale: OperationResult = operation_error(ERROR_TOKEN);
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    val attempt: Attempt = manager.storage.attempts[prepared.token.index];
+    if (attempt.stream_index < manager.storage.stream_capacity) {
+        val stream: *Stream = ?manager.storage.streams[attempt.stream_index];
+        if (stream.active && stream.generation == attempt.stream_generation) { stream.has_prepared = false; }
+    }
+    free_attempt(manager, prepared.token.index);
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun publish(manager: *Manager, prepared: Prepared) OperationResult {
+    if (manager != nil && manager.closing) { ret operation_error(ERROR_STATE); }
+    if (!prepared.ok || !valid_attempt(manager, prepared.token, ATTEMPT_RESERVED)) {
+        var stale: OperationResult = operation_error(ERROR_TOKEN);
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    val attempt: *Attempt = ?manager.storage.attempts[prepared.token.index];
+    if (attempt.stream_index >= manager.storage.stream_capacity) { ret operation_error(ERROR_TOKEN); }
+    val stream: *Stream = ?manager.storage.streams[attempt.stream_index];
+    if (!stream.active || stream.generation != attempt.stream_generation || !stream.has_prepared) {
+        ret operation_error(ERROR_TOKEN);
+    }
+    if (attempt.kind == SEND_STREAM) {
+        var i: usize = 0;
+        for (i < attempt.length) {
+            val offset: u64 = attempt.offset + i::u64;
+            val position: usize = attempt.stream_index * manager.storage.send_stride +
+                (offset % manager.storage.send_stride::u64)::usize;
+            manager.storage.send_pending[position] = false;
+            manager.storage.send_inflight[position] = manager.storage.send_inflight[position] + 1;
+            i = i + 1;
+        }
+        if (attempt.fin) {
+            stream.fin_pending = false;
+            stream.fin_inflight = stream.fin_inflight + 1;
+        }
+    } or (attempt.kind == SEND_RESET) {
+        stream.reset_pending = false;
+        stream.reset_inflight = stream.reset_inflight + 1;
+    } or {
+        stream.stop_pending = false;
+        stream.stop_inflight = stream.stop_inflight + 1;
+    }
+    stream.has_prepared = false;
+    stream.active_attempts = stream.active_attempts + 1;
+    manager.active_attempts = manager.active_attempts + 1;
+    attempt.state = ATTEMPT_ACTIVE;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+fun reclaim_send(manager: *Manager, index: usize) {
+    val stream: *Stream = ?manager.storage.streams[index];
+    for (stream.send_base < stream.send_write) {
+        val position: usize = index * manager.storage.send_stride +
+            (stream.send_base % manager.storage.send_stride::u64)::usize;
+        if (!manager.storage.send_acked[position] || manager.storage.send_inflight[position] != 0) { brk; }
+        manager.storage.send_acked[position] = false;
+        manager.storage.send_pending[position] = false;
+        manager.storage.send_inflight[position] = 0;
+        stream.send_base = stream.send_base + 1;
+        if (stream.send_used > 0) { stream.send_used = stream.send_used - 1; }
+    }
+    if (stream.fin_acked && stream.send_base == stream.send_write) { stream.send_closed = true; }
+    if (stream.reset_acked && stream.active_attempts == 0) {
+        stream.send_base = stream.send_write;
+        stream.send_used = 0;
+        stream.send_closed = true;
+    }
+}
+
+pub fun on_terminal(manager: *Manager, value: AttemptToken, terminal: u8) OperationResult {
+    if (!valid_attempt(manager, value, ATTEMPT_ACTIVE) ||
+        (terminal != TERMINAL_ACKED && terminal != TERMINAL_LOST)) {
+        var stale: OperationResult = operation_error(ERROR_TOKEN);
+        stale.status = STATUS_STALE;
+        ret stale;
+    }
+    val attempt: Attempt = manager.storage.attempts[value.index];
+    if (attempt.stream_index >= manager.storage.stream_capacity) { ret operation_error(ERROR_TOKEN); }
+    val stream: *Stream = ?manager.storage.streams[attempt.stream_index];
+    if (!stream.active || stream.generation != attempt.stream_generation) { ret operation_error(ERROR_TOKEN); }
+    if (attempt.kind == SEND_STREAM) {
+        var i: usize = 0;
+        for (i < attempt.length) {
+            val offset: u64 = attempt.offset + i::u64;
+            val position: usize = attempt.stream_index * manager.storage.send_stride +
+                (offset % manager.storage.send_stride::u64)::usize;
+            if (manager.storage.send_inflight[position] > 0) {
+                manager.storage.send_inflight[position] = manager.storage.send_inflight[position] - 1;
+            }
+            if (terminal == TERMINAL_ACKED) {
+                manager.storage.send_acked[position] = true;
+                manager.storage.send_pending[position] = false;
+            } or (!manager.storage.send_acked[position] && manager.storage.send_inflight[position] == 0 &&
+                !stream.send_cancelled) {
+                manager.storage.send_pending[position] = true;
+            }
+            i = i + 1;
+        }
+        if (attempt.fin) {
+            if (stream.fin_inflight > 0) { stream.fin_inflight = stream.fin_inflight - 1; }
+            if (terminal == TERMINAL_ACKED) {
+                stream.fin_acked = true;
+                stream.fin_pending = false;
+            } or (!stream.fin_acked && stream.fin_inflight == 0 && !stream.send_cancelled) {
+                stream.fin_pending = true;
+            }
+        }
+    } or (attempt.kind == SEND_RESET) {
+        if (stream.reset_inflight > 0) { stream.reset_inflight = stream.reset_inflight - 1; }
+        if (terminal == TERMINAL_ACKED) {
+            stream.reset_acked = true;
+            stream.reset_pending = false;
+        } or (!manager.closing && !stream.reset_acked && stream.reset_inflight == 0) {
+            stream.reset_pending = true;
+        }
+    } or {
+        if (stream.stop_inflight > 0) { stream.stop_inflight = stream.stop_inflight - 1; }
+        if (terminal == TERMINAL_ACKED) {
+            stream.stop_acked = true;
+            stream.stop_pending = false;
+        } or (!manager.closing && !stream.stop_acked && stream.stop_inflight == 0) {
+            stream.stop_pending = true;
+        }
+    }
+    if (stream.active_attempts > 0) { stream.active_attempts = stream.active_attempts - 1; }
+    if (manager.active_attempts > 0) { manager.active_attempts = manager.active_attempts - 1; }
+    free_attempt(manager, value.index);
+    reclaim_send(manager, attempt.stream_index);
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+fun receive_error(code: u8) ReceiveResult {
+    var result: ReceiveResult;
+    result.error = code;
+    ret result;
+}
+
+fun peer_preflight(manager: *Manager, id: u64, needed: *u64) u8 {
+    if (id > varint.MAX || local_initiator(manager, id)) { ret ERROR_DIRECTION; }
+    val uni: bool = unidirectional(id);
+    val ordinal: u64 = id >> 2;
+    var opened: u64 = manager.peer_bidirectional_opened;
+    var limit: u64 = manager.config.peer_bidirectional_limit;
+    if (uni) {
+        opened = manager.peer_unidirectional_opened;
+        limit = manager.config.peer_unidirectional_limit;
+    }
+    if (ordinal >= limit || ordinal < opened) { ret ERROR_STREAM_LIMIT; }
+    needed[0] = ordinal + 1 - opened;
+    if (needed[0] > manager.storage.stream_capacity::u64 - manager.active_streams::u64) { ret ERROR_CAPACITY; }
+    ret ERROR_NONE;
+}
+
+pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
+                       length: usize, fin: bool) ReceiveResult {
+    if (manager == nil || !manager.valid || manager.closing || id > varint.MAX ||
+        (length > 0 && data == nil)) {
+        ret receive_error(ERROR_STATE);
+    }
+    if (offset > varint.MAX || length::u64 > varint.MAX - offset) { ret receive_error(ERROR_OVERFLOW); }
+    var index: usize = stream_index(manager, id);
+    val provisional: bool = index == manager.storage.stream_capacity;
+    var needed: u64 = 0;
+    if (provisional) {
+        val code: u8 = peer_preflight(manager, id, ?needed);
+        if (code != ERROR_NONE) { ret receive_error(code); }
+    }
+    var current_final_known: bool = false;
+    var current_final_size: u64 = 0;
+    var current_highest: u64 = 0;
+    var current_read: u64 = 0;
+    var current_limit: u64 = receive_limit(manager.config, false, unidirectional(id));
+    var discarding: bool = false;
+    if (!provisional) {
+        val current: Stream = manager.storage.streams[index];
+        if (!current.can_receive) { ret receive_error(ERROR_DIRECTION); }
+        current_final_known = current.final_known;
+        current_final_size = current.final_size;
+        current_highest = current.receive_highest;
+        current_read = current.receive_read;
+        current_limit = current.receive_limit;
+        discarding = current.receive_cancelled || current.reset_received;
+    }
+    val ending: u64 = offset + length::u64;
+    if (current_final_known && (ending > current_final_size || (fin && ending != current_final_size))) {
+        ret receive_error(ERROR_FINAL_SIZE);
+    }
+    if (fin && current_highest > ending) { ret receive_error(ERROR_FINAL_SIZE); }
+    if (ending > current_limit) { ret receive_error(ERROR_FLOW_CONTROL); }
+    var delta: u64 = 0;
+    if (ending > current_highest) { delta = ending - current_highest; }
+    if (delta > manager.receive_max_data - minimum(manager.receive_committed, manager.receive_max_data)) {
+        ret receive_error(ERROR_FLOW_CONTROL);
+    }
+    var copy_offset: u64 = offset;
+    var copy_start: usize = 0;
+    if (copy_offset < current_read) {
+        val skipped: u64 = minimum(ending, current_read) - copy_offset;
+        copy_offset = copy_offset + skipped;
+        copy_start = skipped::usize;
+    }
+    val copy_length: usize = length - copy_start;
+    if (!discarding && copy_length > 0 && ending - current_read > manager.storage.receive_stride::u64) {
+        ret receive_error(ERROR_CAPACITY);
+    }
+    if (!discarding && !provisional) {
+        var i: usize = 0;
+        for (i < copy_length) {
+            val current: u64 = copy_offset + i::u64;
+            val position: usize = index * manager.storage.receive_stride +
+                (current % manager.storage.receive_stride::u64)::usize;
+            if (manager.storage.receive_present[position] &&
+                manager.storage.receive_data[position] != data[copy_start + i]) {
+                ret receive_error(ERROR_DATA_CONFLICT);
+            }
+            i = i + 1;
+        }
+    }
+    var new_streams: usize = 0;
+    if (provisional) {
+        val before: usize = manager.active_streams;
+        val created: CreateResult = peer_open(manager, id);
+        if (created.status != STATUS_OK) { ret receive_error(created.error); }
+        index = created.handle.index;
+        new_streams = manager.active_streams - before;
+    }
+    val stream: *Stream = ?manager.storage.streams[index];
+    if (!stream.receive_cancelled) {
+        var i: usize = 0;
+        for (i < copy_length) {
+            val current: u64 = copy_offset + i::u64;
+            val position: usize = index * manager.storage.receive_stride +
+                (current % manager.storage.receive_stride::u64)::usize;
+            manager.storage.receive_data[position] = data[copy_start + i];
+            manager.storage.receive_present[position] = true;
+            i = i + 1;
+        }
+    }
+    if (ending > stream.receive_highest) { stream.receive_highest = ending; }
+    manager.receive_committed = manager.receive_committed + delta;
+    if (stream.receive_cancelled && delta > 0) {
+        grant_connection(manager, delta);
+        stream.receive_read = stream.receive_highest;
+    }
+    if (fin) {
+        stream.final_known = true;
+        stream.final_size = ending;
+        if (stream.receive_cancelled || stream.receive_read == ending) { stream.receive_closed = true; }
+    }
+    var result: ReceiveResult;
+    result.ok = true;
+    result.handle = handle(manager, index);
+    result.new_streams = new_streams;
+    result.connection_delta = delta;
+    ret result;
+}
+
+pub fun receive_reset(manager: *Manager, id: u64, error_code: u64, final_size: u64) ReceiveResult {
+    if (manager == nil || !manager.valid || manager.closing || id > varint.MAX ||
+        error_code > varint.MAX || final_size > varint.MAX) { ret receive_error(ERROR_STATE); }
+    var index: usize = stream_index(manager, id);
+    val provisional: bool = index == manager.storage.stream_capacity;
+    var needed: u64 = 0;
+    if (provisional) {
+        val code: u8 = peer_preflight(manager, id, ?needed);
+        if (code != ERROR_NONE) { ret receive_error(code); }
+    }
+    var current_final_known: bool = false;
+    var current_final_size: u64 = 0;
+    var current_highest: u64 = 0;
+    var current_limit: u64 = receive_limit(manager.config, false, unidirectional(id));
+    if (!provisional) {
+        val current: Stream = manager.storage.streams[index];
+        if (!current.can_receive) { ret receive_error(ERROR_DIRECTION); }
+        current_final_known = current.final_known;
+        current_final_size = current.final_size;
+        current_highest = current.receive_highest;
+        current_limit = current.receive_limit;
+    }
+    if ((current_final_known && current_final_size != final_size) || current_highest > final_size) {
+        ret receive_error(ERROR_FINAL_SIZE);
+    }
+    if (final_size > current_limit) { ret receive_error(ERROR_FLOW_CONTROL); }
+    val delta: u64 = final_size - current_highest;
+    if (delta > manager.receive_max_data - minimum(manager.receive_committed, manager.receive_max_data)) {
+        ret receive_error(ERROR_FLOW_CONTROL);
+    }
+    var new_streams: usize = 0;
+    if (provisional) {
+        val before: usize = manager.active_streams;
+        val created: CreateResult = peer_open(manager, id);
+        if (created.status != STATUS_OK) { ret receive_error(created.error); }
+        index = created.handle.index;
+        new_streams = manager.active_streams - before;
+    }
+    val stream: *Stream = ?manager.storage.streams[index];
+    stream.final_known = true;
+    stream.final_size = final_size;
+    stream.receive_highest = final_size;
+    if (!stream.reset_received) { stream.receive_error = error_code; }
+    stream.reset_received = true;
+    manager.receive_committed = manager.receive_committed + delta;
+    if (stream.receive_cancelled) {
+        grant_connection(manager, delta);
+        stream.receive_read = final_size;
+        stream.receive_closed = true;
+        clear_receive(manager, index);
+    }
+    var result: ReceiveResult;
+    result.ok = true;
+    result.handle = handle(manager, index);
+    result.new_streams = new_streams;
+    result.connection_delta = delta;
+    ret result;
+}
+
+pub fun acknowledge_reset(manager: *Manager, value: Handle) OperationResult {
+    if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (!stream.reset_received) { ret operation_error(ERROR_STATE); }
+    val discarded: u64 = stream.final_size - stream.receive_read;
+    grant_connection(manager, discarded);
+    stream.receive_read = stream.final_size;
+    stream.receive_closed = true;
+    clear_receive(manager, value.index);
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    result.receive_max_data = manager.receive_max_data;
+    ret result;
+}
+
+pub fun receive_stop(manager: *Manager, id: u64, error_code: u64) ReceiveResult {
+    if (manager == nil || !manager.valid || manager.closing || id > varint.MAX || error_code > varint.MAX) {
+        ret receive_error(ERROR_STATE);
+    }
+    var index: usize = stream_index(manager, id);
+    if (index == manager.storage.stream_capacity) {
+        if (unidirectional(id)) { ret receive_error(ERROR_DIRECTION); }
+        var needed: u64 = 0;
+        val code: u8 = peer_preflight(manager, id, ?needed);
+        if (code != ERROR_NONE) { ret receive_error(code); }
+        val created: CreateResult = peer_open(manager, id);
+        if (created.status != STATUS_OK) { ret receive_error(created.error); }
+        index = created.handle.index;
+    }
+    val stream: *Stream = ?manager.storage.streams[index];
+    if (!stream.can_send) { ret receive_error(ERROR_DIRECTION); }
+    if (!stream.stop_received && !stream.send_closed) {
+        stream.stop_received = true;
+        cancel_send_inner(stream, error_code);
+    }
+    var result: ReceiveResult;
+    result.ok = true;
+    result.handle = handle(manager, index);
+    ret result;
+}
+
+pub fun read(manager: *Manager, value: Handle, output: *u8, capacity: usize) ReadResult {
+    var result: ReadResult;
+    if (!valid_handle(manager, value) || (capacity > 0 && output == nil)) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_TOKEN;
+        ret result;
+    }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (!stream.can_receive) { result.status = STATUS_ERROR; result.error = ERROR_DIRECTION; ret result; }
+    if (stream.reset_received && !stream.receive_closed) {
+        result.status = STATUS_RESET;
+        result.application_error = stream.receive_error;
+        result.final_size = stream.final_size;
+        ret result;
+    }
+    if (stream.receive_cancelled && !stream.receive_closed) {
+        result.status = STATUS_CANCELLED;
+        result.application_error = stream.receive_error;
+        ret result;
+    }
+    var count: usize = 0;
+    for (count < capacity && stream.receive_read + count::u64 < stream.receive_highest) {
+        val offset: u64 = stream.receive_read + count::u64;
+        val position: usize = value.index * manager.storage.receive_stride +
+            (offset % manager.storage.receive_stride::u64)::usize;
+        if (!manager.storage.receive_present[position]) { brk; }
+        output[count] = manager.storage.receive_data[position];
+        count = count + 1;
+    }
+    var i: usize = 0;
+    for (i < count) {
+        val offset: u64 = stream.receive_read + i::u64;
+        val position: usize = value.index * manager.storage.receive_stride +
+            (offset % manager.storage.receive_stride::u64)::usize;
+        manager.storage.receive_present[position] = false;
+        i = i + 1;
+    }
+    stream.receive_read = stream.receive_read + count::u64;
+    if (count > 0) {
+        grant_connection(manager, count::u64);
+        stream.receive_limit = minimum(varint.MAX,
+            stream.receive_limit + minimum(count::u64, varint.MAX - stream.receive_limit));
+    }
+    if (stream.final_known && stream.receive_read == stream.final_size) {
+        stream.receive_closed = true;
+        result.fin = true;
+    }
+    result.count = count;
+    result.final_size = stream.final_size;
+    result.receive_max_data = manager.receive_max_data;
+    result.receive_max_stream_data = stream.receive_limit;
+    if (result.fin) { result.status = STATUS_FINISHED; }
+    or (count > 0) { result.status = STATUS_OK; }
+    or { result.status = STATUS_EMPTY; }
+    ret result;
+}
+
+pub fun snapshot(manager: *Manager, value: Handle) Snapshot {
+    var result: Snapshot;
+    if (!valid_handle(manager, value)) { result.error = ERROR_TOKEN; ret result; }
+    val stream: Stream = manager.storage.streams[value.index];
+    result.ok = true;
+    result.id = stream.id;
+    result.send_offset = stream.send_write;
+    result.receive_offset = stream.receive_read;
+    result.final_size = stream.final_size;
+    result.send_error = stream.send_error;
+    result.receive_error = stream.receive_error;
+    result.send_closed = stream.send_closed;
+    result.receive_closed = stream.receive_closed;
+    result.send_cancelled = stream.send_cancelled;
+    result.receive_cancelled = stream.receive_cancelled;
+    result.final_known = stream.final_known;
+    ret result;
+}
+
+pub fun release(manager: *Manager, value: Handle) OperationResult {
+    if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (!stream.send_closed || !stream.receive_closed || stream.active_attempts != 0 || stream.has_prepared ||
+        (stream.stop_received && !stream.reset_acked) || (stream.receive_cancelled && !stream.stop_acked && !stream.reset_received)) {
+        ret operation_error(ERROR_STATE);
+    }
+    val peer: bool = !stream.local;
+    val uni: bool = stream.unidirectional;
+    stream.active = false;
+    stream.generation = next_generation(stream.generation);
+    if (manager.active_streams > 0) { manager.active_streams = manager.active_streams - 1; }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    if (peer) {
+        if (uni && manager.config.peer_unidirectional_limit < MAX_STREAM_COUNT) {
+            manager.config.peer_unidirectional_limit = manager.config.peer_unidirectional_limit + 1;
+            result.peer_max_streams = manager.config.peer_unidirectional_limit;
+        }
+        if (!uni && manager.config.peer_bidirectional_limit < MAX_STREAM_COUNT) {
+            manager.config.peer_bidirectional_limit = manager.config.peer_bidirectional_limit + 1;
+            result.peer_max_streams = manager.config.peer_bidirectional_limit;
+        }
+    }
+    ret result;
+}
+
+pub fun begin_close(manager: *Manager) OperationResult {
+    if (manager == nil || !manager.valid) { ret operation_error(ERROR_STATE); }
+    manager.closing = true;
+    var i: usize = 0;
+    for (i < manager.storage.stream_capacity) {
+        val stream: *Stream = ?manager.storage.streams[i];
+        if (stream.active) {
+            stream.send_cancelled = true;
+            stream.receive_cancelled = true;
+        }
+        i = i + 1;
+    }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun finish_close(manager: *Manager) OperationResult {
+    if (manager == nil || !manager.valid || !manager.closing) { ret operation_error(ERROR_STATE); }
+    if (manager.active_attempts != 0) { ret operation_error(ERROR_CAPACITY); }
+    var i: usize = 0;
+    for (i < manager.storage.attempt_capacity) {
+        if (manager.storage.attempts[i].state != ATTEMPT_FREE) { ret operation_error(ERROR_CAPACITY); }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < manager.storage.stream_capacity) {
+        if (manager.storage.streams[i].active) {
+            manager.storage.streams[i].active = false;
+            manager.storage.streams[i].generation = next_generation(manager.storage.streams[i].generation);
+        }
+        i = i + 1;
+    }
+    manager.active_streams = 0;
+    manager.valid = false;
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
 }
 
 test "quic.stream.stream: stream id bits expose ownership and direction" {
