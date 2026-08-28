@@ -78,6 +78,7 @@ pub rec Stream {
     receive_read: u64;
     receive_highest: u64;
     receive_limit: u64;
+    receive_uncredited: u64;
     final_size: u64;
     send_used: usize;
     active_attempts: usize;
@@ -207,6 +208,7 @@ pub rec ReadResult {
     application_error: u64;
     receive_max_data: u64;
     receive_max_stream_data: u64;
+    receive_uncredited: u64;
     fin: bool;
 }
 
@@ -257,6 +259,7 @@ pub rec Snapshot {
     send_cancelled: bool;
     receive_cancelled: bool;
     final_known: bool;
+    receive_uncredited: u64;
 }
 
 pub fun initiated_by_server(id: u64) bool {
@@ -849,6 +852,23 @@ fun grant_connection(manager: *Manager, count: u64) {
     }
 }
 
+fun release_credit(manager: *Manager, stream: *Stream, count: u64) {
+    grant_connection(manager, count);
+    if (!stream.final_known) {
+        stream.receive_limit = minimum(varint.MAX,
+            stream.receive_limit + minimum(count, varint.MAX - stream.receive_limit));
+        if (stream.receive_limit > stream.receive_advertised) {
+            stream.max_stream_data_pending = true;
+        }
+    }
+}
+
+fun reconcile_uncredited(manager: *Manager, stream: *Stream) {
+    if (stream.receive_uncredited == 0) { ret; }
+    grant_connection(manager, stream.receive_uncredited);
+    stream.receive_uncredited = 0;
+}
+
 fun clear_receive(manager: *Manager, index: usize) {
     var i: usize = 0;
     val start: usize = index * manager.storage.receive_stride;
@@ -866,6 +886,7 @@ pub fun cancel_receive(manager: *Manager, value: Handle, error_code: u64) Operat
     if (!stream.receive_closed && !stream.receive_cancelled) {
         val discarded: u64 = stream.receive_highest - stream.receive_read;
         grant_connection(manager, discarded);
+        reconcile_uncredited(manager, stream);
         stream.receive_read = stream.receive_highest;
         clear_receive(manager, value.index);
         stream.receive_cancelled = true;
@@ -1576,6 +1597,7 @@ pub fun acknowledge_reset(manager: *Manager, value: Handle) OperationResult {
     if (!stream.reset_received) { ret operation_error(ERROR_STATE); }
     val discarded: u64 = stream.final_size - stream.receive_read;
     grant_connection(manager, discarded);
+    reconcile_uncredited(manager, stream);
     stream.receive_read = stream.final_size;
     stream.receive_closed = true;
     clear_receive(manager, value.index);
@@ -1661,16 +1683,7 @@ pub fun read(manager: *Manager, value: Handle, output: *u8, capacity: usize) Rea
         i = i + 1;
     }
     stream.receive_read = stream.receive_read + count::u64;
-    if (count > 0) {
-        grant_connection(manager, count::u64);
-        if (!stream.final_known) {
-            stream.receive_limit = minimum(varint.MAX,
-                stream.receive_limit + minimum(count::u64, varint.MAX - stream.receive_limit));
-            if (stream.receive_limit > stream.receive_advertised) {
-                stream.max_stream_data_pending = true;
-            }
-        }
-    }
+    stream.receive_uncredited = stream.receive_uncredited + count::u64;
     if (stream.final_known && stream.receive_read == stream.final_size) {
         stream.receive_closed = true;
         result.fin = true;
@@ -1679,9 +1692,24 @@ pub fun read(manager: *Manager, value: Handle, output: *u8, capacity: usize) Rea
     result.final_size = stream.final_size;
     result.receive_max_data = manager.receive_max_data;
     result.receive_max_stream_data = stream.receive_limit;
+    result.receive_uncredited = stream.receive_uncredited;
     if (result.fin) { result.status = STATUS_FINISHED; }
     or (count > 0) { result.status = STATUS_OK; }
     or { result.status = STATUS_EMPTY; }
+    ret result;
+}
+
+pub fun credit(manager: *Manager, value: Handle, count: u64) OperationResult {
+    if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
+    val stream: *Stream = ?manager.storage.streams[value.index];
+    if (!stream.can_receive) { ret operation_error(ERROR_DIRECTION); }
+    if (count > stream.receive_uncredited) { ret operation_error(ERROR_STATE); }
+    stream.receive_uncredited = stream.receive_uncredited - count;
+    if (count > 0) { release_credit(manager, stream, count); }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    result.receive_max_data = manager.receive_max_data;
+    result.receive_max_stream_data = stream.receive_limit;
     ret result;
 }
 
@@ -1701,6 +1729,7 @@ pub fun snapshot(manager: *Manager, value: Handle) Snapshot {
     result.send_cancelled = stream.send_cancelled;
     result.receive_cancelled = stream.receive_cancelled;
     result.final_known = stream.final_known;
+    result.receive_uncredited = stream.receive_uncredited;
     ret result;
 }
 
@@ -1713,6 +1742,7 @@ pub fun release(manager: *Manager, value: Handle) OperationResult {
     }
     val peer: bool = !stream.local;
     val uni: bool = stream.unidirectional;
+    reconcile_uncredited(manager, stream);
     stream.active = false;
     stream.generation = next_generation(stream.generation);
     if (manager.active_streams > 0) { manager.active_streams = manager.active_streams - 1; }

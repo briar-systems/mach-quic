@@ -273,8 +273,19 @@ test "quic.stream.simulated: connection and stream flow budgets remain independe
     if (peer_first.handle.id != 1 || stream.accept(?manager).handle.id != 5) { ret 1; }
     var output: [4]u8;
     val consumed: stream.ReadResult = stream.read(?manager, peer_first.handle, ?output[0], 4);
-    if (consumed.count != 4 || consumed.receive_max_data != 9 || consumed.receive_max_stream_data != 8 ||
-        !stream.receive_stream(?manager, 5, 1, ?data[1], 3, false).ok || manager.receive_committed != 8) { ret 1; }
+    if (consumed.count != 4 || consumed.receive_max_data != 5 ||
+        consumed.receive_max_stream_data != 4 || consumed.receive_uncredited != 4) { ret 1; }
+    if (stream.receive_stream(?manager, 5, 1, ?data[1], 3, false).error !=
+        stream.ERROR_FLOW_CONTROL || manager.receive_committed != 5) { ret 1; }
+    if (stream.credit(?manager, peer_first.handle, 5).error != stream.ERROR_STATE ||
+        manager.receive_max_data != 5) { ret 1; }
+    val released: stream.OperationResult = stream.credit(?manager, peer_first.handle, 4);
+    if (released.status != stream.STATUS_OK || released.receive_max_data != 9 ||
+        released.receive_max_stream_data != 8 ||
+        stream.snapshot(?manager, peer_first.handle).receive_uncredited != 0 ||
+        stream.credit(?manager, peer_first.handle, 1).error != stream.ERROR_STATE) { ret 1; }
+    if (!stream.receive_stream(?manager, 5, 1, ?data[1], 3, false).ok ||
+        manager.receive_committed != 8) { ret 1; }
     ret 0;
 }
 
@@ -465,7 +476,9 @@ test "quic.stream.simulated: consumed credit frames survive loss and stream rele
     }
     val accepted: stream.CreateResult = stream.accept(?manager);
     var output: [4]u8;
-    if (stream.read(?manager, accepted.handle, ?output[0], 4).count != 4) {
+    if (stream.read(?manager, accepted.handle, ?output[0], 4).count != 4 ||
+        stream.prepare_control(?manager).status != stream.STATUS_EMPTY ||
+        stream.credit(?manager, accepted.handle, 4).status != stream.STATUS_OK) {
         ret 1;
     }
     var control: stream.Prepared = stream.prepare_control(?manager);
@@ -498,5 +511,122 @@ test "quic.stream.simulated: consumed credit frames survive loss and stream rele
         stream.on_terminal(?manager, control.token,
             stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
         stream.prepare_control(?manager).status != stream.STATUS_EMPTY) { ret 1; }
+    ret 0;
+}
+
+fun credit_storage(records: *stream.Stream, send_data: *u8,
+                   send_pending: *bool, send_acked: *bool, send_inflight: *u8,
+                   receive_data: *u8, receive_present: *bool,
+                   attempts: *stream.Attempt) stream.Storage {
+    ret stream.Storage{
+        streams: records, stream_capacity: 1,
+        send_data: send_data, send_data_length: 8,
+        send_pending: send_pending, send_acked: send_acked,
+        send_inflight: send_inflight, send_state_length: 8, send_stride: 8,
+        receive_data: receive_data, receive_data_length: 8,
+        receive_present: receive_present, receive_state_length: 8,
+        receive_stride: 8, attempts: attempts, attempt_capacity: 4};
+}
+
+fun credit_limits(source: u64) stream.Config {
+    var limits: stream.Config = config(source, 1, 8);
+    limits.receive_max_data = 8;
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit = 8;
+    limits.receive_unidirectional_limit = 8;
+    ret limits;
+}
+
+test "quic.stream.simulated: cancellation reconciles delivered bytes exactly once" {
+    var records: [1]stream.Stream;
+    var send_data: [8]u8;
+    var send_pending: [8]bool;
+    var send_acked: [8]bool;
+    var send_inflight: [8]u8;
+    var receive_data: [8]u8;
+    var receive_present: [8]bool;
+    var attempts: [4]stream.Attempt;
+    var manager: stream.Manager = initialize_manager(credit_limits(30),
+        credit_storage(?records[0], ?send_data[0], ?send_pending[0],
+            ?send_acked[0], ?send_inflight[0], ?receive_data[0],
+            ?receive_present[0], ?attempts[0]));
+    var input: [6]u8 = [6]u8{1, 2, 3, 4, 5, 6};
+    if (!stream.receive_stream(?manager, 1, 0, ?input[0], 6, false).ok) { ret 1; }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    var output: [4]u8;
+    if (stream.read(?manager, accepted.handle, ?output[0], 4).count != 4 ||
+        manager.receive_max_data != 8) { ret 2; }
+    if (stream.cancel_receive(?manager, accepted.handle, 7).status !=
+            stream.STATUS_OK || manager.receive_max_data != 14 ||
+        stream.snapshot(?manager, accepted.handle).receive_uncredited != 0) {
+        ret 3;
+    }
+    if (stream.cancel_receive(?manager, accepted.handle, 7).status !=
+            stream.STATUS_OK || manager.receive_max_data != 14 ||
+        stream.credit(?manager, accepted.handle, 1).error !=
+            stream.ERROR_STATE || manager.receive_max_data != 14) { ret 4; }
+    ret 0;
+}
+
+test "quic.stream.simulated: reset acknowledgement reconciles delivered bytes once" {
+    var records: [1]stream.Stream;
+    var send_data: [8]u8;
+    var send_pending: [8]bool;
+    var send_acked: [8]bool;
+    var send_inflight: [8]u8;
+    var receive_data: [8]u8;
+    var receive_present: [8]bool;
+    var attempts: [4]stream.Attempt;
+    var manager: stream.Manager = initialize_manager(credit_limits(31),
+        credit_storage(?records[0], ?send_data[0], ?send_pending[0],
+            ?send_acked[0], ?send_inflight[0], ?receive_data[0],
+            ?receive_present[0], ?attempts[0]));
+    var input: [4]u8 = [4]u8{1, 2, 3, 4};
+    if (!stream.receive_stream(?manager, 1, 0, ?input[0], 4, false).ok) { ret 1; }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    var output: [4]u8;
+    if (stream.read(?manager, accepted.handle, ?output[0], 4).count != 4 ||
+        manager.receive_max_data != 8) { ret 2; }
+    if (!stream.receive_reset(?manager, 1, 9, 6).ok ||
+        manager.receive_max_data != 8) { ret 3; }
+    if (stream.acknowledge_reset(?manager, accepted.handle).status !=
+            stream.STATUS_OK || manager.receive_max_data != 14 ||
+        stream.snapshot(?manager, accepted.handle).receive_uncredited != 0) {
+        ret 4;
+    }
+    ret 0;
+}
+
+test "quic.stream.simulated: release reconciles bytes the caller never returned" {
+    var records: [1]stream.Stream;
+    var send_data: [8]u8;
+    var send_pending: [8]bool;
+    var send_acked: [8]bool;
+    var send_inflight: [8]u8;
+    var receive_data: [8]u8;
+    var receive_present: [8]bool;
+    var attempts: [4]stream.Attempt;
+    var manager: stream.Manager = initialize_manager(credit_limits(32),
+        credit_storage(?records[0], ?send_data[0], ?send_pending[0],
+            ?send_acked[0], ?send_inflight[0], ?receive_data[0],
+            ?receive_present[0], ?attempts[0]));
+    var input: [4]u8 = [4]u8{1, 2, 3, 4};
+    if (!stream.receive_stream(?manager, 1, 0, ?input[0], 4, true).ok) { ret 1; }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    var output: [4]u8;
+    val consumed: stream.ReadResult = stream.read(?manager, accepted.handle,
+        ?output[0], 4);
+    if (consumed.count != 4 || !consumed.fin ||
+        consumed.receive_uncredited != 4 || manager.receive_max_data != 8) {
+        ret 2;
+    }
+    if (stream.credit(?manager, accepted.handle, 1).status != stream.STATUS_OK ||
+        manager.receive_max_data != 9 ||
+        stream.snapshot(?manager, accepted.handle).receive_uncredited != 3) {
+        ret 3;
+    }
+    records[accepted.handle.index].send_closed = true;
+    if (stream.release(?manager, accepted.handle).status != stream.STATUS_OK ||
+        manager.receive_max_data != 12) { ret 4; }
     ret 0;
 }

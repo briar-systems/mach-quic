@@ -203,6 +203,7 @@ pub rec ReadResult {
     application_error: u64;
     receive_max_data: u64;
     receive_max_stream_data: u64;
+    receive_uncredited: u64;
     fin: bool;
 }
 
@@ -220,6 +221,7 @@ pub rec StreamSnapshot {
     send_cancelled: bool;
     receive_cancelled: bool;
     final_known: bool;
+    receive_uncredited: u64;
 }
 
 pub rec DatagramToken { source: u64; index: usize; generation: u64; }
@@ -1436,7 +1438,33 @@ pub fun read_stream(driver: *Driver, value: Stream, output: *u8, capacity: usize
     result.application_error = read.application_error;
     result.receive_max_data = read.receive_max_data;
     result.receive_max_stream_data = read.receive_max_stream_data;
+    result.receive_uncredited = read.receive_uncredited;
     result.fin = read.fin;
+    mutex.unlock(?driver.lock);
+    ret result;
+}
+
+pub fun credit_stream(driver: *Driver, value: Stream, count: u64) OperationResult {
+    if (callback_reentry(driver)) { ret operation_error(ERROR_STATE); }
+    if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
+    mutex.lock(?driver.lock);
+    if (driver.state == CLOSED) {
+        mutex.unlock(?driver.lock);
+        ret operation_error(ERROR_STATE);
+    }
+    val internal: stream_api.OperationResult = stream_api.credit(driver.streams,
+        stream_handle(value), count);
+    var result: OperationResult;
+    result.status = status_from_stream(internal.status);
+    result.state = driver.state;
+    if (internal.error == stream_api.ERROR_TOKEN) {
+        result.status = STATUS_STALE;
+        result.error = ERROR_TOKEN;
+    }
+    if (result.status == STATUS_ERROR) {
+        result.error = ERROR_STREAM;
+        result.protocol_error = internal.error::u64;
+    }
     mutex.unlock(?driver.lock);
     ret result;
 }
@@ -1525,6 +1553,7 @@ pub fun stream_snapshot(driver: *Driver, value: Stream) StreamSnapshot {
         result.send_cancelled = current.send_cancelled;
         result.receive_cancelled = current.receive_cancelled;
         result.final_known = current.final_known;
+        result.receive_uncredited = current.receive_uncredited;
     } or {
         result.status = STATUS_STALE;
         result.error = ERROR_TOKEN;

@@ -340,7 +340,18 @@ test "quic.transport.simulated: client and server expose only application contra
         accepted.stream, ?output[0], 8);
     if (accepted.status != transport_api.STATUS_OK || accepted.stream.id != 1 ||
         read.status != transport_api.STATUS_OK || read.count != 5 || !read.fin ||
-        output[0] != 'h' || output[4] != 'o') { ret 5; }
+        output[0] != 'h' || output[4] != 'o' ||
+        read.receive_uncredited != 5) { ret 5; }
+    if (transport_api.credit_stream(?client.driver, accepted.stream, 6).status ==
+            transport_api.STATUS_OK ||
+        transport_api.credit_stream(?client.driver, accepted.stream, 5).status !=
+            transport_api.STATUS_OK ||
+        transport_api.stream_snapshot(?client.driver,
+            accepted.stream).receive_uncredited != 0) { ret 9; }
+    val credited: transport_api.ReadResult = transport_api.read_stream(
+        ?client.driver, accepted.stream, ?output[0], 8);
+    if (credited.receive_max_data != read.receive_max_data + 5 ||
+        credited.receive_uncredited != 0) { ret 10; }
     var message: [4]u8 = [4]u8{3, 'd', 'g', 'm'};
     if (input(?client.driver, ?message[0], 4, 3).status != transport_api.STATUS_OK) { ret 6; }
     val delivered: transport_api.ReceivedDatagram = transport_api.next_datagram(?client.driver);

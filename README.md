@@ -276,8 +276,20 @@ range, and the ring remains pinned until every duplicate terminates.
 Receive processing charges only increases in a stream's highest offset. Duplicate
 and reordered bytes do not consume connection credit twice. Conflicting overlap,
 flow-control violations, stream exhaustion, invalid direction, and inconsistent
-final sizes publish no state. `read` copies only the contiguous prefix and returns
-the exact new MAX_DATA and MAX_STREAM_DATA values after consumption. RESET_STREAM,
+final sizes publish no state. `read` copies only the contiguous prefix and reports
+the current MAX_DATA and MAX_STREAM_DATA values without changing either.
+
+Delivery and flow-control credit are separate operations. `read` moves bytes into
+caller storage and adds them to the stream's outstanding uncredited total; it
+returns no window. `credit` returns exactly the bytes whose caller ownership has
+ended and rejects any amount above that outstanding total. A peer therefore cannot
+be invited to send more because the driver handed bytes over, only because the
+caller released them. This is what lets a caller hold delivered bytes — a
+QPACK-blocked field section, an application-held DATA payload — without the
+receive window being sized against the driver's ring instead of against what the
+application actually holds. Cancelling a receive side, acknowledging a reset, and
+releasing a stream each reconcile the outstanding total exactly once, so
+abandoning a stream returns its window rather than leaking it. RESET_STREAM,
 STOP_SENDING, application cancellation, and FIN each retain their distinct
 terminal and retransmission ownership. Delayed frames for a released stream are
 recognized from the cumulative stream counters and discarded instead of being
@@ -426,7 +438,7 @@ is selected by the production client path.
 ## Connection driver contracts
 
 `transport.Driver` is the version-neutral client and server application boundary. HTTP/3 can
-open, accept, read, write, finish, cancel, inspect, and release streams through
+open, accept, read, credit, write, finish, cancel, inspect, and release streams through
 driver-owned public handles. It can send and receive QUIC DATAGRAM values and
 inspect connection state without importing packet, crypto, recovery, congestion,
 path, or stream implementation modules. A connection owner adapts the core's
@@ -446,7 +458,8 @@ Incoming UDP payloads are borrowed only for the synchronous `receive_datagram`
 callback. `receive_native` maps a completed `std.net.async.types.Packet` into the
 same contract, including destination-address and interface metadata. Stream writes
 and application DATAGRAM sends copy their inputs before returning. Stream reads
-copy into application storage. Received application DATAGRAM views remain borrowed
+copy into application storage and return no flow-control credit; `credit_stream`
+returns it once the caller has finished with those exact bytes. Received application DATAGRAM views remain borrowed
 until their exact `DatagramToken` is released.
 
 `generate` writes one protected QUIC datagram into caller storage and transfers
