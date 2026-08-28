@@ -630,9 +630,10 @@ fun unprotect_header_to(value: *KeySet, input: contracts.Bytes,
     ct.zeroize(?mask[0], MASK_SIZE);
     val reserved_bits: bool = (long_header && (first & 0x0c) != 0)
         || (!long_header && (first & 0x18) != 0);
-    ret OpenResult{error: OK, header_len: header_len,
-        packet_number_len: packet_number_len, key_phase: !long_header && (first & 0x04) != 0,
-        reserved_bits: reserved_bits};
+    ret OpenResult{error: OK, written: 0, header_len: header_len,
+        packet_number: 0, packet_number_len: packet_number_len,
+        key_phase: !long_header && (first & 0x04) != 0,
+        reserved_bits: reserved_bits, key_updated: false, generation: 0};
 }
 
 fun read_truncated(data: *u8, offset: usize, width: u8) u32 {
