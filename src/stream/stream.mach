@@ -1096,8 +1096,9 @@ pub fun cancel_prepared(manager: *Manager, prepared: Prepared) OperationResult {
 }
 
 pub fun publish(manager: *Manager, prepared: Prepared) OperationResult {
-    if (!manager_record_valid(manager) || manager.closing ||
-        manager.core_lease != 0) { ret operation_error(ERROR_STATE); }
+    if (!manager_record_valid(manager) || manager.core_lease != 0) {
+        ret operation_error(ERROR_STATE);
+    }
     if (!prepared.ok || !valid_attempt(manager, prepared.token, ATTEMPT_RESERVED)) {
         var stale: OperationResult = operation_error(ERROR_TOKEN);
         stale.status = STATUS_STALE;

@@ -327,7 +327,7 @@ test "quic.stream.simulated: unidirectional streams enforce ownership and ordere
     ret 0;
 }
 
-test "quic.stream.simulated: close pins reserved stream payloads until cancellation" {
+test "quic.stream.simulated: close preserves reserved stream publication" {
     var records: [1]stream.Stream;
     var send_data: [4]u8;
     var send_pending: [4]bool;
@@ -352,8 +352,10 @@ test "quic.stream.simulated: close pins reserved stream payloads until cancellat
     val prepared: stream.Prepared = stream.prepare(?manager, opened.handle, 1, false);
     if (!prepared.ok || stream.begin_close(?manager).status != stream.STATUS_OK || prepared.data.data[0] != 6 ||
         stream.finish_close(?manager).error != stream.ERROR_CAPACITY ||
-        stream.publish(?manager, prepared).error != stream.ERROR_STATE) { ret 1; }
-    if (stream.cancel_prepared(?manager, prepared).status != stream.STATUS_OK ||
+        stream.publish(?manager, prepared).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, prepared.token,
+            stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
+    if (stream.cancel_prepared(?manager, prepared).status != stream.STATUS_STALE ||
         stream.finish_close(?manager).status != stream.STATUS_OK) { ret 1; }
     ret 0;
 }

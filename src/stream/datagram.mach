@@ -61,6 +61,7 @@ pub rec Queue {
     receive_count: usize;
     delivered_count: usize;
     core_lease: u64;
+    peer_limit_bound: bool;
     valid: bool;
     closing: bool;
 }
@@ -130,7 +131,7 @@ fun valid_config(config: Config, storage: Storage) bool {
         ret config.peer_max_frame_size == 0 && config.local_max_frame_size == 0 &&
             storage.send_capacity == 0 && storage.receive_capacity == 0;
     }
-    ret valid_storage(storage) && config.peer_max_frame_size > 0 && config.local_max_frame_size > 0;
+    ret valid_storage(storage) && config.local_max_frame_size > 0;
 }
 
 fun next_generation(value: u64) u64 {
@@ -178,6 +179,7 @@ pub fun initialize(queue: *Queue, config: Config, storage: Storage) bool {
         i = i + 1;
     }
     candidate.next_sequence = 1;
+    candidate.peer_limit_bound = config.peer_max_frame_size > 0;
     candidate.valid = true;
     queue[0] = candidate;
     ret true;
@@ -290,10 +292,13 @@ fun free_receive(queue: *Queue, index: usize) {
 pub fun enqueue(queue: *Queue, data: *u8, length: usize) QueueResult {
     if (!queue_record_valid(queue) || !queue.valid || queue.closing) { ret queue_error(ERROR_STATE); }
     if (!queue.config.enabled) { ret queue_error(ERROR_DISABLED); }
+    if (!queue.peer_limit_bound) { ret queue_error(ERROR_STATE); }
     if (length > queue.storage.send_stride ||
         !borrowed_disjoint(queue, ownership.bytes(data, length,
             ownership.ZERO_ALLOWED)) ||
-        frame_size(length, false) > queue.config.peer_max_frame_size) { ret queue_error(ERROR_LIMIT); }
+        frame_size(length, true) > queue.config.peer_max_frame_size) {
+        ret queue_error(ERROR_LIMIT);
+    }
     if (queue.next_sequence == 0 - 1::u64) { ret queue_error(ERROR_OVERFLOW); }
     var i: usize = 0;
     for (i < queue.storage.send_capacity && queue.storage.send_entries[i].state != ENTRY_FREE) { i = i + 1; }
@@ -322,6 +327,9 @@ pub fun prepare(queue: *Queue, with_length: bool) Prepared {
     if (!queue_record_valid(queue) || !queue.valid || queue.closing ||
         queue.core_lease != 0) { ret prepared_error(STATUS_ERROR, ERROR_STATE); }
     if (!queue.config.enabled) { ret prepared_error(STATUS_ERROR, ERROR_DISABLED); }
+    if (!queue.peer_limit_bound) {
+        ret prepared_error(STATUS_ERROR, ERROR_STATE);
+    }
     var chosen: usize = queue.storage.send_capacity;
     var sequence: u64 = 0;
     var i: usize = 0;
@@ -367,7 +375,7 @@ pub fun cancel_prepared(queue: *Queue, prepared: Prepared) OperationResult {
 
 pub fun publish(queue: *Queue, prepared: Prepared) OperationResult {
     var result: OperationResult;
-    if (!queue_record_valid(queue) || queue.closing || queue.core_lease != 0) {
+    if (!queue_record_valid(queue) || queue.core_lease != 0) {
         result.status = STATUS_ERROR;
         result.error = ERROR_STATE;
         ret result;
@@ -378,6 +386,21 @@ pub fun publish(queue: *Queue, prepared: Prepared) OperationResult {
         ret result;
     }
     free_send(queue, prepared.token.index);
+    result.status = STATUS_OK;
+    ret result;
+}
+
+pub fun bind_peer_limit(queue: *Queue, maximum: usize) OperationResult {
+    var result: OperationResult;
+    if (!queue_record_valid(queue) || !queue.valid || queue.closing ||
+        queue.core_lease != 0 || !queue.config.enabled ||
+        queue.peer_limit_bound || queue.send_count != 0) {
+        result.status = STATUS_ERROR;
+        result.error = ERROR_STATE;
+        ret result;
+    }
+    queue.config.peer_max_frame_size = maximum;
+    queue.peer_limit_bound = true;
     result.status = STATUS_OK;
     ret result;
 }
@@ -567,6 +590,19 @@ pub fun receive_scoped(queue: *Queue, source: u64, data: *u8,
     ret result;
 }
 
+pub fun bind_peer_limit_scoped(queue: *Queue, source: u64,
+                               maximum: usize) OperationResult {
+    if (!enter_core_scope(queue, source)) {
+        var failed: OperationResult;
+        failed.status = STATUS_ERROR;
+        failed.error = ERROR_STATE;
+        ret failed;
+    }
+    val result: OperationResult = bind_peer_limit(queue, maximum);
+    leave_core_scope(queue, source);
+    ret result;
+}
+
 pub fun begin_close_scoped(queue: *Queue, source: u64) OperationResult {
     if (!enter_core_scope(queue, source)) {
         var failed: OperationResult;
@@ -648,6 +684,32 @@ test "quic.stream.datagram: capacity and close preserve delivered ownership" {
     ret 0;
 }
 
+test "quic.stream.datagram: authenticated limits bind once and close preserves sends" {
+    var send_entries: [1]Entry;
+    var receive_entries: [1]Entry;
+    var send_bytes: [4]u8;
+    var receive_bytes: [4]u8;
+    var queue: Queue = initialized_for_test(Config{source: 12,
+        peer_max_frame_size: 0, local_max_frame_size: 8, enabled: true},
+        Storage{send_entries: ?send_entries[0], send_capacity: 1,
+            send_bytes: ?send_bytes[0], send_bytes_length: 4, send_stride: 4,
+            receive_entries: ?receive_entries[0], receive_capacity: 1,
+            receive_bytes: ?receive_bytes[0], receive_bytes_length: 4,
+            receive_stride: 4});
+    var data: [3]u8 = [3]u8{1, 2, 3};
+    if (enqueue(?queue, ?data[0], 3).error != ERROR_STATE ||
+        !lease_core(?queue, 12) ||
+        bind_peer_limit_scoped(?queue, 12, 5).status != STATUS_OK ||
+        bind_peer_limit_scoped(?queue, 12, 6).error != ERROR_STATE) { ret 1; }
+    val queued: QueueResult = enqueue(?queue, ?data[0], 3);
+    if (!queued.ok) { ret 2; }
+    val prepared: Prepared = prepare_scoped(?queue, 12, true);
+    if (!prepared.ok || begin_close_scoped(?queue, 12).status != STATUS_OK ||
+        publish_scoped(?queue, 12, prepared).status != STATUS_OK ||
+        queue.send_count != 0) { ret 3; }
+    ret 0;
+}
+
 test "quic.stream.datagram: disabled mode needs no storage" {
     var empty_storage: Storage;
     var disabled_config: Config;
@@ -672,19 +734,19 @@ test "quic.stream.datagram: frame and sequence bounds are transactional" {
         receive_entries: ?receive_entries[0], receive_capacity: 1,
         receive_bytes: ?receive_bytes[0], receive_bytes_length: 1, receive_stride: 1
     };
-    var queue: Queue = initialized_for_test(Config{source: 10, peer_max_frame_size: 2,
+    var queue: Queue = initialized_for_test(Config{source: 10, peer_max_frame_size: 3,
         local_max_frame_size: 2, enabled: true}, storage);
     val queued: QueueResult = enqueue(?queue, ?byte[0], 1);
-    if (!queued.ok || prepare(?queue, true).error != ERROR_LIMIT) { ret 1; }
-    val no_length: Prepared = prepare(?queue, false);
-    if (!no_length.ok || no_length.frame_size != 2 || publish(?queue, no_length).status != STATUS_OK) { ret 1; }
+    val with_length: Prepared = prepare(?queue, true);
+    if (!queued.ok || !with_length.ok || with_length.frame_size != 3 ||
+        publish(?queue, with_length).status != STATUS_OK) { ret 1; }
     queue.next_sequence = 0 - 1::u64;
     if (enqueue(?queue, ?byte[0], 1).error != ERROR_OVERFLOW || queue.send_count != 0 ||
         receive(?queue, ?byte[0], 1, 2).error != ERROR_OVERFLOW || queue.receive_count != 0) { ret 1; }
     ret 0;
 }
 
-test "quic.stream.datagram: close pins prepared data until explicit cancellation" {
+test "quic.stream.datagram: close preserves prepared publication ownership" {
     var send_entries: [1]Entry;
     var receive_entries: [1]Entry;
     var send_bytes: [4]u8;
@@ -702,9 +764,9 @@ test "quic.stream.datagram: close pins prepared data until explicit cancellation
     val prepared: Prepared = prepare(?queue, true);
     if (!prepared.ok || begin_close(?queue).status != STATUS_OK ||
         prepared.data.data[0] != 3 || finish_close(?queue).error != ERROR_CAPACITY ||
-        publish(?queue, prepared).error != ERROR_STATE) { ret 1; }
-    if (cancel_prepared(?queue, prepared).status != STATUS_OK ||
-        finish_close(?queue).status != STATUS_OK || cancel_prepared(?queue, prepared).status != STATUS_STALE) { ret 1; }
+        publish(?queue, prepared).status != STATUS_OK ||
+        finish_close(?queue).status != STATUS_OK ||
+        cancel_prepared(?queue, prepared).status != STATUS_STALE) { ret 1; }
     ret 0;
 }
 
