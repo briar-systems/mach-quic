@@ -345,6 +345,19 @@ array. A mixed secret/public record is anchored through its first public field
 before its complete range is admitted. Reinitializing a live object is rejected
 without changing its prior state.
 
+Every refusal is attributed. `InitResult.error` remains the wire-facing transport
+error, and `InitResult.reason` names the check that rejected: a capacity relation,
+owned storage ranges aliasing each other, the two secret plaintext buffers
+aliasing, a borrowed configuration range aliasing storage or a component, the
+combined component set aliasing, a malformed provider record, provider secrets
+aliasing the plaintext buffers, a state precondition, connection ID or path
+identity, local transport parameters, recovery or acknowledgement state, a
+refused manager lease, Initial key derivation, path configuration, or the
+provider refusing to start. For the ownership reasons `reason_kind` distinguishes
+a malformed list, a malformed range, and an overlapping pair, and `reason_first`
+and `reason_second` carry the range indices, so a caller that wired one buffer
+into two roles is told which two rather than left to bisect its own storage.
+
 Client and server initialization binds the initial connection IDs and path,
 derives Initial keys, starts TLS with the exact ALPN, server name, role, QUIC
 version, and encoded local transport parameters, and initializes independent
