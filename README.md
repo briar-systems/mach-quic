@@ -444,10 +444,18 @@ cannot erase secret-welded state.
 The adapter contract is covered by deterministic simulated providers and the real
 `mach-tls` client provider. Client CRYPTO ownership, loss, Retry, Version
 Negotiation, malformed-alert forwarding, deadlines, and destruction are exercised
-against the exact pinned TLS client. Issue #3 still cannot close because a real
-`mach-tls` server handshake provider does not exist and major-implementation UDP
-interoperability has not yet been demonstrated. No simulated or fallback provider
-is selected by the production client path.
+against the exact pinned TLS client. The real `mach-tls` server handshake provider
+exists: `connection.handshake.initialize_tls_server`, wrapped by
+`connection.tls_server.initialize`, is selected by the production assembly. No
+simulated or fallback provider is selected by the production client path.
+
+What has *not* been demonstrated is interoperability against a major
+third-party QUIC implementation. This repository ships no interop harness and
+no `test/` tree, so every claim here rests on this library talking to itself
+over real packet protection with real `mach-tls` on both ends. That is a
+genuine end-to-end exercise of the stack and it is not the same thing as
+proving wire compatibility with quiche, quic-go or ngtcp2. Issue #3 was closed
+on its implementation criteria with that one left explicitly undemonstrated.
 
 ## Connection assembly
 
