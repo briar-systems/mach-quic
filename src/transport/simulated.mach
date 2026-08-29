@@ -606,3 +606,26 @@ test "quic.transport.native: loopback udp preserves generated and received datag
     if (!close_fixture(?fixture, 4)) { ret 7; }
     ret 0;
 }
+
+test "quic.transport.simulated: a cancelled scope closes on the owner's next call" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 111, stream_api.ROLE_CLIENT)) { ret 1; }
+    if (!cancel.cancel(?fixture.scope)) { ret 2; }
+    # the scope's callback is handed an untyped ptr and cannot reach a protocol
+    # whose context is secret-welded, so it records the cancellation and touches
+    # nothing else
+    # read the protocol's own state directly: any driver call would itself
+    # apply the cancellation and hide what is being asserted
+    if (fixture.core.closing || fixture.core.abortive) { ret 3; }
+    # the owner's next call performs the close, on the thread that owns the
+    # protocol
+    val state: transport_api.Snapshot = transport_api.snapshot[Core](
+        ?fixture.driver);
+    if (state.state != transport_api.DRAINING ||
+        state.close_mode != io_lifecycle.ABORTIVE ||
+        state.cancellation_reason != cancel.CANCELLED ||
+        !fixture.core.closing || !fixture.core.abortive) { ret 4; }
+    if (transport_api.finish_close[Core](?fixture.driver).status !=
+        transport_api.STATUS_OK || !cancel.destroy(?fixture.scope)) { ret 5; }
+    ret 0;
+}

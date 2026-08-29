@@ -437,8 +437,9 @@ The core exposes direct transport-shaped `receive`, `generate`, `complete_send`,
 operations. It also exposes lease-safe path probing, validation work, active
 migration, and authenticated Packet Too Big handling without releasing manager
 ownership. A UDP or application driver owns the stable `Core` and `Secrets`
-records and serializes those calls. This direct split is intentional because the
-generic public driver context cannot erase secret-welded state.
+records and serializes those calls. This direct split is intentional: the driver's protocol
+context is typed for exactly this reason, because a generic public context
+cannot erase secret-welded state.
 
 The adapter contract is covered by deterministic simulated providers and the real
 `mach-tls` client provider. Client CRYPTO ownership, loss, Retry, Version
@@ -488,14 +489,30 @@ timer fired, and when a received datagram arrives. It also owns the `Core` and
 `Secrets` records themselves, at fixed addresses, with `Secrets` in secret-welded
 storage.
 
-`transport.Driver` is intended to sit between the two, but note the constraint
-recorded under connection core contracts: the driver's `Protocol` context is an
-untyped `ptr`, and a `*Secrets` is secret-welded and cannot be erased to one.
-Every production connection operation needs both records, so **no `Protocol` over
-a real core is constructible against the current vtable**, and the only
-implementations in the tree are simulated ones whose contexts hold no secret
-state. Until that contract changes, a consumer drives `connection.core` directly
-with the pair of records the assembly hands it. See issue #25.
+`transport.Driver[T]` sits between the two. `transport.binding` supplies the
+production `Protocol[Binding]` over a real `Core` and `Secrets`, and the assembly
+constructs the driver over it, so an owner pumps datagrams through
+`transport.generate`, `complete_send` and `receive_datagram` and reaches streams
+and DATAGRAMs through the driver's public handles.
+
+The protocol context is typed rather than an untyped `ptr`, and that is a
+correctness requirement rather than a convenience. Every connection operation
+takes the public record and the secret-welded `Secrets` together, and mach
+refuses to erase a secret-welded pointer to `ptr` — as it refuses `usize` to
+`*Secrets` and `*Secrets` to `*u8`. A vtable with an opaque context can therefore
+only ever be implemented by a test double whose context holds no secrets, which
+is exactly what the tree contained before. `Protocol[T]` carries `context: *T`
+and a `context_range` entry, because the same rule stops the driver taking the
+context's byte range by casting it; the provider answers for its own memory the
+way `handshake.provider_ranges` already does.
+
+Two consequences are worth stating. The driver's own extent is anchored on a
+public field rather than cast, since a `Driver[T]` over a secret context inherits
+the weld. And the cancellation scope's callback is handed an untyped `ptr` by
+`std.sync.cancel`, so it cannot reach the protocol at all: it records the
+cancellation and the owner's next call performs the close, on the thread that
+owns the protocol. `cancel_connection` stays synchronous, because the owner calls
+it with the driver already typed.
 
 ## Connection driver contracts
 

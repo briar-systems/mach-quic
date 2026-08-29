@@ -320,13 +320,15 @@ fun valid_role(role: Role) bool { ret role == CLIENT || role == SERVER; }
 fun valid_state(state: ConnectionState) bool { ret state >= NEW && state <= CLOSED; }
 
 fun protocol_valid[T](protocol: *Protocol[T]) bool {
+    # a callback's type carries the context's secrecy, so these are compared
+    # against nil rather than cast to an address
     if (protocol == nil || protocol.context == nil ||
-        protocol.context_range::usize == 0) { ret false; }
+        protocol.context_range == nil) { ret false; }
     if (!protocol.context_range(protocol.context).valid) { ret false; }
-    ret protocol.receive::usize != 0 && protocol.timeout::usize != 0 &&
-        protocol.generate::usize != 0 && protocol.complete_send::usize != 0 &&
-        protocol.begin_close::usize != 0 && protocol.close_ready::usize != 0 &&
-        protocol.finish_close::usize != 0 && protocol.timer::usize != 0;
+    ret protocol.receive != nil && protocol.timeout != nil &&
+        protocol.generate != nil && protocol.complete_send != nil &&
+        protocol.begin_close != nil && protocol.close_ready != nil &&
+        protocol.finish_close != nil && protocol.timer != nil;
 }
 
 fun callback_reentry[T](driver: *Driver[T]) bool {
