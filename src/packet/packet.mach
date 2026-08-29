@@ -88,6 +88,17 @@ pub rec Limits {
     max_versions: usize;
 }
 
+# every field is assigned by name: an empty record literal does not reliably
+# clear one, and this context steers how many bytes a short header takes off
+# the wire, so a caller with no prior state must still start from a defined one
+pub fun empty_decode_context() DecodeContext {
+    var value: DecodeContext;
+    value.version = 0;
+    value.expected_packet_number = 0;
+    value.short_destination_len = 0;
+    ret value;
+}
+
 pub rec DecodeResult {
     status: u8;
     error: u8;
@@ -892,5 +903,23 @@ test "quic.packet.packet: fixed builder failure publishes no packet" {
     var tiny: [2]u8;
     var b: binary.Builder = binary.builder(?tiny[0], 2, binary.BIG);
     if (encode(?b, ?packet, default_limits()).ok || b.len != 0) { ret 1; }
+    ret 0;
+}
+
+# an empty record literal does not reliably clear its fields, and this context
+# steers how many bytes a short header takes off the wire on an untrusted path
+test "quic.packet.packet: a short header decodes from a defined context" {
+    val context: DecodeContext = empty_decode_context();
+    if (context.version != 0 || context.expected_packet_number != 0 ||
+        context.short_destination_len != 0) { ret 1; }
+    val short: [3]u8 = [3]u8{0x40, 0x07, 0xaa};
+    var out: Packet;
+    var d: binary.Decoder = binary.decoder(?short[0], 3, binary.BIG);
+    val r: DecodeResult = decode(?d, true, context, default_limits(), ?out);
+    if (r.status != STATUS_DONE) { ret 2; }
+    if (out.header.kind != PACKET_ONE_RTT) { ret 3; }
+    if (out.header.destination.len != 0) { ret 4; }
+    if (out.header.version != 0) { ret 5; }
+    if (out.header.packet_number != 7) { ret 6; }
     ret 0;
 }

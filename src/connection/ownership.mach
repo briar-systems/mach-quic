@@ -76,20 +76,83 @@ pub fun secret_disjoint(left: *^u8, left_length: usize,
     ret true;
 }
 
-pub fun all_disjoint(ranges: *Range, count: usize) bool {
+pub def Overlap: u8;
+pub val OVERLAP_NONE: Overlap = 0;
+pub val OVERLAP_LIST_INVALID: Overlap = 1;
+pub val OVERLAP_RANGE_INVALID: Overlap = 2;
+pub val OVERLAP_PAIR: Overlap = 3;
+
+# which range failed, and which one it collided with, so a caller is not left
+# bisecting a list it did not build
+pub rec Disjointness {
+    kind: Overlap;
+    first: usize;
+    second: usize;
+}
+
+pub fun disjointness(ranges: *Range, count: usize) Disjointness {
+    var value: Disjointness;
+    value.kind = OVERLAP_NONE;
+    value.first = 0;
+    value.second = 0;
     val list: Range = array(ranges::*u8, count, $size_of(Range), ZERO_FORBIDDEN);
-    if (!list.valid) { ret false; }
+    if (!list.valid) { value.kind = OVERLAP_LIST_INVALID; ret value; }
     var i: usize = 0;
     for (i < count) {
-        if (!ranges[i].valid) { ret false; }
+        if (!ranges[i].valid) {
+            value.kind = OVERLAP_RANGE_INVALID;
+            value.first = i;
+            ret value;
+        }
         var j: usize = 0;
         for (j < i) {
-            if (!disjoint(ranges[i], ranges[j])) { ret false; }
+            if (!disjoint(ranges[i], ranges[j])) {
+                value.kind = OVERLAP_PAIR;
+                value.first = j;
+                value.second = i;
+                ret value;
+            }
             j = j + 1;
         }
         i = i + 1;
     }
-    ret true;
+    ret value;
+}
+
+pub fun all_disjoint(ranges: *Range, count: usize) bool {
+    ret disjointness(ranges, count).kind == OVERLAP_NONE;
+}
+
+# checks one range that is not a member of `ranges` against ranges[start..count).
+# `index` is the subject's own position in whatever list the caller built, so a
+# refusal names both sides rather than only the one that was walked
+pub fun disjoint_from(subject: Range, index: usize, ranges: *Range,
+                      start: usize, count: usize) Disjointness {
+    var value: Disjointness;
+    value.kind = OVERLAP_NONE;
+    value.first = 0;
+    value.second = 0;
+    val list: Range = array(ranges::*u8, count, $size_of(Range), ZERO_FORBIDDEN);
+    if (!list.valid || start > count) {
+        value.kind = OVERLAP_LIST_INVALID;
+        ret value;
+    }
+    if (!subject.valid) {
+        value.kind = OVERLAP_RANGE_INVALID;
+        value.first = index;
+        ret value;
+    }
+    var j: usize = start;
+    for (j < count) {
+        if (!disjoint(subject, ranges[j])) {
+            value.kind = OVERLAP_PAIR;
+            value.first = index;
+            value.second = j;
+            ret value;
+        }
+        j = j + 1;
+    }
+    ret value;
 }
 
 test "quic.connection.ownership: inclusive maximum ranges are checked without wrapping" {
@@ -133,5 +196,49 @@ test "quic.connection.ownership: zero and scaled ranges have explicit policies" 
     if (!all_disjoint(?ranges[0], 3)) { ret 2; }
     ranges[2] = bytes(?storage[1], 1, ZERO_FORBIDDEN);
     if (all_disjoint(?ranges[0], 3)) { ret 3; }
+    ret 0;
+}
+
+test "quic.connection.ownership: a refusal names the ranges that collided" {
+    var storage: [16]u8;
+    var ranges: [4]Range;
+    ranges[0] = bytes(?storage[0], 4, ZERO_FORBIDDEN);
+    ranges[1] = bytes(?storage[4], 4, ZERO_FORBIDDEN);
+    ranges[2] = bytes(?storage[8], 4, ZERO_FORBIDDEN);
+    ranges[3] = bytes(?storage[12], 4, ZERO_FORBIDDEN);
+    val clean: Disjointness = disjointness(?ranges[0], 4);
+    if (clean.kind != OVERLAP_NONE || clean.first != 0 ||
+        clean.second != 0) { ret 1; }
+    ranges[3] = bytes(?storage[5], 2, ZERO_FORBIDDEN);
+    val pair: Disjointness = disjointness(?ranges[0], 4);
+    if (pair.kind != OVERLAP_PAIR || pair.first != 1 || pair.second != 3) { ret 2; }
+    ranges[2] = bytes(nil, 0, ZERO_FORBIDDEN);
+    val invalid: Disjointness = disjointness(?ranges[0], 4);
+    if (invalid.kind != OVERLAP_RANGE_INVALID || invalid.first != 2) { ret 3; }
+    if (disjointness(nil, 4).kind != OVERLAP_LIST_INVALID) { ret 4; }
+    ret 0;
+}
+
+test "quic.connection.ownership: a borrowed range names itself and its collision" {
+    var storage: [16]u8;
+    var ranges: [4]Range;
+    ranges[0] = bytes(?storage[0], 4, ZERO_FORBIDDEN);
+    ranges[1] = bytes(?storage[4], 4, ZERO_FORBIDDEN);
+    ranges[2] = bytes(?storage[8], 4, ZERO_FORBIDDEN);
+    ranges[3] = bytes(?storage[12], 4, ZERO_FORBIDDEN);
+    var lent: [8]u8;
+    val outside: Disjointness = disjoint_from(bytes(?lent[0], 8, ZERO_FORBIDDEN),
+        6, ?ranges[0], 1, 4);
+    if (outside.kind != OVERLAP_NONE) { ret 1; }
+    val inside: Disjointness = disjoint_from(bytes(?storage[9], 2, ZERO_FORBIDDEN),
+        6, ?ranges[0], 1, 4);
+    if (inside.kind != OVERLAP_PAIR || inside.first != 6 ||
+        inside.second != 2) { ret 2; }
+    # the same collision is invisible once the window excludes it
+    if (disjoint_from(bytes(?storage[9], 2, ZERO_FORBIDDEN), 6, ?ranges[0], 3,
+        4).kind != OVERLAP_NONE) { ret 3; }
+    val malformed: Disjointness = disjoint_from(bytes(nil, 0, ZERO_FORBIDDEN), 6,
+        ?ranges[0], 0, 4);
+    if (malformed.kind != OVERLAP_RANGE_INVALID || malformed.first != 6) { ret 4; }
     ret 0;
 }

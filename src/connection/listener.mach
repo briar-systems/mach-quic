@@ -921,7 +921,7 @@ test "quic.connection.listener: retry identity, replay, cancellation, and admiss
     var decoder: binary.Decoder = binary.decoder(?response[0],
         challenged.output_count, binary.BIG);
     var retry_packet: packet.Packet;
-    if (packet.decode(?decoder, true, packet.DecodeContext{},
+    if (packet.decode(?decoder, true, packet.empty_decode_context(),
         packet.default_limits(), ?retry_packet).status != packet.STATUS_DONE ||
         retry_packet.header.kind != packet.PACKET_RETRY ||
         !packet.connection_id_equal(?retry_packet.header.source, ?retry_source)) { ret 3; }

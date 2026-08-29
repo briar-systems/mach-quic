@@ -207,10 +207,64 @@ pub rec Snapshot {
     destroyed: bool;
 }
 
+# why initialization refused. `error` stays the wire-facing transport code, so
+# a caller that only forwards a CONNECTION_CLOSE is unaffected; `reason` says
+# which check rejected. ownership validation alone can refuse in well over
+# sixty distinct ways and one undifferentiated INTERNAL_ERROR leaves a caller
+# bisecting its own buffer list by hand
+pub def InitReason: u64;
+pub val INIT_OK: InitReason = 0;
+pub val INIT_ARGUMENT: InitReason = 1;
+pub val INIT_STORAGE_CAPACITY: InitReason = 2;
+pub val INIT_STORAGE_RANGES: InitReason = 3;
+pub val INIT_STORAGE_SECRETS: InitReason = 4;
+pub val INIT_STORAGE_BORROWED: InitReason = 5;
+pub val INIT_COMPONENT_RANGES: InitReason = 6;
+pub val INIT_PROVIDER_RANGES: InitReason = 7;
+pub val INIT_PROVIDER_SECRETS: InitReason = 8;
+pub val INIT_COMPONENT_BORROWED: InitReason = 9;
+pub val INIT_PRECONDITION: InitReason = 10;
+pub val INIT_IDENTITY: InitReason = 11;
+pub val INIT_PARAMETERS: InitReason = 12;
+pub val INIT_RECOVERY: InitReason = 13;
+pub val INIT_LEASE: InitReason = 14;
+pub val INIT_KEYS: InitReason = 15;
+pub val INIT_PATH: InitReason = 16;
+pub val INIT_PROVIDER_START: InitReason = 17;
+
+# `reason_kind` and the two indices are only populated for the ownership
+# reasons. an index is a position in the range list the named check built:
+# INIT_STORAGE_* index the twenty-three owned storage ranges, INIT_COMPONENT_*
+# and INIT_PROVIDER_RANGES index the sixty-three component ranges, whose first
+# twenty-three entries are the storage ranges in the same order. for a
+# _BORROWED reason `reason_first` is instead the borrowed range's own index and
+# `reason_second` is the owned range it collided with
 pub rec InitResult {
     ok: bool;
     error: u64;
     provider_error: u64;
+    reason: InitReason;
+    reason_kind: ownership.Overlap;
+    reason_first: usize;
+    reason_second: usize;
+}
+
+# first writer wins, so a coarse refusal further out never overwrites the
+# precise one that caused it
+fun refuse(result: *InitResult, reason: InitReason) bool {
+    if (result != nil && result.reason == INIT_OK) { result.reason = reason; }
+    ret false;
+}
+
+fun refuse_overlap(result: *InitResult, reason: InitReason,
+                   detail: ownership.Disjointness) bool {
+    if (result != nil && result.reason == INIT_OK) {
+        result.reason = reason;
+        result.reason_kind = detail.kind;
+        result.reason_first = detail.first;
+        result.reason_second = detail.second;
+    }
+    ret false;
 }
 
 pub rec Core {
@@ -488,9 +542,10 @@ fun fail(core: *Core, error: u64, now_ns: u64) transport_api.CoreResult {
 }
 
 fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
-                  storage: *Storage, secret_storage: *SecretStorage) bool {
+                  storage: *Storage, secret_storage: *SecretStorage,
+                  result: *InitResult) bool {
     if (core == nil || secrets == nil || config == nil || storage == nil ||
-        secret_storage == nil) { ret false; }
+        secret_storage == nil) { ret refuse(result, INIT_ARGUMENT); }
     val secret_state_address: usize = (?secrets.initialized)::usize;
     val secret_state_offset: usize = $offset_of(Secrets, initialized);
     if (secret_state_address < secret_state_offset ||
@@ -511,7 +566,9 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.frame_ack_capacity < storage.ack_application.capacity - 1 ||
         storage.recovery_event_capacity < storage.owner_capacity ||
         storage.owner_capacity == 0 || storage.received_token_capacity == 0 ||
-        storage.send_token_capacity == 0) { ret false; }
+        storage.send_token_capacity == 0) {
+        ret refuse(result, INIT_STORAGE_CAPACITY);
+    }
     var zero_negotiation: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     var zero_versions: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (config.role == transport_api.SERVER) {
@@ -575,11 +632,16 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.negotiation.retry_token_capacity, zero_negotiation);
     ranges[22] = ownership.bytes(storage.negotiation.retry_pseudo,
         storage.negotiation.retry_pseudo_capacity, zero_negotiation);
-    if (!ownership.all_disjoint(?ranges[0], 23) ||
-        !ownership.secret_disjoint(secret_storage.receive_plaintext,
+    val owned: ownership.Disjointness = ownership.disjointness(?ranges[0], 23);
+    if (owned.kind != ownership.OVERLAP_NONE) {
+        ret refuse_overlap(result, INIT_STORAGE_RANGES, owned);
+    }
+    if (!ownership.secret_disjoint(secret_storage.receive_plaintext,
             secret_storage.receive_plaintext_capacity,
             secret_storage.send_plaintext,
-            secret_storage.send_plaintext_capacity)) { ret false; }
+            secret_storage.send_plaintext_capacity)) {
+        ret refuse(result, INIT_STORAGE_SECRETS);
+    }
     var borrowed: [4]ownership.Range;
     borrowed[0] = ownership.bytes(config.alpn.data, config.alpn.length,
         ownership.ZERO_FORBIDDEN);
@@ -591,11 +653,10 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         config.supported_version_count, $size_of(u32), zero_versions);
     var i: usize = 0;
     for (i < 4) {
-        if (!borrowed[i].valid) { ret false; }
-        var j: usize = 0;
-        for (j < 23) {
-            if (!ownership.disjoint(borrowed[i], ranges[j])) { ret false; }
-            j = j + 1;
+        val lent: ownership.Disjointness = ownership.disjoint_from(borrowed[i], i,
+            ?ranges[0], 0, 23);
+        if (lent.kind != ownership.OVERLAP_NONE) {
+            ret refuse_overlap(result, INIT_STORAGE_BORROWED, lent);
         }
         i = i + 1;
     }
@@ -652,15 +713,18 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
                             handshake: *handshake_api.Adapter,
                             cids: *cid_api.Manager, paths: *path_api.Manager,
                             streams: *stream_api.Manager,
-                            datagrams: *datagram_api.Queue) bool {
+                            datagrams: *datagram_api.Queue,
+                            result: *InitResult) bool {
     if (handshake == nil || cids == nil || paths == nil || streams == nil ||
-        datagrams == nil) { ret false; }
+        datagrams == nil) { ret refuse(result, INIT_ARGUMENT); }
     var ranges: [63]ownership.Range;
     ranges[0] = ownership.bytes((?core.config)::*u8, $size_of(Core),
         ownership.ZERO_FORBIDDEN);
     val secret_state_address: usize = (?secrets.initialized)::usize;
     val secret_state_offset: usize = $offset_of(Secrets, initialized);
-    if (secret_state_address < secret_state_offset) { ret false; }
+    if (secret_state_address < secret_state_offset) {
+        ret refuse(result, INIT_STORAGE_CAPACITY);
+    }
     ranges[1] = ownership.bytes((secret_state_address - secret_state_offset)::*u8,
         $size_of(Secrets), ownership.ZERO_FORBIDDEN);
     ranges[2] = ownership.bytes(storage.receive_header,
@@ -730,7 +794,10 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         $size_of(stream_api.Manager), ownership.ZERO_FORBIDDEN);
     ranges[27] = ownership.bytes((?datagrams.config)::*u8,
         $size_of(datagram_api.Queue), ownership.ZERO_FORBIDDEN);
-    if (!ownership.all_disjoint(?ranges[0], 28)) { ret false; }
+    val anchored: ownership.Disjointness = ownership.disjointness(?ranges[0], 28);
+    if (anchored.kind != ownership.OVERLAP_NONE) {
+        ret refuse_overlap(result, INIT_COMPONENT_RANGES, anchored);
+    }
 
     ranges[28] = ownership.bytes(handshake.storage.receive_data,
         handshake.storage.receive_length, ownership.ZERO_FORBIDDEN);
@@ -801,14 +868,21 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ranges[52] = ownership.bytes(datagrams.storage.receive_bytes,
         datagrams.storage.receive_bytes_length, datagram_zero);
     if (!handshake_api.provider_ranges(handshake, ?ranges[53],
-        handshake_api.PROVIDER_RANGE_CAPACITY)) { ret false; }
-    if (!ownership.all_disjoint(?ranges[0], 63)) { ret false; }
+        handshake_api.PROVIDER_RANGE_CAPACITY)) {
+        ret refuse(result, INIT_PROVIDER_RANGES);
+    }
+    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], 63);
+    if (whole.kind != ownership.OVERLAP_NONE) {
+        ret refuse_overlap(result, INIT_COMPONENT_RANGES, whole);
+    }
     if (!handshake_api.provider_secrets_disjoint(handshake,
             secret_storage.receive_plaintext,
             secret_storage.receive_plaintext_capacity) ||
         !handshake_api.provider_secrets_disjoint(handshake,
             secret_storage.send_plaintext,
-            secret_storage.send_plaintext_capacity)) { ret false; }
+            secret_storage.send_plaintext_capacity)) {
+        ret refuse(result, INIT_PROVIDER_SECRETS);
+    }
     var borrowed: [4]ownership.Range;
     borrowed[0] = ownership.bytes(config.alpn.data, config.alpn.length,
         ownership.ZERO_FORBIDDEN);
@@ -822,11 +896,10 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         config.supported_version_count, $size_of(u32), zero_versions);
     var i: usize = 0;
     for (i < 4) {
-        if (!borrowed[i].valid) { ret false; }
-        var j: usize = 23;
-        for (j < 63) {
-            if (!ownership.disjoint(borrowed[i], ranges[j])) { ret false; }
-            j = j + 1;
+        val lent: ownership.Disjointness = ownership.disjoint_from(borrowed[i], i,
+            ?ranges[0], 23, 63);
+        if (lent.kind != ownership.OVERLAP_NONE) {
+            ret refuse_overlap(result, INIT_COMPONENT_BORROWED, lent);
         }
         i = i + 1;
     }
@@ -839,10 +912,10 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
                paths: *path_api.Manager, streams: *stream_api.Manager,
                datagrams: *datagram_api.Queue, now_ns: u64,
                init_result: *InitResult) bool {
-    if (!storage_valid(core, secrets, ?config, ?storage,
-        ?secret_storage)) { ret false; }
+    if (!storage_valid(core, secrets, ?config, ?storage, ?secret_storage,
+        init_result)) { ret false; }
     if (!component_storage_valid(core, secrets, ?config, ?storage, ?secret_storage, handshake,
-        cids, paths, streams, datagrams)) { ret false; }
+        cids, paths, streams, datagrams, init_result)) { ret false; }
     if (core.initialized || core.destroyed ||
         !valid_role(config.role) || config.source == 0 ||
         (config.version != packet.VERSION_1 && config.version != packet.VERSION_2) ||
@@ -877,7 +950,9 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         config.supported_version_count == 0))) ||
         (config.role == transport_api.SERVER &&
         (paths.config.role != path_api.ROLE_SERVER ||
-        streams.config.role != stream_api.ROLE_SERVER))) { ret false; }
+        streams.config.role != stream_api.ROLE_SERVER))) {
+        ret refuse(init_result, INIT_PRECONDITION);
+    }
     val current_local: cid_api.Selected = cid_api.current(cids, true);
     val current_peer: cid_api.Selected = cid_api.current(cids, false);
     val current_path: path_api.PathResult = path_api.selected(paths);
@@ -888,7 +963,9 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         !packet.connection_id_equal(?current_peer.id,
             ?config.peer_destination) ||
         !path_api.endpoint_equal(paths.storage.paths[current_path.handle.index].endpoint,
-            path_endpoint(config.local, config.peer))) { ret false; }
+            path_endpoint(config.local, config.peer))) {
+        ret refuse(init_result, INIT_IDENTITY);
+    }
     var local_parameters: transport_parameters.Parameters;
     val local_decoded: transport_parameters.DecodeResult =
         transport_parameters.decode(config.local_transport_parameters.data,
@@ -901,7 +978,7 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
             ?local_parameters);
     if (local_decoded.status != transport_parameters.STATUS_DONE ||
         !validate_local_parameters(config, ?local_parameters, cids, paths, streams,
-            datagrams)) { ret false; }
+            datagrams)) { ret refuse(init_result, INIT_PARAMETERS); }
     var candidate: Core;
     var candidate_secrets: Secrets;
     candidate.config = config;
@@ -928,19 +1005,23 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         storage.recovery_handshake, storage.recovery_application,
         recovery.default_config());
     if (!candidate.recovery_state.valid || !recovery.set_peer_address_validated(
-        ?candidate.recovery_state, config.peer_validated, now_ns).ok) { ret false; }
+        ?candidate.recovery_state, config.peer_validated, now_ns).ok) {
+        ret refuse(init_result, INIT_RECOVERY);
+    }
     candidate.acknowledgements = ack_api.init(storage.ack_initial,
         storage.ack_handshake, storage.ack_application,
         saturated_multiply(local_parameters.max_ack_delay, 1000000),
         local_parameters.ack_delay_exponent::u8);
-    if (!candidate.acknowledgements.valid) { ret false; }
+    if (!candidate.acknowledgements.valid) {
+        ret refuse(init_result, INIT_RECOVERY);
+    }
     if (config.role == transport_api.CLIENT) {
         if (!negotiation_api.initialize(?candidate.negotiation,
             negotiation_api.Config{
             supported_versions: config.supported_versions,
             supported_version_count: config.supported_version_count},
             storage.negotiation, config.version, config.original_destination,
-            config.local_source)) { ret false; }
+            config.local_source)) { ret refuse(init_result, INIT_RECOVERY); }
     }
     var start: handshake_api.Start;
     start.role = role_handshake(config.role);
@@ -953,28 +1034,30 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         length: config.local_transport_parameters.length};
     start.now_ns = now_ns;
     start.enable_early_data = config.enable_early_data;
-    if (!handshake_api.lease_core(handshake, config.source)) { ret false; }
+    if (!handshake_api.lease_core(handshake, config.source)) {
+        ret refuse(init_result, INIT_LEASE);
+    }
     if (!cid_api.lease_core(cids, config.source)) {
         handshake_api.release_core(handshake, config.source);
-        ret false;
+        ret refuse(init_result, INIT_LEASE);
     }
     if (!path_api.lease_core(paths, config.source)) {
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
-        ret false;
+        ret refuse(init_result, INIT_LEASE);
     }
     if (!stream_api.lease_core(streams, config.source)) {
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
-        ret false;
+        ret refuse(init_result, INIT_LEASE);
     }
     if (!datagram_api.lease_core(datagrams, config.source)) {
         stream_api.release_core(streams, config.source);
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
-        ret false;
+        ret refuse(init_result, INIT_LEASE);
     }
     if (protection.derive_initial(?candidate_secrets.initial_keys, config.version,
         contracts.Bytes{data: ?config.initial_secret_destination.data[0],
@@ -984,7 +1067,7 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
-        ret false;
+        ret refuse(init_result, INIT_KEYS);
     }
     if (path_api.configure_transport_scoped(paths, config.source, current_path.handle,
         candidate.recovery_state.rtt.smoothed_ns,
@@ -995,7 +1078,7 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
         protection.destroy_initial(?candidate_secrets.initial_keys);
-        ret false;
+        ret refuse(init_result, INIT_PATH);
     }
     val started: handshake_api.Result = handshake_api.start_scoped(handshake,
         config.source, ?start);
@@ -1009,7 +1092,7 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
         protection.destroy_initial(?candidate_secrets.initial_keys);
-        ret false;
+        ret refuse(init_result, INIT_PROVIDER_START);
     }
     var i: usize = 0;
     for (i < storage.owner_capacity) {
@@ -1035,6 +1118,7 @@ pub fun init_client_result(core: *Core, secrets: *Secrets, config: Config,
     var init_result: InitResult;
     if (config.role != transport_api.CLIENT) {
         init_result.error = INTERNAL_ERROR;
+        init_result.reason = INIT_ARGUMENT;
         ret init_result;
     }
     if (!initialize(core, secrets, config, storage, secret_storage, handshake,
@@ -1055,6 +1139,7 @@ pub fun init_server_result(core: *Core, secrets: *Secrets, config: Config,
     var init_result: InitResult;
     if (config.role != transport_api.SERVER) {
         init_result.error = INTERNAL_ERROR;
+        init_result.reason = INIT_ARGUMENT;
         ret init_result;
     }
     if (!initialize(core, secrets, config, storage, secret_storage, handshake,
