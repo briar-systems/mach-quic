@@ -82,15 +82,21 @@ fun stream_config(source: u64, role: u8) stream_api.Config {
     ret value;
 }
 
+# a literal that omits a field leaves the previous frame's contents there rather
+# than zero (briar-systems/mach#3108), so every result names all four
+fun core_outcome(status: u8, error: u64, state: u8) transport_api.CoreResult {
+    ret transport_api.CoreResult{status: status, error: error,
+        provider_error: 0, state: state};
+}
+
 fun core_result(status: u8, state: u8) transport_api.CoreResult {
-    ret transport_api.CoreResult{status: status, error: 0, state: state};
+    ret core_outcome(status, 0, state);
 }
 
 fun core_receive(context: ptr, input: *transport_api.Datagram) transport_api.CoreResult {
     val core: *Core = context::*Core;
     if (core.closed || input == nil || input.length == 0 || input.data == nil) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: 1, state: transport_api.ACTIVE};
+        ret core_outcome(transport_api.STATUS_ERROR, 1, transport_api.ACTIVE);
     }
     val command: u8 = input.data[0];
     if (command == 1) {
@@ -104,8 +110,7 @@ fun core_receive(context: ptr, input: *transport_api.Datagram) transport_api.Cor
         val received: stream_api.ReceiveResult = stream_api.receive_stream(core.streams,
             id, offset, ?input.data[4], input.length - 4, fin);
         if (!received.ok) {
-            ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-                error: received.error::u64, state: transport_api.ACTIVE};
+            ret core_outcome(transport_api.STATUS_ERROR, received.error::u64, transport_api.ACTIVE);
         }
         core.received = core.received + 1;
         ret core_result(transport_api.STATUS_OK, transport_api.ACTIVE);
@@ -114,8 +119,7 @@ fun core_receive(context: ptr, input: *transport_api.Datagram) transport_api.Cor
         val received: datagram_api.QueueResult = datagram_api.receive(core.datagrams,
             ?input.data[1], input.length - 1, input.length);
         if (!received.ok) {
-            ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-                error: received.error::u64, state: transport_api.ACTIVE};
+            ret core_outcome(transport_api.STATUS_ERROR, received.error::u64, transport_api.ACTIVE);
         }
         core.received = core.received + 1;
         ret core_result(transport_api.STATUS_OK, transport_api.ACTIVE);
@@ -140,16 +144,14 @@ fun core_receive(context: ptr, input: *transport_api.Datagram) transport_api.Cor
         core.driver.config.max_udp_payload = 1;
         ret core_result(transport_api.STATUS_OK, transport_api.ACTIVE);
     }
-    ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-        error: 2, state: transport_api.ACTIVE};
+    ret core_outcome(transport_api.STATUS_ERROR, 2, transport_api.ACTIVE);
 }
 
 fun core_timeout(context: ptr, generation: u64, now_ns: u64) transport_api.CoreResult {
     val core: *Core = context::*Core;
     if (!core.timer_armed || core.timer_generation != generation ||
         now_ns < core.timer_deadline_ns) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: 3, state: transport_api.ACTIVE};
+        ret core_outcome(transport_api.STATUS_ERROR, 3, transport_api.ACTIVE);
     }
     core.timer_armed = false;
     core.timer_generation = core.timer_generation + 1;
@@ -202,8 +204,7 @@ fun core_complete(context: ptr, owner: u64, status: u8, count: usize,
     val core: *Core = context::*Core;
     val index: usize = (owner % 64)::usize;
     if (!core.active_owners[index] || count > 5 || now_ns == 0 - 1::u64) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: 6, state: transport_api.ACTIVE};
+        ret core_outcome(transport_api.STATUS_ERROR, 6, transport_api.ACTIVE);
     }
     core.active_owners[index] = false;
     core.active_count = core.active_count - 1;
@@ -223,8 +224,7 @@ fun core_begin_close(context: ptr, abortive: bool, application_error: u64,
                      reason: *u8, reason_length: usize, now_ns: u64) transport_api.CoreResult {
     val core: *Core = context::*Core;
     if (reason_length > 0 && reason == nil) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: application_error + now_ns, state: transport_api.ACTIVE};
+        ret core_outcome(transport_api.STATUS_ERROR, application_error + now_ns, transport_api.ACTIVE);
     }
     core.closing = true;
     if (abortive) { core.abortive = true; core.outbound = 0; }

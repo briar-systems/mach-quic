@@ -821,6 +821,14 @@ fun test_initial(output: *u8, destination: packet.ConnectionId,
     ret builder.len + tail == 1200 - variable_position;
 }
 
+# a literal that omits a field leaves the previous frame's contents there rather
+# than zero (briar-systems/mach#3108), and a record-typed field cannot be zeroed
+# by a nested literal for the same reason
+fun no_connection_id() packet.ConnectionId {
+    var value: packet.ConnectionId;
+    ret value;
+}
+
 test "quic.connection.listener: unsupported versions produce bounded negotiation" {
     var peer_slots: [2]admission.PeerSlot;
     var charges: [2]admission.ChargeSlot;
@@ -841,7 +849,7 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
     var listener: Listener;
     if (!initialize(?listener, Config{source: 503,
         supported_versions: ?versions[0], supported_version_count: 2,
-        minimum_initial_size: 1200}, Storage{pending: ?pending[0],
+        minimum_initial_size: 1200, require_retry: false}, Storage{pending: ?pending[0],
         pending_capacity: 2}, ?admission_manager, ?token_manager)) { ret 1; }
     var input: [32]u8;
     input[0] = 0xc0;
@@ -851,7 +859,8 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
     var output: [64]u8;
     var request: Request = Request{peer: ip.endpoint(192, 0, 2, 1, 4433),
         data: ?input[0], length: 19, now_ns: 1, output: ?output[0],
-        output_capacity: 64, version_negotiation_bits: 0x35};
+        output_capacity: 64, version_negotiation_bits: 0x35,
+        retry_source: no_connection_id(), retry_nonce: 0};
     val negotiated: Result = preflight(?listener, ?request);
     if (negotiated.action != ACTION_VERSION_NEGOTIATION ||
         negotiated.output_count != 27 || output[0] != 0xb5 ||
@@ -902,7 +911,8 @@ test "quic.connection.listener: retry identity, replay, cancellation, and admiss
     val peer: ip.Endpoint = ip.endpoint(198, 51, 100, 8, 55000);
     var request: Request = Request{peer: peer, data: ?initial[0], length: 1200,
         now_ns: 10, retry_source: retry_source, retry_nonce: 99,
-        output: ?response[0], output_capacity: 256};
+        output: ?response[0], output_capacity: 256,
+        version_negotiation_bits: 0};
     val first_charge: admission.Result = admission.reserve_scoped(
         ?admission_manager, 513, ip.endpoint(203, 0, 113, 1, 4433));
     val second_charge: admission.Result = admission.reserve_scoped(
@@ -976,7 +986,7 @@ test "quic.connection.listener: saturated admission precedes token authenticatio
     var listener: Listener;
     if (!initialize(?listener, Config{source: 523,
         supported_versions: ?versions[0], supported_version_count: 1,
-        minimum_initial_size: 1200}, Storage{pending: ?pending[0],
+        minimum_initial_size: 1200, require_retry: false}, Storage{pending: ?pending[0],
         pending_capacity: 1}, ?admission_manager, ?token_manager)) { ret 1; }
     val peer: ip.Endpoint = ip.endpoint(203, 0, 113, 9, 44000);
     val original: packet.ConnectionId = test_id(1);
@@ -999,7 +1009,9 @@ test "quic.connection.listener: saturated admission precedes token authenticatio
     val replay_generation: u64 = replay[0].generation;
     val replay_cursor: usize = token_manager.next_replay;
     var request: Request = Request{peer: peer, data: ?input[0], length: 1200,
-        now_ns: 20, output: nil, output_capacity: 0};
+        now_ns: 20, output: nil, output_capacity: 0,
+        retry_source: no_connection_id(), retry_nonce: 0,
+        version_negotiation_bits: 0};
     val blocked: Result = preflight(?listener, ?request);
     if (blocked.action != ACTION_BLOCKED) { ret 5; }
     if (replay[0].state != token.REPLAY_FREE ||
@@ -1038,11 +1050,11 @@ test "quic.connection.listener: hostile configuration aliases acquire no leases"
     var listener: Listener;
     if (initialize(?listener, Config{source: 533,
             supported_versions: maximum::*u32, supported_version_count: 1,
-            minimum_initial_size: 1200}, Storage{pending: ?pending[0],
+            minimum_initial_size: 1200, require_retry: false}, Storage{pending: ?pending[0],
             pending_capacity: 1}, ?admission_manager, ?token_manager) ||
         initialize(?listener, Config{source: 533,
             supported_versions: ?versions[0], supported_version_count: 1,
-            minimum_initial_size: 1200}, Storage{pending: (?versions[0])::*Pending,
+            minimum_initial_size: 1200, require_retry: false}, Storage{pending: (?versions[0])::*Pending,
             pending_capacity: 1}, ?admission_manager, ?token_manager) ||
         listener.initialized || admission_manager.listener_lease != 0 ||
         token_manager.listener_lease != 0 || pending[0].state != PENDING_RESERVED) {

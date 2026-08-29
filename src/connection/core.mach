@@ -424,6 +424,28 @@ fun core_result(core: *Core, status: transport_api.Status,
         provider_error: core.last_provider_error, state: core.state};
 }
 
+# the guards that refuse before the core is known good cannot read a provider
+# error off it, and a literal that omits the field leaves the previous frame's
+# contents there rather than zero (briar-systems/mach#3108)
+fun core_refused(error: u64) transport_api.CoreResult {
+    ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
+        error: error, provider_error: 0, state: transport_api.DRAINING};
+}
+
+fun stream_prepared_token(token: stream_api.AttemptToken) stream_api.Prepared {
+    var value: stream_api.Prepared;
+    value.ok = true;
+    value.token = token;
+    ret value;
+}
+
+fun datagram_prepared_token(token: datagram_api.Token) datagram_api.Prepared {
+    var value: datagram_api.Prepared;
+    value.ok = true;
+    value.token = token;
+    ret value;
+}
+
 fun core_record_valid(core: *Core) bool {
     ret core != nil && ownership.bytes((?core.config)::*u8, $size_of(Core),
         ownership.ZERO_FORBIDDEN).valid;
@@ -2270,8 +2292,7 @@ pub fun receive(core: *Core, secrets: *Secrets,
     if (!core_record_valid(core) || !secret_record_valid(secrets) ||
         !ownership.bytes(input::*u8, $size_of(transport_api.Datagram),
             ownership.ZERO_FORBIDDEN).valid) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: INTERNAL_ERROR, state: transport_api.DRAINING};
+        ret core_refused(INTERNAL_ERROR);
     }
     val input_range: ownership.Range = ownership.bytes(input.data,
         input.length, ownership.ZERO_FORBIDDEN);
@@ -2280,8 +2301,7 @@ pub fun receive(core: *Core, secrets: *Secrets,
         !borrowed_disjoint(core, input_range) ||
         input.length > core.config.max_udp_payload ||
         input.received_at_ns < core.last_now_ns) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: INTERNAL_ERROR, state: transport_api.DRAINING};
+        ret core_refused(INTERNAL_ERROR);
     }
     if (core.state == transport_api.CLOSED ||
         core.state == transport_api.DRAINING) {
@@ -2453,8 +2473,7 @@ pub fun poll_handshake(core: *Core, secrets: *Secrets,
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
         now_ns < core.last_now_ns) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: INTERNAL_ERROR, state: transport_api.DRAINING};
+        ret core_refused(INTERNAL_ERROR);
     }
     if (core.closing) { ret core_result(core, transport_api.STATUS_CLOSED, 0); }
     core.last_now_ns = now_ns;
@@ -2543,12 +2562,11 @@ fun cancel_payload(core: *Core, secrets: *Secrets, owner: *Owner) bool {
         ok = handshake_api.cancel_prepared_scoped(secrets.handshake, core.config.source, owner.handshake).status == handshake_api.STATUS_OK;
     }
     if (owner.kind == OWNER_STREAM) {
-        ok = stream_api.cancel_prepared_scoped(core.streams, core.config.source, stream_api.Prepared{
-            ok: true, token: owner.stream}).status == stream_api.STATUS_OK;
+        ok = stream_api.cancel_prepared_scoped(core.streams, core.config.source, stream_prepared_token(owner.stream)).status == stream_api.STATUS_OK;
     }
     if (owner.kind == OWNER_DATAGRAM) {
         ok = datagram_api.cancel_prepared_scoped(core.datagrams, core.config.source,
-            datagram_api.Prepared{ok: true, token: owner.datagram}).status ==
+            datagram_prepared_token(owner.datagram)).status ==
             datagram_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_CHALLENGE) {
@@ -3252,12 +3270,10 @@ fun publish_payload(core: *Core, secrets: *Secrets, owner: *Owner,
         ret handshake_api.publish_scoped(secrets.handshake, core.config.source, owner.handshake).status == handshake_api.STATUS_OK;
     }
     if (owner.kind == OWNER_STREAM) {
-        ret stream_api.publish_scoped(core.streams, core.config.source, stream_api.Prepared{
-            ok: true, token: owner.stream}).status == stream_api.STATUS_OK;
+        ret stream_api.publish_scoped(core.streams, core.config.source, stream_prepared_token(owner.stream)).status == stream_api.STATUS_OK;
     }
     if (owner.kind == OWNER_DATAGRAM) {
-        ret datagram_api.publish_scoped(core.datagrams, core.config.source, datagram_api.Prepared{
-            ok: true, token: owner.datagram}).status == datagram_api.STATUS_OK;
+        ret datagram_api.publish_scoped(core.datagrams, core.config.source, datagram_prepared_token(owner.datagram)).status == datagram_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_CHALLENGE) {
         ret path_api.publish_challenge_scoped(core.paths, core.config.source, owner.path_challenge,
@@ -3280,8 +3296,7 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
         now_ns < core.last_now_ns) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: INTERNAL_ERROR, state: transport_api.DRAINING};
+        ret core_refused(INTERNAL_ERROR);
     }
     val owner: *Owner = owner_by_id(core, owner_id);
     core.last_now_ns = now_ns;
@@ -3343,6 +3358,7 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
     val sent: recovery.OperationResult = recovery.on_packet_sent(
         ?core.recovery_state, owner.space, recovery.SentPacket{
             number: owner.packet_number, sent_at_ns: now_ns,
+            sent_after_rtt_sample: core.recovery_state.rtt.has_sample,
             bytes: owner.bytes, owner: owner.owner,
             path_source: recovery_path.source,
             path_index: recovery_path.index,
@@ -3475,8 +3491,7 @@ pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
         now_ns < core.last_now_ns) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: INTERNAL_ERROR, state: transport_api.DRAINING};
+        ret core_refused(INTERNAL_ERROR);
     }
     val current: transport_api.CoreTimer = timer(core);
     if (!current.armed || generation != current.generation) {
@@ -3559,8 +3574,7 @@ pub fun begin_close(core: *Core, secrets: *Secrets, abortive: bool,
         now_ns < core.last_now_ns ||
         reason_length > core.storage.close_reason_capacity ||
         !borrowed_disjoint(core, reason_range)) {
-        ret transport_api.CoreResult{status: transport_api.STATUS_ERROR,
-            error: INTERNAL_ERROR, state: transport_api.DRAINING};
+        ret core_refused(INTERNAL_ERROR);
     }
     if (core.state == transport_api.CLOSED) {
         ret core_result(core, transport_api.STATUS_CLOSED, 0);
