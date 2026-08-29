@@ -854,13 +854,25 @@ fun secret_index(level: Level, direction: u8) usize {
     ret level_index(level) * 2 + (direction - 1)::usize;
 }
 
+# every Result and ProviderResult is built here. a partial literal leaves the
+# unnamed fields holding the previous frame's contents rather than zero
+# (briar-systems/mach#3108), and a constructor cannot be called with one missing
+fun adapter_result(status: Status, error: Error, provider_error: u64,
+                   consumed: usize) Result {
+    ret Result{status: status, error: error, provider_error: provider_error,
+        consumed: consumed};
+}
+
+fun provider_result(status: Status, error: u64) ProviderResult {
+    ret ProviderResult{status: status, error: error};
+}
+
 fun failed(code: Error) Result {
-    ret Result{status: STATUS_ERROR, error: code};
+    ret adapter_result(STATUS_ERROR, code, 0, 0);
 }
 
 fun provider_failed(provider_error: u64) Result {
-    ret Result{status: STATUS_ERROR, error: ERROR_PROVIDER,
-        provider_error: provider_error};
+    ret adapter_result(STATUS_ERROR, ERROR_PROVIDER, provider_error, 0);
 }
 
 fun tls_error(value: tls_error_api.Error) u64 {
@@ -1080,27 +1092,27 @@ fun tls_provider_result(adapter: *Adapter, value: tls_engine.Result,
     if (value.status == tls_engine.OK || value.status == tls_engine.COMPLETE ||
         (accept_more && value.status == tls_engine.MORE)) {
         adapter.tls_error = 0;
-        ret ProviderResult{status: STATUS_OK};
+        ret provider_result(STATUS_OK, 0);
     }
     if (value.status == tls_engine.MORE) {
         adapter.tls_error = 0;
-        ret ProviderResult{status: STATUS_MORE};
+        ret provider_result(STATUS_MORE, 0);
     }
     if (value.status == tls_engine.BLOCKED) {
         adapter.tls_error = 0;
-        ret ProviderResult{status: STATUS_BLOCKED};
+        ret provider_result(STATUS_BLOCKED, 0);
     }
     adapter.tls_error = tls_error(value.error);
-    ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+    ret provider_result(STATUS_ERROR, adapter.tls_error);
 }
 
 fun tls_start(adapter: *Adapter, value: *Start) ProviderResult {
     if (!tls_start_matches(adapter, value)) {
         adapter.tls_error = PROVIDER_BINDING_CONFIG;
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     if (!tls_time(adapter, value.now_ns)) {
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     ret tls_provider_result(adapter, tls_api_start(adapter,
         adapter.tls_verification_time_unix), false);
@@ -1111,15 +1123,15 @@ fun tls_ingest(adapter: *Adapter, level: Level, offset: u64, data: *u8,
     var mapped: tls_engine.Level;
     if (!provider_level(level, ?mapped)) {
         adapter.tls_error = PROVIDER_BINDING_LEVEL;
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     val index: usize = tls_level_index(mapped);
     if (offset != adapter.tls_receive_offsets[index]) {
         adapter.tls_error = PROVIDER_BINDING_OFFSET;
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     if (!tls_time(adapter, now_ns)) {
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     val consumed: tls_engine.Result = tls_api_ingest(adapter, mapped, data,
         length);
@@ -1142,17 +1154,17 @@ fun tls_restart(adapter: *Adapter, reason: u8, version: u32,
         (version != packet.VERSION_1 && version != packet.VERSION_2) ||
         adapter.tls_active_token != 0) {
         adapter.tls_error = PROVIDER_BINDING_STATE;
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     var mapped: u8 = tls_client_api.RESTART_RETRY;
     if (reason == RESTART_VERSION_NEGOTIATION) {
         mapped = tls_client_api.RESTART_VERSION_NEGOTIATION;
     } or (reason != RESTART_RETRY) {
         adapter.tls_error = PROVIDER_BINDING_STATE;
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     if (!tls_time(adapter, now_ns)) {
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     val result: ProviderResult = tls_provider_result(adapter,
         tls_client_api.restart(adapter.tls_client, mapped), false);
@@ -1176,16 +1188,16 @@ fun tls_poll(adapter: *Adapter, now_ns: u64) ProviderResult {
         if (adapter.tls_error == 0) {
             adapter.tls_error = PROVIDER_BINDING_STATE;
         }
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     val value: tls_engine.Result = tls_api_poll(adapter);
     if (value.status == tls_engine.FAILED && tls_api_alert_pending(adapter)) {
         adapter.tls_error = 0;
-        ret ProviderResult{status: STATUS_OK};
+        ret provider_result(STATUS_OK, 0);
     }
     if (value.status == tls_engine.COMPLETE) {
         adapter.tls_error = 0;
-        ret ProviderResult{status: STATUS_EMPTY};
+        ret provider_result(STATUS_EMPTY, 0);
     }
     ret tls_provider_result(adapter, value, false);
 }
@@ -1279,7 +1291,7 @@ fun tls_close(adapter: *Adapter, alert: u64, now_ns: u64) ProviderResult {
     if (alert > 255 || adapter.tls_active_token != 0 ||
         now_ns < adapter.tls_last_now_ns) {
         adapter.tls_error = PROVIDER_BINDING_STATE;
-        ret ProviderResult{status: STATUS_ERROR, error: adapter.tls_error};
+        ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     adapter.tls_last_now_ns = now_ns;
     val state: tls_engine.Snapshot = tls_api_snapshot(adapter);
@@ -1288,7 +1300,7 @@ fun tls_close(adapter: *Adapter, alert: u64, now_ns: u64) ProviderResult {
             alert::tls_record.AlertDescription), false);
     }
     adapter.tls_error = 0;
-    ret ProviderResult{status: STATUS_OK};
+    ret provider_result(STATUS_OK, 0);
 }
 
 fun storage_valid(adapter: *Adapter, config: Config, storage: Storage) bool {
@@ -1633,7 +1645,7 @@ pub fun start(adapter: *Adapter, value: *Start) Result {
     adapter.role = role;
     adapter.version = version;
     adapter.started = true;
-    ret Result{status: STATUS_OK};
+    ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
 fun receive_bounds(adapter: *Adapter, level: Level, offset: u64,
@@ -1680,7 +1692,7 @@ pub fun receive(adapter: *Adapter, level: Level, offset: u64, data: *u8,
         adapter.storage.receive_present[base + contiguous::usize]) {
         contiguous = contiguous + 1;
     }
-    if (contiguous == begin) { ret Result{status: STATUS_MORE, consumed: length}; }
+    if (contiguous == begin) { ret adapter_result(STATUS_MORE, ERROR_NONE, 0, length); }
     var provider: ProviderResult;
     if (tls_bound(adapter)) {
         provider = tls_ingest(adapter, level, begin,
@@ -1702,7 +1714,7 @@ pub fun receive(adapter: *Adapter, level: Level, offset: u64, data: *u8,
         ret provider_failed(provider.error);
     }
     adapter.levels[index].receive_contiguous = contiguous;
-    ret Result{status: STATUS_OK, consumed: length};
+    ret adapter_result(STATUS_OK, ERROR_NONE, 0, length);
 }
 
 fun valid_secret_event(adapter: *Adapter, event: *ProviderEvent) bool {
@@ -1933,7 +1945,7 @@ pub fun complete_event(adapter: *Adapter, token: EventToken, accepted: bool) Res
         adapter.terminal_alert = event.alert;
         adapter.closing = true;
     }
-    ret Result{status: STATUS_OK};
+    ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
 fun claim_attempt(adapter: *Adapter) usize {
@@ -2055,7 +2067,7 @@ pub fun cancel_prepared(adapter: *Adapter, token: AttemptToken) Result {
     val attempt: *Attempt = attempt_for(adapter, token);
     if (attempt == nil || attempt.state != ATTEMPT_PREPARED) { ret failed(ERROR_TOKEN); }
     release_attempt(adapter, attempt, true, false);
-    ret Result{status: STATUS_OK};
+    ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
 pub fun publish(adapter: *Adapter, token: AttemptToken) Result {
@@ -2066,7 +2078,7 @@ pub fun publish(adapter: *Adapter, token: AttemptToken) Result {
     val end: usize = i + attempt.length;
     for (i < end) { adapter.storage.send_pending[base + i] = false; i = i + 1; }
     attempt.state = ATTEMPT_PUBLISHED;
-    ret Result{status: STATUS_OK};
+    ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
 pub fun on_terminal(adapter: *Adapter, token: AttemptToken, terminal: u8) Result {
@@ -2077,7 +2089,7 @@ pub fun on_terminal(adapter: *Adapter, token: AttemptToken, terminal: u8) Result
     }
     release_attempt(adapter, attempt, terminal == TERMINAL_LOST,
         terminal == TERMINAL_ACKED);
-    ret Result{status: STATUS_OK};
+    ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
 fun clear_level(adapter: *Adapter, level: Level) {
@@ -2152,7 +2164,7 @@ pub fun restart(adapter: *Adapter, reason: u8, version: u32, now_ns: u64) Result
         adapter.terminal_alert = 0;
     }
     adapter.version = version;
-    ret Result{status: STATUS_OK};
+    ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
 pub fun on_retry(adapter: *Adapter, version: u32, now_ns: u64) Result {
@@ -2185,7 +2197,7 @@ pub fun poll(adapter: *Adapter, now_ns: u64) Result {
         adapter.closing = true;
         ret provider_failed(provider.error);
     }
-    ret Result{status: provider.status, provider_error: provider.error};
+    ret adapter_result(provider.status, ERROR_NONE, provider.error, 0);
 }
 
 pub fun close(adapter: *Adapter, alert: u64, now_ns: u64) Result {
@@ -2210,7 +2222,7 @@ pub fun close(adapter: *Adapter, alert: u64, now_ns: u64) Result {
     }
     adapter.closing = true;
     adapter.terminal_alert = alert;
-    ret Result{status: STATUS_OK};
+    ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
 pub fun destroy(adapter: *Adapter) bool {

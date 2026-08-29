@@ -399,8 +399,10 @@ fun callback_generate(driver: *Driver, output: *u8, capacity: usize,
         driver.protocol.context, output, capacity, now_ns);
     if (!callback_intact(driver, ?before)) {
         restore_callback(driver, ?before);
-        ret CoreDatagram{status: STATUS_ERROR, error: 0,
-            provider_error: 0, state: before.state};
+        var refused: CoreDatagram;
+        refused.status = STATUS_ERROR;
+        refused.state = before.state;
+        ret refused;
     }
     atomic.store(?driver.callback_owner, 0);
     ret result;
@@ -658,6 +660,16 @@ fun operation_error(code: Error) OperationResult {
     ret result;
 }
 
+# a literal that omits a field leaves the previous frame's contents there rather
+# than zero (briar-systems/mach#3108), so every result is built with all of them
+fun operation_result(status: Status, error: Error, protocol_error: u64,
+                     provider_error: u64,
+                     state: ConnectionState) OperationResult {
+    ret OperationResult{status: status, error: error,
+        protocol_error: protocol_error, provider_error: provider_error,
+        state: state};
+}
+
 fun source_scope(scope: *cancel.Scope, owner: *cancel.Scope) bool {
     if (scope == nil || owner == nil) { ret false; }
     var current: *cancel.Scope = scope;
@@ -721,8 +733,7 @@ fun begin_close_locked(driver: *Driver, abortive: bool, cause: lifecycle.Cause,
                        application_error: u64, reason: *u8, reason_length: usize,
                        now_ns: u64) OperationResult {
     if (driver.state == CLOSED) {
-        ret OperationResult{status: STATUS_CLOSED, error: ERROR_NONE,
-            protocol_error: 0, state: CLOSED};
+        ret operation_result(STATUS_CLOSED, ERROR_NONE, 0, 0, CLOSED);
     }
     if (reason_length > driver.config.max_close_reason || (reason_length > 0 && reason == nil)) {
         ret operation_error(ERROR_BUFFER);
@@ -737,8 +748,7 @@ fun begin_close_locked(driver: *Driver, abortive: bool, cause: lifecycle.Cause,
             driver.close_mode = lifecycle.ABORTIVE;
             driver.terminal_cause = cause;
         }
-        ret OperationResult{status: STATUS_OK, error: ERROR_NONE,
-            protocol_error: 0, state: driver.state};
+        ret operation_result(STATUS_OK, ERROR_NONE, 0, 0, driver.state);
     }
     val core: CoreResult = callback_begin_close(driver, abortive,
         application_error, reason, reason_length, now_ns);
@@ -752,8 +762,7 @@ fun begin_close_locked(driver: *Driver, abortive: bool, cause: lifecycle.Cause,
     driver.close_cause = cause;
     driver.terminal_cause = cause;
     driver.application_error = application_error;
-    ret OperationResult{status: STATUS_OK, error: ERROR_NONE,
-        protocol_error: 0, state: driver.state};
+    ret operation_result(STATUS_OK, ERROR_NONE, 0, 0, driver.state);
 }
 
 fun cancellation_callback(context: ptr, reason: cancel.Reason) {
@@ -914,15 +923,13 @@ pub fun receive_datagram(driver: *Driver, input: *Datagram) OperationResult {
         driver.close_mode == lifecycle.ABORTIVE)) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
-        ret OperationResult{status: STATUS_CLOSED, error: ERROR_NONE,
-            protocol_error: 0, state: state};
+        ret operation_result(STATUS_CLOSED, ERROR_NONE, 0, 0, state);
     }
     if (driver.operation_scope == nil ||
         cancel.reason(driver.operation_scope) != cancel.ACTIVE) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
-        ret OperationResult{status: STATUS_CANCELLED, error: ERROR_CANCELLED,
-            protocol_error: 0, state: state};
+        ret operation_result(STATUS_CANCELLED, ERROR_CANCELLED, 0, 0, state);
     }
     if (!update_now(driver, input.received_at_ns)) {
         mutex.unlock(?driver.lock);
@@ -980,15 +987,13 @@ pub fun on_timeout(driver: *Driver, value: Timer, now_ns: u64) OperationResult {
     mutex.lock(?driver.lock);
     if (driver.state == CLOSED) {
         mutex.unlock(?driver.lock);
-        ret OperationResult{status: STATUS_CLOSED, error: ERROR_NONE,
-            protocol_error: 0, state: CLOSED};
+        ret operation_result(STATUS_CLOSED, ERROR_NONE, 0, 0, CLOSED);
     }
     if ((driver.closing && driver.close_mode == lifecycle.ABORTIVE) ||
         driver.operation_scope == nil || cancel.reason(driver.operation_scope) != cancel.ACTIVE) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
-        ret OperationResult{status: STATUS_CANCELLED, error: ERROR_CANCELLED,
-            protocol_error: 0, state: state};
+        ret operation_result(STATUS_CANCELLED, ERROR_CANCELLED, 0, 0, state);
     }
     if (now_ns < driver.last_now_ns) {
         mutex.unlock(?driver.lock);
@@ -999,14 +1004,12 @@ pub fun on_timeout(driver: *Driver, value: Timer, now_ns: u64) OperationResult {
         current.deadline_ns != value.deadline_ns) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
-        ret OperationResult{status: STATUS_STALE, error: ERROR_TOKEN,
-            protocol_error: 0, state: state};
+        ret operation_result(STATUS_STALE, ERROR_TOKEN, 0, 0, state);
     }
     if (now_ns < value.deadline_ns) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
-        ret OperationResult{status: STATUS_EARLY, error: ERROR_TIME,
-            protocol_error: 0, state: state};
+        ret operation_result(STATUS_EARLY, ERROR_TIME, 0, 0, state);
     }
     driver.last_now_ns = now_ns;
     val core: CoreResult = callback_timeout(driver, value.generation, now_ns);
@@ -1710,8 +1713,7 @@ pub fun finish_close(driver: *Driver) OperationResult {
         driver.datagrams.send_count != 0 || driver.datagrams.delivered_count != 0 ||
         !callback_close_ready(driver)) {
         mutex.unlock(?driver.lock);
-        ret OperationResult{status: STATUS_BLOCKED, error: ERROR_CAPACITY,
-            protocol_error: 0, state: DRAINING};
+        ret operation_result(STATUS_BLOCKED, ERROR_CAPACITY, 0, 0, DRAINING);
     }
     if (!callback_finish_close(driver)) {
         mutex.unlock(?driver.lock);
@@ -1720,8 +1722,7 @@ pub fun finish_close(driver: *Driver) OperationResult {
     if (driver.cancellation_attached) {
         if (!cancel.unregister(?driver.cancellation)) {
             mutex.unlock(?driver.lock);
-            ret OperationResult{status: STATUS_BLOCKED, error: ERROR_CANCELLED,
-                protocol_error: 0, state: DRAINING};
+            ret operation_result(STATUS_BLOCKED, ERROR_CANCELLED, 0, 0, DRAINING);
         }
         driver.cancellation_attached = false;
     }
@@ -1733,8 +1734,7 @@ pub fun finish_close(driver: *Driver) OperationResult {
     driver.state = CLOSED;
     driver.operation_scope = nil;
     mutex.unlock(?driver.lock);
-    ret OperationResult{status: STATUS_OK, error: ERROR_NONE,
-        protocol_error: 0, state: CLOSED};
+    ret operation_result(STATUS_OK, ERROR_NONE, 0, 0, CLOSED);
 }
 
 pub fun snapshot(driver: *Driver) Snapshot {
