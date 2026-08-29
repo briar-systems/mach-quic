@@ -226,6 +226,66 @@ fun accept_next(adapter: *handshake.Adapter, expected: u8) bool {
     ret handshake.complete_event(adapter, event.token, true).status == handshake.STATUS_OK;
 }
 
+# a literal that omits a field leaves the previous frame's contents there rather
+# than zero (briar-systems/mach#3108), which in argument position hands the
+# adapter a level, offset or alert the test never chose. one constructor per
+# event kind names every field
+fun event_of(token: u64, kind: handshake.EventKind) handshake.ProviderEvent {
+    var value: handshake.ProviderEvent;
+    value.token = token;
+    value.kind = kind;
+    ret value;
+}
+
+fun crypto_event(token: u64, level: handshake.Level, offset: u64,
+                 data: handshake.View) handshake.ProviderEvent {
+    var value: handshake.ProviderEvent = event_of(token, handshake.EVENT_CRYPTO);
+    value.level = level;
+    value.offset = offset;
+    value.data = data;
+    ret value;
+}
+
+fun secret_event(token: u64, level: handshake.Level, direction: u8,
+                 algorithm: protection.Algorithm, generation: u64,
+                 secret: handshake.SecretView) handshake.ProviderEvent {
+    var value: handshake.ProviderEvent = event_of(token,
+        handshake.EVENT_TRAFFIC_SECRET);
+    value.level = level;
+    value.direction = direction;
+    value.algorithm = algorithm;
+    value.generation = generation;
+    value.secret = secret;
+    ret value;
+}
+
+fun parameters_event(token: u64, data: handshake.View) handshake.ProviderEvent {
+    var value: handshake.ProviderEvent = event_of(token,
+        handshake.EVENT_PEER_TRANSPORT_PARAMETERS);
+    value.data = data;
+    ret value;
+}
+
+fun early_event(token: u64, disposition: u8) handshake.ProviderEvent {
+    var value: handshake.ProviderEvent = event_of(token,
+        handshake.EVENT_EARLY_DATA);
+    value.disposition = disposition;
+    ret value;
+}
+
+fun authentication_event(token: u64, disposition: u8,
+                         data: handshake.View) handshake.ProviderEvent {
+    var value: handshake.ProviderEvent = event_of(token,
+        handshake.EVENT_AUTHENTICATION);
+    value.disposition = disposition;
+    value.data = data;
+    ret value;
+}
+
+fun handshake_complete_event(token: u64) handshake.ProviderEvent {
+    ret event_of(token, handshake.EVENT_HANDSHAKE_COMPLETE);
+}
+
 test "quic.connection.handshake: every-byte crypto fragmentation is reassembled exactly once" {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 401)) { ret 1; }
@@ -263,38 +323,14 @@ test "quic.connection.handshake: event transitions expose secrets and peer decis
     var secret: [32]^u8;
     var parameters: [4]u8 = [4]u8{3, 2, 1, 0};
     var identity: [3]u8 = [3]u8{'c', 'a', '1'};
-    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 1,
-            kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.HANDSHAKE,
-            direction: handshake.DIRECTION_SEND,
-            algorithm: protection.AES_128_GCM_SHA256, generation: 1,
-            secret: handshake.SecretView{data: ?secret[0], length: 32}}) ||
-        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 2,
-            kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.HANDSHAKE,
-            direction: handshake.DIRECTION_RECEIVE,
-            algorithm: protection.AES_128_GCM_SHA256, generation: 1,
-            secret: handshake.SecretView{data: ?secret[0], length: 32}}) ||
-        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 3,
-            kind: handshake.EVENT_PEER_TRANSPORT_PARAMETERS,
-            data: handshake.View{data: ?parameters[0], length: 4}}) ||
-        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 4,
-            kind: handshake.EVENT_EARLY_DATA,
-            disposition: handshake.EARLY_NOT_OFFERED}) ||
-        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 5,
-            kind: handshake.EVENT_AUTHENTICATION,
-            disposition: handshake.AUTHENTICATED,
-            data: handshake.View{data: ?identity[0], length: 3}}) ||
-        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 6,
-            kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.APPLICATION,
-            direction: handshake.DIRECTION_SEND,
-            algorithm: protection.AES_128_GCM_SHA256, generation: 1,
-            secret: handshake.SecretView{data: ?secret[0], length: 32}}) ||
-        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 7,
-            kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.APPLICATION,
-            direction: handshake.DIRECTION_RECEIVE,
-            algorithm: protection.AES_128_GCM_SHA256, generation: 1,
-            secret: handshake.SecretView{data: ?secret[0], length: 32}}) ||
-        !queue_event(?fixture.provider, handshake.ProviderEvent{token: 8,
-            kind: handshake.EVENT_HANDSHAKE_COMPLETE})) { ret 2; }
+    if (!queue_event(?fixture.provider, secret_event(1, handshake.HANDSHAKE, handshake.DIRECTION_SEND, protection.AES_128_GCM_SHA256, 1, handshake.SecretView{data: ?secret[0], length: 32})) ||
+        !queue_event(?fixture.provider, secret_event(2, handshake.HANDSHAKE, handshake.DIRECTION_RECEIVE, protection.AES_128_GCM_SHA256, 1, handshake.SecretView{data: ?secret[0], length: 32})) ||
+        !queue_event(?fixture.provider, parameters_event(3, handshake.View{data: ?parameters[0], length: 4})) ||
+        !queue_event(?fixture.provider, early_event(4, handshake.EARLY_NOT_OFFERED)) ||
+        !queue_event(?fixture.provider, authentication_event(5, handshake.AUTHENTICATED, handshake.View{data: ?identity[0], length: 3})) ||
+        !queue_event(?fixture.provider, secret_event(6, handshake.APPLICATION, handshake.DIRECTION_SEND, protection.AES_128_GCM_SHA256, 1, handshake.SecretView{data: ?secret[0], length: 32})) ||
+        !queue_event(?fixture.provider, secret_event(7, handshake.APPLICATION, handshake.DIRECTION_RECEIVE, protection.AES_128_GCM_SHA256, 1, handshake.SecretView{data: ?secret[0], length: 32})) ||
+        !queue_event(?fixture.provider, handshake_complete_event(8))) { ret 2; }
     val first: handshake.Event = handshake.next_event(?fixture.adapter);
     if (first.status != handshake.STATUS_OK ||
         handshake.next_event(?fixture.adapter).status != handshake.STATUS_BLOCKED ||
@@ -323,9 +359,7 @@ test "quic.connection.handshake: crypto output survives cancellation, loss, retr
     var fixture: Fixture;
     if (!make_fixture(?fixture, 403)) { ret 1; }
     var output: [8]u8 = [8]u8{'c', 'l', 'i', 'e', 'n', 't', '-', 'h'};
-    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 1,
-        kind: handshake.EVENT_CRYPTO, level: handshake.INITIAL, offset: 0,
-        data: handshake.View{data: ?output[0], length: 8}}) ||
+    if (!queue_event(?fixture.provider, crypto_event(1, handshake.INITIAL, 0, handshake.View{data: ?output[0], length: 8})) ||
         !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 2; }
     output[0] = 'x';
     val cancelled: handshake.Prepared = handshake.prepare(?fixture.adapter,
@@ -346,9 +380,7 @@ test "quic.connection.handshake: crypto output survives cancellation, loss, retr
         handshake.publish(?fixture.adapter, before_retry.token).error !=
             handshake.ERROR_TOKEN || fixture.provider.retries != 1) { ret 5; }
     output[0] = 'c';
-    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 2,
-        kind: handshake.EVENT_CRYPTO, level: handshake.INITIAL, offset: 0,
-        data: handshake.View{data: ?output[0], length: 8}}) ||
+    if (!queue_event(?fixture.provider, crypto_event(2, handshake.INITIAL, 0, handshake.View{data: ?output[0], length: 8})) ||
         !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 8; }
     val final: handshake.Prepared = handshake.prepare(?fixture.adapter,
         handshake.INITIAL, 8);
@@ -367,11 +399,7 @@ test "quic.connection.handshake: invalid provider events and rejection are termi
     var invalid: Fixture;
     if (!make_fixture(?invalid, 404)) { ret 1; }
     var secret: [32]^u8;
-    if (!queue_event(?invalid.provider, handshake.ProviderEvent{token: 1,
-        kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.APPLICATION,
-        direction: handshake.DIRECTION_SEND,
-        algorithm: protection.AES_128_GCM_SHA256, generation: 1,
-        secret: handshake.SecretView{data: ?secret[0], length: 32}})) { ret 2; }
+    if (!queue_event(?invalid.provider, secret_event(1, handshake.APPLICATION, handshake.DIRECTION_SEND, protection.AES_128_GCM_SHA256, 1, handshake.SecretView{data: ?secret[0], length: 32}))) { ret 2; }
     if (handshake.next_event(?invalid.adapter).error != handshake.ERROR_EVENT ||
         invalid.provider.rejected != 1 || !handshake.snapshot(?invalid.adapter).closing ||
         !handshake.destroy(?invalid.adapter)) { ret 3; }
@@ -379,9 +407,7 @@ test "quic.connection.handshake: invalid provider events and rejection are termi
     var rejected: Fixture;
     if (!make_fixture(?rejected, 405)) { ret 4; }
     var parameters: [1]u8 = [1]u8{0};
-    if (!queue_event(?rejected.provider, handshake.ProviderEvent{token: 1,
-        kind: handshake.EVENT_PEER_TRANSPORT_PARAMETERS,
-        data: handshake.View{data: ?parameters[0], length: 1}})) { ret 5; }
+    if (!queue_event(?rejected.provider, parameters_event(1, handshake.View{data: ?parameters[0], length: 1}))) { ret 5; }
     val event: handshake.Event = handshake.next_event(?rejected.adapter);
     if (event.status != handshake.STATUS_OK || handshake.complete_event(?rejected.adapter,
         event.token, false).error != handshake.ERROR_REJECTED ||
@@ -394,9 +420,7 @@ test "quic.connection.handshake: Version Negotiation replaces rather than retran
     var fixture: Fixture;
     if (!make_fixture(?fixture, 406)) { ret 1; }
     var old: [4]u8 = [4]u8{'o', 'l', 'd', '!'};
-    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 1,
-        kind: handshake.EVENT_CRYPTO, level: handshake.INITIAL, offset: 0,
-        data: handshake.View{data: ?old[0], length: 4}}) ||
+    if (!queue_event(?fixture.provider, crypto_event(1, handshake.INITIAL, 0, handshake.View{data: ?old[0], length: 4})) ||
         !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 2; }
     val sent: handshake.Prepared = handshake.prepare(?fixture.adapter,
         handshake.INITIAL, 4);
@@ -409,9 +433,7 @@ test "quic.connection.handshake: Version Negotiation replaces rather than retran
         handshake.prepare(?fixture.adapter, handshake.INITIAL, 4).status !=
             handshake.STATUS_EMPTY) { ret 4; }
     var fresh: [4]u8 = [4]u8{'n', 'e', 'w', '!'};
-    if (!queue_event(?fixture.provider, handshake.ProviderEvent{token: 2,
-        kind: handshake.EVENT_CRYPTO, level: handshake.INITIAL, offset: 0,
-        data: handshake.View{data: ?fresh[0], length: 4}}) ||
+    if (!queue_event(?fixture.provider, crypto_event(2, handshake.INITIAL, 0, handshake.View{data: ?fresh[0], length: 4})) ||
         !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 5; }
     val prepared: handshake.Prepared = handshake.prepare(?fixture.adapter,
         handshake.INITIAL, 4);
