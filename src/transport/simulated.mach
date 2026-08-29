@@ -1,4 +1,5 @@
 use transport_api: quic.transport;
+use quic.connection.ownership;
 use stream_api: quic.stream.stream;
 use datagram_api: quic.stream.datagram;
 
@@ -20,7 +21,7 @@ use io_lifecycle: std.io.lifecycle;
 use net_types: std.net.async.types;
 
 rec Core {
-    driver: *transport_api.Driver;
+    driver: *transport_api.Driver[Core];
     streams: *stream_api.Manager;
     datagrams: *datagram_api.Queue;
     outbound: usize;
@@ -60,7 +61,7 @@ rec Fixture {
     sends: [4]transport_api.SendSlot;
     core: Core;
     scope: cancel.Scope;
-    driver: transport_api.Driver;
+    driver: transport_api.Driver[Core];
 }
 
 fun stream_config(source: u64, role: u8) stream_api.Config {
@@ -84,6 +85,12 @@ fun stream_config(source: u64, role: u8) stream_api.Config {
 
 # a literal that omits a field leaves the previous frame's contents there rather
 # than zero (briar-systems/mach#3108), so every result names all four
+# the protocol answers for its own memory, because a context the driver cannot
+# cast to bytes is the whole reason the entry exists
+fun core_range(core: *Core) ownership.Range {
+    ret ownership.bytes(core::*u8, $size_of(Core), ownership.ZERO_FORBIDDEN);
+}
+
 fun core_outcome(status: u8, error: u64, state: u8) transport_api.CoreResult {
     ret transport_api.CoreResult{status: status, error: error,
         provider_error: 0, state: state};
@@ -93,8 +100,7 @@ fun core_result(status: u8, state: u8) transport_api.CoreResult {
     ret core_outcome(status, 0, state);
 }
 
-fun core_receive(context: ptr, input: *transport_api.Datagram) transport_api.CoreResult {
-    val core: *Core = context::*Core;
+fun core_receive(core: *Core, input: *transport_api.Datagram) transport_api.CoreResult {
     if (core.closed || input == nil || input.length == 0 || input.data == nil) {
         ret core_outcome(transport_api.STATUS_ERROR, 1, transport_api.ACTIVE);
     }
@@ -137,7 +143,7 @@ fun core_receive(context: ptr, input: *transport_api.Datagram) transport_api.Cor
         ret core_result(transport_api.STATUS_OK, transport_api.ACTIVE);
     }
     if (command == 6 && core.driver != nil) {
-        val reentered: transport_api.OperationResult = transport_api.begin_close(
+        val reentered: transport_api.OperationResult = transport_api.begin_close[Core](
             core.driver, 0, nil, 0, input.received_at_ns);
         core.reentry_rejected = reentered.status == transport_api.STATUS_ERROR &&
             reentered.error == transport_api.ERROR_STATE;
@@ -147,8 +153,7 @@ fun core_receive(context: ptr, input: *transport_api.Datagram) transport_api.Cor
     ret core_outcome(transport_api.STATUS_ERROR, 2, transport_api.ACTIVE);
 }
 
-fun core_timeout(context: ptr, generation: u64, now_ns: u64) transport_api.CoreResult {
-    val core: *Core = context::*Core;
+fun core_timeout(core: *Core, generation: u64, now_ns: u64) transport_api.CoreResult {
     if (!core.timer_armed || core.timer_generation != generation ||
         now_ns < core.timer_deadline_ns) {
         ret core_outcome(transport_api.STATUS_ERROR, 3, transport_api.ACTIVE);
@@ -159,9 +164,8 @@ fun core_timeout(context: ptr, generation: u64, now_ns: u64) transport_api.CoreR
     ret core_result(transport_api.STATUS_OK, transport_api.ACTIVE);
 }
 
-fun core_generate(context: ptr, output: *u8, capacity: usize,
+fun core_generate(core: *Core, output: *u8, capacity: usize,
                   now_ns: u64) transport_api.CoreDatagram {
-    val core: *Core = context::*Core;
     var result: transport_api.CoreDatagram;
     result.state = transport_api.ACTIVE;
     if (core.outbound == 0) { result.status = transport_api.STATUS_EMPTY; ret result; }
@@ -199,9 +203,8 @@ fun core_generate(context: ptr, output: *u8, capacity: usize,
     ret result;
 }
 
-fun core_complete(context: ptr, owner: u64, status: u8, count: usize,
+fun core_complete(core: *Core, owner: u64, status: u8, count: usize,
                   now_ns: u64) transport_api.CoreResult {
-    val core: *Core = context::*Core;
     val index: usize = (owner % 64)::usize;
     if (!core.active_owners[index] || count > 5 || now_ns == 0 - 1::u64) {
         ret core_outcome(transport_api.STATUS_ERROR, 6, transport_api.ACTIVE);
@@ -220,9 +223,8 @@ fun core_complete(context: ptr, owner: u64, status: u8, count: usize,
     ret core_result(transport_api.STATUS_OK, state);
 }
 
-fun core_begin_close(context: ptr, abortive: bool, application_error: u64,
+fun core_begin_close(core: *Core, abortive: bool, application_error: u64,
                      reason: *u8, reason_length: usize, now_ns: u64) transport_api.CoreResult {
-    val core: *Core = context::*Core;
     if (reason_length > 0 && reason == nil) {
         ret core_outcome(transport_api.STATUS_ERROR, application_error + now_ns, transport_api.ACTIVE);
     }
@@ -231,20 +233,17 @@ fun core_begin_close(context: ptr, abortive: bool, application_error: u64,
     ret core_result(transport_api.STATUS_OK, transport_api.DRAINING);
 }
 
-fun core_ready(context: ptr) bool {
-    val core: *Core = context::*Core;
+fun core_ready(core: *Core) bool {
     ret core.closing && core.active_count == 0 && core.outbound == 0;
 }
 
-fun core_finish(context: ptr) bool {
-    val core: *Core = context::*Core;
-    if (!core_ready(context)) { ret false; }
+fun core_finish(core: *Core) bool {
+    if (!core_ready(core)) { ret false; }
     core.closed = true;
     ret true;
 }
 
-fun core_timer(context: ptr) transport_api.CoreTimer {
-    val core: *Core = context::*Core;
+fun core_timer(core: *Core) transport_api.CoreTimer {
     ret transport_api.CoreTimer{deadline_ns: core.timer_deadline_ns,
         generation: core.timer_generation, armed: core.timer_armed};
 }
@@ -278,8 +277,8 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     fixture.core.next_owner = 1;
     fixture.core.timer_generation = 1;
     if (!cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0})) { ret false; }
-    val protocol: transport_api.Protocol = transport_api.Protocol{
-        context: (?fixture.core)::ptr, context_size: $size_of(Core),
+    val protocol: transport_api.Protocol[Core] = transport_api.Protocol[Core]{
+        context: ?fixture.core, context_range: core_range,
         receive: core_receive, timeout: core_timeout,
         generate: core_generate, complete_send: core_complete,
         begin_close: core_begin_close, close_ready: core_ready,
@@ -290,14 +289,14 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     val storage: transport_api.Storage = transport_api.Storage{
         sends: ?fixture.sends[0], send_capacity: 4};
     if (role == stream_api.ROLE_CLIENT) {
-        ret transport_api.init_client(?fixture.driver, config, protocol,
+        ret transport_api.init_client[Core](?fixture.driver, config, protocol,
             ?fixture.streams, ?fixture.datagrams, ?fixture.scope, storage);
     }
-    ret transport_api.init_server(?fixture.driver, config, protocol,
+    ret transport_api.init_server[Core](?fixture.driver, config, protocol,
         ?fixture.streams, ?fixture.datagrams, ?fixture.scope, storage);
 }
 
-fun input(driver: *transport_api.Driver, bytes: *u8, length: usize,
+fun input(driver: *transport_api.Driver[Core], bytes: *u8, length: usize,
           now_ns: u64) transport_api.OperationResult {
     var datagram: transport_api.Datagram;
     datagram.local = ip.endpoint(127, 0, 0, 1, 4433);
@@ -305,15 +304,15 @@ fun input(driver: *transport_api.Driver, bytes: *u8, length: usize,
     datagram.data = bytes;
     datagram.length = length;
     datagram.received_at_ns = now_ns;
-    ret transport_api.receive_datagram(driver, ?datagram);
+    ret transport_api.receive_datagram[Core](driver, ?datagram);
 }
 
 fun close_fixture(fixture: *Fixture, now_ns: u64) bool {
-    if (transport_api.snapshot(?fixture.driver).state != transport_api.DRAINING) {
-        if (transport_api.begin_close(?fixture.driver, 0, nil, 0, now_ns).status !=
+    if (transport_api.snapshot[Core](?fixture.driver).state != transport_api.DRAINING) {
+        if (transport_api.begin_close[Core](?fixture.driver, 0, nil, 0, now_ns).status !=
             transport_api.STATUS_OK) { ret false; }
     }
-    if (transport_api.finish_close(?fixture.driver).status != transport_api.STATUS_OK) { ret false; }
+    if (transport_api.finish_close[Core](?fixture.driver).status != transport_api.STATUS_OK) { ret false; }
     ret cancel.destroy(?fixture.scope);
 }
 
@@ -325,38 +324,38 @@ test "quic.transport.simulated: client and server expose only application contra
     var active: [1]u8 = [1]u8{1};
     if (input(?client.driver, ?active[0], 1, 1).state != transport_api.ACTIVE ||
         input(?server.driver, ?active[0], 1, 1).state != transport_api.ACTIVE) { ret 2; }
-    val opened: transport_api.OpenResult = transport_api.open_stream(?client.driver,
+    val opened: transport_api.OpenResult = transport_api.open_stream[Core](?client.driver,
         transport_api.BIDIRECTIONAL);
     var original: [4]u8 = [4]u8{'h', '3', '-', 'x'};
     if (opened.status != transport_api.STATUS_OK || opened.stream.id != 0 ||
-        transport_api.write_stream(?client.driver, opened.stream, ?original[0], 4).count != 4 ||
-        transport_api.finish_stream(?client.driver, opened.stream).status != transport_api.STATUS_OK) { ret 3; }
+        transport_api.write_stream[Core](?client.driver, opened.stream, ?original[0], 4).count != 4 ||
+        transport_api.finish_stream[Core](?client.driver, opened.stream).status != transport_api.STATUS_OK) { ret 3; }
     original[0] = 'z';
     var remote: [9]u8 = [9]u8{2, 1, 0, 1, 'h', 'e', 'l', 'l', 'o'};
     if (input(?client.driver, ?remote[0], 9, 2).status != transport_api.STATUS_OK) { ret 4; }
-    val accepted: transport_api.OpenResult = transport_api.accept_stream(?client.driver);
+    val accepted: transport_api.OpenResult = transport_api.accept_stream[Core](?client.driver);
     var output: [8]u8;
-    val read: transport_api.ReadResult = transport_api.read_stream(?client.driver,
+    val read: transport_api.ReadResult = transport_api.read_stream[Core](?client.driver,
         accepted.stream, ?output[0], 8);
     if (accepted.status != transport_api.STATUS_OK || accepted.stream.id != 1 ||
         read.status != transport_api.STATUS_OK || read.count != 5 || !read.fin ||
         output[0] != 'h' || output[4] != 'o' ||
         read.receive_uncredited != 5) { ret 5; }
-    if (transport_api.credit_stream(?client.driver, accepted.stream, 6).status ==
+    if (transport_api.credit_stream[Core](?client.driver, accepted.stream, 6).status ==
             transport_api.STATUS_OK ||
-        transport_api.credit_stream(?client.driver, accepted.stream, 5).status !=
+        transport_api.credit_stream[Core](?client.driver, accepted.stream, 5).status !=
             transport_api.STATUS_OK ||
-        transport_api.stream_snapshot(?client.driver,
+        transport_api.stream_snapshot[Core](?client.driver,
             accepted.stream).receive_uncredited != 0) { ret 9; }
-    val credited: transport_api.ReadResult = transport_api.read_stream(
+    val credited: transport_api.ReadResult = transport_api.read_stream[Core](
         ?client.driver, accepted.stream, ?output[0], 8);
     if (credited.receive_max_data != read.receive_max_data + 5 ||
         credited.receive_uncredited != 0) { ret 10; }
     var message: [4]u8 = [4]u8{3, 'd', 'g', 'm'};
     if (input(?client.driver, ?message[0], 4, 3).status != transport_api.STATUS_OK) { ret 6; }
-    val delivered: transport_api.ReceivedDatagram = transport_api.next_datagram(?client.driver);
+    val delivered: transport_api.ReceivedDatagram = transport_api.next_datagram[Core](?client.driver);
     if (delivered.status != transport_api.STATUS_OK || delivered.data.length != 3 ||
-        delivered.data.data[0] != 'd' || transport_api.release_datagram(?client.driver,
+        delivered.data.data[0] != 'd' || transport_api.release_datagram[Core](?client.driver,
             delivered.token).status != transport_api.STATUS_OK) { ret 7; }
     if (!close_fixture(?client, 4) || !close_fixture(?server, 2)) { ret 8; }
     ret 0;
@@ -371,31 +370,31 @@ test "quic.transport.simulated: output saturation, loss, reordering, and stale t
     var generated: [4]transport_api.Generated;
     var i: usize = 0;
     for (i < 4) {
-        generated[i] = transport_api.generate(?fixture.driver, ?fixture.scope,
+        generated[i] = transport_api.generate[Core](?fixture.driver, ?fixture.scope,
             ?buffers[i][0], 8, 2 + i::u64, 10 + i);
         if (generated[i].status != transport_api.STATUS_OK || generated[i].count != 5 ||
-            transport_api.operation_snapshot(?fixture.driver, generated[i].token).buffer !=
+            transport_api.operation_snapshot[Core](?fixture.driver, generated[i].token).buffer !=
                 ?buffers[i][0]) { ret 3; }
         i = i + 1;
     }
-    if (transport_api.generate(?fixture.driver, ?fixture.scope, ?buffers[4][0], 8,
+    if (transport_api.generate[Core](?fixture.driver, ?fixture.scope, ?buffers[4][0], 8,
         6, 99).status != transport_api.STATUS_BLOCKED) { ret 4; }
-    if (transport_api.complete_send(?fixture.driver, generated[2].token,
+    if (transport_api.complete_send[Core](?fixture.driver, generated[2].token,
             transport_api.SEND_FAILED, 0, 7).status != transport_api.STATUS_OK ||
-        transport_api.complete_send(?fixture.driver, generated[0].token,
+        transport_api.complete_send[Core](?fixture.driver, generated[0].token,
             transport_api.SEND_SENT, 5, 8).status != transport_api.STATUS_OK ||
-        transport_api.cancel_send(?fixture.driver, generated[3].token, 9).status !=
+        transport_api.cancel_send[Core](?fixture.driver, generated[3].token, 9).status !=
             transport_api.STATUS_OK ||
-        transport_api.complete_send(?fixture.driver, generated[1].token,
+        transport_api.complete_send[Core](?fixture.driver, generated[1].token,
             transport_api.SEND_TIMED_OUT, 0, 10).status != transport_api.STATUS_OK) { ret 5; }
-    if (transport_api.complete_send(?fixture.driver, generated[0].token,
+    if (transport_api.complete_send[Core](?fixture.driver, generated[0].token,
         transport_api.SEND_SENT, 5, 11).status != transport_api.STATUS_STALE ||
         fixture.core.failed != 1 || fixture.core.cancelled != 1 ||
         fixture.core.timed_out != 1 || fixture.core.active_count != 0) { ret 6; }
-    val retried: transport_api.Generated = transport_api.generate(?fixture.driver,
+    val retried: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
         ?fixture.scope, ?buffers[4][0], 8, 12, 77);
     if (retried.status != transport_api.STATUS_OK ||
-        transport_api.cancel_send(?fixture.driver, retried.token, 13).status !=
+        transport_api.cancel_send[Core](?fixture.driver, retried.token, 13).status !=
             transport_api.STATUS_OK) { ret 7; }
     fixture.core.outbound = 0;
     if (!close_fixture(?fixture, 14)) { ret 8; }
@@ -408,20 +407,20 @@ test "quic.transport.simulated: malformed generation and scope inputs publish no
     fixture.core.outbound = 1;
     fixture.core.oversize = true;
     var bytes: [2048]u8;
-    if (transport_api.generate(?fixture.driver, ?fixture.scope, ?bytes[0], 2048,
+    if (transport_api.generate[Core](?fixture.driver, ?fixture.scope, ?bytes[0], 2048,
         1, 1).status != transport_api.STATUS_ERROR || fixture.core.outbound != 1 ||
-        fixture.core.active_count != 0 || transport_api.snapshot(?fixture.driver).pending_sends != 0) { ret 2; }
+        fixture.core.active_count != 0 || transport_api.snapshot[Core](?fixture.driver).pending_sends != 0) { ret 2; }
     fixture.core.oversize = false;
     fixture.sends[0].generation = 0 - 1::u64;
-    val generated: transport_api.Generated = transport_api.generate(?fixture.driver,
+    val generated: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
         ?fixture.scope, ?bytes[0], 2048, 2, 2);
     if (generated.status != transport_api.STATUS_OK || generated.token.generation != 1 ||
         generated.count != 5) { ret 3; }
     var unrelated: cancel.Scope;
     if (!cancel.make_root(?unrelated, false, time.Time{sec: 0, nsec: 0}) ||
-        transport_api.generate(?fixture.driver, ?unrelated, ?bytes[0], 8, 3, 3).status !=
+        transport_api.generate[Core](?fixture.driver, ?unrelated, ?bytes[0], 8, 3, 3).status !=
             transport_api.STATUS_CANCELLED || !cancel.destroy(?unrelated)) { ret 4; }
-    if (transport_api.cancel_send(?fixture.driver, generated.token, 4).status !=
+    if (transport_api.cancel_send[Core](?fixture.driver, generated.token, 4).status !=
         transport_api.STATUS_OK || !close_fixture(?fixture, 5)) { ret 5; }
     ret 0;
 }
@@ -442,7 +441,7 @@ test "quic.transport.simulated: protocol callbacks cannot reenter or mutate driv
 }
 
 rec CancelRace {
-    driver: *transport_api.Driver;
+    driver: *transport_api.Driver[Core];
     go: *i64;
     result: *i64;
 }
@@ -451,7 +450,7 @@ fun cancel_worker(arg: *u8) {
     val race: *CancelRace = arg::*CancelRace;
     for (atomic.load(race.go) == 0) { atomic.spin_hint(); }
     var result: i64 = 0;
-    if (transport_api.cancel_connection(race.driver)) { result = 1; }
+    if (transport_api.cancel_connection[Core](race.driver)) { result = 1; }
     atomic.store(race.result, result);
 }
 
@@ -460,7 +459,7 @@ test "quic.transport.simulated: send completion and connection cancellation race
     if (!make_fixture(?fixture, 110, stream_api.ROLE_CLIENT)) { ret 1; }
     fixture.core.outbound = 1;
     var bytes: [8]u8;
-    val generated: transport_api.Generated = transport_api.generate(?fixture.driver,
+    val generated: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
         ?fixture.scope, ?bytes[0], 8, 1, 44);
     if (generated.status != transport_api.STATUS_OK) { ret 2; }
     var go: i64 = 0;
@@ -470,13 +469,13 @@ test "quic.transport.simulated: send completion and connection cancellation race
     thread.spawn_with(cancel_worker, (?race)::*u8, ?worker);
     if (worker.tid < 0) { ret 3; }
     atomic.store(?go, 1);
-    val completed: transport_api.Completion = transport_api.complete_send(?fixture.driver,
+    val completed: transport_api.Completion = transport_api.complete_send[Core](?fixture.driver,
         generated.token, transport_api.SEND_SENT, 5, 2);
     thread.join(?worker);
     if (completed.status != transport_api.STATUS_OK || atomic.load(?cancelled) != 1 ||
         fixture.core.completed != 1 || fixture.core.active_count != 0 ||
-        transport_api.snapshot(?fixture.driver).state != transport_api.DRAINING ||
-        transport_api.finish_close(?fixture.driver).status != transport_api.STATUS_OK ||
+        transport_api.snapshot[Core](?fixture.driver).state != transport_api.DRAINING ||
+        transport_api.finish_close[Core](?fixture.driver).status != transport_api.STATUS_OK ||
         !cancel.destroy(?fixture.scope)) { ret 4; }
     ret 0;
 }
@@ -486,21 +485,21 @@ test "quic.transport.simulated: timers reject early and stale work transactional
     if (!make_fixture(?fixture, 104, stream_api.ROLE_CLIENT)) { ret 1; }
     var set_first: [2]u8 = [2]u8{5, 20};
     input(?fixture.driver, ?set_first[0], 2, 1);
-    val first: transport_api.Timer = transport_api.timer(?fixture.driver);
-    if (!first.armed || transport_api.on_timeout(?fixture.driver, first, 19).status !=
+    val first: transport_api.Timer = transport_api.timer[Core](?fixture.driver);
+    if (!first.armed || transport_api.on_timeout[Core](?fixture.driver, first, 19).status !=
         transport_api.STATUS_EARLY) { ret 2; }
     var set_second: [2]u8 = [2]u8{5, 30};
     input(?fixture.driver, ?set_second[0], 2, 19);
-    if (transport_api.on_timeout(?fixture.driver, first, 100).status !=
+    if (transport_api.on_timeout[Core](?fixture.driver, first, 100).status !=
         transport_api.STATUS_STALE) { ret 3; }
-    val second: transport_api.Timer = transport_api.timer(?fixture.driver);
-    if (transport_api.on_timeout(?fixture.driver, second, 30).status !=
+    val second: transport_api.Timer = transport_api.timer[Core](?fixture.driver);
+    if (transport_api.on_timeout[Core](?fixture.driver, second, 30).status !=
         transport_api.STATUS_OK || fixture.core.outbound != 1) { ret 4; }
     var bytes: [8]u8;
-    val generated: transport_api.Generated = transport_api.generate(?fixture.driver,
+    val generated: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
         ?fixture.scope, ?bytes[0], 8, 31, 1);
     if (generated.status != transport_api.STATUS_OK ||
-        transport_api.cancel_send(?fixture.driver, generated.token, 32).status !=
+        transport_api.cancel_send[Core](?fixture.driver, generated.token, 32).status !=
             transport_api.STATUS_OK || !close_fixture(?fixture, 33)) { ret 5; }
     ret 0;
 }
@@ -511,35 +510,35 @@ test "quic.transport.simulated: cancellation and graceful close retain exact bor
     var queue: [2]u8 = [2]u8{4, 1};
     input(?cancelled.driver, ?queue[0], 2, 1);
     var output: [8]u8;
-    val pending: transport_api.Generated = transport_api.generate(?cancelled.driver,
+    val pending: transport_api.Generated = transport_api.generate[Core](?cancelled.driver,
         ?cancelled.scope, ?output[0], 8, 2, 55);
     if (pending.status != transport_api.STATUS_OK ||
-        !transport_api.cancel_connection(?cancelled.driver)) { ret 2; }
-    val state: transport_api.Snapshot = transport_api.snapshot(?cancelled.driver);
+        !transport_api.cancel_connection[Core](?cancelled.driver)) { ret 2; }
+    val state: transport_api.Snapshot = transport_api.snapshot[Core](?cancelled.driver);
     if (state.state != transport_api.DRAINING || state.close_mode != io_lifecycle.ABORTIVE ||
         state.cancellation_reason != cancel.CANCELLED ||
-        transport_api.finish_close(?cancelled.driver).status != transport_api.STATUS_BLOCKED ||
-        transport_api.operation_snapshot(?cancelled.driver, pending.token).buffer != ?output[0]) { ret 3; }
-    if (transport_api.cancel_send(?cancelled.driver, pending.token, 3).status !=
-        transport_api.STATUS_OK || transport_api.finish_close(?cancelled.driver).status !=
+        transport_api.finish_close[Core](?cancelled.driver).status != transport_api.STATUS_BLOCKED ||
+        transport_api.operation_snapshot[Core](?cancelled.driver, pending.token).buffer != ?output[0]) { ret 3; }
+    if (transport_api.cancel_send[Core](?cancelled.driver, pending.token, 3).status !=
+        transport_api.STATUS_OK || transport_api.finish_close[Core](?cancelled.driver).status !=
         transport_api.STATUS_OK || !cancel.destroy(?cancelled.scope)) { ret 4; }
 
     var graceful: Fixture;
     if (!make_fixture(?graceful, 106, stream_api.ROLE_CLIENT)) { ret 5; }
     var received: [3]u8 = [3]u8{3, 'o', 'k'};
     input(?graceful.driver, ?received[0], 3, 1);
-    val borrowed: transport_api.ReceivedDatagram = transport_api.next_datagram(?graceful.driver);
+    val borrowed: transport_api.ReceivedDatagram = transport_api.next_datagram[Core](?graceful.driver);
     var reason: [3]u8 = [3]u8{'b', 'y', 'e'};
-    if (transport_api.begin_close(?graceful.driver, 42, ?reason[0], 3, 2).status !=
-        transport_api.STATUS_OK || transport_api.finish_close(?graceful.driver).status !=
+    if (transport_api.begin_close[Core](?graceful.driver, 42, ?reason[0], 3, 2).status !=
+        transport_api.STATUS_OK || transport_api.finish_close[Core](?graceful.driver).status !=
         transport_api.STATUS_BLOCKED || borrowed.data.data[0] != 'o') { ret 6; }
-    if (!transport_api.cancel_connection(?graceful.driver)) { ret 7; }
-    val escalated: transport_api.Snapshot = transport_api.snapshot(?graceful.driver);
+    if (!transport_api.cancel_connection[Core](?graceful.driver)) { ret 7; }
+    val escalated: transport_api.Snapshot = transport_api.snapshot[Core](?graceful.driver);
     if (escalated.close_cause != io_lifecycle.EXPLICIT ||
         escalated.terminal_cause != io_lifecycle.CANCELLATION ||
         escalated.close_mode != io_lifecycle.ABORTIVE || escalated.application_error != 42) { ret 8; }
-    if (transport_api.release_datagram(?graceful.driver, borrowed.token).status !=
-        transport_api.STATUS_OK || transport_api.finish_close(?graceful.driver).status !=
+    if (transport_api.release_datagram[Core](?graceful.driver, borrowed.token).status !=
+        transport_api.STATUS_OK || transport_api.finish_close[Core](?graceful.driver).status !=
         transport_api.STATUS_OK || !cancel.destroy(?graceful.scope)) { ret 9; }
     ret 0;
 }
@@ -552,18 +551,18 @@ test "quic.transport.simulated: sustained independent streams remain bounded" {
     var payload: [8]u8 = [8]u8{'s', 't', 'r', 'e', 'a', 'm', '0', '0'};
     var i: usize = 0;
     for (i < 32) {
-        val opened: transport_api.OpenResult = transport_api.open_stream(?fixture.driver,
+        val opened: transport_api.OpenResult = transport_api.open_stream[Core](?fixture.driver,
             transport_api.BIDIRECTIONAL);
         payload[6] = ('0'::u8 + (i / 10)::u8)::u8;
         payload[7] = ('0'::u8 + (i % 10)::u8)::u8;
         if (opened.status != transport_api.STATUS_OK ||
-            transport_api.write_stream(?fixture.driver, opened.stream, ?payload[0], 8).count != 8 ||
-            transport_api.finish_stream(?fixture.driver, opened.stream).status !=
+            transport_api.write_stream[Core](?fixture.driver, opened.stream, ?payload[0], 8).count != 8 ||
+            transport_api.finish_stream[Core](?fixture.driver, opened.stream).status !=
                 transport_api.STATUS_OK) { ret 2; }
         i = i + 1;
     }
-    if (transport_api.snapshot(?fixture.driver).active_streams != 32 ||
-        transport_api.open_stream(?fixture.driver, transport_api.BIDIRECTIONAL).status !=
+    if (transport_api.snapshot[Core](?fixture.driver).active_streams != 32 ||
+        transport_api.open_stream[Core](?fixture.driver, transport_api.BIDIRECTIONAL).status !=
             transport_api.STATUS_BLOCKED) { ret 3; }
     if (!close_fixture(?fixture, 2)) { ret 4; }
     ret 0;
@@ -581,13 +580,13 @@ test "quic.transport.native: loopback udp preserves generated and received datag
     if (is_err[ip.Endpoint, io_error.Error](receiver_endpoint)) { ret 3; }
     fixture.core.outbound = 1;
     var output: [8]u8;
-    val generated: transport_api.Generated = transport_api.generate(?fixture.driver,
+    val generated: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
         ?fixture.scope, ?output[0], 8, 1, 9);
     val sent: Result[usize, io_error.Error] = udp.send_to(?sender, generated.buffer,
         generated.count, unwrap_ok[ip.Endpoint, io_error.Error](receiver_endpoint));
     if (generated.status != transport_api.STATUS_OK || is_err[usize, io_error.Error](sent) ||
         unwrap_ok[usize, io_error.Error](sent) != 5 ||
-        transport_api.complete_send(?fixture.driver, generated.token,
+        transport_api.complete_send[Core](?fixture.driver, generated.token,
             transport_api.SEND_SENT, 5, 2).status != transport_api.STATUS_OK) { ret 4; }
     var received_bytes: [16]u8;
     var peer: ip.Endpoint;
@@ -599,7 +598,7 @@ test "quic.transport.native: loopback udp preserves generated and received datag
     packet.capacity = 16;
     packet.length = unwrap_ok[usize, io_error.Error](received);
     packet.peer = peer;
-    if (transport_api.receive_native(?fixture.driver, ?packet,
+    if (transport_api.receive_native[Core](?fixture.driver, ?packet,
         unwrap_ok[ip.Endpoint, io_error.Error](receiver_endpoint), 3, 0).status !=
         transport_api.STATUS_OK || fixture.core.received != 1) { ret 6; }
     udp.socket_close(?sender);
