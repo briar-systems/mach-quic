@@ -20,12 +20,14 @@ use stream_api: quic.stream.stream;
 use tls_client_api: quic.connection.tls_client;
 use tls_server_api: quic.connection.tls_server;
 use transport_api: quic.transport;
+use binding_api: quic.transport.binding;
 
 use tls.client;
 use tls.server;
 
 use std.encoding.binary;
 use std.net.ip;
+use std.sync.cancel;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -46,6 +48,7 @@ pub val CONNECTION_ID_CAPACITY: usize = 4;
 pub val OWNER_CAPACITY: usize = 16;
 pub val TOKEN_CAPACITY: usize = 512;
 pub val PARAMETER_CAPACITY: usize = 512;
+pub val SEND_CAPACITY: usize = 4;
 
 pub def Stage: u8;
 pub val STAGE_OK: Stage = 0;
@@ -57,6 +60,8 @@ pub val STAGE_DATAGRAMS: Stage = 5;
 pub val STAGE_HANDSHAKE: Stage = 6;
 pub val STAGE_PARAMETERS: Stage = 7;
 pub val STAGE_CORE: Stage = 8;
+pub val STAGE_BINDING: Stage = 9;
+pub val STAGE_DRIVER: Stage = 10;
 
 # `core` carries the reason code the core itself reported, so a refusal at
 # STAGE_CORE names which ownership or precondition check rejected
@@ -127,6 +132,9 @@ pub rec Connection {
     paths: path_api.Manager;
     streams: stream_api.Manager;
     datagrams: datagram_api.Queue;
+    binding: binding_api.Binding;
+    driver: transport_api.Driver[binding_api.Binding];
+    sends: [4]transport_api.SendSlot;
 
     supported_versions: [2]u32;
     local_parameters: [512]u8;
@@ -500,7 +508,7 @@ fun build_managers(c: *Connection, config: *Config,
 }
 
 fun finish(c: *Connection, config: *Config, role: transport_api.Role,
-           now_ns: u64) InitResult {
+           scope: *cancel.Scope, now_ns: u64) InitResult {
     val encoded: transport_parameters.EncodeResult = encode_parameters(config,
         role, ?c.local_parameters[0], 512);
     if (!encoded.ok) { ret staged(STAGE_PARAMETERS); }
@@ -521,6 +529,29 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
         value.stage = STAGE_CORE;
         ret value;
     }
+    if (!binding_api.bind(?c.binding, ?c.core, ?c.secrets)) {
+        value.stage = STAGE_BINDING;
+        ret value;
+    }
+    val driver_config: transport_api.Config = transport_api.Config{
+        source: config.source, max_udp_payload: config.max_udp_payload,
+        max_close_reason: 256};
+    val driver_storage: transport_api.Storage = transport_api.Storage{
+        sends: ?c.sends[0], send_capacity: 4};
+    var started: bool = false;
+    if (role == transport_api.CLIENT) {
+        started = transport_api.init_client[binding_api.Binding](?c.driver,
+            driver_config, binding_api.protocol(?c.binding), ?c.streams,
+            ?c.datagrams, scope, driver_storage);
+    } or {
+        started = transport_api.init_server[binding_api.Binding](?c.driver,
+            driver_config, binding_api.protocol(?c.binding), ?c.streams,
+            ?c.datagrams, scope, driver_storage);
+    }
+    if (!started) {
+        value.stage = STAGE_DRIVER;
+        ret value;
+    }
     c.initialized = true;
     value.ok = true;
     value.stage = STAGE_OK;
@@ -528,8 +559,8 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
 }
 
 pub fun init_client(c: *Connection, config: *Config, tls: *client.Client,
-                    now_ns: u64) InitResult {
-    if (c == nil || tls == nil || c.initialized ||
+                    scope: *cancel.Scope, now_ns: u64) InitResult {
+    if (c == nil || tls == nil || scope == nil || c.initialized ||
         !config_valid(config, transport_api.CLIENT)) {
         ret staged(STAGE_CONFIG);
     }
@@ -539,12 +570,12 @@ pub fun init_client(c: *Connection, config: *Config, tls: *client.Client,
         crypto_storage(c), tls, tls_configuration(config))) {
         ret staged(STAGE_HANDSHAKE);
     }
-    ret finish(c, config, transport_api.CLIENT, now_ns);
+    ret finish(c, config, transport_api.CLIENT, scope, now_ns);
 }
 
 pub fun init_server(c: *Connection, config: *Config, tls: *server.Server,
-                    now_ns: u64) InitResult {
-    if (c == nil || tls == nil || c.initialized ||
+                    scope: *cancel.Scope, now_ns: u64) InitResult {
+    if (c == nil || tls == nil || scope == nil || c.initialized ||
         !config_valid(config, transport_api.SERVER)) {
         ret staged(STAGE_CONFIG);
     }
@@ -554,5 +585,5 @@ pub fun init_server(c: *Connection, config: *Config, tls: *server.Server,
         crypto_storage(c), tls, server_tls_configuration(config))) {
         ret staged(STAGE_HANDSHAKE);
     }
-    ret finish(c, config, transport_api.SERVER, now_ns);
+    ret finish(c, config, transport_api.SERVER, scope, now_ns);
 }

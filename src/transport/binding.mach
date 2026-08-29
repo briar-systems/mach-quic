@@ -1,0 +1,139 @@
+# the production Protocol: the vtable that joins connection.core to the driver
+#
+# this is what the untyped context made unconstructable. every core operation
+# takes the public record and the secret-welded Secrets together, and a
+# *Secrets cannot be erased to `ptr`, so a vtable with an opaque context could
+# only ever be implemented by a test double whose context holds no secrets.
+# with Protocol[T] the context is simply typed and the binding is thin.
+
+use core_api: quic.connection.core;
+use quic.connection.ownership;
+use transport_api: quic.transport;
+
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+# holds only the pair of pointers the core's operations take. it is the
+# protocol context, so it must stay disjoint from the driver record the
+# transport validates it against
+pub rec Binding {
+    anchor: u64;
+    core: *core_api.Core;
+    secrets: *core_api.Secrets;
+    initialized: bool;
+}
+
+fun bound(binding: *Binding) bool {
+    ret binding != nil && binding.initialized && binding.core != nil &&
+        binding.secrets != nil;
+}
+
+fun refused() transport_api.CoreResult {
+    var value: transport_api.CoreResult;
+    value.status = transport_api.STATUS_ERROR;
+    value.error = core_api.INTERNAL_ERROR;
+    value.provider_error = 0;
+    value.state = transport_api.DRAINING;
+    ret value;
+}
+
+fun refused_datagram() transport_api.CoreDatagram {
+    var value: transport_api.CoreDatagram;
+    value.status = transport_api.STATUS_ERROR;
+    value.error = core_api.INTERNAL_ERROR;
+    value.state = transport_api.DRAINING;
+    ret value;
+}
+
+# the binding is secret-welded through its Secrets pointer, so its own extent is
+# anchored on a public field rather than taken by a cast
+fun binding_range(binding: *Binding) ownership.Range {
+    if (binding == nil) { ret ownership.bytes(nil, 0, ownership.ZERO_FORBIDDEN); }
+    val base: usize = (?binding.anchor)::usize - $offset_of(Binding, anchor);
+    ret ownership.bytes(base::*u8, $size_of(Binding), ownership.ZERO_FORBIDDEN);
+}
+
+fun on_receive(binding: *Binding,
+               input: *transport_api.Datagram) transport_api.CoreResult {
+    if (!bound(binding)) { ret refused(); }
+    ret core_api.receive(binding.core, binding.secrets, input);
+}
+
+fun on_timeout(binding: *Binding, generation: u64,
+               now_ns: u64) transport_api.CoreResult {
+    if (!bound(binding)) { ret refused(); }
+    ret core_api.on_timeout(binding.core, binding.secrets, generation, now_ns);
+}
+
+fun on_generate(binding: *Binding, output: *u8, capacity: usize,
+                now_ns: u64) transport_api.CoreDatagram {
+    if (!bound(binding)) { ret refused_datagram(); }
+    ret core_api.generate(binding.core, binding.secrets, output, capacity,
+        now_ns);
+}
+
+fun on_complete_send(binding: *Binding, owner: u64,
+                     status: transport_api.SendStatus, count: usize,
+                     now_ns: u64) transport_api.CoreResult {
+    if (!bound(binding)) { ret refused(); }
+    ret core_api.complete_send(binding.core, binding.secrets, owner, status,
+        count, now_ns);
+}
+
+fun on_begin_close(binding: *Binding, abortive: bool, application_error: u64,
+                   reason: *u8, reason_length: usize,
+                   now_ns: u64) transport_api.CoreResult {
+    if (!bound(binding)) { ret refused(); }
+    ret core_api.begin_close(binding.core, binding.secrets, abortive,
+        application_error, reason, reason_length, now_ns);
+}
+
+fun on_close_ready(binding: *Binding) bool {
+    if (!bound(binding)) { ret false; }
+    ret core_api.close_ready(binding.core);
+}
+
+fun on_finish_close(binding: *Binding) bool {
+    if (!bound(binding)) { ret false; }
+    ret core_api.finish_close(binding.core, binding.secrets);
+}
+
+fun on_timer(binding: *Binding) transport_api.CoreTimer {
+    var idle: transport_api.CoreTimer;
+    if (!bound(binding)) { ret idle; }
+    ret core_api.timer(binding.core);
+}
+
+# binds an already-initialized core. the core has validated its own ownership
+# set by then, so the binding only refuses a core that is not live
+pub fun bind(binding: *Binding, core: *core_api.Core,
+             secrets: *core_api.Secrets) bool {
+    if (binding == nil || core == nil || secrets == nil || binding.initialized ||
+        !core.initialized || core.destroyed || !secrets.initialized ||
+        secrets.destroyed) { ret false; }
+    binding.anchor = 1;
+    binding.core = core;
+    binding.secrets = secrets;
+    binding.initialized = true;
+    ret true;
+}
+
+# an unbound binding yields a vtable with a nil context, which the driver
+# rejects, so a protocol cannot be installed over a core that is not there
+pub fun protocol(binding: *Binding) transport_api.Protocol[Binding] {
+    var value: transport_api.Protocol[Binding];
+    if (!bound(binding)) { ret value; }
+    value.context = binding;
+    value.context_range = binding_range;
+    value.receive = on_receive;
+    value.timeout = on_timeout;
+    value.generate = on_generate;
+    value.complete_send = on_complete_send;
+    value.begin_close = on_begin_close;
+    value.close_ready = on_close_ready;
+    value.finish_close = on_finish_close;
+    value.timer = on_timer;
+    ret value;
+}
