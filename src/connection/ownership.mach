@@ -123,6 +123,38 @@ pub fun all_disjoint(ranges: *Range, count: usize) bool {
     ret disjointness(ranges, count).kind == OVERLAP_NONE;
 }
 
+# checks one range that is not a member of `ranges` against ranges[start..count).
+# `index` is the subject's own position in whatever list the caller built, so a
+# refusal names both sides rather than only the one that was walked
+pub fun disjoint_from(subject: Range, index: usize, ranges: *Range,
+                      start: usize, count: usize) Disjointness {
+    var value: Disjointness;
+    value.kind = OVERLAP_NONE;
+    value.first = 0;
+    value.second = 0;
+    val list: Range = array(ranges::*u8, count, $size_of(Range), ZERO_FORBIDDEN);
+    if (!list.valid || start > count) {
+        value.kind = OVERLAP_LIST_INVALID;
+        ret value;
+    }
+    if (!subject.valid) {
+        value.kind = OVERLAP_RANGE_INVALID;
+        value.first = index;
+        ret value;
+    }
+    var j: usize = start;
+    for (j < count) {
+        if (!disjoint(subject, ranges[j])) {
+            value.kind = OVERLAP_PAIR;
+            value.first = index;
+            value.second = j;
+            ret value;
+        }
+        j = j + 1;
+    }
+    ret value;
+}
+
 test "quic.connection.ownership: inclusive maximum ranges are checked without wrapping" {
     val maximum: usize = ~(0::usize);
     val at_maximum: *u8 = maximum::*u8;
