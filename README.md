@@ -448,6 +448,55 @@ against the exact pinned TLS client. Issue #3 still cannot close because a real
 interoperability has not yet been demonstrated. No simulated or fallback provider
 is selected by the production client path.
 
+## Connection assembly
+
+`connection.assembly` builds a connection and every manager it owns from one
+`Config`. The consumer declares a single `Connection`, supplies its identity,
+endpoints, limits and an initialized `mach-tls` engine, and calls `init_client`
+or `init_server`. It imports nothing from packet, recovery, path or stream: the
+record embeds its own storage at the capacities named by the module's public
+`val`s, so a caller sizes nothing and there is no per-component storage record to
+assemble.
+
+The reason this belongs in the library rather than in each consumer is that the
+core requires twelve exact equalities between the encoded local transport
+parameters and the manager configurations those parameters describe — the
+connection-level and stream-level data limits, the stream counts, the active
+connection ID limit, the idle timeout in milliseconds against the same timeout in
+nanoseconds, the DATAGRAM frame size, and the migration flag against the path
+manager's own. The assembly derives the manager configurations and the encoded
+parameters from the same record, so they cannot disagree. `encode_parameters`
+exposes those bytes before the connection exists, because the TLS engine has to
+carry them as its `quic_transport_parameters` extension; init re-derives them
+from the same `Config` rather than accepting a copy.
+
+A refusal reports the stage that rejected, and a refusal from the core carries
+the core's own `InitReason` and the offending ownership range indices.
+
+## Scheduling boundary
+
+The division of labour is not symmetric and is worth stating outright.
+
+**This library owns** the connection state machine, packet protection, recovery,
+congestion control, path validation, streams, DATAGRAMs, the TLS adapter, and —
+through `connection.assembly` — the construction of all of them from one
+configuration.
+
+**The consumer owns** the socket, the clock and the pump. It decides when to call
+`generate` and where to send the bytes, when a send completed or failed, when a
+timer fired, and when a received datagram arrives. It also owns the `Core` and
+`Secrets` records themselves, at fixed addresses, with `Secrets` in secret-welded
+storage.
+
+`transport.Driver` is intended to sit between the two, but note the constraint
+recorded under connection core contracts: the driver's `Protocol` context is an
+untyped `ptr`, and a `*Secrets` is secret-welded and cannot be erased to one.
+Every production connection operation needs both records, so **no `Protocol` over
+a real core is constructible against the current vtable**, and the only
+implementations in the tree are simulated ones whose contexts hold no secret
+state. Until that contract changes, a consumer drives `connection.core` directly
+with the pair of records the assembly hands it. See issue #25.
+
 ## Connection driver contracts
 
 `transport.Driver` is the version-neutral client and server application boundary. HTTP/3 can

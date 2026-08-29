@@ -2193,7 +2193,7 @@ pub fun poll(adapter: *Adapter, now_ns: u64) Result {
         }
     }
     if (provider.status != STATUS_OK && provider.status != STATUS_EMPTY &&
-        provider.status != STATUS_MORE) {
+        provider.status != STATUS_MORE && provider.status != STATUS_BLOCKED) {
         adapter.closing = true;
         ret provider_failed(provider.error);
     }
