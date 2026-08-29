@@ -76,20 +76,51 @@ pub fun secret_disjoint(left: *^u8, left_length: usize,
     ret true;
 }
 
-pub fun all_disjoint(ranges: *Range, count: usize) bool {
+pub def Overlap: u8;
+pub val OVERLAP_NONE: Overlap = 0;
+pub val OVERLAP_LIST_INVALID: Overlap = 1;
+pub val OVERLAP_RANGE_INVALID: Overlap = 2;
+pub val OVERLAP_PAIR: Overlap = 3;
+
+# which range failed, and which one it collided with, so a caller is not left
+# bisecting a list it did not build
+pub rec Disjointness {
+    kind: Overlap;
+    first: usize;
+    second: usize;
+}
+
+pub fun disjointness(ranges: *Range, count: usize) Disjointness {
+    var value: Disjointness;
+    value.kind = OVERLAP_NONE;
+    value.first = 0;
+    value.second = 0;
     val list: Range = array(ranges::*u8, count, $size_of(Range), ZERO_FORBIDDEN);
-    if (!list.valid) { ret false; }
+    if (!list.valid) { value.kind = OVERLAP_LIST_INVALID; ret value; }
     var i: usize = 0;
     for (i < count) {
-        if (!ranges[i].valid) { ret false; }
+        if (!ranges[i].valid) {
+            value.kind = OVERLAP_RANGE_INVALID;
+            value.first = i;
+            ret value;
+        }
         var j: usize = 0;
         for (j < i) {
-            if (!disjoint(ranges[i], ranges[j])) { ret false; }
+            if (!disjoint(ranges[i], ranges[j])) {
+                value.kind = OVERLAP_PAIR;
+                value.first = j;
+                value.second = i;
+                ret value;
+            }
             j = j + 1;
         }
         i = i + 1;
     }
-    ret true;
+    ret value;
+}
+
+pub fun all_disjoint(ranges: *Range, count: usize) bool {
+    ret disjointness(ranges, count).kind == OVERLAP_NONE;
 }
 
 test "quic.connection.ownership: inclusive maximum ranges are checked without wrapping" {

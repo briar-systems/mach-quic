@@ -207,10 +207,46 @@ pub rec Snapshot {
     destroyed: bool;
 }
 
+# why initialization refused. `error` stays the wire-facing transport code;
+# these say which check rejected and which range it was looking at, because
+# component ownership validation can refuse in well over sixty distinct ways
+# and one undifferentiated INTERNAL_ERROR leaves a caller bisecting by hand.
+# an index is a position in the range array built by component_storage_valid,
+# which is the single source of truth for the ordering
+pub def InitReason: u64;
+pub val INIT_OK: InitReason = 0;
+pub val INIT_ARGUMENT: InitReason = 1;
+pub val INIT_STORAGE_RANGES: InitReason = 2;
+pub val INIT_COMPONENT_RANGES: InitReason = 3;
+pub val INIT_PROVIDER_RANGES: InitReason = 4;
+pub val INIT_PROVIDER_SECRETS: InitReason = 5;
+pub val INIT_BORROWED_RANGES: InitReason = 6;
+pub val INIT_PRECONDITION: InitReason = 7;
+
 pub rec InitResult {
     ok: bool;
     error: u64;
     provider_error: u64;
+    reason: InitReason;
+    reason_kind: ownership.Overlap;
+    reason_first: usize;
+    reason_second: usize;
+}
+
+fun refuse(result: *InitResult, reason: InitReason) bool {
+    if (result != nil && result.reason == INIT_OK) { result.reason = reason; }
+    ret false;
+}
+
+fun refuse_overlap(result: *InitResult, reason: InitReason,
+                   detail: ownership.Disjointness) bool {
+    if (result != nil && result.reason == INIT_OK) {
+        result.reason = reason;
+        result.reason_kind = detail.kind;
+        result.reason_first = detail.first;
+        result.reason_second = detail.second;
+    }
+    ret false;
 }
 
 pub rec Core {
