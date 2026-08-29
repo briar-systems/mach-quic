@@ -437,8 +437,9 @@ The core exposes direct transport-shaped `receive`, `generate`, `complete_send`,
 operations. It also exposes lease-safe path probing, validation work, active
 migration, and authenticated Packet Too Big handling without releasing manager
 ownership. A UDP or application driver owns the stable `Core` and `Secrets`
-records and serializes those calls. This direct split is intentional because the
-generic public driver context cannot erase secret-welded state.
+records and serializes those calls. This direct split is intentional: the driver's protocol
+context is typed for exactly this reason, because a generic public context
+cannot erase secret-welded state.
 
 The adapter contract is covered by deterministic simulated providers and the real
 `mach-tls` client provider. Client CRYPTO ownership, loss, Retry, Version
@@ -447,6 +448,71 @@ against the exact pinned TLS client. Issue #3 still cannot close because a real
 `mach-tls` server handshake provider does not exist and major-implementation UDP
 interoperability has not yet been demonstrated. No simulated or fallback provider
 is selected by the production client path.
+
+## Connection assembly
+
+`connection.assembly` builds a connection and every manager it owns from one
+`Config`. The consumer declares a single `Connection`, supplies its identity,
+endpoints, limits and an initialized `mach-tls` engine, and calls `init_client`
+or `init_server`. It imports nothing from packet, recovery, path or stream: the
+record embeds its own storage at the capacities named by the module's public
+`val`s, so a caller sizes nothing and there is no per-component storage record to
+assemble.
+
+The reason this belongs in the library rather than in each consumer is that the
+core requires twelve exact equalities between the encoded local transport
+parameters and the manager configurations those parameters describe — the
+connection-level and stream-level data limits, the stream counts, the active
+connection ID limit, the idle timeout in milliseconds against the same timeout in
+nanoseconds, the DATAGRAM frame size, and the migration flag against the path
+manager's own. The assembly derives the manager configurations and the encoded
+parameters from the same record, so they cannot disagree. `encode_parameters`
+exposes those bytes before the connection exists, because the TLS engine has to
+carry them as its `quic_transport_parameters` extension; init re-derives them
+from the same `Config` rather than accepting a copy.
+
+A refusal reports the stage that rejected, and a refusal from the core carries
+the core's own `InitReason` and the offending ownership range indices.
+
+## Scheduling boundary
+
+The division of labour is not symmetric and is worth stating outright.
+
+**This library owns** the connection state machine, packet protection, recovery,
+congestion control, path validation, streams, DATAGRAMs, the TLS adapter, and —
+through `connection.assembly` — the construction of all of them from one
+configuration.
+
+**The consumer owns** the socket, the clock and the pump. It decides when to call
+`generate` and where to send the bytes, when a send completed or failed, when a
+timer fired, and when a received datagram arrives. It also owns the `Core` and
+`Secrets` records themselves, at fixed addresses, with `Secrets` in secret-welded
+storage.
+
+`transport.Driver[T]` sits between the two. `transport.binding` supplies the
+production `Protocol[Binding]` over a real `Core` and `Secrets`, and the assembly
+constructs the driver over it, so an owner pumps datagrams through
+`transport.generate`, `complete_send` and `receive_datagram` and reaches streams
+and DATAGRAMs through the driver's public handles.
+
+The protocol context is typed rather than an untyped `ptr`, and that is a
+correctness requirement rather than a convenience. Every connection operation
+takes the public record and the secret-welded `Secrets` together, and mach
+refuses to erase a secret-welded pointer to `ptr` — as it refuses `usize` to
+`*Secrets` and `*Secrets` to `*u8`. A vtable with an opaque context can therefore
+only ever be implemented by a test double whose context holds no secrets, which
+is exactly what the tree contained before. `Protocol[T]` carries `context: *T`
+and a `context_range` entry, because the same rule stops the driver taking the
+context's byte range by casting it; the provider answers for its own memory the
+way `handshake.provider_ranges` already does.
+
+Two consequences are worth stating. The driver's own extent is anchored on a
+public field rather than cast, since a `Driver[T]` over a secret context inherits
+the weld. And the cancellation scope's callback is handed an untyped `ptr` by
+`std.sync.cancel`, so it cannot reach the protocol at all: it records the
+cancellation and the owner's next call performs the close, on the thread that
+owns the protocol. `cancel_connection` stays synchronous, because the owner calls
+it with the driver already typed.
 
 ## Connection driver contracts
 

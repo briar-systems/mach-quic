@@ -5,16 +5,15 @@ use crypto.encoding.keys;
 use crypto.secret;
 use handshake_api: quic.connection.handshake;
 use quic.connection.ownership;
+use test_credentials: quic.connection.credentials_simulated;
 use quic.crypto.protection;
 use quic.packet.packet;
-use std.crypto.ct;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 use tls.cert;
 use tls.cert.credentials;
-use tls.cert.load;
 use tls.client;
 use tls.config;
 use tls.record;
@@ -38,8 +37,6 @@ pub fun initialize(adapter: *handshake_api.Adapter,
         configuration.entropy_context_size,
         configuration.entropy_secret_context_size);
 }
-
-val VERIFICATION_TIME: i64 = 1800000000;
 
 var listener_input: [8192]u8;
 var listener_output: [8192]u8;
@@ -67,74 +64,8 @@ var dialer_send_acked: [16384]bool;
 var dialer_send_inflight: [16384]u16;
 var dialer_attempts: [8]handshake_api.Attempt;
 
-var root_der: [341]u8;
-var leaf_der: [393]u8;
-
 var listener_transport: [5]u8 = [5]u8{0x0a, 0x0b, 0x0c, 0x0d, 0x0e};
 var dialer_transport: [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
-
-#[oblivious]
-fun deterministic_entropy(context: ptr, secret_context: *^u8,
-                          destination: *^u8, length: usize) i64 {
-    val counter: *u8 = context::*u8;
-    var i: usize = 0;
-    for (i < length) {
-        destination[i] = counter[0] + i::u8 + 1;
-        i = i + 1;
-    }
-    counter[0] = counter[0] + 23;
-    ret 0;
-}
-
-fun hex_nibble(value: u8, output: *u8) bool {
-    if (value >= '0' && value <= '9') { output[0] = value - '0'; ret true; }
-    if (value >= 'a' && value <= 'f') { output[0] = value - 'a' + 10; ret true; }
-    ret false;
-}
-
-fun decode_hex(input: *u8, length: usize, output: *u8, capacity: usize) bool {
-    if (input == nil || output == nil || (length & 1) != 0 ||
-        length / 2 > capacity) { ret false; }
-    var i: usize = 0;
-    for (i < length / 2) {
-        var high: u8;
-        var low: u8;
-        if (!hex_nibble(input[i * 2], ?high) ||
-            !hex_nibble(input[i * 2 + 1], ?low)) { ret false; }
-        output[i] = (high << 4) | low;
-        i = i + 1;
-    }
-    ret true;
-}
-
-# an ed25519 chain for api.example.com valid from 2026-08-28 to 2027-08-28
-fun load_credentials(identity: *credentials.Identity,
-                     chain_storage: *cert.Certificate, key: *keys.PrivateKey,
-                     owner: *secret.Allocator) bool {
-    val root_hex: *u8 = "3082015130820103a00302010202141d7193bab7ae596e287e9e4bf29af4f4be7a0ce9300506032b657030163114301206035504030c0b4d616368544c53526f6f74301e170d3236303832383133323131315a170d3336303832353133323131315a30163114301206035504030c0b4d616368544c53526f6f74302a300506032b657003210019033c2a825bf32d9ef128e4c1e053c148488fb0125c7d4087dccbe60760331da3633061301d0603551d0e04160414a3e1f1ea703e2e0fcde6217a83888df333c4e8ea301f0603551d23041830168014a3e1f1ea703e2e0fcde6217a83888df333c4e8ea300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b65700341009b3793c855daa7b89b9f615856bcaf046d37244ecb5de6fab461f83542a884af4f47f23fda39e91d5fa77646c754bf61220533faa84e5795e6ac4493e4278a0d"::*u8;
-    val leaf_hex: *u8 = "3082018530820137a00302010202147da845f0ef3c4bedac9ebe18bdafc1e948a34249300506032b657030163114301206035504030c0b4d616368544c53526f6f74301e170d3236303832383133323131315a170d3237303832383133323131315a301a3118301606035504030c0f6170692e6578616d706c652e636f6d302a300506032b6570032100cf37004bca6a1c334d1a7e487239adfc92a1b93cf1b911afd8d032b0b8158e65a3819230818f300c0603551d130101ff04023000300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06010505070301301a0603551d1104133011820f6170692e6578616d706c652e636f6d301d0603551d0e041604147720306b64aa6266fad59d6aa94234f18ca7b510301f0603551d23041830168014a3e1f1ea703e2e0fcde6217a83888df333c4e8ea300506032b65700341009c055b8841c91781cb2b281a48805b9f205d59c30b03141e9922f3b14accadc3cf4b059d0eafa7e5cc2dc72baf5f2ba821905414a7f5f2ab5ff78b8a148f6a04"::*u8;
-    if (!decode_hex(root_hex, 682, ?root_der[0], 341) ||
-        !decode_hex(leaf_hex, 786, ?leaf_der[0], 393)) { ret false; }
-    var key_der: [48]^u8 = [48]^u8{
-        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
-        0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
-        0xeb, 0x3b, 0x8b, 0xa3, 0x21, 0x67, 0x09, 0xef,
-        0x29, 0x39, 0x0e, 0x9c, 0x43, 0x84, 0x01, 0xbe,
-        0xca, 0x3f, 0xf8, 0x03, 0x7d, 0x60, 0xbb, 0x30,
-        0x42, 0x18, 0xc8, 0x8c, 0xd4, 0xb7, 0x9b, 0x72,
-    };
-    @key = keys.empty_private();
-    val loaded: contracts.Error = load.private_der(
-        contracts.SecretBytes{data: ?key_der[0], len: 48}, cert.PKCS8_DER,
-        owner, key);
-    ct.zeroize(?key_der[0], 48);
-    if (loaded != contracts.OK) { ret false; }
-    chain_storage[0] = cert.Certificate{der: ?leaf_der[0], der_len: 393};
-    identity.server_name = contracts.Bytes{data: "api.example.com"::*u8, len: 15};
-    identity.chain = cert.Chain{certificates: chain_storage, len: 1};
-    identity.private_key = key;
-    ret true;
-}
 
 # what one side observed across the whole exchange, so an assertion names the
 # event that carried it rather than a state the engine happens to expose
@@ -314,7 +245,7 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
     var chain_storage: [1]cert.Certificate;
     var key: keys.PrivateKey;
     var identity: credentials.Identity;
-    if (!load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) { ret 1; }
+    if (!test_credentials.load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) { ret 1; }
     var generation: credentials.Generation = credentials.empty_generation();
     if (credentials.initialize(?generation, ?identity, 1, 0, nil,
         false) != contracts.OK) { ret 2; }
@@ -340,7 +271,7 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
     var listener_counter: u8 = 3;
     var listener_entropy: secret.Entropy = secret.Entropy{
         context: ?listener_counter, secret_context: nil,
-        fill_fn: deterministic_entropy, initialized: true};
+        fill_fn: test_credentials.deterministic_entropy, initialized: true};
     var listener_config: config.ServerConfig;
     listener_config.credentials = ?store;
     listener_config.alpn = ?listener_protocols[0];
@@ -376,15 +307,14 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
             data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
 
-    var anchor: cert.Certificate = cert.Certificate{der: ?root_der[0],
-        der_len: 341};
+    var anchor: cert.Certificate = test_credentials.anchor();
     var trust: cert.TrustStore = cert.TrustStore{anchors: ?anchor, len: 1};
     var dialer_protocols: [1]config.ProtocolName = [1]config.ProtocolName{
         config.ProtocolName{data: "h3"::*u8, len: 2}};
     var dialer_counter: u8 = 91;
     var dialer_entropy: secret.Entropy = secret.Entropy{
         context: ?dialer_counter, secret_context: nil,
-        fill_fn: deterministic_entropy, initialized: true};
+        fill_fn: test_credentials.deterministic_entropy, initialized: true};
     var dialer_config: config.ClientConfig;
     dialer_config.server_name = contracts.Bytes{
         data: "api.example.com"::*u8, len: 15};
@@ -423,14 +353,14 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
 
     var listener_adapter: handshake_api.Adapter;
     var dialer_adapter: handshake_api.Adapter;
-    val binding: Config = Config{verification_time_unix: VERIFICATION_TIME,
+    val binding: Config = Config{verification_time_unix: test_credentials.VERIFICATION_TIME,
         deadline_ns: 0, entropy_context_size: 1,
         entropy_secret_context_size: 0};
     if (!initialize(?listener_adapter, adapter_config(81), listener_storage(),
         ?listener_engine, binding)) { ret 6; }
     if (!handshake_api.initialize_tls_client(?dialer_adapter,
         adapter_config(82), dialer_storage(), ?dialer_engine,
-        VERIFICATION_TIME, 0, 1, 0)) { ret 7; }
+        test_credentials.VERIFICATION_TIME, 0, 1, 0)) { ret 7; }
     if (listener_adapter.tls_role != handshake_api.SERVER ||
         dialer_adapter.tls_role != handshake_api.CLIENT) { ret 8; }
 
@@ -540,7 +470,7 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
     var chain_storage: [1]cert.Certificate;
     var key: keys.PrivateKey;
     var identity: credentials.Identity;
-    if (!load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) { ret 1; }
+    if (!test_credentials.load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) { ret 1; }
     var generation: credentials.Generation = credentials.empty_generation();
     if (credentials.initialize(?generation, ?identity, 1, 0, nil,
         false) != contracts.OK) { ret 2; }
@@ -559,7 +489,7 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
         config.ProtocolName{data: "h3"::*u8, len: 2}};
     var counter: u8 = 7;
     var entropy: secret.Entropy = secret.Entropy{context: ?counter,
-        secret_context: nil, fill_fn: deterministic_entropy, initialized: true};
+        secret_context: nil, fill_fn: test_credentials.deterministic_entropy, initialized: true};
     var listener_config: config.ServerConfig;
     listener_config.credentials = ?store;
     listener_config.alpn = ?protocols[0];
@@ -595,7 +525,7 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
             data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
 
-    val binding: Config = Config{verification_time_unix: VERIFICATION_TIME,
+    val binding: Config = Config{verification_time_unix: test_credentials.VERIFICATION_TIME,
         deadline_ns: 0, entropy_context_size: 1,
         entropy_secret_context_size: 0};
 
@@ -678,7 +608,7 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
     var chain_storage: [1]cert.Certificate;
     var key: keys.PrivateKey;
     var identity: credentials.Identity;
-    if (!load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) { ret 1; }
+    if (!test_credentials.load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) { ret 1; }
     var generation: credentials.Generation = credentials.empty_generation();
     if (credentials.initialize(?generation, ?identity, 1, 0, nil,
         false) != contracts.OK) { ret 2; }
@@ -697,7 +627,7 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
         config.ProtocolName{data: "h3"::*u8, len: 2}};
     var counter: u8 = 11;
     var entropy: secret.Entropy = secret.Entropy{context: ?counter,
-        secret_context: nil, fill_fn: deterministic_entropy, initialized: true};
+        secret_context: nil, fill_fn: test_credentials.deterministic_entropy, initialized: true};
     var listener_config: config.ServerConfig;
     listener_config.credentials = ?store;
     listener_config.alpn = ?protocols[0];
@@ -735,7 +665,7 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
 
     var adapter: handshake_api.Adapter;
     if (!initialize(?adapter, adapter_config(86), listener_storage(),
-        ?listener_engine, Config{verification_time_unix: VERIFICATION_TIME,
+        ?listener_engine, Config{verification_time_unix: test_credentials.VERIFICATION_TIME,
             deadline_ns: 0, entropy_context_size: 1,
             entropy_secret_context_size: 0})) { ret 5; }
 

@@ -1,0 +1,403 @@
+# a real client and a real server, assembled from configuration and driven to a
+# completed handshake and an exchanged stream over real packet protection
+
+use assembly: quic.connection.assembly;
+use core: quic.connection.core;
+use handshake: quic.connection.handshake;
+use test_credentials: quic.connection.credentials_simulated;
+use binding: quic.transport.binding;
+use transport: quic.transport;
+
+use crypto.contracts;
+use crypto.encoding.keys;
+use crypto.secret;
+use std.chrono.time;
+use std.net.ip;
+use std.sync.cancel;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+use tls.cert;
+use tls.cert.credentials;
+use tls.client;
+use tls.config;
+use tls.server;
+use tls.tls13;
+
+# two assembled connections and two TLS engines are far past a stack frame
+var dialer: assembly.Connection;
+var listener: assembly.Connection;
+var dialer_tls: client.Client;
+var listener_tls: server.Server;
+
+var dialer_input: [8192]u8;
+var dialer_output: [8192]u8;
+var dialer_hello: [8192]u8;
+var dialer_certificates: [4]cert.Certificate;
+var dialer_peer_parameters: [512]u8;
+var listener_input: [8192]u8;
+var listener_output: [8192]u8;
+var listener_hello: [8192]u8;
+var listener_certificates: [4]cert.Certificate;
+var listener_peer_parameters: [512]u8;
+
+var dialer_parameters: [512]u8;
+var listener_parameters: [512]u8;
+var wire: [1500]u8;
+var dialer_scope: cancel.Scope;
+var listener_scope: cancel.Scope;
+
+# a failing exit code is one byte, so the detail lands here and the assertion
+# returns only which step refused
+var fault_side: u64;
+var fault_step: u64;
+var fault_status: u64;
+var fault_error: u64;
+
+var dialer_source: [8]u8 = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+var listener_source: [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
+var initial_destination: [8]u8 =
+    [8]u8{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
+var alpn: [2]u8 = [2]u8{'h', '3'};
+var server_name: [15]u8 = [15]u8{'a', 'p', 'i', '.', 'e', 'x', 'a', 'm',
+    'p', 'l', 'e', '.', 'c', 'o', 'm'};
+
+# an exit code is one byte, so a refusal reports which side and step refused and
+# what the core said, each clamped rather than truncated into another code's
+# range. never zero, so a refusal cannot be mistaken for a pass
+fun clamped(value: u64, ceiling: u64) u64 {
+    if (value > ceiling) { ret ceiling; }
+    ret value;
+}
+
+fun refusal() i32 {
+    ret (100 + fault_side * 50 + fault_step * 8 +
+        clamped(fault_status, 3) * 2 + clamped(fault_error, 1))::i32;
+}
+
+fun endpoint(host: u8, port: u16) ip.Endpoint {
+    var value: ip.Endpoint;
+    value.addr.v4.octets[0] = 192;
+    value.addr.v4.octets[1] = 0;
+    value.addr.v4.octets[2] = 2;
+    value.addr.v4.octets[3] = host;
+    value.port = port;
+    ret value;
+}
+
+fun dialer_endpoint() ip.Endpoint { ret endpoint(1, 55000); }
+fun listener_endpoint() ip.Endpoint { ret endpoint(2, 4433); }
+
+# both sides describe the same connection; only the identity fields differ
+fun connection_config(role: transport.Role) assembly.Config {
+    var value: assembly.Config;
+    if (role == transport.CLIENT) {
+        value = assembly.default_config(901, dialer_endpoint(),
+            listener_endpoint());
+        value.local_source = ?dialer_source[0];
+        value.peer_destination = ?listener_source[0];
+        value.server_name = ?server_name[0];
+        value.server_name_length = 15;
+    } or {
+        value = assembly.default_config(902, listener_endpoint(),
+            dialer_endpoint());
+        value.local_source = ?listener_source[0];
+        value.peer_destination = ?dialer_source[0];
+    }
+    value.local_source_length = 8;
+    value.peer_destination_length = 8;
+    value.original_destination = ?initial_destination[0];
+    value.original_destination_length = 8;
+    value.alpn = ?alpn[0];
+    value.alpn_length = 2;
+    value.max_udp_payload = 1200;
+    value.max_idle_timeout_ms = 30000;
+    value.peer_bidirectional_streams = 2;
+    value.peer_unidirectional_streams = 2;
+    value.receive_max_data = 4096;
+    value.receive_stream_data = 2048;
+    value.verification_time_unix = test_credentials.VERIFICATION_TIME;
+    value.peer_validated = true;
+    ret value;
+}
+
+# one generated datagram, completed on the sender and delivered to the peer,
+# exactly as an owner's scheduling loop would move it
+fun carry(source: *assembly.Connection, sink: *assembly.Connection,
+          source_scope: *cancel.Scope, sink_local: ip.Endpoint,
+          sink_peer: ip.Endpoint, clock: *u64, moved: *usize) i64 {
+    var guard: usize = 0;
+    for (guard < 64) {
+        clock[0] = clock[0] + 1000;
+        val generated: transport.Generated =
+            transport.generate[binding.Binding](?source.driver, source_scope,
+                ?wire[0], 1500, clock[0], 0);
+        if (generated.status == transport.STATUS_EMPTY ||
+            generated.status == transport.STATUS_BLOCKED) { ret 0; }
+        if (generated.status != transport.STATUS_OK) {
+            fault_step = 1;
+            fault_status = generated.status::u64;
+            fault_error = generated.error::u64;
+            ret 1;
+        }
+        if (generated.count == 0) { fault_step = 2; ret 2; }
+        clock[0] = clock[0] + 1000;
+        val completed: transport.Completion =
+            transport.complete_send[binding.Binding](?source.driver,
+                generated.token, transport.SEND_SENT, generated.count,
+                clock[0]);
+        if (completed.status != transport.STATUS_OK) {
+            fault_step = 3;
+            fault_status = completed.status::u64;
+            fault_error = completed.error::u64;
+            ret 3;
+        }
+        var input: transport.Datagram;
+        input.local = sink_local;
+        input.peer = sink_peer;
+        input.data = ?wire[0];
+        input.length = generated.count;
+        input.received_at_ns = clock[0];
+        input.ecn = 0;
+        clock[0] = clock[0] + 1000;
+        val received: transport.OperationResult =
+            transport.receive_datagram[binding.Binding](?sink.driver, ?input);
+        if (received.status != transport.STATUS_OK) {
+            fault_step = 4;
+            fault_status = received.status::u64;
+            fault_error = received.error::u64;
+            ret 4;
+        }
+        moved[0] = moved[0] + 1;
+        guard = guard + 1;
+    }
+    fault_step = 5;
+    ret 5;
+}
+
+# carries both directions for a fixed number of rounds, with no completion
+# condition, so a caller that is past the handshake is not relying on one
+fun pump(clock: *u64, moved: *usize, rounds: usize) i64 {
+    var round: usize = 0;
+    for (round < rounds) {
+        val forward: i64 = carry(?dialer, ?listener, ?dialer_scope,
+            listener_endpoint(), dialer_endpoint(), clock, moved);
+        if (forward != 0) { fault_side = 1; ret forward; }
+        val backward: i64 = carry(?listener, ?dialer, ?listener_scope,
+            dialer_endpoint(), listener_endpoint(), clock, moved);
+        if (backward != 0) { fault_side = 2; ret backward; }
+        round = round + 1;
+    }
+    ret 0;
+}
+
+fun exchange(clock: *u64, moved: *usize, rounds: usize) i64 {
+    var round: usize = 0;
+    for (round < rounds) {
+        val forward: i64 = carry(?dialer, ?listener, ?dialer_scope,
+            listener_endpoint(), dialer_endpoint(), clock, moved);
+        if (forward != 0) { fault_side = 1; ret forward; }
+        val backward: i64 = carry(?listener, ?dialer, ?listener_scope,
+            dialer_endpoint(), listener_endpoint(), clock, moved);
+        if (backward != 0) { fault_side = 2; ret backward; }
+        clock[0] = clock[0] + 1000;
+        if (core.poll_handshake(?dialer.core, ?dialer.secrets,
+            clock[0]).status == transport.STATUS_ERROR) {
+            fault_side = 1; fault_step = 6; ret 6;
+        }
+        clock[0] = clock[0] + 1000;
+        if (core.poll_handshake(?listener.core, ?listener.secrets,
+            clock[0]).status == transport.STATUS_ERROR) {
+            fault_side = 2; fault_step = 6; ret 6;
+        }
+        if (core.snapshot(?dialer.core).state == transport.ACTIVE &&
+            core.snapshot(?listener.core).state == transport.ACTIVE) { ret 0; }
+        round = round + 1;
+    }
+    fault_step = 7;
+    ret 7;
+}
+
+
+test "quic.connection.assembly: a real client and server exchange a stream over a real handshake" {
+    var owner: secret.Allocator = secret.system_allocator();
+    var chain_storage: [1]cert.Certificate;
+    var key: keys.PrivateKey;
+    var identity: credentials.Identity;
+    if (!test_credentials.load_credentials(?identity, ?chain_storage[0], ?key,
+        ?owner)) { ret 1; }
+    var generation: credentials.Generation = credentials.empty_generation();
+    if (credentials.initialize(?generation, ?identity, 1, 0, nil,
+        false) != contracts.OK) { ret 2; }
+    var store: credentials.Store = credentials.empty_store();
+    if (credentials.initialize_store(?store, ?generation) != contracts.OK) {
+        ret 3;
+    }
+
+    var versions: [1]u16 = [1]u16{tls13.VERSION};
+    var suites: [1]tls13.CipherSuite =
+        [1]tls13.CipherSuite{tls13.AES_128_GCM_SHA256};
+    var groups: [1]tls13.NamedGroup = [1]tls13.NamedGroup{tls13.X25519};
+    var signatures: [1]tls13.SignatureScheme =
+        [1]tls13.SignatureScheme{tls13.ED25519};
+    var protocols: [1]config.ProtocolName = [1]config.ProtocolName{
+        config.ProtocolName{data: ?alpn[0], len: 2}};
+
+    val listener_config: assembly.Config = connection_config(transport.SERVER);
+    val dialer_config: assembly.Config = connection_config(transport.CLIENT);
+    val listener_encoded: usize = assembly.encode_parameters(?listener_config,
+        transport.SERVER, ?listener_parameters[0], 512).count;
+    val dialer_encoded: usize = assembly.encode_parameters(?dialer_config,
+        transport.CLIENT, ?dialer_parameters[0], 512).count;
+    if (listener_encoded == 0 || dialer_encoded == 0) { ret 4; }
+
+    var listener_counter: u8 = 3;
+    var listener_entropy: secret.Entropy = secret.Entropy{
+        context: ?listener_counter, secret_context: nil,
+        fill_fn: test_credentials.deterministic_entropy, initialized: true};
+    var listener_tls_config: config.ServerConfig;
+    listener_tls_config.credentials = ?store;
+    listener_tls_config.alpn = ?protocols[0];
+    listener_tls_config.alpn_len = 1;
+    listener_tls_config.require_alpn = true;
+    listener_tls_config.versions = ?versions[0];
+    listener_tls_config.version_len = 1;
+    listener_tls_config.suites = ?suites[0];
+    listener_tls_config.suite_len = 1;
+    listener_tls_config.groups = ?groups[0];
+    listener_tls_config.group_len = 1;
+    listener_tls_config.signatures = ?signatures[0];
+    listener_tls_config.signature_len = 1;
+    listener_tls_config.entropy = ?listener_entropy;
+    listener_tls_config.entropy_context_size = 1;
+    listener_tls_config.limits = config.production_limits();
+    listener_tls_config.limits.max_peer_handshake_bytes = 8192;
+    listener_tls_config.limits.max_client_hello_bytes = 8192;
+    listener_tls_config.limits.max_client_flight_bytes = 8192;
+    listener_tls_config.limits.max_server_flight_bytes = 8192;
+    listener_tls_config.limits.max_chain_bytes = 4096;
+    listener_tls_config.limits.max_ticket_bytes = 4096;
+    if (!server.init(?listener_tls, ?listener_tls_config, server.Storage{
+            input: ?listener_input[0], input_capacity: 8192,
+            output: ?listener_output[0], output_capacity: 8192,
+            hello: ?listener_hello[0], hello_capacity: 8192,
+            certificates: ?listener_certificates[0], certificate_capacity: 4,
+            peer_parameters: ?listener_peer_parameters[0],
+            peer_parameters_capacity: 512},
+        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+            data: contracts.Bytes{data: ?listener_parameters[0],
+                len: listener_encoded}},
+        server.QUIC_TRANSPORT_PARAMETERS)) { ret 5; }
+
+    var anchor: cert.Certificate = test_credentials.anchor();
+    var trust: cert.TrustStore = cert.TrustStore{anchors: ?anchor, len: 1};
+    var dialer_counter: u8 = 91;
+    var dialer_entropy: secret.Entropy = secret.Entropy{
+        context: ?dialer_counter, secret_context: nil,
+        fill_fn: test_credentials.deterministic_entropy, initialized: true};
+    var dialer_tls_config: config.ClientConfig;
+    dialer_tls_config.server_name = contracts.Bytes{data: ?server_name[0],
+        len: 15};
+    dialer_tls_config.alpn = ?protocols[0];
+    dialer_tls_config.alpn_len = 1;
+    dialer_tls_config.trust = ?trust;
+    dialer_tls_config.versions = ?versions[0];
+    dialer_tls_config.version_len = 1;
+    dialer_tls_config.suites = ?suites[0];
+    dialer_tls_config.suite_len = 1;
+    dialer_tls_config.groups = ?groups[0];
+    dialer_tls_config.group_len = 1;
+    dialer_tls_config.signatures = ?signatures[0];
+    dialer_tls_config.signature_len = 1;
+    dialer_tls_config.client_identity = nil;
+    dialer_tls_config.entropy = ?dialer_entropy;
+    dialer_tls_config.entropy_context_size = 1;
+    dialer_tls_config.limits = config.production_limits();
+    dialer_tls_config.limits.max_peer_handshake_bytes = 8192;
+    dialer_tls_config.limits.max_client_hello_bytes = 8192;
+    dialer_tls_config.limits.max_client_flight_bytes = 8192;
+    dialer_tls_config.limits.max_chain_bytes = 4096;
+    dialer_tls_config.limits.max_ticket_bytes = 4096;
+    if (!client.init(?dialer_tls, ?dialer_tls_config, client.Storage{
+            input: ?dialer_input[0], input_capacity: 8192,
+            output: ?dialer_output[0], output_capacity: 8192,
+            hello: ?dialer_hello[0], hello_capacity: 8192,
+            certificates: ?dialer_certificates[0], certificate_capacity: 4,
+            peer_parameters: ?dialer_peer_parameters[0],
+            peer_parameters_capacity: 512},
+        client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
+            data: contracts.Bytes{data: ?dialer_parameters[0],
+                len: dialer_encoded}},
+        client.QUIC_TRANSPORT_PARAMETERS)) { ret 6; }
+
+    if (!cancel.make_root(?listener_scope, false, time.Time{sec: 0, nsec: 0}) ||
+        !cancel.make_root(?dialer_scope, false, time.Time{sec: 0, nsec: 0})) {
+        ret 7;
+    }
+    val served: assembly.InitResult = assembly.init_server(?listener,
+        ?listener_config, ?listener_tls, ?listener_scope, 1000);
+    if (!served.ok) { ret 140 + served.stage::i32; }
+    if (served.core.reason != core.INIT_OK) { ret 150 + served.core.reason::i32; }
+    val dialed: assembly.InitResult = assembly.init_client(?dialer,
+        ?dialer_config, ?dialer_tls, ?dialer_scope, 1000);
+    if (!dialed.ok) { ret 170 + dialed.stage::i32; }
+    if (dialed.core.reason != core.INIT_OK) { ret 180 + dialed.core.reason::i32; }
+
+    # state of the dialer's adapter the instant after init, before any exchange
+    val started: handshake.Snapshot = handshake.snapshot(?dialer.handshake);
+    if (!started.initialized) { ret 210; }
+    if (!started.started) { ret 211; }
+    if (started.closing) { ret 212; }
+    if (started.destroyed) { ret 213; }
+    if (started.terminal_alert != 0) { ret 214; }
+    if (started.event_active) { ret 215; }
+    if (started.role != handshake.CLIENT) { ret 216; }
+    var clock: u64 = 1000;
+    var moved: usize = 0;
+    val ran: i64 = exchange(?clock, ?moved, 24);
+    # never zero, so a refusal can never be mistaken for a pass
+    if (ran != 0) { ret refusal(); }
+    if (moved == 0) { ret 200; }
+    if (transport.snapshot[binding.Binding](?dialer.driver).state !=
+            transport.ACTIVE ||
+        transport.snapshot[binding.Binding](?listener.driver).state !=
+            transport.ACTIVE) { ret 201; }
+    if (!core.snapshot(?dialer.core).peer_parameters_ready ||
+        !core.snapshot(?listener.core).peer_parameters_ready) { ret 202; }
+
+    # a stream the peer never opened, opened and read through the drivers and
+    # carried between them in real 1-RTT packets
+    val opened: transport.OpenResult =
+        transport.open_stream[binding.Binding](?dialer.driver,
+            transport.BIDIRECTIONAL);
+    if (opened.status != transport.STATUS_OK) { ret 203; }
+    var payload: [11]u8 = [11]u8{'q', 'u', 'i', 'c', '-', 's', 't', 'r', 'e',
+        'a', 'm'};
+    val written: transport.WriteResult =
+        transport.write_stream[binding.Binding](?dialer.driver, opened.stream,
+            ?payload[0], 11);
+    if (written.status != transport.STATUS_OK || written.count != 11) {
+        ret 204;
+    }
+    if (transport.finish_stream[binding.Binding](?dialer.driver,
+        opened.stream).status != transport.STATUS_OK) { ret 205; }
+    val carried: i64 = pump(?clock, ?moved, 4);
+    if (carried != 0) { ret refusal(); }
+    val accepted: transport.OpenResult =
+        transport.accept_stream[binding.Binding](?listener.driver);
+    if (accepted.status != transport.STATUS_OK) { ret 206; }
+    var received: [16]u8;
+    val read: transport.ReadResult =
+        transport.read_stream[binding.Binding](?listener.driver,
+            accepted.stream, ?received[0], 16);
+    if (read.status != transport.STATUS_OK &&
+        read.status != transport.STATUS_CLOSED) { ret 90 + read.status::i32; }
+    if (read.count != 11) { ret 100 + read.count::i32; }
+    var i: usize = 0;
+    for (i < 11) {
+        if (received[i] != payload[i]) { ret 208; }
+        i = i + 1;
+    }
+    ret 0;
+}
