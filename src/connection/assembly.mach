@@ -320,8 +320,8 @@ fun config_valid(config: *Config, role: transport_api.Role) bool {
         config.original_destination_length > packet.MAX_CONNECTION_ID ||
         config.active_connection_id_limit < 2 ||
         config.active_connection_id_limit > CONNECTION_ID_CAPACITY::u64 ||
-        config.peer_bidirectional_streams + config.peer_unidirectional_streams >
-            STREAM_CAPACITY::u64 ||
+        config.peer_bidirectional_streams + config.peer_unidirectional_streams +
+            H3_CRITICAL_STREAMS_PER_PEER::u64 > STREAM_CAPACITY::u64 ||
         config.receive_stream_data == 0 ||
         config.receive_stream_data > STREAM_STRIDE::u64 ||
         config.receive_max_data == 0 ||
@@ -785,11 +785,11 @@ test "quic.connection.assembly: production profile encodes bounded H3 limits" {
         parameters.initial_max_stream_data_bidi_local != STREAM_STRIDE::u64 ||
         parameters.initial_max_stream_data_bidi_remote != STREAM_STRIDE::u64 ||
         parameters.initial_max_stream_data_uni != STREAM_STRIDE::u64) { ret 1; }
-    config.peer_bidirectional_streams = 13;
+    config.peer_bidirectional_streams = 10;
     config.peer_unidirectional_streams = 3;
     if (!encode_parameters(?config, transport_api.CLIENT,
         ?encoded[0], 512).ok) { ret 2; }
-    config.peer_bidirectional_streams = 14;
+    config.peer_bidirectional_streams = 11;
     if (encode_parameters(?config, transport_api.CLIENT,
         ?encoded[0], 512).ok) { ret 3; }
     config.peer_bidirectional_streams = H3_REQUEST_STREAMS::u64;
