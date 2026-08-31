@@ -10,6 +10,7 @@ use cid_api: quic.connection.cid;
 use core_api: quic.connection.core;
 use datagram_api: quic.stream.datagram;
 use handshake_api: quic.connection.handshake;
+use listener_api: quic.connection.listener;
 use quic.connection.negotiation;
 use quic.frame.frame;
 use quic.packet.packet;
@@ -106,6 +107,10 @@ pub rec Config {
     peer_destination_length: usize;
     original_destination: *u8;
     original_destination_length: usize;
+    initial_destination: *u8;
+    initial_destination_length: usize;
+    retry_source: *u8;
+    retry_source_length: usize;
     alpn: *u8;
     alpn_length: usize;
     server_name: *u8;
@@ -124,6 +129,8 @@ pub rec Config {
     entropy_context_size: usize;
     entropy_secret_context_size: usize;
     peer_validated: bool;
+    retry_source_present: bool;
+    server_acceptance_applied: bool;
     enable_early_data: bool;
 }
 
@@ -238,6 +245,54 @@ fun connection_id(data: *u8, length: usize) packet.ConnectionId {
     ret value;
 }
 
+fun accepted_id(value: *packet.ConnectionId) bool {
+    ret value != nil && value.len > 0 &&
+        value.len::usize <= packet.MAX_CONNECTION_ID;
+}
+
+# applies the listener's complete acceptance as one configuration transaction.
+# accepted must remain at a fixed address through parameter encoding and init
+pub fun apply_server_acceptance(config: *Config,
+                                accepted: *listener_api.Accepted) bool {
+    if (config == nil || accepted == nil ||
+        accepted.action != listener_api.ACTION_ACCEPT ||
+        (accepted.version != packet.VERSION_1 &&
+            accepted.version != packet.VERSION_2) ||
+        !accepted_id(?accepted.original_destination) ||
+        !accepted_id(?accepted.initial_destination) ||
+        !accepted_id(?accepted.initial_source)) { ret false; }
+    if (accepted.retry_source_present) {
+        if (!accepted_id(?accepted.retry_source) ||
+            !packet.connection_id_equal(?accepted.initial_destination,
+                ?accepted.retry_source)) { ret false; }
+    } or {
+        if (accepted.retry_source.len != 0 ||
+            !packet.connection_id_equal(?accepted.initial_destination,
+                ?accepted.original_destination)) { ret false; }
+    }
+    var next: Config = @config;
+    next.version = accepted.version;
+    next.peer = accepted.peer;
+    next.peer_destination = ?accepted.initial_source.data[0];
+    next.peer_destination_length = accepted.initial_source.len::usize;
+    next.original_destination = ?accepted.original_destination.data[0];
+    next.original_destination_length =
+        accepted.original_destination.len::usize;
+    next.initial_destination = ?accepted.initial_destination.data[0];
+    next.initial_destination_length = accepted.initial_destination.len::usize;
+    next.retry_source = nil;
+    next.retry_source_length = 0;
+    if (accepted.retry_source_present) {
+        next.retry_source = ?accepted.retry_source.data[0];
+        next.retry_source_length = accepted.retry_source.len::usize;
+    }
+    next.peer_validated = accepted.peer_validated;
+    next.retry_source_present = accepted.retry_source_present;
+    next.server_acceptance_applied = true;
+    @config = next;
+    ret true;
+}
+
 fun path_address(value: ip.Endpoint) path_api.Address {
     ret path_api.ipv4(value.addr.v4.octets[0], value.addr.v4.octets[1],
         value.addr.v4.octets[2], value.addr.v4.octets[3], value.port);
@@ -272,7 +327,34 @@ fun config_valid(config: *Config, role: transport_api.Role) bool {
         config.receive_max_data == 0 ||
         config.receive_max_data > STREAM_WINDOW::u64 ||
         config.max_datagram_frame_size > DATAGRAM_STRIDE) { ret false; }
-    if (role == transport_api.SERVER) { ret true; }
+    if (role == transport_api.SERVER) {
+        if (!config.server_acceptance_applied ||
+            config.initial_destination == nil ||
+            config.initial_destination_length == 0 ||
+            config.initial_destination_length > packet.MAX_CONNECTION_ID) {
+            ret false;
+        }
+        if (config.retry_source_present) {
+            if (config.retry_source == nil || config.retry_source_length == 0 ||
+                config.retry_source_length > packet.MAX_CONNECTION_ID) {
+                ret false;
+            }
+            var initial: packet.ConnectionId = connection_id(
+                config.initial_destination,
+                config.initial_destination_length);
+            var retry: packet.ConnectionId = connection_id(config.retry_source,
+                config.retry_source_length);
+            ret packet.connection_id_equal(?initial, ?retry);
+        }
+        if (config.retry_source != nil || config.retry_source_length != 0) {
+            ret false;
+        }
+        var initial: packet.ConnectionId = connection_id(
+            config.initial_destination, config.initial_destination_length);
+        var original: packet.ConnectionId = connection_id(
+            config.original_destination, config.original_destination_length);
+        ret packet.connection_id_equal(?initial, ?original);
+    }
     ret config.server_name != nil && config.server_name_length != 0;
 }
 
@@ -336,6 +418,12 @@ fun local_parameters(config: *Config,
             config.original_destination, config.original_destination_length);
         transport_parameters.set_present(?value,
             transport_parameters.ORIGINAL_DESTINATION_CONNECTION_ID);
+        if (config.retry_source_present) {
+            value.retry_source_connection_id = connection_id(
+                config.retry_source, config.retry_source_length);
+            transport_parameters.set_present(?value,
+                transport_parameters.RETRY_SOURCE_CONNECTION_ID);
+        }
     }
     ret value;
 }
@@ -456,6 +544,12 @@ fun core_configuration(c: *Connection, config: *Config,
     value.original_destination = connection_id(config.original_destination,
         config.original_destination_length);
     value.initial_secret_destination = value.original_destination;
+    if (role == transport_api.SERVER) {
+        value.initial_secret_destination = connection_id(
+            config.initial_destination, config.initial_destination_length);
+        value.retry_source = connection_id(config.retry_source,
+            config.retry_source_length);
+    }
     value.local_source = connection_id(config.local_source,
         config.local_source_length);
     value.peer_destination = connection_id(config.peer_destination,
@@ -469,7 +563,7 @@ fun core_configuration(c: *Connection, config: *Config,
     value.max_idle_timeout_ns = config.max_idle_timeout_ms * 1000000;
     value.drain_timeout_ns = config.drain_timeout_ns;
     value.peer_validated = config.peer_validated;
-    value.retry_source_present = false;
+    value.retry_source_present = config.retry_source_present;
     value.enable_early_data = config.enable_early_data;
     ret value;
 }
@@ -708,5 +802,77 @@ test "quic.connection.assembly: production profile encodes bounded H3 limits" {
     config.receive_stream_data = STREAM_STRIDE::u64 + 1;
     if (encode_parameters(?config, transport_api.CLIENT,
         ?encoded[0], 512).ok) { ret 5; }
+    ret 0;
+}
+
+test "quic.connection.assembly: server acceptance preserves three Retry identities" {
+    var local_id: [8]u8 = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    var original_id: [8]u8 = [8]u8{21, 22, 23, 24, 25, 26, 27, 28};
+    var retry_id: [8]u8 = [8]u8{41, 42, 43, 44, 45, 46, 47, 48};
+    var peer_id: [8]u8 = [8]u8{61, 62, 63, 64, 65, 66, 67, 68};
+    var protocol: [2]u8 = [2]u8{'h', '3'};
+    var config: Config = default_config(992,
+        ip.endpoint(192, 0, 2, 2, 4433),
+        ip.endpoint(192, 0, 2, 1, 55000));
+    config.local_source = ?local_id[0];
+    config.local_source_length = 8;
+    config.alpn = ?protocol[0];
+    config.alpn_length = 2;
+    var accepted: listener_api.Accepted;
+    accepted.action = listener_api.ACTION_ACCEPT;
+    accepted.original_destination = connection_id(?original_id[0], 8);
+    accepted.initial_destination = connection_id(?retry_id[0], 8);
+    accepted.initial_source = connection_id(?peer_id[0], 8);
+    accepted.retry_source = accepted.initial_destination;
+    accepted.retry_source_present = true;
+    accepted.peer_validated = true;
+    accepted.peer = config.peer;
+    accepted.version = packet.VERSION_1;
+    if (!apply_server_acceptance(?config, ?accepted) ||
+        !config_valid(?config, transport_api.SERVER)) { ret 1; }
+    var initial: packet.ConnectionId = connection_id(config.initial_destination,
+        config.initial_destination_length);
+    var original: packet.ConnectionId = connection_id(config.original_destination,
+        config.original_destination_length);
+    var retry: packet.ConnectionId = connection_id(config.retry_source,
+        config.retry_source_length);
+    val parameters: transport_parameters.Parameters = local_parameters(?config,
+        transport_api.SERVER);
+    if (!packet.connection_id_equal(?initial, ?accepted.initial_destination) ||
+        !packet.connection_id_equal(?original,
+            ?accepted.original_destination) ||
+        !packet.connection_id_equal(?retry, ?accepted.retry_source) ||
+        packet.connection_id_equal(?initial, ?original) ||
+        !transport_parameters.has(?parameters,
+            transport_parameters.RETRY_SOURCE_CONNECTION_ID) ||
+        !packet.connection_id_equal(?parameters.original_destination_connection_id,
+            ?accepted.original_destination) ||
+        !packet.connection_id_equal(?parameters.retry_source_connection_id,
+            ?accepted.retry_source)) { ret 2; }
+    var malformed: listener_api.Accepted = accepted;
+    malformed.initial_destination.data[0] =
+        malformed.initial_destination.data[0] ^ 1;
+    var untouched: Config = default_config(993, config.local, config.peer);
+    untouched.local_source = ?local_id[0];
+    untouched.local_source_length = 8;
+    untouched.alpn = ?protocol[0];
+    untouched.alpn_length = 2;
+    if (apply_server_acceptance(?untouched, ?malformed) ||
+        untouched.server_acceptance_applied) { ret 3; }
+    malformed = accepted;
+    malformed.retry_source.data[0] = malformed.retry_source.data[0] ^ 1;
+    if (apply_server_acceptance(?untouched, ?malformed) ||
+        untouched.server_acceptance_applied) { ret 4; }
+    malformed = accepted;
+    malformed.original_destination.len = 0;
+    if (apply_server_acceptance(?untouched, ?malformed) ||
+        untouched.server_acceptance_applied) { ret 5; }
+    var addressed: listener_api.Accepted = accepted;
+    addressed.initial_destination = addressed.original_destination;
+    addressed.retry_source = connection_id(nil, 0);
+    addressed.retry_source_present = false;
+    if (!apply_server_acceptance(?untouched, ?addressed) ||
+        untouched.retry_source_present || !untouched.peer_validated ||
+        !config_valid(?untouched, transport_api.SERVER)) { ret 6; }
     ret 0;
 }
