@@ -113,10 +113,11 @@ fun connection_config(role: transport.Role) assembly.Config {
     value.alpn_length = 2;
     value.max_udp_payload = 1200;
     value.max_idle_timeout_ms = 30000;
-    value.peer_bidirectional_streams = 2;
-    value.peer_unidirectional_streams = 2;
-    value.receive_max_data = 4096;
-    value.receive_stream_data = 2048;
+    value.peer_bidirectional_streams = assembly.H3_REQUEST_STREAMS::u64;
+    value.peer_unidirectional_streams =
+        assembly.H3_CRITICAL_STREAMS_PER_PEER::u64;
+    value.receive_max_data = assembly.STREAM_WINDOW::u64;
+    value.receive_stream_data = assembly.STREAM_STRIDE::u64;
     value.verification_time_unix = test_credentials.VERIFICATION_TIME;
     value.peer_validated = true;
     ret value;
@@ -220,7 +221,7 @@ fun exchange(clock: *u64, moved: *usize, rounds: usize) i64 {
 }
 
 
-test "quic.connection.assembly: a real client and server exchange a stream over a real handshake" {
+test "quic.connection.assembly: production H3 capacity, routing, and close share one binding" {
     var owner: secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key: keys.PrivateKey;
@@ -366,38 +367,90 @@ test "quic.connection.assembly: a real client and server exchange a stream over 
     if (!core.snapshot(?dialer.core).peer_parameters_ready ||
         !core.snapshot(?listener.core).peer_parameters_ready) { ret 202; }
 
-    # a stream the peer never opened, opened and read through the drivers and
-    # carried between them in real 1-RTT packets
-    val opened: transport.OpenResult =
-        transport.open_stream[binding.Binding](?dialer.driver,
-            transport.BIDIRECTIONAL);
-    if (opened.status != transport.STATUS_OK) { ret 203; }
-    var payload: [11]u8 = [11]u8{'q', 'u', 'i', 'c', '-', 's', 't', 'r', 'e',
-        'a', 'm'};
-    val written: transport.WriteResult =
-        transport.write_stream[binding.Binding](?dialer.driver, opened.stream,
-            ?payload[0], 11);
-    if (written.status != transport.STATUS_OK || written.count != 11) {
-        ret 204;
-    }
-    if (transport.finish_stream[binding.Binding](?dialer.driver,
-        opened.stream).status != transport.STATUS_OK) { ret 205; }
-    val carried: i64 = pump(?clock, ?moved, 4);
-    if (carried != 0) { ret refusal(); }
-    val accepted: transport.OpenResult =
-        transport.accept_stream[binding.Binding](?listener.driver);
-    if (accepted.status != transport.STATUS_OK) { ret 206; }
-    var received: [16]u8;
-    val read: transport.ReadResult =
-        transport.read_stream[binding.Binding](?listener.driver,
-            accepted.stream, ?received[0], 16);
-    if (read.status != transport.STATUS_OK &&
-        read.status != transport.STATUS_CLOSED) { ret 90 + read.status::i32; }
-    if (read.count != 11) { ret 100 + read.count::i32; }
+    val routes: assembly.RoutingSnapshot = assembly.routing_snapshot(?listener);
+    val route: assembly.Route = assembly.route_at(?listener, 0);
+    if (!routes.initialized || routes.capacity != 1 || routes.active != 1 ||
+        !route.active || route.sequence != 0 || route.id.length != 8 ||
+        !assembly.route_valid(?listener, ?route)) { ret 203; }
     var i: usize = 0;
-    for (i < 11) {
-        if (received[i] != payload[i]) { ret 208; }
+    for (i < 8) {
+        if (route.id.data[i] != listener_source[i]) { ret 204; }
         i = i + 1;
+    }
+    var stale_route: assembly.Route = route;
+    stale_route.generation = stale_route.generation + 1;
+    var wrong_route: assembly.Route = route;
+    wrong_route.id.data[0] = wrong_route.id.data[0] ^ 1;
+    if (assembly.route_valid(?listener, ?stale_route) ||
+        assembly.route_valid(?listener, ?wrong_route) ||
+        assembly.route_at(?listener, 1).active) { ret 205; }
+
+    var dialer_critical: [3]transport.Stream;
+    var listener_critical: [3]transport.Stream;
+    var requests: [8]transport.Stream;
+    var stream_byte: [1]u8;
+    i = 0;
+    for (i < 3) {
+        val dialer_opened: transport.OpenResult =
+            transport.open_stream[binding.Binding](?dialer.driver,
+                transport.UNIDIRECTIONAL);
+        val listener_opened: transport.OpenResult =
+            transport.open_stream[binding.Binding](?listener.driver,
+                transport.UNIDIRECTIONAL);
+        if (dialer_opened.status != transport.STATUS_OK ||
+            listener_opened.status != transport.STATUS_OK) { ret 206; }
+        dialer_critical[i] = dialer_opened.stream;
+        listener_critical[i] = listener_opened.stream;
+        stream_byte[0] = i::u8;
+        if (transport.write_stream[binding.Binding](?dialer.driver,
+                dialer_critical[i], ?stream_byte[0], 1).count != 1 ||
+            transport.write_stream[binding.Binding](?listener.driver,
+                listener_critical[i], ?stream_byte[0], 1).count != 1) {
+            ret 207;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < 8) {
+        val opened: transport.OpenResult =
+            transport.open_stream[binding.Binding](?dialer.driver,
+                transport.BIDIRECTIONAL);
+        if (opened.status != transport.STATUS_OK) { ret 208; }
+        requests[i] = opened.stream;
+        stream_byte[0] = (0x80 + i)::u8;
+        if (transport.write_stream[binding.Binding](?dialer.driver,
+                requests[i], ?stream_byte[0], 1).count != 1 ||
+            transport.finish_stream[binding.Binding](?dialer.driver,
+                requests[i]).status != transport.STATUS_OK) { ret 209; }
+        i = i + 1;
+    }
+    if (pump(?clock, ?moved, 16) != 0) { ret refusal(); }
+    i = 0;
+    for (i < 11) {
+        if (transport.accept_stream[binding.Binding](?listener.driver).status !=
+            transport.STATUS_OK) { ret 210; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < 3) {
+        if (transport.accept_stream[binding.Binding](?dialer.driver).status !=
+            transport.STATUS_OK) { ret 211; }
+        i = i + 1;
+    }
+    if (transport.snapshot[binding.Binding](?dialer.driver).active_streams != 14 ||
+        transport.snapshot[binding.Binding](?listener.driver).active_streams != 14) {
+        ret 212;
+    }
+    if (!transport.cancel_connection[binding.Binding](?dialer.driver) ||
+        !transport.cancel_connection[binding.Binding](?listener.driver)) { ret 213; }
+    if (transport.finish_close[binding.Binding](?dialer.driver).status !=
+        transport.STATUS_OK) { ret 214; }
+    if (transport.finish_close[binding.Binding](?listener.driver).status !=
+        transport.STATUS_OK) { ret 216; }
+    if (assembly.routing_snapshot(?listener).active != 0 ||
+        assembly.route_valid(?listener, ?route) ||
+        !cancel.destroy(?dialer_scope) || !cancel.destroy(?listener_scope)) {
+        ret 215;
     }
     ret 0;
 }
