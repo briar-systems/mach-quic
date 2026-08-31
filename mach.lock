@@ -7,10 +7,10 @@ commit = "d2f08352acaac3169e823335ab4ef1e8ce632abb"
 
 [dep.mach-crypto]
 url = "https://github.com/briar-systems/mach-crypto"
-ref = "tag/v0.6.0"
-commit = "4d23006514994b3e217b30031c1c5ba711ba0624"
+ref = "tag/v0.7.0"
+commit = "0f74518b3381ac993900d7ce44a86a3c26a1522e"
 
 [dep.mach-tls]
 url = "https://github.com/briar-systems/mach-tls"
-ref = "tag/v0.1.0"
-commit = "1e6262942e1cea145193a3844d031d7da1e5caae"
+ref = "tag/v0.2.0"
+commit = "860fb2386ebfd02e3b3db5f510f4782fed3f29c5"
