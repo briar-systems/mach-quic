@@ -35,6 +35,8 @@ var dialer: assembly.Connection;
 var listener: assembly.Connection;
 var dialer_tls: client.Client;
 var listener_tls: server.Server;
+var dialer_tls_two: client.Client;
+var listener_tls_two: server.Server;
 
 var dialer_input: [8192]u8;
 var dialer_output: [8192]u8;
@@ -380,7 +382,9 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     request.data = ?wire[0];
     request.length = first.count;
     request.now_ns = clock;
-    request.retry_source = connection_id(?listener_source[0], 8);
+    if (!listener_api.set_retry_source(?request, ?listener_source[0], 8)) {
+        ret 11;
+    }
     request.retry_nonce = 41;
     request.output = ?retry_bytes[0];
     request.output_capacity = 512;
@@ -407,6 +411,10 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     clock = clock + 1000;
     val second: transport.Generated = transport.generate[binding.Binding](
         ?dialer.driver, ?dialer_scope, ?wire[0], 1500, clock, 0);
+    val routed_initial: listener_api.ClassifiedDatagram =
+        listener_api.classify_datagram(?wire[0], second.count, 8);
+    if (routed_initial.class != listener_api.DATAGRAM_INITIAL ||
+        routed_initial.destination.length != 8) { ret 221; }
     request.data = ?wire[0];
     request.length = second.count;
     request.now_ns = clock;
@@ -470,10 +478,12 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val route: assembly.Route = assembly.route_at(?listener, 0);
     if (!routes.initialized || routes.capacity != 1 || routes.active != 1 ||
         !route.active || route.sequence != 0 || route.id.length != 8 ||
+        route.id.length != routed_initial.destination.length ||
         !assembly.route_valid(?listener, ?route)) { ret 203; }
     var i: usize = 0;
     for (i < 8) {
-        if (route.id.data[i] != listener_source[i]) { ret 204; }
+        if (route.id.data[i] != listener_source[i] ||
+            route.id.data[i] != routed_initial.destination.data[i]) { ret 204; }
         i = i + 1;
     }
     var stale_route: assembly.Route = route;
@@ -483,6 +493,10 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (assembly.route_valid(?listener, ?stale_route) ||
         assembly.route_valid(?listener, ?wrong_route) ||
         assembly.route_at(?listener, 1).active) { ret 205; }
+    if (assembly.release_closed(?listener) || !listener.initialized ||
+        listener.released || !assembly.route_valid(?listener, ?route)) {
+        ret 222;
+    }
 
     var dialer_critical: [3]transport.Stream;
     var listener_critical: [3]transport.Stream;
@@ -550,9 +564,123 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         assembly.route_valid(?listener, ?route) ||
         listener_api.release_connection(?front, accepted.charge).action !=
             listener_api.ACTION_ACCEPT || !listener_api.begin_close(?front) ||
-        !listener_api.finish_close(?front) ||
-        !cancel.destroy(?dialer_scope) || !cancel.destroy(?listener_scope)) {
+        !listener_api.finish_close(?front)) {
         ret 215;
+    }
+    if (!assembly.release_closed(?dialer) ||
+        !assembly.release_closed(?listener) || dialer.initialized ||
+        listener.initialized || !dialer.released || !listener.released ||
+        !assembly.release_closed(?dialer) ||
+        !assembly.release_closed(?listener) ||
+        !cancel.destroy(?dialer_scope) || !cancel.destroy(?listener_scope)) {
+        ret 223;
+    }
+
+    # the same stable records now serve a second real client/server generation
+    if (!client.init(?dialer_tls_two, ?dialer_tls_config, client.Storage{
+            input: ?dialer_input[0], input_capacity: 8192,
+            output: ?dialer_output[0], output_capacity: 8192,
+            hello: ?dialer_hello[0], hello_capacity: 8192,
+            certificates: ?dialer_certificates[0], certificate_capacity: 4,
+            peer_parameters: ?dialer_peer_parameters[0],
+            peer_parameters_capacity: 512},
+        client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
+            data: contracts.Bytes{data: ?dialer_parameters[0],
+                len: dialer_encoded}},
+        client.QUIC_TRANSPORT_PARAMETERS) ||
+        !cancel.make_root(?dialer_scope, false,
+            time.Time{sec: 0, nsec: 0}) ||
+        !cancel.make_root(?listener_scope, false,
+            time.Time{sec: 0, nsec: 0})) { ret 224; }
+    val redialed: assembly.InitResult = assembly.init_client(?dialer,
+        ?dialer_config, ?dialer_tls_two, ?dialer_scope, clock + 1000);
+    if (!redialed.ok || redialed.core.reason != core.INIT_OK) { ret 225; }
+    clock = clock + 2000;
+    val third: transport.Generated = transport.generate[binding.Binding](
+        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, clock, 0);
+    if (third.status != transport.STATUS_OK ||
+        third.token.index != first.token.index ||
+        third.token.generation == first.token.generation ||
+        transport.complete_send[binding.Binding](?dialer.driver, first.token,
+            transport.SEND_SENT, first.count, clock + 1000).status !=
+            transport.STATUS_STALE ||
+        transport.complete_send[binding.Binding](?dialer.driver, third.token,
+            transport.SEND_SENT, third.count, clock + 2000).status !=
+            transport.STATUS_OK) { ret 226; }
+
+    var direct: listener_api.Accepted;
+    direct.action = listener_api.ACTION_ACCEPT;
+    direct.original_destination = connection_id(?initial_destination[0], 8);
+    direct.initial_destination = connection_id(?initial_destination[0], 8);
+    direct.initial_source = connection_id(?dialer_source[0], 8);
+    direct.peer = dialer_endpoint();
+    direct.version = packet_api.VERSION_1;
+    direct.peer_validated = true;
+    var listener_config_two: assembly.Config = connection_config(
+        transport.SERVER);
+    if (!assembly.apply_server_acceptance(?listener_config_two, ?direct)) {
+        ret 227;
+    }
+    val listener_encoded_two: usize = assembly.encode_parameters(
+        ?listener_config_two, transport.SERVER, ?listener_parameters[0], 512).count;
+    if (listener_encoded_two == 0 || !server.init(?listener_tls_two,
+            ?listener_tls_config, server.Storage{
+                input: ?listener_input[0], input_capacity: 8192,
+                output: ?listener_output[0], output_capacity: 8192,
+                hello: ?listener_hello[0], hello_capacity: 8192,
+                certificates: ?listener_certificates[0],
+                certificate_capacity: 4,
+                peer_parameters: ?listener_peer_parameters[0],
+                peer_parameters_capacity: 512},
+            server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+                data: contracts.Bytes{data: ?listener_parameters[0],
+                    len: listener_encoded_two}},
+            server.QUIC_TRANSPORT_PARAMETERS)) { ret 228; }
+    val reserved_two: assembly.InitResult = assembly.init_server(?listener,
+        ?listener_config_two, ?listener_tls_two, ?listener_scope, clock + 2000);
+    if (!reserved_two.ok || reserved_two.core.reason != core.INIT_OK) { ret 229; }
+    val route_two: assembly.Route = assembly.route_at(?listener, 0);
+    if (!route_two.active || route_two.generation == route.generation ||
+        assembly.route_valid(?listener, ?route)) { ret 230; }
+    var direct_datagram: transport.Datagram;
+    direct_datagram.local = listener_endpoint();
+    direct_datagram.peer = dialer_endpoint();
+    direct_datagram.data = ?wire[0];
+    direct_datagram.length = third.count;
+    clock = clock + 3000;
+    direct_datagram.received_at_ns = clock;
+    val received_initial_two: transport.OperationResult =
+        transport.receive_datagram[binding.Binding](?listener.driver,
+            ?direct_datagram);
+    if (received_initial_two.status != transport.STATUS_OK) { ret 234; }
+    if (exchange(?clock, ?moved, 24) != 0) { ret refusal(); }
+    val reused: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    var reused_bytes: [4]u8 = [4]u8{'n', 'e', 'x', 't'};
+    if (reused.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?dialer.driver, reused.stream,
+            ?reused_bytes[0], 4).count != 4 ||
+        transport.finish_stream[binding.Binding](?dialer.driver,
+            reused.stream).status != transport.STATUS_OK ||
+        pump(?clock, ?moved, 12) != 0) { ret 231; }
+    val received_two: transport.OpenResult =
+        transport.accept_stream[binding.Binding](?listener.driver);
+    var received_bytes: [4]u8;
+    val read_two: transport.ReadResult = transport.read_stream[binding.Binding](
+        ?listener.driver, received_two.stream, ?received_bytes[0], 4);
+    if (received_two.status != transport.STATUS_OK ||
+        read_two.status != transport.STATUS_OK || read_two.count != 4 ||
+        !read_two.fin || received_bytes[0] != 'n' ||
+        received_bytes[3] != 't') { ret 232; }
+    if (!transport.cancel_connection[binding.Binding](?dialer.driver) ||
+        !transport.cancel_connection[binding.Binding](?listener.driver) ||
+        transport.finish_close[binding.Binding](?dialer.driver).status !=
+            transport.STATUS_OK ||
+        transport.finish_close[binding.Binding](?listener.driver).status !=
+            transport.STATUS_OK || !assembly.release_closed(?dialer) ||
+        !assembly.release_closed(?listener) ||
+        !cancel.destroy(?dialer_scope) || !cancel.destroy(?listener_scope)) {
+        ret 233;
     }
     ct.zeroize(?token_key[0], 32);
     ret 0;

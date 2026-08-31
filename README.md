@@ -505,6 +505,17 @@ local routing ID. The inventory is deliberately bounded and generation-tagged
 so later issuance can extend that contract without exposing CID-manager or
 packet internals to the socket multiplexer.
 
+Before that lookup, `connection.listener.classify_datagram` validates the
+visible header invariants and copies the destination ID into its result. It
+identifies a v1 or v2 Initial admission candidate, an unsupported nonzero
+version that may receive Version Negotiation, and traffic that must already
+have a route. Short headers take the socket owner's fixed local ID length.
+Malformed, truncated, zero-length, and oversized datagrams return
+`DATAGRAM_MALFORMED`; the result retains no input pointer. Retry construction is
+also copying: `set_retry_source` copies caller bytes into the `listener.ConnectionId`
+held by `Request`, so a socket owner never constructs a packet-layer ID or keeps
+its source storage alive through `preflight`.
+
 ## Scheduling boundary
 
 The division of labour is not symmetric and is worth stating outright.
@@ -613,6 +624,16 @@ and invalidates stream and DATAGRAM storage only after all generated datagrams,
 stream attempts, prepared DATAGRAM sends, and delivered DATAGRAM views have drained.
 The initiating close cause and a later abortive terminal cause are preserved
 separately.
+
+`connection.assembly.release_closed` is the terminal transaction that makes a
+finished fixed connection record reusable. It refuses without mutation until the
+driver is closed, cancellation is detached, routing is retired, the core and TLS
+provider are destroyed, and every manager lease and application borrower is gone.
+Success removes retained protocol and configuration references while preserving
+route epochs and generated-datagram slot generations. A second call after success
+is idempotent. The next `init_client` or `init_server` may use the same assembly
+address with a newly initialized TLS provider and cancellation scope, and delayed
+routes or transport tokens from its prior use remain stale.
 
 ## Development
 

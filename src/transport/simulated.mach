@@ -274,11 +274,13 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     if (!datagram_api.initialize(?fixture.datagrams,
         datagram_api.Config{source: source, peer_max_frame_size: 65,
         local_max_frame_size: 65, enabled: true}, datagram_storage)) { ret false; }
-    fixture.core.streams = ?fixture.streams;
-    fixture.core.datagrams = ?fixture.datagrams;
-    fixture.core.driver = ?fixture.driver;
-    fixture.core.next_owner = 1;
-    fixture.core.timer_generation = 1;
+    var candidate: Core;
+    candidate.streams = ?fixture.streams;
+    candidate.datagrams = ?fixture.datagrams;
+    candidate.driver = ?fixture.driver;
+    candidate.next_owner = 1;
+    candidate.timer_generation = 1;
+    fixture.core = candidate;
     if (!cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0})) { ret false; }
     val protocol: transport_api.Protocol[Core] = transport_api.Protocol[Core]{
         context: ?fixture.core, context_range: core_range,
@@ -412,6 +414,57 @@ test "quic.transport.simulated: output saturation, loss, reordering, and stale t
             transport_api.STATUS_OK) { ret 7; }
     fixture.core.outbound = 0;
     if (!close_fixture(?fixture, 14)) { ret 8; }
+    ret 0;
+}
+
+test "quic.transport.simulated: terminal release preserves generations across record reuse" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 119, stream_api.ROLE_CLIENT)) { ret 1; }
+    if (transport_api.release_closed[Core](?fixture.driver).status !=
+            transport_api.STATUS_ERROR || !fixture.driver.initialized ||
+        fixture.driver.released) { ret 2; }
+    fixture.core.outbound = 1;
+    var first_buffer: [8]u8;
+    val first: transport_api.Generated = transport_api.generate[Core](
+        ?fixture.driver, ?fixture.scope, ?first_buffer[0], 8, 1, 1);
+    if (first.status != transport_api.STATUS_OK ||
+        transport_api.complete_send[Core](?fixture.driver, first.token,
+            transport_api.SEND_SENT, first.count, 2).status !=
+            transport_api.STATUS_OK ||
+        transport_api.begin_close[Core](?fixture.driver, 0, nil, 0, 3).status !=
+            transport_api.STATUS_OK ||
+        transport_api.release_closed[Core](?fixture.driver).status !=
+            transport_api.STATUS_ERROR || !fixture.driver.initialized ||
+        transport_api.finish_close[Core](?fixture.driver).status !=
+            transport_api.STATUS_OK) { ret 3; }
+    fixture.driver.cancellation_calls = 1;
+    if (transport_api.release_closed[Core](?fixture.driver).status !=
+            transport_api.STATUS_BLOCKED || !fixture.driver.initialized ||
+        fixture.driver.protocol.context != ?fixture.core) { ret 7; }
+    fixture.driver.cancellation_calls = 0;
+    if (!transport_api.release_ready[Core](?fixture.driver) ||
+        transport_api.release_closed[Core](?fixture.driver).status !=
+            transport_api.STATUS_OK || fixture.driver.initialized ||
+        !fixture.driver.released || fixture.sends[first.token.index::usize].generation !=
+            first.token.generation ||
+        fixture.sends[first.token.index::usize].token.source != 0 ||
+        fixture.sends[first.token.index::usize].packet.buffer != nil ||
+        transport_api.release_closed[Core](?fixture.driver).status !=
+            transport_api.STATUS_OK || !cancel.destroy(?fixture.scope)) { ret 4; }
+    if (!make_fixture(?fixture, 119, stream_api.ROLE_CLIENT)) { ret 5; }
+    fixture.core.outbound = 1;
+    var second_buffer: [8]u8;
+    val second: transport_api.Generated = transport_api.generate[Core](
+        ?fixture.driver, ?fixture.scope, ?second_buffer[0], 8, 4, 2);
+    if (second.status != transport_api.STATUS_OK ||
+        second.token.index != first.token.index ||
+        second.token.generation == first.token.generation ||
+        transport_api.complete_send[Core](?fixture.driver, first.token,
+            transport_api.SEND_SENT, first.count, 5).status !=
+            transport_api.STATUS_STALE ||
+        transport_api.complete_send[Core](?fixture.driver, second.token,
+            transport_api.SEND_SENT, second.count, 6).status !=
+            transport_api.STATUS_OK || !close_fixture(?fixture, 7)) { ret 6; }
     ret 0;
 }
 

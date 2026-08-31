@@ -42,6 +42,27 @@ pub val ERROR_CRYPTO: Error = 10;
 pub val ERROR_OUTPUT: Error = 11;
 pub val ERROR_TOKEN_HANDLE: Error = 12;
 
+pub val CONNECTION_ID_CAPACITY: usize = 20;
+pub val MAX_DATAGRAM_LENGTH: usize = 65527;
+
+pub def DatagramClass: u8;
+pub val DATAGRAM_MALFORMED: DatagramClass = 0;
+pub val DATAGRAM_INITIAL: DatagramClass = 1;
+pub val DATAGRAM_NEGOTIATE: DatagramClass = 2;
+pub val DATAGRAM_ESTABLISHED: DatagramClass = 3;
+
+pub rec ConnectionId {
+    data: [CONNECTION_ID_CAPACITY]u8;
+    length: usize;
+}
+
+pub rec ClassifiedDatagram {
+    class: DatagramClass;
+    destination: ConnectionId;
+    version: u32;
+    long_header: bool;
+}
+
 pub val PENDING_FREE: u8 = 0;
 pub val PENDING_RESERVED: u8 = 1;
 
@@ -89,7 +110,7 @@ pub rec Request {
     data: *u8;
     length: usize;
     now_ns: u64;
-    retry_source: packet.ConnectionId;
+    retry_source: ConnectionId;
     retry_nonce: u64;
     version_negotiation_bits: u8;
     output: *u8;
@@ -133,6 +154,54 @@ rec Initial {
     token_length: usize;
     version: u32;
     valid: bool;
+}
+
+fun copy_connection_id(output: *ConnectionId, data: *u8,
+                       length: usize) bool {
+    if (output == nil || data == nil || length == 0 ||
+        length > CONNECTION_ID_CAPACITY) { ret false; }
+    var next: ConnectionId;
+    next.length = length;
+    var i: usize = 0;
+    for (i < CONNECTION_ID_CAPACITY) {
+        next.data[i] = 0;
+        i = i + 1;
+    }
+    memory.copy[u8](?next.data[0], data, length);
+    @output = next;
+    ret true;
+}
+
+fun packet_connection_id(value: *ConnectionId) packet.ConnectionId {
+    var result: packet.ConnectionId;
+    if (value == nil || value.length == 0 ||
+        value.length > CONNECTION_ID_CAPACITY) { ret result; }
+    packet.set_connection_id(?result, ?value.data[0], value.length);
+    ret result;
+}
+
+# copies the retry source so the caller retains no storage through preflight
+pub fun set_retry_source(request: *Request, data: *u8,
+                         length: usize) bool {
+    if (request == nil) { ret false; }
+    var next: ConnectionId;
+    if (!copy_connection_id(?next, data, length)) { ret false; }
+    request.retry_source = next;
+    ret true;
+}
+
+fun malformed_datagram() ClassifiedDatagram {
+    var result: ClassifiedDatagram;
+    result.class = DATAGRAM_MALFORMED;
+    result.destination.length = 0;
+    var i: usize = 0;
+    for (i < CONNECTION_ID_CAPACITY) {
+        result.destination.data[i] = 0;
+        i = i + 1;
+    }
+    result.version = 0;
+    result.long_header = false;
+    ret result;
 }
 
 fun next_generation(value: u64) u64 {
@@ -320,6 +389,92 @@ fun parse_initial(data: *u8, length: usize) Initial {
     ret initial;
 }
 
+fun retry_bits(version: u32) u8 {
+    if (version == packet.VERSION_1) { ret 3; }
+    if (version == packet.VERSION_2) { ret 0; }
+    ret 0xff;
+}
+
+fun encoded_tail_valid(data: *u8, length: usize, position: usize) bool {
+    if (position >= length) { ret false; }
+    var decoder: binary.Decoder = binary.decoder(?data[position],
+        length - position, binary.BIG);
+    val encoded: varint.Decoded = varint.read(?decoder, false);
+    ret encoded.status == varint.STATUS_DONE && encoded.value >= 1 &&
+        encoded.value <= (decoder.len - decoder.pos)::u64;
+}
+
+fun version_list_valid(data: *u8, length: usize, position: usize) bool {
+    if (position >= length) { ret false; }
+    val bytes: usize = length - position;
+    if ((bytes & 3) != 0 || bytes / 4 > 64) { ret false; }
+    var i: usize = 0;
+    for (i < bytes / 4) {
+        if (binary.get_uint(?data[position + i * 4], 4, binary.BIG) == 0) {
+            ret false;
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# classifies one received datagram for a cid-indexed socket owner. every
+# published byte is copied, and the input is borrowed only for this call
+pub fun classify_datagram(data: *u8, length: usize,
+                          short_destination_length: usize) ClassifiedDatagram {
+    var result: ClassifiedDatagram = malformed_datagram();
+    if (data == nil || length == 0 || length > MAX_DATAGRAM_LENGTH) { ret result; }
+    val first: u8 = data[0];
+    if ((first & 0x80) == 0) {
+        if ((first & 0x40) == 0 || short_destination_length == 0 ||
+            short_destination_length > CONNECTION_ID_CAPACITY ||
+            short_destination_length >= length - 1) { ret result; }
+        if (!copy_connection_id(?result.destination, ?data[1],
+                short_destination_length)) { ret result; }
+        result.class = DATAGRAM_ESTABLISHED;
+        result.long_header = false;
+        ret result;
+    }
+    if (length < 7) { ret result; }
+    var initial: Initial;
+    var position: usize = 0;
+    if (!parse_ids(data, length, ?initial, ?position) ||
+        initial.destination.len == 0 ||
+        !copy_connection_id(?result.destination,
+            ?initial.destination.data[0], initial.destination.len::usize)) {
+        ret malformed_datagram();
+    }
+    result.version = initial.version;
+    result.long_header = true;
+    if (initial.version == 0) {
+        if (!version_list_valid(data, length, position)) {
+            ret malformed_datagram();
+        }
+        result.class = DATAGRAM_ESTABLISHED;
+        ret result;
+    }
+    if ((first & 0x40) == 0) { ret malformed_datagram(); }
+    if (!known_supported(initial.version)) {
+        result.class = DATAGRAM_NEGOTIATE;
+        ret result;
+    }
+    val bits: u8 = (first >> 4) & 0x03;
+    if (bits == initial_bits(initial.version)) {
+        if (!parse_initial(data, length).valid) { ret malformed_datagram(); }
+        result.class = DATAGRAM_INITIAL;
+        ret result;
+    }
+    if (bits == retry_bits(initial.version)) {
+        if (position >= length || length - position <= packet.RETRY_INTEGRITY_TAG) {
+            ret malformed_datagram();
+        }
+    } or (!encoded_tail_valid(data, length, position)) {
+        ret malformed_datagram();
+    }
+    result.class = DATAGRAM_ESTABLISHED;
+    ret result;
+}
+
 fun write_versions(listener: *Listener, output: *u8) usize {
     var i: usize = 0;
     for (i < listener.config.supported_version_count) {
@@ -369,8 +524,17 @@ fun version_negotiation(listener: *Listener, request: *Request,
 
 fun retry(listener: *Listener, request: *Request, initial: *Initial) Result {
     var result: Result;
-    if (request.retry_source.len == 0 || request.retry_nonce == 0 ||
+    if (request.retry_source.length == 0 ||
+        request.retry_source.length > CONNECTION_ID_CAPACITY ||
+        request.retry_nonce == 0 ||
         request.output == nil) {
+        result.action = ACTION_ERROR;
+        result.error = ERROR_CONFIG;
+        ret result;
+    }
+    val retry_source: packet.ConnectionId =
+        packet_connection_id(?request.retry_source);
+    if (retry_source.len == 0) {
         result.action = ACTION_ERROR;
         result.error = ERROR_CONFIG;
         ret result;
@@ -378,7 +542,7 @@ fun retry(listener: *Listener, request: *Request, initial: *Initial) Result {
     var encoded_token: [token.TOKEN_SIZE]u8;
     val sealed: token.Result = token.seal_scoped(listener.token_manager,
         listener.config.source, token.PURPOSE_RETRY, request.peer, initial.destination,
-        request.retry_source, request.now_ns, request.retry_nonce,
+        retry_source, request.now_ns, request.retry_nonce,
         ?encoded_token[0], token.TOKEN_SIZE);
     if (sealed.status != token.STATUS_OK) {
         result.action = ACTION_ERROR;
@@ -390,7 +554,7 @@ fun retry(listener: *Listener, request: *Request, initial: *Initial) Result {
     value.header.kind = packet.PACKET_RETRY;
     value.header.version = initial.version;
     value.header.destination = initial.source;
-    value.header.source = request.retry_source;
+    value.header.source = retry_source;
     value.token = packet.Span{data: ?encoded_token[0], len: token.TOKEN_SIZE};
     var builder: binary.Builder = binary.builder(request.output,
         request.output_capacity, binary.BIG);
@@ -798,13 +962,17 @@ fun test_id(value: u8) packet.ConnectionId {
     ret id;
 }
 
-fun test_initial(output: *u8, destination: packet.ConnectionId,
-                 source: packet.ConnectionId, token_data: *u8,
-                 token_length: usize) bool {
-    if (output == nil || token_length > 0 && token_data == nil) { ret false; }
+fun test_initial_version(output: *u8, version: u32,
+                         destination: packet.ConnectionId,
+                         source: packet.ConnectionId, token_data: *u8,
+                         token_length: usize) bool {
+    if (output == nil || (version != packet.VERSION_1 &&
+        version != packet.VERSION_2) || token_length > 0 &&
+        token_data == nil) { ret false; }
     memory.raw_zero(output, 1200);
     output[0] = 0xc0;
-    binary.put_uint(?output[1], packet.VERSION_1::u64, 4, binary.BIG);
+    if (version == packet.VERSION_2) { output[0] = 0xd0; }
+    binary.put_uint(?output[1], version::u64, 4, binary.BIG);
     output[5] = destination.len;
     memory.copy[u8](?output[6], ?destination.data[0], destination.len::usize);
     val source_length_position: usize = 6 + destination.len::usize;
@@ -831,12 +999,186 @@ fun test_initial(output: *u8, destination: packet.ConnectionId,
     ret builder.len + tail == 1200 - variable_position;
 }
 
+fun test_initial(output: *u8, destination: packet.ConnectionId,
+                 source: packet.ConnectionId, token_data: *u8,
+                 token_length: usize) bool {
+    ret test_initial_version(output, packet.VERSION_1, destination, source,
+        token_data, token_length);
+}
+
 # a literal that omits a field leaves the previous frame's contents there rather
 # than zero (briar-systems/mach#3108), and a record-typed field cannot be zeroed
 # by a nested literal for the same reason
-fun no_connection_id() packet.ConnectionId {
-    var value: packet.ConnectionId;
+fun no_connection_id() ConnectionId {
+    var value: ConnectionId;
+    value.length = 0;
+    var i: usize = 0;
+    for (i < CONNECTION_ID_CAPACITY) {
+        value.data[i] = 0;
+        i = i + 1;
+    }
     ret value;
+}
+
+fun classified_id_equal(value: *ConnectionId,
+                        expected: *packet.ConnectionId) bool {
+    if (value == nil || expected == nil ||
+        value.length != expected.len::usize) { ret false; }
+    var i: usize = 0;
+    for (i < value.length) {
+        if (value.data[i] != expected.data[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+test "quic.connection.listener: datagram classification copies v1 v2 and short destinations" {
+    val destination: packet.ConnectionId = test_id(11);
+    val source: packet.ConnectionId = test_id(31);
+    var input: [1200]u8;
+    var before: [1200]u8;
+    if (!test_initial_version(?input[0], packet.VERSION_1, destination,
+            source, nil, 0)) { ret 1; }
+    memory.raw_copy(?before[0], ?input[0], 1200);
+    val first: ClassifiedDatagram = classify_datagram(?input[0], 1200, 8);
+    if (first.class != DATAGRAM_INITIAL || !first.long_header ||
+        first.version != packet.VERSION_1 ||
+        !classified_id_equal(?first.destination, ?destination) ||
+        !memory.raw_equal(?input[0], ?before[0], 1200)) { ret 2; }
+    input[6] = input[6] ^ 0xff;
+    if (!classified_id_equal(?first.destination, ?destination)) { ret 3; }
+
+    if (!test_initial_version(?input[0], packet.VERSION_2, destination,
+            source, nil, 0)) { ret 4; }
+    val second: ClassifiedDatagram = classify_datagram(?input[0], 1200, 8);
+    if (second.class != DATAGRAM_INITIAL || !second.long_header ||
+        second.version != packet.VERSION_2 ||
+        !classified_id_equal(?second.destination, ?destination)) { ret 5; }
+
+    var short: [10]u8;
+    short[0] = 0x40;
+    var i: usize = 0;
+    for (i < 8) {
+        short[1 + i] = destination.data[i];
+        i = i + 1;
+    }
+    short[9] = 0xa5;
+    var short_before: [10]u8;
+    memory.raw_copy(?short_before[0], ?short[0], 10);
+    val third: ClassifiedDatagram = classify_datagram(?short[0], 10, 8);
+    if (third.class != DATAGRAM_ESTABLISHED || third.long_header ||
+        third.version != 0 ||
+        !classified_id_equal(?third.destination, ?destination) ||
+        !memory.raw_equal(?short[0], ?short_before[0], 10)) { ret 6; }
+    short[1] = short[1] ^ 0xff;
+    if (!classified_id_equal(?third.destination, ?destination)) { ret 7; }
+    ret 0;
+}
+
+test "quic.connection.listener: datagram classification distinguishes negotiation and fails closed" {
+    val destination: packet.ConnectionId = test_id(51);
+    val source: packet.ConnectionId = test_id(71);
+    var unknown: [27]u8;
+    unknown[0] = 0xc0;
+    binary.put_uint(?unknown[1], 0xfaceb00c, 4, binary.BIG);
+    unknown[5] = destination.len;
+    memory.copy[u8](?unknown[6], ?destination.data[0],
+        destination.len::usize);
+    val source_position: usize = 6 + destination.len::usize;
+    unknown[source_position] = source.len;
+    memory.copy[u8](?unknown[source_position + 1], ?source.data[0],
+        source.len::usize);
+    val invariant_length: usize = source_position + 1 + source.len::usize;
+    val negotiated: ClassifiedDatagram = classify_datagram(?unknown[0],
+        invariant_length, 8);
+    if (negotiated.class != DATAGRAM_NEGOTIATE || !negotiated.long_header ||
+        negotiated.version != 0xfaceb00c ||
+        !classified_id_equal(?negotiated.destination, ?destination)) { ret 1; }
+
+    unknown[0] = 0x80;
+    binary.put_uint(?unknown[1], 0, 4, binary.BIG);
+    binary.put_uint(?unknown[invariant_length], packet.VERSION_1::u64,
+        4, binary.BIG);
+    val version_negotiation: ClassifiedDatagram = classify_datagram(
+        ?unknown[0], invariant_length + 4, 8);
+    if (version_negotiation.class != DATAGRAM_ESTABLISHED ||
+        !version_negotiation.long_header || version_negotiation.version != 0 ||
+        !classified_id_equal(?version_negotiation.destination,
+            ?destination)) { ret 2; }
+
+    var handshake: [25]u8;
+    handshake[0] = 0xe0;
+    binary.put_uint(?handshake[1], packet.VERSION_1::u64, 4, binary.BIG);
+    handshake[5] = destination.len;
+    memory.copy[u8](?handshake[6], ?destination.data[0],
+        destination.len::usize);
+    handshake[source_position] = source.len;
+    memory.copy[u8](?handshake[source_position + 1], ?source.data[0],
+        source.len::usize);
+    handshake[invariant_length] = 1;
+    handshake[invariant_length + 1] = 0;
+    if (classify_datagram(?handshake[0], invariant_length + 2, 8).class !=
+            DATAGRAM_ESTABLISHED) { ret 3; }
+
+    var one: [1]u8;
+    one[0] = 0x40;
+    if (classify_datagram(nil, 0, 8).class != DATAGRAM_MALFORMED ||
+        classify_datagram(?one[0], 0, 8).class != DATAGRAM_MALFORMED ||
+        classify_datagram(?one[0], MAX_DATAGRAM_LENGTH + 1, 8).class !=
+            DATAGRAM_MALFORMED ||
+        classify_datagram(?one[0], 1, 0).class != DATAGRAM_MALFORMED ||
+        classify_datagram(?one[0], 1, CONNECTION_ID_CAPACITY + 1).class !=
+            DATAGRAM_MALFORMED) { ret 4; }
+
+    var short: [9]u8;
+    short[0] = 0x40;
+    if (classify_datagram(?short[0], 9, 8).class != DATAGRAM_MALFORMED) {
+        ret 5;
+    }
+    short[0] = 0;
+    if (classify_datagram(?short[0], 9, 8).class != DATAGRAM_MALFORMED) {
+        ret 6;
+    }
+    unknown[0] = 0x80;
+    binary.put_uint(?unknown[1], packet.VERSION_1::u64, 4, binary.BIG);
+    if (classify_datagram(?unknown[0], invariant_length, 8).class !=
+            DATAGRAM_MALFORMED) { ret 7; }
+    unknown[0] = 0xc0;
+    unknown[5] = (CONNECTION_ID_CAPACITY + 1)::u8;
+    if (classify_datagram(?unknown[0], invariant_length, 8).class !=
+            DATAGRAM_MALFORMED) { ret 8; }
+    unknown[5] = destination.len;
+    if (classify_datagram(?unknown[0], 6, 8).class != DATAGRAM_MALFORMED) {
+        ret 9;
+    }
+    ret 0;
+}
+
+test "quic.connection.listener: Retry source setter copies transactionally" {
+    var request: Request;
+    request.retry_source = no_connection_id();
+    var source: [8]u8;
+    var i: usize = 0;
+    for (i < 8) {
+        source[i] = (91 + i)::u8;
+        i = i + 1;
+    }
+    if (!set_retry_source(?request, ?source[0], 8) ||
+        request.retry_source.length != 8) { ret 1; }
+    source[0] = source[0] ^ 0xff;
+    if (request.retry_source.data[0] != 91) { ret 2; }
+    val retained: ConnectionId = request.retry_source;
+    if (set_retry_source(?request, nil, 8) ||
+        set_retry_source(?request, ?source[0], 0) ||
+        set_retry_source(?request, ?source[0], CONNECTION_ID_CAPACITY + 1) ||
+        set_retry_source(nil, ?source[0], 8)) { ret 3; }
+    if (request.retry_source.length != retained.length) { ret 4; }
+    i = 0;
+    for (i < CONNECTION_ID_CAPACITY) {
+        if (request.retry_source.data[i] != retained.data[i]) { ret 5; }
+        i = i + 1;
+    }
+    ret 0;
 }
 
 test "quic.connection.listener: unsupported versions produce bounded negotiation" {
@@ -952,9 +1294,11 @@ test "quic.connection.listener: retry identity, replay, cancellation, and admiss
     if (!test_initial(?initial[0], original, client_source, nil, 0)) { ret 1; }
     val peer: ip.Endpoint = ip.endpoint(198, 51, 100, 8, 55000);
     var request: Request = Request{peer: peer, data: ?initial[0], length: 1200,
-        now_ns: 10, retry_source: retry_source, retry_nonce: 99,
+        now_ns: 10, retry_source: no_connection_id(), retry_nonce: 99,
         output: ?response[0], output_capacity: 256,
         version_negotiation_bits: 0};
+    if (!set_retry_source(?request, ?retry_source.data[0],
+            retry_source.len::usize)) { ret 1; }
     val first_charge: admission.Result = admission.reserve_scoped(
         ?admission_manager, 513, ip.endpoint(203, 0, 113, 1, 4433));
     val second_charge: admission.Result = admission.reserve_scoped(
