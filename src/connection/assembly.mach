@@ -226,6 +226,7 @@ pub rec Connection {
     datagram_receive_bytes: [4800]u8;
 
     initialized: bool;
+    released: bool;
 }
 
 fun staged(stage: Stage) InitResult {
@@ -678,6 +679,7 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
         ret value;
     }
     c.initialized = true;
+    c.released = false;
     value.ok = true;
     value.stage = STAGE_OK;
     ret value;
@@ -722,12 +724,55 @@ pub fun route_valid(c: *Connection, route: *Route) bool {
     ret binding_api.route_valid(?c.binding, ?internal);
 }
 
+fun release_ready(c: *Connection) bool {
+    ret c != nil && c.initialized &&
+        c.driver.protocol.context == ?c.binding &&
+        c.binding.core == ?c.core && c.binding.secrets == ?c.secrets &&
+        c.core.cids == ?c.cids && c.core.paths == ?c.paths &&
+        c.core.streams == ?c.streams && c.core.datagrams == ?c.datagrams &&
+        c.secrets.handshake == ?c.handshake &&
+        transport_api.release_ready[binding_api.Binding](?c.driver) &&
+        binding_api.release_ready(?c.binding);
+}
+
+# release is serialized by the connection owner. refusal leaves the complete
+# assembly intact. success is idempotent and preserves token generations while
+# removing every live protocol and caller-borrowed reference
+pub fun release_closed(c: *Connection) bool {
+    if (c == nil) { ret false; }
+    if (!c.initialized) { ret c.released; }
+    if (!release_ready(c)) { ret false; }
+    if (transport_api.release_closed[binding_api.Binding](?c.driver).status !=
+        transport_api.STATUS_OK) { ret false; }
+    if (!binding_api.release_closed(?c.binding)) { ret false; }
+    c.core.config.supported_versions = nil;
+    c.core.config.alpn.data = nil;
+    c.core.config.alpn.length = 0;
+    c.core.config.server_name.data = nil;
+    c.core.config.server_name.length = 0;
+    c.core.config.local_transport_parameters.data = nil;
+    c.core.config.local_transport_parameters.length = 0;
+    c.core.initialized = false;
+    c.core.destroyed = false;
+    c.secrets.initialized = false;
+    c.secrets.destroyed = false;
+    val event_generation: u64 = c.handshake.event_generation;
+    var empty_handshake: handshake_api.Adapter;
+    empty_handshake.event_generation = event_generation;
+    c.handshake = empty_handshake;
+    c.local_parameter_length = 0;
+    c.initialized = false;
+    c.released = true;
+    ret true;
+}
+
 pub fun init_client(c: *Connection, config: *Config, tls: *client.Client,
                     scope: *cancel.Scope, now_ns: u64) InitResult {
     if (c == nil || tls == nil || scope == nil || c.initialized ||
         !config_valid(config, transport_api.CLIENT)) {
         ret staged(STAGE_CONFIG);
     }
+    c.released = false;
     val built: Stage = build_managers(c, config, transport_api.CLIENT);
     if (built != STAGE_OK) { ret staged(built); }
     if (!tls_client_api.initialize(?c.handshake, crypto_config(config),
@@ -743,6 +788,7 @@ pub fun init_server(c: *Connection, config: *Config, tls: *server.Server,
         !config_valid(config, transport_api.SERVER)) {
         ret staged(STAGE_CONFIG);
     }
+    c.released = false;
     val built: Stage = build_managers(c, config, transport_api.SERVER);
     if (built != STAGE_OK) { ret staged(built); }
     if (!tls_server_api.initialize(?c.handshake, crypto_config(config),

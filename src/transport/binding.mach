@@ -57,6 +57,7 @@ pub rec Binding {
     routing: [1]RoutingEntry;
     routing_source: u64;
     initialized: bool;
+    released: bool;
 }
 
 fun next_epoch(value: i64) i64 {
@@ -176,6 +177,7 @@ pub fun bind(binding: *Binding, core: *core_api.Core,
     binding.secrets = secrets;
     binding.routing_source = core.config.source;
     binding.initialized = true;
+    binding.released = false;
     ret true;
 }
 
@@ -186,7 +188,7 @@ pub fun prepare_initial_route(binding: *Binding, data: *u8,
     if (!bound(binding) || data == nil || length == 0 ||
         length > ROUTING_ID_LENGTH) { ret false; }
     val entry: *RoutingEntry = ?binding.routing[0];
-    if (entry.prepared || atomic.load(?entry.epoch) != 0) { ret false; }
+    if (entry.prepared || (atomic.load(?entry.epoch) & 1) == 1) { ret false; }
     var i: usize = 0;
     for (i < length) { entry.id.data[i] = data[i]; i = i + 1; }
     entry.id.length = length;
@@ -198,8 +200,72 @@ pub fun prepare_initial_route(binding: *Binding, data: *u8,
 pub fun publish_initial_route(binding: *Binding) bool {
     if (!bound(binding)) { ret false; }
     val entry: *RoutingEntry = ?binding.routing[0];
-    if (!entry.prepared || atomic.load(?entry.epoch) != 0) { ret false; }
-    atomic.store(?entry.epoch, 1);
+    val epoch: i64 = atomic.load(?entry.epoch);
+    if (!entry.prepared || (epoch & 1) == 1) { ret false; }
+    atomic.store(?entry.epoch, next_epoch(epoch));
+    ret true;
+}
+
+# release is valid only after the production core has destroyed its secrets,
+# handshake provider, and every leased manager, and after routing is invisible
+pub fun release_ready(binding: *Binding) bool {
+    if (binding == nil) { ret false; }
+    if (!binding.initialized) { ret binding.released; }
+    if (binding.core == nil || binding.secrets == nil ||
+        binding.core.initialized || !binding.core.destroyed ||
+        !binding.core.closing || binding.core.state != transport_api.CLOSED ||
+        binding.secrets.initialized || !binding.secrets.destroyed ||
+        binding.secrets.handshake == nil ||
+        binding.secrets.handshake.initialized ||
+        !binding.secrets.handshake.destroyed ||
+        !binding.secrets.handshake.closing ||
+        binding.secrets.handshake.core_lease != 0 ||
+        binding.core.cids == nil || binding.core.cids.initialized ||
+        !binding.core.cids.closing || binding.core.cids.core_lease != 0 ||
+        binding.core.paths == nil || binding.core.paths.valid ||
+        !binding.core.paths.closing || binding.core.paths.core_lease != 0 ||
+        binding.core.streams == nil || binding.core.streams.valid ||
+        !binding.core.streams.closing || binding.core.streams.active_streams != 0 ||
+        binding.core.streams.active_attempts != 0 ||
+        binding.core.streams.core_lease != 0 || binding.core.datagrams == nil ||
+        binding.core.datagrams.valid || !binding.core.datagrams.closing ||
+        binding.core.datagrams.send_count != 0 ||
+        binding.core.datagrams.delivered_count != 0 ||
+        binding.core.datagrams.core_lease != 0) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < ROUTING_ID_CAPACITY) {
+        if (route_active(?binding.routing[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# retired epochs are deliberately preserved so a route from an earlier use of
+# the stable record can never validate after the next publication
+pub fun release_closed(binding: *Binding) bool {
+    if (!release_ready(binding)) { ret false; }
+    if (!binding.initialized) { ret binding.released; }
+    var i: usize = 0;
+    for (i < ROUTING_ID_CAPACITY) {
+        val entry: *RoutingEntry = ?binding.routing[i];
+        var byte: usize = 0;
+        for (byte < ROUTING_ID_LENGTH) {
+            entry.id.data[byte] = 0;
+            byte = byte + 1;
+        }
+        entry.id.length = 0;
+        entry.sequence = 0;
+        entry.prepared = false;
+        i = i + 1;
+    }
+    binding.anchor = 0;
+    binding.core = nil;
+    binding.secrets = nil;
+    binding.routing_source = 0;
+    binding.initialized = false;
+    binding.released = true;
     ret true;
 }
 

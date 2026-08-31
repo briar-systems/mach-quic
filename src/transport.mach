@@ -309,6 +309,7 @@ pub rec Driver[T] {
     callback_owner: i64;
     lock: mutex.Mutex;
     initialized: bool;
+    released: bool;
     closing: bool;
 }
 
@@ -367,6 +368,7 @@ fun callback_intact[T](driver: *Driver[T], before: *Driver[T]) bool {
         driver.cancellation_reason == before.cancellation_reason &&
         driver.cancellation.attached == before.cancellation.attached &&
         driver.initialized == before.initialized &&
+        driver.released == before.released &&
         driver.closing == before.closing &&
         atomic.load(?driver.callback_owner) == os.thread_current_id();
 }
@@ -853,9 +855,10 @@ fun init_driver[T](driver: *Driver[T], role: Role, config: Config, protocol: Pro
     }
     var i: usize = 0;
     for (i < storage.send_capacity) {
-        storage.sends[i].state = SLOT_FREE;
-        storage.sends[i].generation = 0;
-        storage.sends[i].buffer = nil;
+        val generation: u64 = storage.sends[i].generation;
+        var clean: SendSlot;
+        clean.generation = generation;
+        storage.sends[i] = clean;
         i = i + 1;
     }
     mutex.unlock(?driver.lock);
@@ -1790,6 +1793,91 @@ pub fun finish_close[T](driver: *Driver[T]) OperationResult {
     }
     driver.state = CLOSED;
     driver.operation_scope = nil;
+    mutex.unlock(?driver.lock);
+    ret operation_result(STATUS_OK, ERROR_NONE, 0, 0, CLOSED);
+}
+
+fun release_ready_locked[T](driver: *Driver[T]) bool {
+    if (!driver.initialized || !driver.closing || driver.state != CLOSED ||
+        driver.pending_sends != 0 || driver.cancellation_calls != 0 ||
+        driver.operation_scope != nil || driver.cancellation.attached ||
+        atomic.load(?driver.cancellation.pending) != 0 ||
+        atomic.load(?driver.callback_owner) != 0 || driver.streams == nil ||
+        driver.datagrams == nil || driver.streams.valid ||
+        driver.streams.active_streams != 0 ||
+        driver.streams.active_attempts != 0 || driver.datagrams.valid ||
+        driver.datagrams.send_count != 0 ||
+        driver.datagrams.delivered_count != 0) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < driver.storage.send_capacity) {
+        if (driver.storage.sends[i].state != SLOT_FREE) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# a successfully released driver is the only uninitialized terminal state for
+# which release is idempotent. send-slot generations remain caller-owned so a
+# delayed token cannot target the next initialization of the same record
+pub fun release_ready[T](driver: *Driver[T]) bool {
+    if (callback_reentry[T](driver) || driver == nil) { ret false; }
+    if (!driver.initialized) { ret driver.released; }
+    mutex.lock(?driver.lock);
+    val ready: bool = release_ready_locked[T](driver);
+    mutex.unlock(?driver.lock);
+    ret ready;
+}
+
+pub fun release_closed[T](driver: *Driver[T]) OperationResult {
+    if (callback_reentry[T](driver) || driver == nil) {
+        ret operation_error(ERROR_STATE);
+    }
+    if (!driver.initialized) {
+        if (driver.released) {
+            ret operation_result(STATUS_OK, ERROR_NONE, 0, 0, CLOSED);
+        }
+        ret operation_error(ERROR_STATE);
+    }
+    mutex.lock(?driver.lock);
+    if (!driver.closing || driver.state != CLOSED) {
+        mutex.unlock(?driver.lock);
+        ret operation_error(ERROR_STATE);
+    }
+    if (!release_ready_locked[T](driver)) {
+        mutex.unlock(?driver.lock);
+        ret operation_result(STATUS_BLOCKED, ERROR_CAPACITY, 0, 0, CLOSED);
+    }
+    var i: usize = 0;
+    for (i < driver.storage.send_capacity) {
+        val generation: u64 = driver.storage.sends[i].generation;
+        var clean: SendSlot;
+        clean.generation = generation;
+        driver.storage.sends[i] = clean;
+        i = i + 1;
+    }
+    var empty_protocol: Protocol[T];
+    driver.protocol = empty_protocol;
+    driver.streams = nil;
+    driver.datagrams = nil;
+    driver.operation_scope = nil;
+    driver.storage.sends = nil;
+    driver.storage.send_capacity = 0;
+    driver.config.source = 0;
+    driver.config.max_udp_payload = 0;
+    driver.config.max_close_reason = 0;
+    driver.role = 0;
+    driver.next_slot = 0;
+    driver.pending_sends = 0;
+    driver.cancellation_calls = 0;
+    driver.application_error = 0;
+    atomic.store(?driver.callback_owner, 0);
+    var empty_cancellation: Cancellation;
+    driver.cancellation = empty_cancellation;
+    driver.closing = false;
+    driver.initialized = false;
+    driver.released = true;
     mutex.unlock(?driver.lock);
     ret operation_result(STATUS_OK, ERROR_NONE, 0, 0, CLOSED);
 }
