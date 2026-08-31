@@ -855,12 +855,10 @@ fun init_driver[T](driver: *Driver[T], role: Role, config: Config, protocol: Pro
     }
     var i: usize = 0;
     for (i < storage.send_capacity) {
-        storage.sends[i].state = SLOT_FREE;
-        storage.sends[i].buffer = nil;
-        storage.sends[i].capacity = 0;
-        storage.sends[i].length = 0;
-        storage.sends[i].context = 0;
-        storage.sends[i].owner = 0;
+        val generation: u64 = storage.sends[i].generation;
+        var clean: SendSlot;
+        clean.generation = generation;
+        storage.sends[i] = clean;
         i = i + 1;
     }
     mutex.unlock(?driver.lock);
@@ -1850,6 +1848,14 @@ pub fun release_closed[T](driver: *Driver[T]) OperationResult {
     if (!release_ready_locked[T](driver)) {
         mutex.unlock(?driver.lock);
         ret operation_result(STATUS_BLOCKED, ERROR_CAPACITY, 0, 0, CLOSED);
+    }
+    var i: usize = 0;
+    for (i < driver.storage.send_capacity) {
+        val generation: u64 = driver.storage.sends[i].generation;
+        var clean: SendSlot;
+        clean.generation = generation;
+        driver.storage.sends[i] = clean;
+        i = i + 1;
     }
     var empty_protocol: Protocol[T];
     driver.protocol = empty_protocol;

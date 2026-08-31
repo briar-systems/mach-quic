@@ -445,7 +445,10 @@ test "quic.transport.simulated: terminal release preserves generations across re
     if (!transport_api.release_ready[Core](?fixture.driver) ||
         transport_api.release_closed[Core](?fixture.driver).status !=
             transport_api.STATUS_OK || fixture.driver.initialized ||
-        !fixture.driver.released ||
+        !fixture.driver.released || fixture.sends[first.token.index::usize].generation !=
+            first.token.generation ||
+        fixture.sends[first.token.index::usize].token.source != 0 ||
+        fixture.sends[first.token.index::usize].packet.buffer != nil ||
         transport_api.release_closed[Core](?fixture.driver).status !=
             transport_api.STATUS_OK || !cancel.destroy(?fixture.scope)) { ret 4; }
     if (!make_fixture(?fixture, 119, stream_api.ROLE_CLIENT)) { ret 5; }
