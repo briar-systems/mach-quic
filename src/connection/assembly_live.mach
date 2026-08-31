@@ -409,6 +409,10 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     clock = clock + 1000;
     val second: transport.Generated = transport.generate[binding.Binding](
         ?dialer.driver, ?dialer_scope, ?wire[0], 1500, clock, 0);
+    val routed_initial: listener_api.ClassifiedDatagram =
+        listener_api.classify_datagram(?wire[0], second.count, 8);
+    if (routed_initial.class != listener_api.DATAGRAM_INITIAL ||
+        routed_initial.destination.length != 8) { ret 221; }
     request.data = ?wire[0];
     request.length = second.count;
     request.now_ns = clock;
@@ -472,10 +476,12 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val route: assembly.Route = assembly.route_at(?listener, 0);
     if (!routes.initialized || routes.capacity != 1 || routes.active != 1 ||
         !route.active || route.sequence != 0 || route.id.length != 8 ||
+        route.id.length != routed_initial.destination.length ||
         !assembly.route_valid(?listener, ?route)) { ret 203; }
     var i: usize = 0;
     for (i < 8) {
-        if (route.id.data[i] != listener_source[i]) { ret 204; }
+        if (route.id.data[i] != listener_source[i] ||
+            route.id.data[i] != routed_initial.destination.data[i]) { ret 204; }
         i = i + 1;
     }
     var stale_route: assembly.Route = route;
