@@ -380,7 +380,9 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     request.data = ?wire[0];
     request.length = first.count;
     request.now_ns = clock;
-    request.retry_source = connection_id(?listener_source[0], 8);
+    if (!listener_api.set_retry_source(?request, ?listener_source[0], 8)) {
+        ret 11;
+    }
     request.retry_nonce = 41;
     request.output = ?retry_bytes[0];
     request.output_capacity = 512;
