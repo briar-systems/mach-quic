@@ -341,6 +341,17 @@ test "quic.transport.simulated: client and server expose only application contra
         read.status != transport_api.STATUS_OK || read.count != 5 || !read.fin ||
         output[0] != 'h' || output[4] != 'o' ||
         read.receive_uncredited != 5) { ret 5; }
+    var stale: transport_api.Stream = accepted.stream;
+    stale.generation = stale.generation + 1;
+    val unsettled: transport_api.OperationResult =
+        transport_api.release_stream[Core](?client.driver, accepted.stream);
+    val rejected: transport_api.OperationResult =
+        transport_api.release_stream[Core](?client.driver, stale);
+    if (unsettled.status != transport_api.STATUS_BLOCKED ||
+        unsettled.error != transport_api.ERROR_NONE ||
+        unsettled.protocol_error != 0 ||
+        rejected.status != transport_api.STATUS_STALE ||
+        rejected.error != transport_api.ERROR_TOKEN) { ret 11; }
     if (transport_api.credit_stream[Core](?client.driver, accepted.stream, 6).status ==
             transport_api.STATUS_OK ||
         transport_api.credit_stream[Core](?client.driver, accepted.stream, 5).status !=

@@ -1567,6 +1567,10 @@ pub fun release_stream[T](driver: *Driver[T], value: Stream) OperationResult {
     result.status = status_from_stream(released.status);
     result.state = driver.state;
     if (released.error == stream_api.ERROR_TOKEN) { result.status = STATUS_STALE; result.error = ERROR_TOKEN; }
+    if (released.error == stream_api.ERROR_STATE) {
+        result.status = STATUS_BLOCKED;
+        result.error = ERROR_NONE;
+    }
     if (result.status == STATUS_ERROR) {
         result.error = ERROR_STREAM;
         result.protocol_error = released.error::u64;
