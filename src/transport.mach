@@ -1777,17 +1777,16 @@ pub fun finish_close[T](driver: *Driver[T]) OperationResult {
         mutex.unlock(?driver.lock);
         ret operation_error(ERROR_PROTOCOL);
     }
+    if (driver.streams.valid || driver.datagrams.valid) {
+        mutex.unlock(?driver.lock);
+        ret operation_error(ERROR_PROTOCOL);
+    }
     if (driver.cancellation.attached) {
         if (!cancel.unregister(?driver.cancellation.registration)) {
             mutex.unlock(?driver.lock);
             ret operation_result(STATUS_BLOCKED, ERROR_CANCELLED, 0, 0, DRAINING);
         }
         driver.cancellation.attached = false;
-    }
-    if (stream_api.finish_close(driver.streams).status != stream_api.STATUS_OK ||
-        datagram_api.finish_close(driver.datagrams).status != datagram_api.STATUS_OK) {
-        mutex.unlock(?driver.lock);
-        ret operation_error(ERROR_STATE);
     }
     driver.state = CLOSED;
     driver.operation_scope = nil;

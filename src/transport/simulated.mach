@@ -239,6 +239,9 @@ fun core_ready(core: *Core) bool {
 
 fun core_finish(core: *Core) bool {
     if (!core_ready(core)) { ret false; }
+    if (stream_api.finish_close(core.streams).status != stream_api.STATUS_OK ||
+        datagram_api.finish_close(core.datagrams).status !=
+            datagram_api.STATUS_OK) { ret false; }
     core.closed = true;
     ret true;
 }
