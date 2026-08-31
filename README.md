@@ -625,6 +625,16 @@ stream attempts, prepared DATAGRAM sends, and delivered DATAGRAM views have drai
 The initiating close cause and a later abortive terminal cause are preserved
 separately.
 
+`connection.assembly.release_closed` is the terminal transaction that makes a
+finished fixed connection record reusable. It refuses without mutation until the
+driver is closed, cancellation is detached, routing is retired, the core and TLS
+provider are destroyed, and every manager lease and application borrower is gone.
+Success removes retained protocol and configuration references while preserving
+route epochs and generated-datagram slot generations. A second call after success
+is idempotent. The next `init_client` or `init_server` may use the same assembly
+address with a newly initialized TLS provider and cancellation scope, and delayed
+routes or transport tokens from its prior use remain stale.
+
 ## Development
 
 Dependencies use exact Git tags or commit pins. The temporary `mach-tls` commit
