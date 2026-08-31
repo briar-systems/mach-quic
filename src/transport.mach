@@ -1567,6 +1567,10 @@ pub fun release_stream[T](driver: *Driver[T], value: Stream) OperationResult {
     result.status = status_from_stream(released.status);
     result.state = driver.state;
     if (released.error == stream_api.ERROR_TOKEN) { result.status = STATUS_STALE; result.error = ERROR_TOKEN; }
+    if (released.error == stream_api.ERROR_STATE) {
+        result.status = STATUS_BLOCKED;
+        result.error = ERROR_NONE;
+    }
     if (result.status == STATUS_ERROR) {
         result.error = ERROR_STREAM;
         result.protocol_error = released.error::u64;
@@ -1773,17 +1777,16 @@ pub fun finish_close[T](driver: *Driver[T]) OperationResult {
         mutex.unlock(?driver.lock);
         ret operation_error(ERROR_PROTOCOL);
     }
+    if (driver.streams.valid || driver.datagrams.valid) {
+        mutex.unlock(?driver.lock);
+        ret operation_error(ERROR_PROTOCOL);
+    }
     if (driver.cancellation.attached) {
         if (!cancel.unregister(?driver.cancellation.registration)) {
             mutex.unlock(?driver.lock);
             ret operation_result(STATUS_BLOCKED, ERROR_CANCELLED, 0, 0, DRAINING);
         }
         driver.cancellation.attached = false;
-    }
-    if (stream_api.finish_close(driver.streams).status != stream_api.STATUS_OK ||
-        datagram_api.finish_close(driver.datagrams).status != datagram_api.STATUS_OK) {
-        mutex.unlock(?driver.lock);
-        ret operation_error(ERROR_STATE);
     }
     driver.state = CLOSED;
     driver.operation_scope = nil;

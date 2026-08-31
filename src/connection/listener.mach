@@ -59,12 +59,14 @@ pub rec Pending {
     original_destination: packet.ConnectionId;
     initial_destination: packet.ConnectionId;
     initial_source: packet.ConnectionId;
+    retry_source: packet.ConnectionId;
     peer: ip.Endpoint;
     version: u32;
     generation: u64;
     state: u8;
     has_replay: bool;
     peer_validated: bool;
+    retry_source_present: bool;
 }
 
 pub rec Storage {
@@ -117,9 +119,11 @@ pub rec Accepted {
     original_destination: packet.ConnectionId;
     initial_destination: packet.ConnectionId;
     initial_source: packet.ConnectionId;
+    retry_source: packet.ConnectionId;
     peer: ip.Endpoint;
     version: u32;
     peer_validated: bool;
+    retry_source_present: bool;
 }
 
 rec Initial {
@@ -591,6 +595,7 @@ pub fun preflight(listener: *Listener, request: *Request) Result {
     var opened: token.Result;
     var peer_validated: bool = false;
     var original_destination: packet.ConnectionId = initial.destination;
+    var retry_source: packet.ConnectionId;
     var has_replay: bool = false;
     if (initial.token_length > 0) {
         opened = token.open_scoped(listener.token_manager, listener.config.source,
@@ -612,6 +617,7 @@ pub fun preflight(listener: *Listener, request: *Request) Result {
         if (opened.claims.purpose == token.PURPOSE_RETRY) {
             has_replay = true;
             original_destination = opened.claims.original_destination;
+            retry_source = opened.claims.retry_source;
             if (!packet.connection_id_equal(?initial.destination,
                 ?opened.claims.retry_source)) {
                 val replay_cancelled: token.Result = token.cancel_scoped(
@@ -638,9 +644,11 @@ pub fun preflight(listener: *Listener, request: *Request) Result {
     pending.original_destination = original_destination;
     pending.initial_destination = initial.destination;
     pending.initial_source = initial.source;
+    pending.retry_source = retry_source;
     pending.peer = request.peer;
     pending.version = initial.version;
     pending.peer_validated = peer_validated;
+    pending.retry_source_present = has_replay;
     pending.has_replay = has_replay;
     if (has_replay) { pending.replay = opened.claims.reservation; }
     result.action = ACTION_ACCEPT;
@@ -706,9 +714,11 @@ pub fun commit(listener: *Listener, value: Acceptance) Accepted {
     result.original_destination = pending.original_destination;
     result.initial_destination = pending.initial_destination;
     result.initial_source = pending.initial_source;
+    result.retry_source = pending.retry_source;
     result.peer = pending.peer;
     result.version = pending.version;
     result.peer_validated = pending.peer_validated;
+    result.retry_source_present = pending.retry_source_present;
     release_pending(pending);
     ret result;
 }
@@ -875,6 +885,38 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
         opened.claims.purpose != token.PURPOSE_ADDRESS ||
         opened.claims.original_destination.len != 0 ||
         opened.claims.retry_source.len != 0) { ret 2; }
+    val original: packet.ConnectionId = test_id(61);
+    val client_source: packet.ConnectionId = test_id(81);
+    var initial: [1200]u8;
+    if (!test_initial(?initial[0], original, client_source, nil, 0)) { ret 3; }
+    request.data = ?initial[0];
+    request.length = 1200;
+    request.now_ns = 4;
+    request.output = nil;
+    request.output_capacity = 0;
+    val direct_result: Result = preflight(?listener, ?request);
+    val direct: Accepted = commit(?listener, direct_result.acceptance);
+    if (direct_result.action != ACTION_ACCEPT || direct.action != ACTION_ACCEPT ||
+        direct.peer_validated || direct.retry_source_present ||
+        direct.retry_source.len != 0 ||
+        !packet.connection_id_equal(?direct.original_destination, ?original) ||
+        !packet.connection_id_equal(?direct.initial_destination, ?original) ||
+        release_connection(?listener, direct.charge).action != ACTION_ACCEPT) {
+        ret 4;
+    }
+    if (!test_initial(?initial[0], original, client_source,
+        ?address_token[0], issued.count)) { ret 5; }
+    request.now_ns = 5;
+    val address_result: Result = preflight(?listener, ?request);
+    val addressed: Accepted = commit(?listener, address_result.acceptance);
+    if (address_result.action != ACTION_ACCEPT ||
+        addressed.action != ACTION_ACCEPT || !addressed.peer_validated ||
+        addressed.retry_source_present || addressed.retry_source.len != 0 ||
+        !packet.connection_id_equal(?addressed.original_destination, ?original) ||
+        !packet.connection_id_equal(?addressed.initial_destination, ?original) ||
+        release_connection(?listener, addressed.charge).action != ACTION_ACCEPT) {
+        ret 6;
+    }
     ct.zeroize(?key[0], 32);
     ret 0;
 }
@@ -958,6 +1000,9 @@ test "quic.connection.listener: retry identity, replay, cancellation, and admiss
     if (retried.action != ACTION_ACCEPT || accepted.action != ACTION_ACCEPT ||
         !accepted.peer_validated ||
         !packet.connection_id_equal(?accepted.original_destination, ?original) ||
+        !packet.connection_id_equal(?accepted.initial_destination,
+            ?retry_source) || !accepted.retry_source_present ||
+        !packet.connection_id_equal(?accepted.retry_source, ?retry_source) ||
         admission.snapshot(?admission_manager).active != 1) { ret 7; }
     if (preflight(?listener, ?request).error != ERROR_TOKEN ||
         release_connection(?listener, accepted.charge).action != ACTION_ACCEPT ||
