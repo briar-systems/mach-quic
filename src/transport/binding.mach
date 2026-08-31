@@ -14,6 +14,38 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
+use std.sync.atomic;
+
+pub val ROUTING_ID_CAPACITY: usize = 1;
+pub val ROUTING_ID_LENGTH: usize = 20;
+
+pub rec RoutingId {
+    data: [20]u8;
+    length: usize;
+}
+
+pub rec Route {
+    source: u64;
+    index: usize;
+    generation: u64;
+    sequence: u64;
+    id: RoutingId;
+    active: bool;
+}
+
+pub rec RoutingSnapshot {
+    source: u64;
+    capacity: usize;
+    active: usize;
+    initialized: bool;
+}
+
+rec RoutingEntry {
+    id: RoutingId;
+    sequence: u64;
+    epoch: i64;
+    prepared: bool;
+}
 
 # holds only the pair of pointers the core's operations take. it is the
 # protocol context, so it must stay disjoint from the driver record the
@@ -22,7 +54,31 @@ pub rec Binding {
     anchor: u64;
     core: *core_api.Core;
     secrets: *core_api.Secrets;
+    routing: [1]RoutingEntry;
+    routing_source: u64;
     initialized: bool;
+}
+
+fun next_epoch(value: i64) i64 {
+    var next: i64 = value + 1;
+    if (next <= 0) { next = 1; }
+    ret next;
+}
+
+fun route_active(entry: *RoutingEntry) bool {
+    ret entry != nil && (atomic.load(?entry.epoch) & 1) == 1;
+}
+
+fun retire_routes(binding: *Binding) {
+    var i: usize = 0;
+    for (i < ROUTING_ID_CAPACITY) {
+        val entry: *RoutingEntry = ?binding.routing[i];
+        val epoch: i64 = atomic.load(?entry.epoch);
+        if ((epoch & 1) == 1) {
+            atomic.store(?entry.epoch, next_epoch(epoch));
+        }
+        i = i + 1;
+    }
 }
 
 fun bound(binding: *Binding) bool {
@@ -97,7 +153,9 @@ fun on_close_ready(binding: *Binding) bool {
 
 fun on_finish_close(binding: *Binding) bool {
     if (!bound(binding)) { ret false; }
-    ret core_api.finish_close(binding.core, binding.secrets);
+    if (!core_api.finish_close(binding.core, binding.secrets)) { ret false; }
+    retire_routes(binding);
+    ret true;
 }
 
 fun on_timer(binding: *Binding) transport_api.CoreTimer {
@@ -116,7 +174,82 @@ pub fun bind(binding: *Binding, core: *core_api.Core,
     binding.anchor = 1;
     binding.core = core;
     binding.secrets = secrets;
+    binding.routing_source = core.config.source;
     binding.initialized = true;
+    ret true;
+}
+
+# stages the stable sequence-zero route while it is not externally visible.
+# assembly publishes it only after the transport driver is initialized
+pub fun prepare_initial_route(binding: *Binding, data: *u8,
+                              length: usize) bool {
+    if (!bound(binding) || data == nil || length == 0 ||
+        length > ROUTING_ID_LENGTH) { ret false; }
+    val entry: *RoutingEntry = ?binding.routing[0];
+    if (entry.prepared || atomic.load(?entry.epoch) != 0) { ret false; }
+    var i: usize = 0;
+    for (i < length) { entry.id.data[i] = data[i]; i = i + 1; }
+    entry.id.length = length;
+    entry.sequence = 0;
+    entry.prepared = true;
+    ret true;
+}
+
+pub fun publish_initial_route(binding: *Binding) bool {
+    if (!bound(binding)) { ret false; }
+    val entry: *RoutingEntry = ?binding.routing[0];
+    if (!entry.prepared || atomic.load(?entry.epoch) != 0) { ret false; }
+    atomic.store(?entry.epoch, 1);
+    ret true;
+}
+
+pub fun routing_snapshot(binding: *Binding) RoutingSnapshot {
+    var value: RoutingSnapshot;
+    if (!bound(binding)) { ret value; }
+    value.source = binding.routing_source;
+    value.capacity = ROUTING_ID_CAPACITY;
+    value.initialized = true;
+    var i: usize = 0;
+    for (i < ROUTING_ID_CAPACITY) {
+        if (route_active(?binding.routing[i])) { value.active = value.active + 1; }
+        i = i + 1;
+    }
+    ret value;
+}
+
+pub fun route_at(binding: *Binding, index: usize) Route {
+    var value: Route;
+    if (!bound(binding) || index >= ROUTING_ID_CAPACITY) { ret value; }
+    val entry: *RoutingEntry = ?binding.routing[index];
+    val before: i64 = atomic.load(?entry.epoch);
+    if ((before & 1) == 0) { ret value; }
+    value.source = binding.routing_source;
+    value.index = index;
+    value.generation = before::u64;
+    value.sequence = entry.sequence;
+    value.id = entry.id;
+    val after: i64 = atomic.load(?entry.epoch);
+    if (after != before || (after & 1) == 0) {
+        var retired: Route;
+        ret retired;
+    }
+    value.active = true;
+    ret value;
+}
+
+pub fun route_valid(binding: *Binding, route: *Route) bool {
+    if (!bound(binding) || route == nil || !route.active ||
+        route.source != binding.routing_source ||
+        route.index >= ROUTING_ID_CAPACITY) { ret false; }
+    val current: Route = route_at(binding, route.index);
+    if (!current.active || current.generation != route.generation ||
+        current.sequence != route.sequence ||
+        current.id.length != route.id.length) { ret false; }
+    var i: usize = 0;
+    for (i < current.id.length) {
+        if (current.id.data[i] != route.id.data[i]) { ret false; }
+        i = i + 1;
+    }
     ret true;
 }
 

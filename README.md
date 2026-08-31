@@ -482,6 +482,29 @@ from the same `Config` rather than accepting a copy.
 A refusal reports the stage that rejected, and a refusal from the core carries
 the core's own `InitReason` and the offending ownership range indices.
 
+The default assembly profile reserves sixteen stream records and thirty-two
+partial-work attempts. Its named HTTP/3 contract admits three local critical
+unidirectional streams, three peer critical unidirectional streams, and eight
+concurrent request streams. The same `STREAM_CAPACITY`, `STREAM_STRIDE`, and
+`STREAM_WINDOW` values size both manager storage and the limits accepted by
+`encode_parameters`.
+
+A server passes the complete result from `connection.listener.commit` through
+`apply_server_acceptance` before encoding parameters or calling `init_server`.
+That single transaction preserves the received Initial destination used for
+Initial keys, the original destination carried in the server transport
+parameters, the client Initial source used as the peer destination, and the
+optional Retry source. Address validation alone does not imply Retry.
+
+The socket owner inventories routing IDs through `routing_snapshot`, `route_at`,
+and `route_valid` on the assembly. Entries contain copied ID bytes plus source,
+index, sequence, and generation. Publication happens only after driver
+initialization. Retirement happens inside the serialized production binding
+close callback. The current production core supports one stable sequence-zero
+local routing ID. The inventory is deliberately bounded and generation-tagged
+so later issuance can extend that contract without exposing CID-manager or
+packet internals to the socket multiplexer.
+
 ## Scheduling boundary
 
 The division of labour is not symmetric and is worth stating outright.
@@ -502,6 +525,11 @@ production `Protocol[Binding]` over a real `Core` and `Secrets`, and the assembl
 constructs the driver over it, so an owner pumps datagrams through
 `transport.generate`, `complete_send` and `receive_datagram` and reaches streams
 and DATAGRAMs through the driver's public handles.
+
+`release_stream` reports `STATUS_BLOCKED` while either stream direction or
+recovery-owned work is unsettled. A stale generation remains `STATUS_STALE`, and
+an actual transport failure remains `STATUS_ERROR`, so HTTP/3 consumers do not
+need stream-manager error constants.
 
 The protocol context is typed rather than an untyped `ptr`, and that is a
 correctness requirement rather than a convenience. Every connection operation

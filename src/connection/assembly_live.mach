@@ -2,8 +2,12 @@
 # completed handshake and an exchanged stream over real packet protection
 
 use assembly: quic.connection.assembly;
+use admission: quic.connection.admission;
 use core: quic.connection.core;
 use handshake: quic.connection.handshake;
+use listener_api: quic.connection.listener;
+use packet_api: quic.packet.packet;
+use token: quic.connection.token;
 use test_credentials: quic.connection.credentials_simulated;
 use binding: quic.transport.binding;
 use transport: quic.transport;
@@ -12,6 +16,7 @@ use crypto.contracts;
 use crypto.encoding.keys;
 use crypto.secret;
 use std.chrono.time;
+use std.crypto.ct;
 use std.net.ip;
 use std.sync.cancel;
 use std.types.bool.bool;
@@ -89,6 +94,12 @@ fun endpoint(host: u8, port: u16) ip.Endpoint {
 fun dialer_endpoint() ip.Endpoint { ret endpoint(1, 55000); }
 fun listener_endpoint() ip.Endpoint { ret endpoint(2, 4433); }
 
+fun connection_id(data: *u8, length: usize) packet_api.ConnectionId {
+    var value: packet_api.ConnectionId;
+    packet_api.set_connection_id(?value, data, length);
+    ret value;
+}
+
 # both sides describe the same connection; only the identity fields differ
 fun connection_config(role: transport.Role) assembly.Config {
     var value: assembly.Config;
@@ -96,7 +107,7 @@ fun connection_config(role: transport.Role) assembly.Config {
         value = assembly.default_config(901, dialer_endpoint(),
             listener_endpoint());
         value.local_source = ?dialer_source[0];
-        value.peer_destination = ?listener_source[0];
+        value.peer_destination = ?initial_destination[0];
         value.server_name = ?server_name[0];
         value.server_name_length = 15;
     } or {
@@ -113,10 +124,12 @@ fun connection_config(role: transport.Role) assembly.Config {
     value.alpn_length = 2;
     value.max_udp_payload = 1200;
     value.max_idle_timeout_ms = 30000;
-    value.peer_bidirectional_streams = 2;
-    value.peer_unidirectional_streams = 2;
-    value.receive_max_data = 4096;
-    value.receive_stream_data = 2048;
+    value.peer_bidirectional_streams = (assembly.STREAM_CAPACITY -
+        assembly.H3_CRITICAL_STREAMS_PER_PEER * 2)::u64;
+    value.peer_unidirectional_streams =
+        assembly.H3_CRITICAL_STREAMS_PER_PEER::u64;
+    value.receive_max_data = assembly.STREAM_WINDOW::u64;
+    value.receive_stream_data = assembly.STREAM_STRIDE::u64;
     value.verification_time_unix = test_credentials.VERIFICATION_TIME;
     value.peer_validated = true;
     ret value;
@@ -220,7 +233,7 @@ fun exchange(clock: *u64, moved: *usize, rounds: usize) i64 {
 }
 
 
-test "quic.connection.assembly: a real client and server exchange a stream over a real handshake" {
+test "quic.connection.assembly: production H3 capacity, routing, and close share one binding" {
     var owner: secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key: keys.PrivateKey;
@@ -244,13 +257,11 @@ test "quic.connection.assembly: a real client and server exchange a stream over 
     var protocols: [1]config.ProtocolName = [1]config.ProtocolName{
         config.ProtocolName{data: ?alpn[0], len: 2}};
 
-    val listener_config: assembly.Config = connection_config(transport.SERVER);
+    var listener_config: assembly.Config = connection_config(transport.SERVER);
     val dialer_config: assembly.Config = connection_config(transport.CLIENT);
-    val listener_encoded: usize = assembly.encode_parameters(?listener_config,
-        transport.SERVER, ?listener_parameters[0], 512).count;
     val dialer_encoded: usize = assembly.encode_parameters(?dialer_config,
         transport.CLIENT, ?dialer_parameters[0], 512).count;
-    if (listener_encoded == 0 || dialer_encoded == 0) { ret 4; }
+    if (dialer_encoded == 0) { ret 4; }
 
     var listener_counter: u8 = 3;
     var listener_entropy: secret.Entropy = secret.Entropy{
@@ -278,18 +289,6 @@ test "quic.connection.assembly: a real client and server exchange a stream over 
     listener_tls_config.limits.max_server_flight_bytes = 8192;
     listener_tls_config.limits.max_chain_bytes = 4096;
     listener_tls_config.limits.max_ticket_bytes = 4096;
-    if (!server.init(?listener_tls, ?listener_tls_config, server.Storage{
-            input: ?listener_input[0], input_capacity: 8192,
-            output: ?listener_output[0], output_capacity: 8192,
-            hello: ?listener_hello[0], hello_capacity: 8192,
-            certificates: ?listener_certificates[0], certificate_capacity: 4,
-            peer_parameters: ?listener_peer_parameters[0],
-            peer_parameters_capacity: 512},
-        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
-            data: contracts.Bytes{data: ?listener_parameters[0],
-                len: listener_encoded}},
-        server.QUIC_TRANSPORT_PARAMETERS)) { ret 5; }
-
     var anchor: cert.Certificate = test_credentials.anchor();
     var trust: cert.TrustStore = cert.TrustStore{anchors: ?anchor, len: 1};
     var dialer_counter: u8 = 91;
@@ -335,10 +334,6 @@ test "quic.connection.assembly: a real client and server exchange a stream over 
         !cancel.make_root(?dialer_scope, false, time.Time{sec: 0, nsec: 0})) {
         ret 7;
     }
-    val served: assembly.InitResult = assembly.init_server(?listener,
-        ?listener_config, ?listener_tls, ?listener_scope, 1000);
-    if (!served.ok) { ret 140 + served.stage::i32; }
-    if (served.core.reason != core.INIT_OK) { ret 150 + served.core.reason::i32; }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_tls, ?dialer_scope, 1000);
     if (!dialed.ok) { ret 170 + dialed.stage::i32; }
@@ -354,7 +349,112 @@ test "quic.connection.assembly: a real client and server exchange a stream over 
     if (started.event_active) { ret 215; }
     if (started.role != handshake.CLIENT) { ret 216; }
     var clock: u64 = 1000;
-    var moved: usize = 0;
+    var peer_slots: [2]admission.PeerSlot;
+    var charges: [2]admission.ChargeSlot;
+    var admission_manager: admission.Manager;
+    if (!admission.initialize(?admission_manager, admission.Config{
+        source: 911, max_connections: 2, max_connections_per_peer: 2},
+        admission.Storage{peers: ?peer_slots[0], peer_capacity: 2,
+            charges: ?charges[0], charge_capacity: 2})) { ret 8; }
+    var replay: [2]token.ReplaySlot;
+    var token_key: [32]^u8;
+    var token_manager: token.Manager;
+    if (!token.initialize(?token_manager, token.Config{source: 912,
+            retry_max_age_ns: 1000000000, address_max_age_ns: 1000000000},
+        token.Storage{replay: ?replay[0], replay_capacity: 2}, 1,
+        contracts.SecretBytes{data: ?token_key[0], len: 32})) { ret 9; }
+    var pending: [2]listener_api.Pending;
+    var quic_versions: [1]u32 = [1]u32{packet_api.VERSION_1};
+    var front: listener_api.Listener;
+    if (!listener_api.initialize(?front, listener_api.Config{source: 913,
+            supported_versions: ?quic_versions[0], supported_version_count: 1,
+            minimum_initial_size: 1200, require_retry: true},
+        listener_api.Storage{pending: ?pending[0], pending_capacity: 2},
+        ?admission_manager, ?token_manager)) { ret 10; }
+    var retry_bytes: [512]u8;
+    clock = clock + 1000;
+    val first: transport.Generated = transport.generate[binding.Binding](
+        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, clock, 0);
+    var request: listener_api.Request;
+    request.peer = dialer_endpoint();
+    request.data = ?wire[0];
+    request.length = first.count;
+    request.now_ns = clock;
+    request.retry_source = connection_id(?listener_source[0], 8);
+    request.retry_nonce = 41;
+    request.output = ?retry_bytes[0];
+    request.output_capacity = 512;
+    val challenged: listener_api.Result = listener_api.preflight(?front,
+        ?request);
+    clock = clock + 1000;
+    if (first.status != transport.STATUS_OK || first.count < 1200 ||
+        challenged.action != listener_api.ACTION_RETRY ||
+        transport.complete_send[binding.Binding](?dialer.driver, first.token,
+            transport.SEND_SENT, first.count, clock).status !=
+            transport.STATUS_OK) { ret 11; }
+    var retry_datagram: transport.Datagram;
+    retry_datagram.local = dialer_endpoint();
+    retry_datagram.peer = listener_endpoint();
+    retry_datagram.data = ?retry_bytes[0];
+    retry_datagram.length = challenged.output_count;
+    clock = clock + 1000;
+    retry_datagram.received_at_ns = clock;
+    if (transport.receive_datagram[binding.Binding](?dialer.driver,
+        ?retry_datagram).status != transport.STATUS_OK) { ret 12; }
+    clock = clock + 1000;
+    if (core.poll_handshake(?dialer.core, ?dialer.secrets, clock).status ==
+        transport.STATUS_ERROR) { ret 13; }
+    clock = clock + 1000;
+    val second: transport.Generated = transport.generate[binding.Binding](
+        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, clock, 0);
+    request.data = ?wire[0];
+    request.length = second.count;
+    request.now_ns = clock;
+    val reserved: listener_api.Result = listener_api.preflight(?front,
+        ?request);
+    val accepted: listener_api.Accepted = listener_api.commit(?front,
+        reserved.acceptance);
+    clock = clock + 1000;
+    if (second.status != transport.STATUS_OK) {
+        ret (20 + second.status::i32);
+    }
+    if (second.count < 1200) { ret 13; }
+    if (reserved.action != listener_api.ACTION_ACCEPT) { ret 16; }
+    if (accepted.action != listener_api.ACTION_ACCEPT) { ret 17; }
+    if (!accepted.retry_source_present || !accepted.peer_validated) { ret 18; }
+    if (transport.complete_send[binding.Binding](?dialer.driver, second.token,
+            transport.SEND_SENT, second.count, clock).status !=
+        transport.STATUS_OK) { ret 19; }
+    if (!assembly.apply_server_acceptance(?listener_config, ?accepted)) { ret 20; }
+    val listener_encoded: usize = assembly.encode_parameters(?listener_config,
+        transport.SERVER, ?listener_parameters[0], 512).count;
+    if (listener_encoded == 0 || !server.init(?listener_tls,
+            ?listener_tls_config, server.Storage{
+                input: ?listener_input[0], input_capacity: 8192,
+                output: ?listener_output[0], output_capacity: 8192,
+                hello: ?listener_hello[0], hello_capacity: 8192,
+                certificates: ?listener_certificates[0],
+                certificate_capacity: 4,
+                peer_parameters: ?listener_peer_parameters[0],
+                peer_parameters_capacity: 512},
+            server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+                data: contracts.Bytes{data: ?listener_parameters[0],
+                    len: listener_encoded}},
+            server.QUIC_TRANSPORT_PARAMETERS)) { ret 14; }
+    val served: assembly.InitResult = assembly.init_server(?listener,
+        ?listener_config, ?listener_tls, ?listener_scope, clock);
+    if (!served.ok) { ret 140 + served.stage::i32; }
+    if (served.core.reason != core.INIT_OK) { ret 150 + served.core.reason::i32; }
+    var retried_datagram: transport.Datagram;
+    retried_datagram.local = listener_endpoint();
+    retried_datagram.peer = dialer_endpoint();
+    retried_datagram.data = ?wire[0];
+    retried_datagram.length = second.count;
+    clock = clock + 1000;
+    retried_datagram.received_at_ns = clock;
+    if (transport.receive_datagram[binding.Binding](?listener.driver,
+        ?retried_datagram).status != transport.STATUS_OK) { ret 15; }
+    var moved: usize = 2;
     val ran: i64 = exchange(?clock, ?moved, 24);
     # never zero, so a refusal can never be mistaken for a pass
     if (ran != 0) { ret refusal(); }
@@ -366,38 +466,94 @@ test "quic.connection.assembly: a real client and server exchange a stream over 
     if (!core.snapshot(?dialer.core).peer_parameters_ready ||
         !core.snapshot(?listener.core).peer_parameters_ready) { ret 202; }
 
-    # a stream the peer never opened, opened and read through the drivers and
-    # carried between them in real 1-RTT packets
-    val opened: transport.OpenResult =
-        transport.open_stream[binding.Binding](?dialer.driver,
-            transport.BIDIRECTIONAL);
-    if (opened.status != transport.STATUS_OK) { ret 203; }
-    var payload: [11]u8 = [11]u8{'q', 'u', 'i', 'c', '-', 's', 't', 'r', 'e',
-        'a', 'm'};
-    val written: transport.WriteResult =
-        transport.write_stream[binding.Binding](?dialer.driver, opened.stream,
-            ?payload[0], 11);
-    if (written.status != transport.STATUS_OK || written.count != 11) {
-        ret 204;
-    }
-    if (transport.finish_stream[binding.Binding](?dialer.driver,
-        opened.stream).status != transport.STATUS_OK) { ret 205; }
-    val carried: i64 = pump(?clock, ?moved, 4);
-    if (carried != 0) { ret refusal(); }
-    val accepted: transport.OpenResult =
-        transport.accept_stream[binding.Binding](?listener.driver);
-    if (accepted.status != transport.STATUS_OK) { ret 206; }
-    var received: [16]u8;
-    val read: transport.ReadResult =
-        transport.read_stream[binding.Binding](?listener.driver,
-            accepted.stream, ?received[0], 16);
-    if (read.status != transport.STATUS_OK &&
-        read.status != transport.STATUS_CLOSED) { ret 90 + read.status::i32; }
-    if (read.count != 11) { ret 100 + read.count::i32; }
+    val routes: assembly.RoutingSnapshot = assembly.routing_snapshot(?listener);
+    val route: assembly.Route = assembly.route_at(?listener, 0);
+    if (!routes.initialized || routes.capacity != 1 || routes.active != 1 ||
+        !route.active || route.sequence != 0 || route.id.length != 8 ||
+        !assembly.route_valid(?listener, ?route)) { ret 203; }
     var i: usize = 0;
-    for (i < 11) {
-        if (received[i] != payload[i]) { ret 208; }
+    for (i < 8) {
+        if (route.id.data[i] != listener_source[i]) { ret 204; }
         i = i + 1;
     }
+    var stale_route: assembly.Route = route;
+    stale_route.generation = stale_route.generation + 1;
+    var wrong_route: assembly.Route = route;
+    wrong_route.id.data[0] = wrong_route.id.data[0] ^ 1;
+    if (assembly.route_valid(?listener, ?stale_route) ||
+        assembly.route_valid(?listener, ?wrong_route) ||
+        assembly.route_at(?listener, 1).active) { ret 205; }
+
+    var dialer_critical: [3]transport.Stream;
+    var listener_critical: [3]transport.Stream;
+    var requests: [10]transport.Stream;
+    var stream_byte: [1]u8;
+    i = 0;
+    for (i < 3) {
+        val dialer_opened: transport.OpenResult =
+            transport.open_stream[binding.Binding](?dialer.driver,
+                transport.UNIDIRECTIONAL);
+        val listener_opened: transport.OpenResult =
+            transport.open_stream[binding.Binding](?listener.driver,
+                transport.UNIDIRECTIONAL);
+        if (dialer_opened.status != transport.STATUS_OK ||
+            listener_opened.status != transport.STATUS_OK) { ret 206; }
+        dialer_critical[i] = dialer_opened.stream;
+        listener_critical[i] = listener_opened.stream;
+        stream_byte[0] = i::u8;
+        if (transport.write_stream[binding.Binding](?dialer.driver,
+                dialer_critical[i], ?stream_byte[0], 1).count != 1 ||
+            transport.write_stream[binding.Binding](?listener.driver,
+                listener_critical[i], ?stream_byte[0], 1).count != 1) {
+            ret 207;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < 10) {
+        val opened: transport.OpenResult =
+            transport.open_stream[binding.Binding](?dialer.driver,
+                transport.BIDIRECTIONAL);
+        if (opened.status != transport.STATUS_OK) { ret 208; }
+        requests[i] = opened.stream;
+        stream_byte[0] = (0x80 + i)::u8;
+        if (transport.write_stream[binding.Binding](?dialer.driver,
+                requests[i], ?stream_byte[0], 1).count != 1 ||
+            transport.finish_stream[binding.Binding](?dialer.driver,
+                requests[i]).status != transport.STATUS_OK) { ret 209; }
+        i = i + 1;
+    }
+    if (pump(?clock, ?moved, 16) != 0) { ret refusal(); }
+    i = 0;
+    for (i < 13) {
+        if (transport.accept_stream[binding.Binding](?listener.driver).status !=
+            transport.STATUS_OK) { ret 210; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < 3) {
+        if (transport.accept_stream[binding.Binding](?dialer.driver).status !=
+            transport.STATUS_OK) { ret 211; }
+        i = i + 1;
+    }
+    if (transport.snapshot[binding.Binding](?dialer.driver).active_streams != 16 ||
+        transport.snapshot[binding.Binding](?listener.driver).active_streams != 16) {
+        ret 212;
+    }
+    if (!transport.cancel_connection[binding.Binding](?dialer.driver) ||
+        !transport.cancel_connection[binding.Binding](?listener.driver)) { ret 213; }
+    if (transport.finish_close[binding.Binding](?dialer.driver).status !=
+        transport.STATUS_OK) { ret 214; }
+    if (transport.finish_close[binding.Binding](?listener.driver).status !=
+        transport.STATUS_OK) { ret 216; }
+    if (assembly.routing_snapshot(?listener).active != 0 ||
+        assembly.route_valid(?listener, ?route) ||
+        listener_api.release_connection(?front, accepted.charge).action !=
+            listener_api.ACTION_ACCEPT || !listener_api.begin_close(?front) ||
+        !listener_api.finish_close(?front) ||
+        !cancel.destroy(?dialer_scope) || !cancel.destroy(?listener_scope)) {
+        ret 215;
+    }
+    ct.zeroize(?token_key[0], 32);
     ret 0;
 }
