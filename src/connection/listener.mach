@@ -1593,9 +1593,40 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
         retry_cleanup(?listener, completed.acceptance).status != CLEANUP_INVALID) {
         ret 7;
     }
+    val reverse: Result = preflight(?listener, ?request);
+    if (reverse.action != ACTION_ACCEPT || !pending[0].owns_admission ||
+        !pending[0].owns_replay) { ret 8; }
+    admission_manager.initialized = false;
+    val failed_reverse: Result = cancel(?listener, reverse.acceptance);
+    if (failed_reverse.action != ACTION_ERROR ||
+        failed_reverse.error != ERROR_CLEANUP ||
+        failed_reverse.cleanup.status != CLEANUP_RETAINED ||
+        !failed_reverse.cleanup.admission_retained ||
+        failed_reverse.cleanup.replay_retained ||
+        !failed_reverse.cleanup.admission_attempted ||
+        !failed_reverse.cleanup.replay_attempted ||
+        failed_reverse.cleanup.admission_status != admission.STATUS_ERROR ||
+        failed_reverse.cleanup.replay_status != token.STATUS_OK ||
+        pending[0].state != PENDING_CLEANUP ||
+        replay[0].state != token.REPLAY_FREE) { ret 9; }
+    val admission_retry: CleanupResult = retry_cleanup(?listener,
+        failed_reverse.cleanup.acceptance);
+    if (admission_retry.status != CLEANUP_RETAINED ||
+        !admission_retry.admission_retained || admission_retry.replay_retained ||
+        !admission_retry.admission_attempted || admission_retry.replay_attempted ||
+        admission_retry.admission_status != admission.STATUS_ERROR ||
+        pending[0].state != PENDING_CLEANUP ||
+        replay[0].state != token.REPLAY_FREE) { ret 10; }
+    admission_manager.initialized = true;
+    val reverse_complete: CleanupResult = retry_cleanup(?listener,
+        admission_retry.acceptance);
+    if (reverse_complete.status != CLEANUP_COMPLETE ||
+        !reverse_complete.admission_attempted ||
+        reverse_complete.replay_attempted || pending[0].state != PENDING_FREE ||
+        replay[0].state != token.REPLAY_FREE) { ret 11; }
     val retried: Result = preflight(?listener, ?request);
     if (retried.action != ACTION_ACCEPT || !pending[0].owns_admission ||
-        !pending[0].owns_replay) { ret 8; }
+        !pending[0].owns_replay) { ret 12; }
     token_manager.initialized = false;
     val failed_commit: Accepted = commit(?listener, retried.acceptance);
     if (failed_commit.action != ACTION_ERROR ||
@@ -1609,13 +1640,13 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
         failed_commit.cleanup.replay_status != token.STATUS_ERROR ||
         admission.snapshot(?admission_manager).active != 0 ||
         admission.snapshot(?admission_manager).reserved != 0 ||
-        pending[0].state != PENDING_CLEANUP) { ret 9; }
+        pending[0].state != PENDING_CLEANUP) { ret 13; }
     token_manager.initialized = true;
     val commit_cleanup: CleanupResult = retry_cleanup(?listener,
         failed_commit.cleanup.acceptance);
     if (commit_cleanup.status != CLEANUP_COMPLETE ||
         pending[0].state != PENDING_FREE || replay[0].state != token.REPLAY_FREE ||
-        !begin_close(?listener) || !finish_close(?listener)) { ret 10; }
+        !begin_close(?listener) || !finish_close(?listener)) { ret 14; }
     ct.zeroize(?key[0], 32);
     ret 0;
 }
