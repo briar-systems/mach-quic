@@ -92,6 +92,8 @@ pub rec Pending {
     peer: ip.Endpoint;
     version: u32;
     generation: u64;
+    listener_source: u64;
+    listener_generation: u64;
     state: u8;
     owns_admission: bool;
     owns_replay: bool;
@@ -110,6 +112,11 @@ pub rec Listener {
     admission_manager: *admission.Manager;
     token_manager: *token.Manager;
     next_pending: usize;
+    lease_generation: u64;
+    owns_storage: bool;
+    owns_admission_lease: bool;
+    owns_token_lease: bool;
+    cleanup_pending: bool;
     initialized: bool;
     closing: bool;
 }
@@ -130,6 +137,29 @@ pub rec Acceptance {
     source: u64;
     index: usize;
     generation: u64;
+}
+
+pub rec LeaseHandle {
+    source: u64;
+    generation: u64;
+}
+
+pub rec LeaseCleanupResult {
+    status: CleanupStatus;
+    handle: LeaseHandle;
+    admission_retained: bool;
+    token_retained: bool;
+    storage_retained: bool;
+    admission_attempted: bool;
+    token_attempted: bool;
+    storage_attempted: bool;
+}
+
+pub rec InitializeResult {
+    ok: bool;
+    error: Error;
+    handle: LeaseHandle;
+    cleanup: LeaseCleanupResult;
 }
 
 pub rec CleanupResult {
@@ -290,21 +320,121 @@ fun physical(listener: *Listener) bool {
     ret ownership.all_disjoint(?ranges[0], 8);
 }
 
-pub fun initialize(listener: *Listener, config: Config, storage: Storage,
-                   admission_manager: *admission.Manager,
-                   token_manager: *token.Manager) bool {
+fun reset_unpublished(listener: *Listener) {
+    val generation: u64 = listener.lease_generation;
+    var empty: Listener;
+    empty.lease_generation = generation;
+    @listener = empty;
+}
+
+fun lease_handle_valid(listener: *Listener, value: LeaseHandle) bool {
+    ret listener != nil && value.source != 0 &&
+        value.source == listener.config.source &&
+        value.generation != 0 && value.generation == listener.lease_generation;
+}
+
+fun claim_listener_storage(listener: *Listener) bool {
+    var i: usize = 0;
+    for (i < listener.storage.pending_capacity) {
+        if (listener.storage.pending[i].listener_source != 0 ||
+            listener.storage.pending[i].listener_generation != 0) { ret false; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < listener.storage.pending_capacity) {
+        listener.storage.pending[i].listener_source = listener.config.source;
+        listener.storage.pending[i].listener_generation =
+            listener.lease_generation;
+        i = i + 1;
+    }
+    listener.owns_storage = true;
+    ret true;
+}
+
+fun release_listener_storage(listener: *Listener) bool {
+    var i: usize = 0;
+    for (i < listener.storage.pending_capacity) {
+        if (listener.storage.pending[i].listener_source != listener.config.source ||
+            listener.storage.pending[i].listener_generation !=
+                listener.lease_generation) { ret false; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < listener.storage.pending_capacity) {
+        listener.storage.pending[i].listener_source = 0;
+        listener.storage.pending[i].listener_generation = 0;
+        i = i + 1;
+    }
+    listener.owns_storage = false;
+    ret true;
+}
+
+fun cleanup_listener_leases(listener: *Listener,
+                            value: LeaseHandle) LeaseCleanupResult {
+    var result: LeaseCleanupResult;
+    result.handle = value;
+    if (!lease_handle_valid(listener, value) ||
+        (!listener.owns_storage && !listener.owns_admission_lease &&
+            !listener.owns_token_lease)) {
+        result.status = CLEANUP_INVALID;
+        ret result;
+    }
+    listener.initialized = false;
+    listener.cleanup_pending = true;
+    if (listener.owns_admission_lease) {
+        result.admission_attempted = true;
+        if (admission.release_listener(listener.admission_manager,
+                listener.config.source)) {
+            listener.owns_admission_lease = false;
+        }
+    }
+    if (listener.owns_token_lease) {
+        result.token_attempted = true;
+        if (token.release_listener(listener.token_manager,
+                listener.config.source)) {
+            listener.owns_token_lease = false;
+        }
+    }
+    if (listener.owns_storage && !listener.owns_admission_lease &&
+        !listener.owns_token_lease) {
+        result.storage_attempted = true;
+        release_listener_storage(listener);
+    }
+    result.admission_retained = listener.owns_admission_lease;
+    result.token_retained = listener.owns_token_lease;
+    result.storage_retained = listener.owns_storage;
+    if (result.admission_retained || result.token_retained ||
+        result.storage_retained) {
+        result.status = CLEANUP_RETAINED;
+        ret result;
+    }
+    result.status = CLEANUP_COMPLETE;
+    reset_unpublished(listener);
+    ret result;
+}
+
+pub fun initialize_result(listener: *Listener, config: Config, storage: Storage,
+                          admission_manager: *admission.Manager,
+                          token_manager: *token.Manager) InitializeResult {
+    var result: InitializeResult;
     if (config.source == 0 || config.supported_versions == nil ||
         config.supported_version_count == 0 || config.supported_version_count > 16 ||
         config.minimum_initial_size < 1200 || storage.pending == nil ||
-        storage.pending_capacity == 0) { ret false; }
+        storage.pending_capacity == 0) {
+        result.error = ERROR_CONFIG;
+        ret result;
+    }
     if (listener == nil || admission_manager == nil || token_manager == nil) {
-        ret false;
+        result.error = ERROR_CONFIG;
+        ret result;
     }
     if (!ownership.bytes(admission_manager::*u8, $size_of(admission.Manager),
             ownership.ZERO_FORBIDDEN).valid ||
         !ownership.bytes((?token_manager.config)::*u8, $size_of(token.Manager),
-            ownership.ZERO_FORBIDDEN).valid) { ret false; }
-    if (listener == nil) { ret false; }
+            ownership.ZERO_FORBIDDEN).valid) {
+        result.error = ERROR_CONFIG;
+        ret result;
+    }
     val listener_range: ownership.Range = ownership.bytes((?listener.config)::*u8,
         $size_of(Listener), ownership.ZERO_FORBIDDEN);
     val token_range: ownership.Range = ownership.bytes((?token_manager.config)::*u8,
@@ -327,28 +457,70 @@ pub fun initialize(listener: *Listener, config: Config, storage: Storage,
     ranges[7] = ownership.array(token_manager.storage.replay::*u8,
         token_manager.storage.replay_capacity, $size_of(token.ReplaySlot),
         ownership.ZERO_FORBIDDEN);
-    if (!ownership.all_disjoint(?ranges[0], 8)) { ret false; }
-    if (listener.initialized ||
+    if (!ownership.all_disjoint(?ranges[0], 8)) {
+        result.error = ERROR_CONFIG;
+        ret result;
+    }
+    if (listener.initialized || listener.cleanup_pending || listener.owns_storage ||
+        listener.owns_admission_lease || listener.owns_token_lease ||
         !admission_manager.initialized || admission_manager.closing ||
-        admission_manager.listener_lease != 0 || !token_manager.initialized ||
-        token_manager.closing || token_manager.listener_lease != 0) { ret false; }
+        !token_manager.initialized || token_manager.closing) {
+        result.error = ERROR_STATE;
+        ret result;
+    }
     var i: usize = 0;
     for (i < config.supported_version_count) {
-        if (!known_supported(config.supported_versions[i])) { ret false; }
+        if (!known_supported(config.supported_versions[i])) {
+            result.error = ERROR_VERSION;
+            ret result;
+        }
         var j: usize = 0;
         for (j < i) {
             if (config.supported_versions[j] == config.supported_versions[i]) {
-                ret false;
+                result.error = ERROR_VERSION;
+                ret result;
             }
             j = j + 1;
         }
         i = i + 1;
     }
-    if (!admission.lease_listener(admission_manager, config.source)) { ret false; }
-    if (!token.lease_listener(token_manager, config.source)) {
-        admission.release_listener(admission_manager, config.source);
-        ret false;
+    listener.config = config;
+    listener.storage = storage;
+    listener.admission_manager = admission_manager;
+    listener.token_manager = token_manager;
+    listener.next_pending = 0;
+    listener.lease_generation = next_generation(listener.lease_generation);
+    listener.owns_storage = false;
+    listener.owns_admission_lease = false;
+    listener.owns_token_lease = false;
+    listener.cleanup_pending = false;
+    listener.closing = false;
+    listener.initialized = false;
+    result.handle = LeaseHandle{source: config.source,
+        generation: listener.lease_generation};
+    if (!claim_listener_storage(listener)) {
+        result.error = ERROR_CAPACITY;
+        reset_unpublished(listener);
+        ret result;
     }
+    if (!admission.lease_listener(admission_manager, config.source)) {
+        result.error = ERROR_ADMISSION;
+        result.cleanup = cleanup_listener_leases(listener, result.handle);
+        if (result.cleanup.status == CLEANUP_RETAINED) {
+            result.error = ERROR_CLEANUP;
+        }
+        ret result;
+    }
+    listener.owns_admission_lease = true;
+    if (!token.lease_listener(token_manager, config.source)) {
+        result.error = ERROR_TOKEN;
+        result.cleanup = cleanup_listener_leases(listener, result.handle);
+        if (result.cleanup.status == CLEANUP_RETAINED) {
+            result.error = ERROR_CLEANUP;
+        }
+        ret result;
+    }
+    listener.owns_token_lease = true;
     i = 0;
     for (i < storage.pending_capacity) {
         storage.pending[i].state = PENDING_FREE;
@@ -357,14 +529,16 @@ pub fun initialize(listener: *Listener, config: Config, storage: Storage,
         storage.pending[i].generation = next_generation(storage.pending[i].generation);
         i = i + 1;
     }
-    listener.config = config;
-    listener.storage = storage;
-    listener.admission_manager = admission_manager;
-    listener.token_manager = token_manager;
-    listener.next_pending = 0;
-    listener.closing = false;
     listener.initialized = true;
-    ret true;
+    result.ok = true;
+    ret result;
+}
+
+pub fun initialize(listener: *Listener, config: Config, storage: Storage,
+                   admission_manager: *admission.Manager,
+                   token_manager: *token.Manager) bool {
+    ret initialize_result(listener, config, storage, admission_manager,
+        token_manager).ok;
 }
 
 fun parse_ids(data: *u8, length: usize, initial: *Initial, position: *usize) bool {
@@ -627,7 +801,11 @@ fun claim_pending(listener: *Listener) usize {
     for (offset < listener.storage.pending_capacity) {
         val i: usize = (listener.next_pending + offset) %
             listener.storage.pending_capacity;
-        if (listener.storage.pending[i].state == PENDING_FREE) {
+        if (listener.storage.pending[i].state == PENDING_FREE &&
+            listener.storage.pending[i].listener_source ==
+                listener.config.source &&
+            listener.storage.pending[i].listener_generation ==
+                listener.lease_generation) {
             val pending: *Pending = ?listener.storage.pending[i];
             pending.generation = next_generation(pending.generation);
             pending.state = PENDING_RESERVED;
@@ -992,30 +1170,89 @@ pub fun release_connection(listener: *Listener, charge: admission.Charge) Result
 
 pub fun begin_close(listener: *Listener) bool {
     if (!physical(listener) || !listener.initialized || listener.closing ||
+        !listener.owns_storage || !listener.owns_admission_lease ||
+        !listener.owns_token_lease ||
         listener.admission_manager.listener_lease != listener.config.source ||
-        listener.token_manager.listener_lease != listener.config.source) { ret false; }
+        listener.token_manager.listener_lease != listener.config.source) {
+        ret false;
+    }
     listener.closing = true;
     ret true;
 }
 
-pub fun finish_close(listener: *Listener) bool {
-    if (!physical(listener) || !listener.initialized || !listener.closing ||
-        listener.admission_manager.listener_lease != listener.config.source ||
-        listener.token_manager.listener_lease != listener.config.source) { ret false; }
+fun cleanup_ready(listener: *Listener) bool {
+    if (!physical(listener)) { ret false; }
     var i: usize = 0;
     for (i < listener.storage.pending_capacity) {
         if (listener.storage.pending[i].state != PENDING_FREE) { ret false; }
         i = i + 1;
     }
-    val admissions: admission.Snapshot = admission.snapshot(listener.admission_manager);
-    if (admissions.active != 0 || admissions.reserved != 0) { ret false; }
-    if (!admission.release_listener(listener.admission_manager,
-            listener.config.source) ||
-        !token.release_listener(listener.token_manager, listener.config.source)) {
-        ret false;
+    val admissions: admission.Snapshot = admission.snapshot(
+        listener.admission_manager);
+    ret admissions.active == 0 && admissions.reserved == 0;
+}
+
+pub fun abort_initialize(listener: *Listener,
+                         value: LeaseHandle) LeaseCleanupResult {
+    var invalid: LeaseCleanupResult;
+    invalid.handle = value;
+    invalid.status = CLEANUP_INVALID;
+    if (!lease_handle_valid(listener, value) || !listener.initialized ||
+        listener.closing || listener.cleanup_pending ||
+        !cleanup_ready(listener)) { ret invalid; }
+    ret cleanup_listener_leases(listener, value);
+}
+
+pub fun retry_initialization_cleanup(listener: *Listener,
+                                     value: LeaseHandle) LeaseCleanupResult {
+    var invalid: LeaseCleanupResult;
+    invalid.handle = value;
+    invalid.status = CLEANUP_INVALID;
+    if (!lease_handle_valid(listener, value) || listener.initialized ||
+        !listener.cleanup_pending ||
+        (!listener.owns_storage && !listener.owns_admission_lease &&
+            !listener.owns_token_lease)) {
+        ret invalid;
     }
-    listener.initialized = false;
-    ret true;
+    ret cleanup_listener_leases(listener, value);
+}
+
+pub fun initialization_cleanup(listener: *Listener) LeaseCleanupResult {
+    var result: LeaseCleanupResult;
+    if (listener == nil) {
+        result.status = CLEANUP_INVALID;
+        ret result;
+    }
+    result.handle = LeaseHandle{source: listener.config.source,
+        generation: listener.lease_generation};
+    if (listener.cleanup_pending) {
+        result.admission_retained = listener.owns_admission_lease;
+        result.token_retained = listener.owns_token_lease;
+        result.storage_retained = listener.owns_storage;
+    }
+    if (result.admission_retained || result.token_retained ||
+        result.storage_retained) {
+        result.status = CLEANUP_RETAINED;
+    }
+    ret result;
+}
+
+pub fun finish_close_result(listener: *Listener) LeaseCleanupResult {
+    var invalid: LeaseCleanupResult;
+    if (!physical(listener) || !listener.initialized || !listener.closing ||
+        !listener.owns_storage || !listener.owns_admission_lease ||
+        !listener.owns_token_lease ||
+        !cleanup_ready(listener)) {
+        invalid.status = CLEANUP_INVALID;
+        ret invalid;
+    }
+    val handle: LeaseHandle = LeaseHandle{source: listener.config.source,
+        generation: listener.lease_generation};
+    ret cleanup_listener_leases(listener, handle);
+}
+
+pub fun finish_close(listener: *Listener) bool {
+    ret finish_close_result(listener).status == CLEANUP_COMPLETE;
 }
 
 fun test_id(value: u8) packet.ConnectionId {
