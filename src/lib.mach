@@ -1,7 +1,9 @@
 use std.runtime;
 use std.types.string.str;
+use std.types.size.usize;
+use std.types.bool.bool;
 
-pub val VERSION: str = "0.1.0";
+pub val VERSION: str = "0.5.0";
 
 fwd quic.packet.packet;
 fwd quic.frame.frame;
@@ -30,7 +32,23 @@ fwd quic.connection.core_simulated;
 fwd quic.transport;
 fwd quic.transport.simulated;
 
-test "quic: version is present" {
-    if (VERSION[0] == 0) { ret 1; }
+# tools/check-version.sh proves the constant matches the manifest, so the test
+# only pins the shape: three dot-separated numeric components
+test "quic: exported version is major.minor.patch" {
+    var dots: usize = 0;
+    var digits: usize = 0;
+    var i: usize = 0;
+    for (VERSION[i] != 0) {
+        var digit: bool = VERSION[i] >= '0' && VERSION[i] <= '9';
+        if (!digit && VERSION[i] != '.') { ret 1; }
+        if (digit) { digits = digits + 1; }
+        if (!digit) {
+            if (digits == 0) { ret 2; }
+            dots = dots + 1;
+            digits = 0;
+        }
+        i = i + 1;
+    }
+    if (dots != 2 || digits == 0) { ret 3; }
     ret 0;
 }

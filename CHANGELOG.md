@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `quic.VERSION` now reports the manifest version, `tools/check-version.sh`
+  fails a release when the two disagree, and the version test pins the
+  `major.minor.patch` shape instead of a literal.
+
 ## [0.5.0] - 2026-09-01
 
 ### Changed
