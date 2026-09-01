@@ -369,6 +369,14 @@ keys, and restarts TLS with an explicit reason. Stateless server preflight parse
 and validates Initial packets before connection allocation. Listener admission
 charges connection and peer capacity before token validation or state allocation.
 The listener exclusively leases its admission and token managers until close.
+Every successful preflight returns an `Acceptance` that owns its admission charge
+and, for Retry, its replay reservation through one pending slot. `commit` and
+`cancel` attempt both cleanup legs even if one fails. Their cleanup result names
+which legs were attempted, their exact subsystem status and error, and which
+ownership remains. A retained slot enters cleanup state and cannot be reused.
+The socket owner calls `retry_cleanup` with the same generation-tagged
+`Acceptance`; retries touch only retained legs, and the slot is released only
+after both complete.
 The core transactionally leases handshake, CID, path, stream, and DATAGRAM
 managers before the first provider callback and releases every acquired lease on
 failure. Protocol-side mutations require the matching lease-scoped entry point,
