@@ -651,7 +651,8 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
     }
     if (!binding_api.bind(?c.binding, ?c.core, ?c.secrets) ||
         !binding_api.prepare_initial_route(?c.binding, config.local_source,
-            config.local_source_length)) {
+            config.local_source_length) ||
+        !binding_api.publish_initial_route(?c.binding)) {
         value.stage = STAGE_BINDING;
         ret value;
     }
@@ -674,14 +675,53 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
         value.stage = STAGE_DRIVER;
         ret value;
     }
-    if (!binding_api.publish_initial_route(?c.binding)) {
-        value.stage = STAGE_BINDING;
-        ret value;
-    }
     c.initialized = true;
     c.released = false;
     value.ok = true;
     value.stage = STAGE_OK;
+    ret value;
+}
+
+fun abandon_manager_initialization(c: *Connection) bool {
+    if (c.driver.initialized || c.initialized) { ret false; }
+    if (c.binding.initialized &&
+        !binding_api.abandon_initialization(?c.binding)) { ret false; }
+    if (c.core.initialized &&
+        !core_api.abandon_initialization(?c.core, ?c.secrets)) { ret false; }
+    if (c.handshake.initialized &&
+        !handshake_api.abandon_initialization(?c.handshake)) { ret false; }
+    if (c.datagrams.valid) {
+        if (!c.datagrams.closing &&
+            datagram_api.begin_close(?c.datagrams).status !=
+                transport_api.STATUS_OK) { ret false; }
+        if (datagram_api.finish_close(?c.datagrams).status !=
+            transport_api.STATUS_OK) { ret false; }
+    }
+    if (c.paths.valid) {
+        if (!c.paths.closing && path_api.begin_close(?c.paths).status !=
+            path_api.STATUS_OK) { ret false; }
+        if (path_api.finish_close(?c.paths).status != path_api.STATUS_OK) {
+            ret false;
+        }
+    }
+    if (c.cids.initialized) {
+        if (!c.cids.closing && !cid_api.begin_close(?c.cids)) { ret false; }
+        if (!cid_api.finish_close(?c.cids)) { ret false; }
+    }
+    if (c.streams.valid) {
+        if (!c.streams.closing && stream_api.begin_close(?c.streams).status !=
+            stream_api.STATUS_OK) { ret false; }
+        if (stream_api.finish_close(?c.streams).status !=
+            stream_api.STATUS_OK) { ret false; }
+    }
+    c.local_parameter_length = 0;
+    c.initialized = false;
+    c.released = true;
+    ret true;
+}
+
+fun failed(c: *Connection, value: InitResult) InitResult {
+    if (c != nil) { abandon_manager_initialization(c); }
     ret value;
 }
 
@@ -766,6 +806,14 @@ pub fun release_closed(c: *Connection) bool {
     ret true;
 }
 
+pub fun reusable(c: *Connection) bool {
+    ret c != nil && !c.initialized && c.released &&
+        !c.driver.initialized && !c.binding.initialized &&
+        !c.core.initialized && !c.secrets.initialized &&
+        !c.handshake.initialized && !c.cids.initialized &&
+        !c.paths.valid && !c.streams.valid && !c.datagrams.valid;
+}
+
 pub fun init_client(c: *Connection, config: *Config, tls: *client.Client,
                     scope: *cancel.Scope, now_ns: u64) InitResult {
     if (c == nil || tls == nil || scope == nil || c.initialized ||
@@ -774,12 +822,15 @@ pub fun init_client(c: *Connection, config: *Config, tls: *client.Client,
     }
     c.released = false;
     val built: Stage = build_managers(c, config, transport_api.CLIENT);
-    if (built != STAGE_OK) { ret staged(built); }
+    if (built != STAGE_OK) { ret failed(c, staged(built)); }
     if (!tls_client_api.initialize(?c.handshake, crypto_config(config),
         crypto_storage(c), tls, tls_configuration(config))) {
-        ret staged(STAGE_HANDSHAKE);
+        ret failed(c, staged(STAGE_HANDSHAKE));
     }
-    ret finish(c, config, transport_api.CLIENT, scope, now_ns);
+    val result: InitResult = finish(c, config, transport_api.CLIENT,
+        scope, now_ns);
+    if (!result.ok) { ret failed(c, result); }
+    ret result;
 }
 
 pub fun init_server(c: *Connection, config: *Config, tls: *server.Server,
@@ -790,12 +841,15 @@ pub fun init_server(c: *Connection, config: *Config, tls: *server.Server,
     }
     c.released = false;
     val built: Stage = build_managers(c, config, transport_api.SERVER);
-    if (built != STAGE_OK) { ret staged(built); }
+    if (built != STAGE_OK) { ret failed(c, staged(built)); }
     if (!tls_server_api.initialize(?c.handshake, crypto_config(config),
         crypto_storage(c), tls, server_tls_configuration(config))) {
-        ret staged(STAGE_HANDSHAKE);
+        ret failed(c, staged(STAGE_HANDSHAKE));
     }
-    ret finish(c, config, transport_api.SERVER, scope, now_ns);
+    val result: InitResult = finish(c, config, transport_api.SERVER,
+        scope, now_ns);
+    if (!result.ok) { ret failed(c, result); }
+    ret result;
 }
 
 test "quic.connection.assembly: production profile encodes bounded H3 limits" {

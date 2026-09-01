@@ -1190,6 +1190,48 @@ pub fun init_server(core: *Core, secrets: *Secrets, config: Config, storage: Sto
         handshake, cids, paths, streams, datagrams, now_ns).ok;
 }
 
+# rolls back a successful core init before the assembly becomes observable
+pub fun abandon_initialization(core: *Core, secrets: *Secrets) bool {
+    if (!core_record_valid(core) || !secret_record_valid(secrets) ||
+        !core.initialized || core.destroyed || core.closing ||
+        core.state != transport_api.HANDSHAKING || !secrets.initialized ||
+        secrets.destroyed || core.authenticated_packets != 0 ||
+        core.retry_count != 0 || core.version_restart_count != 0 ||
+        core.next_owner != 1 || core.next_owner_slot != 0) { ret false; }
+    var i: usize = 0;
+    for (i < core.storage.owner_capacity) {
+        if (core.storage.owners[i].state != OWNER_FREE) { ret false; }
+        i = i + 1;
+    }
+    val selected: path_api.PathResult = path_api.selected(core.paths);
+    if (selected.status != path_api.STATUS_OK ||
+        path_api.unconfigure_transport_scoped(core.paths, core.config.source,
+            selected.handle).status != path_api.STATUS_OK ||
+        !datagram_api.release_core(core.datagrams, core.config.source) ||
+        !stream_api.release_core(core.streams, core.config.source) ||
+        !path_api.release_core(core.paths, core.config.source) ||
+        !cid_api.release_core(core.cids, core.config.source) ||
+        !handshake_api.abandon_core(secrets.handshake, core.config.source)) {
+        ret false;
+    }
+    protection.destroy_initial(?secrets.initial_keys);
+    protection.destroy(?secrets.early_send);
+    protection.destroy(?secrets.early_receive);
+    protection.destroy(?secrets.handshake_send);
+    protection.destroy(?secrets.handshake_receive);
+    protection.destroy_send(?secrets.application_send);
+    protection.destroy_receive(?secrets.application_receive);
+    ct.zeroize(secrets.storage.receive_plaintext,
+        secrets.storage.receive_plaintext_capacity);
+    ct.zeroize(secrets.storage.send_plaintext,
+        secrets.storage.send_plaintext_capacity);
+    var empty_core: Core;
+    var empty_secrets: Secrets;
+    core[0] = empty_core;
+    secrets[0] = empty_secrets;
+    ret true;
+}
+
 fun install_secret(core: *Core, secrets: *Secrets,
                    event: *handshake_api.Event) bool {
     val secret: contracts.SecretBytes = contracts.SecretBytes{

@@ -1422,6 +1422,42 @@ pub fun release_core(adapter: *Adapter, source: u64) bool {
     ret true;
 }
 
+# initialization rollback is private ownership, so no event may have escaped
+pub fun abandon_core(adapter: *Adapter, source: u64) bool {
+    if (!adapter_valid(adapter) || source == 0 ||
+        adapter.core_lease != source || adapter.transition_active ||
+        adapter.event_active) { ret false; }
+    var i: usize = 0;
+    for (i < adapter.storage.attempt_capacity) {
+        if (adapter.storage.attempts[i].state != ATTEMPT_FREE) { ret false; }
+        i = i + 1;
+    }
+    adapter.core_lease = 0;
+    ret true;
+}
+
+# detaches an unexposed adapter without consuming the caller's tls provider
+pub fun abandon_initialization(adapter: *Adapter) bool {
+    if (!adapter_valid(adapter) || adapter.core_lease != 0 ||
+        adapter.transition_active || adapter.event_active) { ret false; }
+    var i: usize = 0;
+    for (i < adapter.storage.attempt_capacity) {
+        if (adapter.storage.attempts[i].state != ATTEMPT_FREE) { ret false; }
+        i = i + 1;
+    }
+    memory.raw_zero(adapter.storage.receive_data, adapter.storage.receive_length);
+    memory.raw_zero(adapter.storage.receive_present, adapter.storage.receive_length);
+    memory.raw_zero(adapter.storage.send_data, adapter.storage.send_length);
+    memory.raw_zero(adapter.storage.send_pending, adapter.storage.send_length);
+    memory.raw_zero(adapter.storage.send_acked, adapter.storage.send_length);
+    memory.raw_zero(adapter.storage.send_inflight, adapter.storage.send_length * 2);
+    val generation: u64 = adapter.event_generation;
+    var empty: Adapter;
+    empty.event_generation = generation;
+    adapter[0] = empty;
+    ret true;
+}
+
 pub fun initialize_tls_client(adapter: *Adapter, config: Config, storage: Storage,
                               value: *tls_client_api.Client,
                               verification_time_unix: i64,

@@ -197,6 +197,32 @@ pub fun prepare_initial_route(binding: *Binding, data: *u8,
     ret true;
 }
 
+# rollback retires routes that remained private to a failed assembly init
+pub fun abandon_initialization(binding: *Binding) bool {
+    if (!bound(binding)) { ret false; }
+    retire_routes(binding);
+    var i: usize = 0;
+    for (i < ROUTING_ID_CAPACITY) {
+        val entry: *RoutingEntry = ?binding.routing[i];
+        var byte: usize = 0;
+        for (byte < ROUTING_ID_LENGTH) {
+            entry.id.data[byte] = 0;
+            byte = byte + 1;
+        }
+        entry.id.length = 0;
+        entry.sequence = 0;
+        entry.prepared = false;
+        i = i + 1;
+    }
+    binding.anchor = 0;
+    binding.core = nil;
+    binding.secrets = nil;
+    binding.routing_source = 0;
+    binding.initialized = false;
+    binding.released = true;
+    ret true;
+}
+
 pub fun publish_initial_route(binding: *Binding) bool {
     if (!bound(binding)) { ret false; }
     val entry: *RoutingEntry = ?binding.routing[0];
