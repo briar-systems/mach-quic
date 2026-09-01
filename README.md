@@ -635,6 +635,12 @@ is idempotent. The next `init_client` or `init_server` may use the same assembly
 address with a newly initialized TLS provider and cancellation scope, and delayed
 routes or transport tokens from its prior use remain stale.
 
+Initialization has the same ownership boundary. A failed `init_client` or
+`init_server` retires any route that was staged internally, releases core leases,
+detaches the handshake adapter without destroying the caller's TLS provider, and
+closes every manager initialized by that attempt. `reusable` confirms the complete
+rollback before a bounded owner returns the fixed record to its free list.
+
 ## Development
 
 Dependencies use exact Git tags or commit pins. The temporary `mach-tls` commit
