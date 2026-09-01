@@ -285,18 +285,19 @@ fun version_supported(listener: *Listener, version: u32) bool {
 
 fun physical(listener: *Listener) bool {
     if (listener == nil) { ret false; }
-    val listener_range: ownership.Range = ownership.bytes((?listener.config)::*u8,
-        $size_of(Listener), ownership.ZERO_FORBIDDEN);
+    val listener_range: ownership.Range = ownership.anchored_record[
+        Listener, Config](?listener.config, $offset_of(Listener, config));
     if (!listener_range.valid) { ret false; }
     val admissions: *admission.Manager = listener.admission_manager;
     val tokens: *token.Manager = listener.token_manager;
     if (admissions == nil || tokens == nil ||
         !ownership.bytes(admissions::*u8, $size_of(admission.Manager),
             ownership.ZERO_FORBIDDEN).valid ||
-        !ownership.bytes((?tokens.config)::*u8, $size_of(token.Manager),
-            ownership.ZERO_FORBIDDEN).valid) { ret false; }
-    val token_range: ownership.Range = ownership.bytes((?tokens.config)::*u8,
-        $size_of(token.Manager), ownership.ZERO_FORBIDDEN);
+        !ownership.anchored_record[token.Manager, token.Config](?tokens.config,
+            $offset_of(token.Manager, config)).valid) { ret false; }
+    val token_range: ownership.Range =
+        ownership.anchored_record[token.Manager, token.Config](?tokens.config,
+            $offset_of(token.Manager, config));
     var ranges: [8]ownership.Range;
     ranges[0] = listener_range;
     ranges[1] = ownership.array(listener.config.supported_versions::*u8,
@@ -430,15 +431,17 @@ pub fun initialize_result(listener: *Listener, config: Config, storage: Storage,
     }
     if (!ownership.bytes(admission_manager::*u8, $size_of(admission.Manager),
             ownership.ZERO_FORBIDDEN).valid ||
-        !ownership.bytes((?token_manager.config)::*u8, $size_of(token.Manager),
-            ownership.ZERO_FORBIDDEN).valid) {
+        !ownership.anchored_record[token.Manager, token.Config](
+            ?token_manager.config,
+            $offset_of(token.Manager, config)).valid) {
         result.error = ERROR_CONFIG;
         ret result;
     }
-    val listener_range: ownership.Range = ownership.bytes((?listener.config)::*u8,
-        $size_of(Listener), ownership.ZERO_FORBIDDEN);
-    val token_range: ownership.Range = ownership.bytes((?token_manager.config)::*u8,
-        $size_of(token.Manager), ownership.ZERO_FORBIDDEN);
+    val listener_range: ownership.Range = ownership.anchored_record[
+        Listener, Config](?listener.config, $offset_of(Listener, config));
+    val token_range: ownership.Range =
+        ownership.anchored_record[token.Manager, token.Config](
+            ?token_manager.config, $offset_of(token.Manager, config));
     var ranges: [8]ownership.Range;
     ranges[0] = listener_range;
     ranges[1] = ownership.array(config.supported_versions::*u8,
@@ -823,10 +826,11 @@ fun external_disjoint(listener: *Listener, value: ownership.Range) bool {
     if (!value.valid) { ret false; }
     val admissions: *admission.Manager = listener.admission_manager;
     val tokens: *token.Manager = listener.token_manager;
-    val listener_range: ownership.Range = ownership.bytes((?listener.config)::*u8,
-        $size_of(Listener), ownership.ZERO_FORBIDDEN);
-    val token_range: ownership.Range = ownership.bytes((?tokens.config)::*u8,
-        $size_of(token.Manager), ownership.ZERO_FORBIDDEN);
+    val listener_range: ownership.Range = ownership.anchored_record[
+        Listener, Config](?listener.config, $offset_of(Listener, config));
+    val token_range: ownership.Range =
+        ownership.anchored_record[token.Manager, token.Config](?tokens.config,
+            $offset_of(token.Manager, config));
     var ranges: [8]ownership.Range;
     ranges[0] = listener_range;
     ranges[1] = ownership.array(listener.config.supported_versions::*u8,
@@ -2007,7 +2011,29 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         !closed.storage_attempted || closed.storage_retained ||
         admission_manager.listener_lease != 0 ||
         token_manager.listener_lease != 0) { ret 14; }
-    if (!token.lease_listener(?token_manager, 554)) { ret 15; }
+    val fourth: InitializeResult = initialize_result(?listener, config, storage,
+        ?admission_manager, ?token_manager);
+    if (!fourth.ok) { ret 15; }
+    pending[0].listener_generation = fourth.handle.generation + 1;
+    val storage_retained: LeaseCleanupResult = abort_initialize(?listener,
+        fourth.handle);
+    if (storage_retained.status != CLEANUP_RETAINED ||
+        !storage_retained.admission_attempted ||
+        !storage_retained.token_attempted ||
+        !storage_retained.storage_attempted ||
+        storage_retained.admission_retained || storage_retained.token_retained ||
+        !storage_retained.storage_retained || !listener.cleanup_pending ||
+        !listener.owns_storage || listener.owns_admission_lease ||
+        listener.owns_token_lease || admission_manager.listener_lease != 0 ||
+        token_manager.listener_lease != 0) { ret 16; }
+    pending[0].listener_generation = fourth.handle.generation;
+    val storage_complete: LeaseCleanupResult = retry_initialization_cleanup(
+        ?listener, storage_retained.handle);
+    if (storage_complete.status != CLEANUP_COMPLETE ||
+        storage_complete.admission_attempted || storage_complete.token_attempted ||
+        !storage_complete.storage_attempted || storage_complete.storage_retained ||
+        listener.cleanup_pending || listener.owns_storage) { ret 17; }
+    if (!token.lease_listener(?token_manager, 554)) { ret 18; }
     val token_busy: InitializeResult = initialize_result(?listener, config,
         storage, ?admission_manager, ?token_manager);
     if (token_busy.ok || token_busy.error != ERROR_TOKEN ||
@@ -2018,8 +2044,8 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         token_busy.cleanup.storage_retained || listener.cleanup_pending ||
         admission_manager.listener_lease != 0 ||
         token_manager.listener_lease != 554 ||
-        !token.release_listener(?token_manager, 554)) { ret 16; }
-    if (!admission.lease_listener(?admission_manager, 555)) { ret 17; }
+        !token.release_listener(?token_manager, 554)) { ret 19; }
+    if (!admission.lease_listener(?admission_manager, 555)) { ret 20; }
     val admission_busy: InitializeResult = initialize_result(?listener, config,
         storage, ?admission_manager, ?token_manager);
     if (admission_busy.ok || admission_busy.error != ERROR_ADMISSION ||
@@ -2029,7 +2055,7 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         !admission_busy.cleanup.storage_attempted ||
         listener.cleanup_pending || token_manager.listener_lease != 0 ||
         admission_manager.listener_lease != 555 ||
-        !admission.release_listener(?admission_manager, 555)) { ret 18; }
+        !admission.release_listener(?admission_manager, 555)) { ret 21; }
     ct.zeroize(?key[0], 32);
     ret 0;
 }

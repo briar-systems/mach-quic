@@ -496,14 +496,10 @@ fun callback_finish_close[T](driver: *Driver[T]) bool {
     ret result;
 }
 
-# a Driver[T] whose protocol context is secret-welded cannot be cast to bytes,
-# so its range is anchored on a public field the same way core.mach anchors
-# Secrets
 fun driver_extent[T](driver: *Driver[T]) ownership.Range {
-    val base: usize = (?driver.cancellation)::usize -
-        $offset_of(Driver[T], cancellation);
-    ret ownership.bytes(base::*u8, $size_of(Driver[T]),
-        ownership.ZERO_FORBIDDEN);
+    if (driver == nil) { var empty: ownership.Range; ret empty; }
+    ret ownership.anchored_record[Driver[T], Cancellation](
+        ?driver.cancellation, $offset_of(Driver[T], cancellation));
 }
 
 fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
@@ -518,8 +514,7 @@ fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
     ranges[0] = driver_extent[T](driver);
     ranges[1] = ownership.array(storage.sends::*u8, storage.send_capacity,
         $size_of(SendSlot), ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.bytes((?streams.config)::*u8,
-        $size_of(stream_api.Manager), ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.record[stream_api.Manager](streams);
     ranges[3] = ownership.array(streams.storage.streams::*u8,
         streams.storage.stream_capacity, $size_of(stream_api.Stream),
         ownership.ZERO_FORBIDDEN);
@@ -541,8 +536,7 @@ fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
     ranges[10] = ownership.array(streams.storage.receive_present::*u8,
         streams.storage.receive_state_length, $size_of(bool),
         ownership.ZERO_FORBIDDEN);
-    ranges[11] = ownership.bytes((?datagrams.config)::*u8,
-        $size_of(datagram_api.Queue), ownership.ZERO_FORBIDDEN);
+    ranges[11] = ownership.record[datagram_api.Queue](datagrams);
     ranges[12] = ownership.array(datagrams.storage.send_entries::*u8,
         datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
         datagram_zero);
@@ -553,8 +547,7 @@ fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
         datagram_zero);
     ranges[15] = ownership.bytes(datagrams.storage.receive_bytes,
         datagrams.storage.receive_bytes_length, datagram_zero);
-    ranges[16] = ownership.bytes(scope::*u8, $size_of(cancel.Scope),
-        ownership.ZERO_FORBIDDEN);
+    ranges[16] = ownership.record[cancel.Scope](scope);
     ranges[17] = protocol.context_range(protocol.context);
     ret ownership.all_disjoint(?ranges[0], 18);
 }
@@ -570,8 +563,7 @@ fun borrowed_disjoint[T](driver: *Driver[T], borrowed: ownership.Range) bool {
     ranges[1] = ownership.array(driver.storage.sends::*u8,
         driver.storage.send_capacity, $size_of(SendSlot),
         ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.bytes((?driver.streams.config)::*u8,
-        $size_of(stream_api.Manager), ownership.ZERO_FORBIDDEN);
+    ranges[2] = ownership.record[stream_api.Manager](driver.streams);
     ranges[3] = ownership.array(driver.streams.storage.streams::*u8,
         driver.streams.storage.stream_capacity, $size_of(stream_api.Stream),
         ownership.ZERO_FORBIDDEN);
@@ -593,8 +585,7 @@ fun borrowed_disjoint[T](driver: *Driver[T], borrowed: ownership.Range) bool {
     ranges[10] = ownership.array(driver.streams.storage.receive_present::*u8,
         driver.streams.storage.receive_state_length, $size_of(bool),
         ownership.ZERO_FORBIDDEN);
-    ranges[11] = ownership.bytes((?driver.datagrams.config)::*u8,
-        $size_of(datagram_api.Queue), ownership.ZERO_FORBIDDEN);
+    ranges[11] = ownership.record[datagram_api.Queue](driver.datagrams);
     ranges[12] = ownership.array(driver.datagrams.storage.send_entries::*u8,
         driver.datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
         datagram_zero);
@@ -605,8 +596,7 @@ fun borrowed_disjoint[T](driver: *Driver[T], borrowed: ownership.Range) bool {
         datagram_zero);
     ranges[15] = ownership.bytes(driver.datagrams.storage.receive_bytes,
         driver.datagrams.storage.receive_bytes_length, datagram_zero);
-    ranges[16] = ownership.bytes(driver.operation_scope::*u8,
-        $size_of(cancel.Scope), ownership.ZERO_FORBIDDEN);
+    ranges[16] = ownership.record[cancel.Scope](driver.operation_scope);
     ranges[17] = driver.protocol.context_range(driver.protocol.context);
     var i: usize = 0;
     for (i < 18) {
@@ -940,8 +930,7 @@ pub fun receive_datagram[T](driver: *Driver[T], input: *Datagram) OperationResul
     if (driver == nil || input == nil || !driver.initialized) {
         ret operation_error(ERROR_BUFFER);
     }
-    val input_record: ownership.Range = ownership.bytes(input::*u8,
-        $size_of(Datagram), ownership.ZERO_FORBIDDEN);
+    val input_record: ownership.Range = ownership.record[Datagram](input);
     if (!borrowed_disjoint[T](driver, input_record)) {
         ret operation_error(ERROR_BUFFER);
     }
@@ -979,8 +968,8 @@ pub fun receive_datagram[T](driver: *Driver[T], input: *Datagram) OperationResul
 pub fun receive_native[T](driver: *Driver[T], packet: *net_types.Packet,
                        bound_local: ip.Endpoint, received_at_ns: u64, ecn: u8) OperationResult {
     if (driver == nil || !driver.initialized || packet == nil ||
-        !borrowed_disjoint[T](driver, ownership.bytes(packet::*u8,
-            $size_of(net_types.Packet), ownership.ZERO_FORBIDDEN)) ||
+        !borrowed_disjoint[T](driver,
+            ownership.record[net_types.Packet](packet)) ||
         packet.truncated || packet.length > packet.capacity ||
         (packet.length > 0 && packet.buffer == nil)) { ret operation_error(ERROR_BUFFER); }
     var local: ip.Endpoint = bound_local;

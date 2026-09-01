@@ -677,14 +677,13 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
 
     # the provider record itself is reported, and the configuration copy that
     # lives inside it is not reported beside it
-    val record: ownership.Range = ownership.bytes(
-        ((?listener_engine.state)::usize -
-            $offset_of(server.Server, state))::*u8,
-        $size_of(server.Server), ownership.ZERO_FORBIDDEN);
-    val configuration: ownership.Range = ownership.bytes(
-        ((?listener_engine.configuration.limits)::usize -
-            $offset_of(config.ServerConfig, limits))::*u8,
-        $size_of(config.ServerConfig), ownership.ZERO_FORBIDDEN);
+    val record: ownership.Range = ownership.anchored_record[
+        server.Server, u8](?listener_engine.state,
+            $offset_of(server.Server, state));
+    val configuration: ownership.Range = ownership.anchored_record[
+        config.ServerConfig, config.Limits](
+            ?listener_engine.configuration.limits,
+            $offset_of(config.ServerConfig, limits));
     if (!ownership.contains(record, configuration)) { ret 8; }
     var found: bool = false;
     var i: usize = 0;

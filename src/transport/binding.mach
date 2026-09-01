@@ -104,12 +104,10 @@ fun refused_datagram() transport_api.CoreDatagram {
     ret value;
 }
 
-# the binding is secret-welded through its Secrets pointer, so its own extent is
-# anchored on a public field rather than taken by a cast
 fun binding_range(binding: *Binding) ownership.Range {
-    if (binding == nil) { ret ownership.bytes(nil, 0, ownership.ZERO_FORBIDDEN); }
-    val base: usize = (?binding.anchor)::usize - $offset_of(Binding, anchor);
-    ret ownership.bytes(base::*u8, $size_of(Binding), ownership.ZERO_FORBIDDEN);
+    if (binding == nil) { var empty: ownership.Range; ret empty; }
+    ret ownership.anchored_record[Binding, u64](?binding.anchor,
+        $offset_of(Binding, anchor));
 }
 
 fun on_receive(binding: *Binding,

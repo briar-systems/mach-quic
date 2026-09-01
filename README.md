@@ -341,7 +341,7 @@ inclusive pointer ranges, checked array products, and pairwise disjoint output,
 configuration, and owned-storage regions before clearing or publishing anything.
 Core initialization additionally validates one combined ownership set containing
 Core, Secrets, handshake, CID, path, stream, DATAGRAM, and every nested backing
-array. A mixed secret/public record is anchored through its first public field
+array. A mixed secret/public record is anchored through a public field
 before its complete range is admitted. Reinitializing a live object is rejected
 without changing its prior state.
 
@@ -476,12 +476,14 @@ on its implementation criteria with that one left explicitly undemonstrated.
 ## Connection assembly
 
 `connection.assembly` builds a connection and every manager it owns from one
-`Config`. The consumer declares a single `Connection`, supplies its identity,
-endpoints, limits and an initialized `mach-tls` engine, and calls `init_client`
-or `init_server`. It imports nothing from packet, recovery, path or stream: the
-record embeds its own storage at the capacities named by the module's public
-`val`s, so a caller sizes nothing and there is no per-component storage record to
-assemble.
+`Config`. `Connection` is the small secret-welded control record. The caller
+separately owns a public `Storage` whose fixed arrays contain every public
+backing buffer, plus a secret-welded `SecretStorage` whose fixed arrays contain
+the two secret plaintext buffers. Their types enforce every required capacity.
+Both records remain at fixed addresses until release succeeds, and their fresh
+`source` and `leased` headers must be clear on first use. The consumer also
+supplies identities, endpoints, limits, an initialized `mach-tls` engine, and a
+cancellation scope to `init_client` or `init_server`.
 
 The reason this belongs in the library rather than in each consumer is that the
 core requires twelve exact equalities between the encoded local transport
@@ -642,25 +644,29 @@ The initiating close cause and a later abortive terminal cause are preserved
 separately.
 
 `connection.assembly.release_closed` is the terminal transaction that makes a
-finished fixed connection record reusable. It refuses without mutation until the
+finished connection and both backing classes reusable. It refuses without mutation until the
 driver is closed, cancellation is detached, routing is retired, the core and TLS
 provider are destroyed, and every manager lease and application borrower is gone.
 Success removes retained protocol and configuration references while preserving
 route epochs and generated-datagram slot generations. A second call after success
 is idempotent. The next `init_client` or `init_server` may use the same assembly
-address with a newly initialized TLS provider and cancellation scope, and delayed
-routes or transport tokens from its prior use remain stale.
+address and backing records with a newly initialized TLS provider and
+cancellation scope, and delayed routes or transport tokens from its prior use
+remain stale.
 
 Initialization has the same ownership boundary. A failed `init_client` or
 `init_server` retires any route that was staged internally, releases core leases,
 detaches the handshake adapter without destroying the caller's TLS provider, and
-closes every manager initialized by that attempt. `reusable` confirms the complete
-rollback before a bounded owner returns the fixed record to its free list.
+closes every manager initialized by that attempt. If rollback retains ownership,
+`InitResult.cleanup_retained` is true and both backing leases remain held.
+`release_closed` retries that unpublished initialization cleanup without requiring
+a live driver. Only complete cleanup clears both lease headers. `reusable`
+confirms the complete rollback before a bounded owner reclaims either backing
+class or returns the control record to its free list.
 
 ## Development
 
-Dependencies use exact Git tags or commit pins. The temporary `mach-tls` commit
-pin remains until its client handshake is released as a tag.
+Dependencies use exact Git tags.
 
 ```sh
 mach dep pull .

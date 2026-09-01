@@ -10,29 +10,75 @@ pub val ZERO_FORBIDDEN: ZeroPolicy = 1;
 pub val ZERO_ALLOWED: ZeroPolicy = 2;
 
 pub rec Range {
-    data: *u8;
+    start: usize;
     length: usize;
     valid: bool;
 }
 
-pub fun bytes(data: *u8, length: usize, zero_policy: ZeroPolicy) Range {
+rec AnchoredFixture {
+    secret: [8]^u8;
+    anchor: u64;
+    tail: u8;
+}
+
+pub fun address(start: usize, length: usize,
+                zero_policy: ZeroPolicy) Range {
     var value: Range;
-    value.data = data;
+    value.start = start;
     value.length = length;
     if (zero_policy != ZERO_FORBIDDEN && zero_policy != ZERO_ALLOWED) { ret value; }
     if (length == 0) {
         value.valid = zero_policy == ZERO_ALLOWED;
         ret value;
     }
-    if (data == nil || length - 1 > ~(0::usize) - data::usize) { ret value; }
+    if (start == 0 || length - 1 > ~(0::usize) - start) { ret value; }
     value.valid = true;
     ret value;
+}
+
+pub fun bytes(data: *u8, length: usize, zero_policy: ZeroPolicy) Range {
+    ret address(data::usize, length, zero_policy);
+}
+
+# public records become numeric extents without a byte alias
+pub fun record[T](data: *T) Range {
+    if (data == nil) {
+        var invalid: Range;
+        ret invalid;
+    }
+    val start: usize = data::usize;
+    if (start % $align_of(T) != 0) {
+        var invalid: Range;
+        ret invalid;
+    }
+    ret address(start, $size_of(T), ZERO_FORBIDDEN);
+}
+
+# pass ?value.field with $offset_of(T, field) for a public field of mixed T
+pub fun anchored_record[T, U](anchor: *U, offset: usize) Range {
+    if (anchor == nil) {
+        var invalid: Range;
+        ret invalid;
+    }
+    val anchor_address: usize = anchor::usize;
+    if (offset >= $size_of(T) || offset % $align_of(U) != 0 ||
+        $size_of(U) > $size_of(T) - offset ||
+        anchor_address < offset || anchor_address % $align_of(U) != 0) {
+        var invalid: Range;
+        ret invalid;
+    }
+    val start: usize = anchor_address - offset;
+    if (start % $align_of(T) != 0) {
+        var invalid: Range;
+        ret invalid;
+    }
+    ret address(start, $size_of(T), ZERO_FORBIDDEN);
 }
 
 pub fun array(data: *u8, count: usize, item_size: usize,
               zero_policy: ZeroPolicy) Range {
     var value: Range;
-    value.data = data;
+    value.start = data::usize;
     if (item_size == 0 || (count != 0 && item_size > ~(0::usize) / count)) {
         ret value;
     }
@@ -42,8 +88,8 @@ pub fun array(data: *u8, count: usize, item_size: usize,
 pub fun disjoint(left: Range, right: Range) bool {
     if (!left.valid || !right.valid) { ret false; }
     if (left.length == 0 || right.length == 0) { ret true; }
-    val left_start: usize = left.data::usize;
-    val right_start: usize = right.data::usize;
+    val left_start: usize = left.start;
+    val right_start: usize = right.start;
     val left_end: usize = left_start + left.length - 1;
     val right_end: usize = right_start + right.length - 1;
     ret left_end < right_start || right_end < left_start;
@@ -52,8 +98,8 @@ pub fun disjoint(left: Range, right: Range) bool {
 pub fun contains(outer: Range, inner: Range) bool {
     if (!outer.valid || !inner.valid || outer.length == 0 ||
         inner.length == 0) { ret false; }
-    val outer_start: usize = outer.data::usize;
-    val inner_start: usize = inner.data::usize;
+    val outer_start: usize = outer.start;
+    val inner_start: usize = inner.start;
     if (inner_start < outer_start) { ret false; }
     ret inner_start + inner.length - 1 <= outer_start + outer.length - 1;
 }
@@ -196,6 +242,30 @@ test "quic.connection.ownership: zero and scaled ranges have explicit policies" 
     if (!all_disjoint(?ranges[0], 3)) { ret 2; }
     ranges[2] = bytes(?storage[1], 1, ZERO_FORBIDDEN);
     if (all_disjoint(?ranges[0], 3)) { ret 3; }
+    ret 0;
+}
+
+test "quic.connection.ownership: mixed records use checked numeric anchors" {
+    var fixture: AnchoredFixture;
+    val offset: usize = $offset_of(AnchoredFixture, anchor);
+    val value: Range = anchored_record[AnchoredFixture, u64](?fixture.anchor,
+        offset);
+    if (!value.valid || value.start != (?fixture.anchor)::usize - offset ||
+        value.length != $size_of(AnchoredFixture)) { ret 1; }
+    if (anchored_record[AnchoredFixture, u64](nil, offset).valid ||
+        anchored_record[AnchoredFixture, u64]((offset - 1)::*u64,
+            offset).valid ||
+        anchored_record[AnchoredFixture, u64](?fixture.anchor,
+            $size_of(AnchoredFixture)).valid ||
+        anchored_record[AnchoredFixture, u64](?fixture.anchor,
+            offset + 1).valid) { ret 2; }
+    var overhang: [16]u8;
+    if (anchored_record[AnchoredFixture, [16]u8](?overhang,
+            $size_of(AnchoredFixture) - 8).valid) { ret 3; }
+    if (anchored_record[[16]u8, u64]((8::usize)::*u64, 1).valid) { ret 4; }
+    val maximum: usize = ~(0::usize);
+    if (array((1::usize)::*u8, maximum / 5 + 1, 5,
+            ZERO_FORBIDDEN).valid) { ret 5; }
     ret 0;
 }
 
