@@ -847,14 +847,10 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ranges[23] = ownership.anchored_record[
         handshake_api.Adapter, handshake_api.Config](?handshake.config,
             $offset_of(handshake_api.Adapter, config));
-    ranges[24] = ownership.bytes((?cids.config)::*u8,
-        $size_of(cid_api.Manager), ownership.ZERO_FORBIDDEN);
-    ranges[25] = ownership.bytes((?paths.config)::*u8,
-        $size_of(path_api.Manager), ownership.ZERO_FORBIDDEN);
-    ranges[26] = ownership.bytes((?streams.config)::*u8,
-        $size_of(stream_api.Manager), ownership.ZERO_FORBIDDEN);
-    ranges[27] = ownership.bytes((?datagrams.config)::*u8,
-        $size_of(datagram_api.Queue), ownership.ZERO_FORBIDDEN);
+    ranges[24] = ownership.record[cid_api.Manager](cids);
+    ranges[25] = ownership.record[path_api.Manager](paths);
+    ranges[26] = ownership.record[stream_api.Manager](streams);
+    ranges[27] = ownership.record[datagram_api.Queue](datagrams);
     val anchored: ownership.Disjointness = ownership.disjointness(?ranges[0], 28);
     if (anchored.kind != ownership.OVERLAP_NONE) {
         ret refuse_overlap(result, INIT_COMPONENT_RANGES, anchored);
