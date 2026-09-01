@@ -1887,3 +1887,149 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
     ct.zeroize(?key[0], 32);
     ret 0;
 }
+
+test "quic.connection.listener: unpublished lease cleanup retains each manager leg" {
+    var peer_slots: [1]admission.PeerSlot;
+    var charges: [1]admission.ChargeSlot;
+    var admission_manager: admission.Manager;
+    if (!admission.initialize(?admission_manager, admission.Config{
+        source: 551, max_connections: 1, max_connections_per_peer: 1},
+        admission.Storage{peers: ?peer_slots[0], peer_capacity: 1,
+            charges: ?charges[0], charge_capacity: 1})) { ret 1; }
+    var replay: [1]token.ReplaySlot;
+    var key: [32]^u8;
+    var token_manager: token.Manager;
+    if (!token.initialize(?token_manager, token.Config{source: 552,
+        retry_max_age_ns: 100, address_max_age_ns: 1000},
+        token.Storage{replay: ?replay[0], replay_capacity: 1}, 1,
+        contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
+    var pending: [1]Pending;
+    var versions: [1]u32 = [1]u32{packet.VERSION_1};
+    val config: Config = Config{source: 553,
+        supported_versions: ?versions[0], supported_version_count: 1,
+        minimum_initial_size: 1200, require_retry: false};
+    val storage: Storage = Storage{pending: ?pending[0], pending_capacity: 1};
+    var listener: Listener;
+    val first: InitializeResult = initialize_result(?listener, config, storage,
+        ?admission_manager, ?token_manager);
+    if (!first.ok || first.error != ERROR_NONE ||
+        first.handle.source != config.source || first.handle.generation == 0 ||
+        !listener.initialized || !listener.owns_storage ||
+        !listener.owns_admission_lease ||
+        !listener.owns_token_lease) { ret 2; }
+    admission_manager.initialized = false;
+    val admission_retained: LeaseCleanupResult = abort_initialize(?listener,
+        first.handle);
+    if (admission_retained.status != CLEANUP_RETAINED ||
+        !admission_retained.admission_attempted ||
+        !admission_retained.token_attempted ||
+        !admission_retained.admission_retained ||
+        admission_retained.token_retained ||
+        !admission_retained.storage_retained ||
+        admission_retained.storage_attempted || listener.initialized ||
+        !listener.cleanup_pending ||
+        admission_manager.listener_lease != config.source ||
+        token_manager.listener_lease != 0) { ret 3; }
+    val admission_only: LeaseCleanupResult = retry_initialization_cleanup(
+        ?listener, admission_retained.handle);
+    if (admission_only.status != CLEANUP_RETAINED ||
+        !admission_only.admission_attempted || admission_only.token_attempted ||
+        admission_only.storage_attempted ||
+        !admission_only.admission_retained || admission_only.token_retained ||
+        !admission_only.storage_retained) {
+        ret 4;
+    }
+    admission_manager.initialized = true;
+    if (initialize(?listener, config, storage, ?admission_manager,
+            ?token_manager) ||
+        initialization_cleanup(?listener).status != CLEANUP_RETAINED) { ret 5; }
+    var blocked_listener: Listener;
+    val blocked: InitializeResult = initialize_result(?blocked_listener, config,
+        storage, ?admission_manager, ?token_manager);
+    if (blocked.ok || blocked.error != ERROR_CAPACITY ||
+        blocked_listener.initialized ||
+        initialization_cleanup(?listener).status != CLEANUP_RETAINED) { ret 5; }
+    val admission_complete: LeaseCleanupResult = retry_initialization_cleanup(
+        ?listener, admission_only.handle);
+    if (admission_complete.status != CLEANUP_COMPLETE || listener.initialized ||
+        !admission_complete.storage_attempted ||
+        admission_complete.storage_retained ||
+        listener.cleanup_pending || listener.admission_manager != nil ||
+        listener.token_manager != nil || admission_manager.listener_lease != 0 ||
+        retry_initialization_cleanup(?listener, admission_complete.handle).status !=
+            CLEANUP_INVALID) { ret 6; }
+    val second: InitializeResult = initialize_result(?listener, config, storage,
+        ?admission_manager, ?token_manager);
+    if (!second.ok || second.handle.generation == first.handle.generation ||
+        pending[0].state != PENDING_FREE ||
+        abort_initialize(?listener, first.handle).status != CLEANUP_INVALID) {
+        ret 7;
+    }
+    token_manager.initialized = false;
+    val token_retained: LeaseCleanupResult = abort_initialize(?listener,
+        second.handle);
+    if (token_retained.status != CLEANUP_RETAINED ||
+        !token_retained.admission_attempted || !token_retained.token_attempted ||
+        token_retained.admission_retained || !token_retained.token_retained ||
+        !token_retained.storage_retained || token_retained.storage_attempted ||
+        admission_manager.listener_lease != 0 ||
+        token_manager.listener_lease != config.source) { ret 8; }
+    val token_only: LeaseCleanupResult = retry_initialization_cleanup(?listener,
+        token_retained.handle);
+    if (token_only.status != CLEANUP_RETAINED ||
+        token_only.admission_attempted || !token_only.token_attempted ||
+        token_only.storage_attempted || token_only.admission_retained ||
+        !token_only.token_retained || !token_only.storage_retained) { ret 9; }
+    token_manager.initialized = true;
+    if (retry_initialization_cleanup(?listener, token_only.handle).status !=
+        CLEANUP_COMPLETE) { ret 10; }
+    val third: InitializeResult = initialize_result(?listener, config, storage,
+        ?admission_manager, ?token_manager);
+    if (!third.ok || !begin_close(?listener)) { ret 11; }
+    admission_manager.initialized = false;
+    token_manager.initialized = false;
+    val both: LeaseCleanupResult = finish_close_result(?listener);
+    if (both.status != CLEANUP_RETAINED || !both.admission_retained ||
+        !both.token_retained || !both.storage_retained ||
+        !both.admission_attempted || !both.token_attempted ||
+        both.storage_attempted) { ret 12; }
+    admission_manager.initialized = true;
+    val token_last: LeaseCleanupResult = retry_initialization_cleanup(?listener,
+        both.handle);
+    if (token_last.status != CLEANUP_RETAINED ||
+        token_last.admission_retained || !token_last.token_retained ||
+        !token_last.storage_retained || token_last.storage_attempted ||
+        !token_last.admission_attempted || !token_last.token_attempted) { ret 13; }
+    token_manager.initialized = true;
+    val closed: LeaseCleanupResult = retry_initialization_cleanup(?listener,
+        token_last.handle);
+    if (closed.status != CLEANUP_COMPLETE ||
+        !closed.storage_attempted || closed.storage_retained ||
+        admission_manager.listener_lease != 0 ||
+        token_manager.listener_lease != 0) { ret 14; }
+    if (!token.lease_listener(?token_manager, 554)) { ret 15; }
+    val token_busy: InitializeResult = initialize_result(?listener, config,
+        storage, ?admission_manager, ?token_manager);
+    if (token_busy.ok || token_busy.error != ERROR_TOKEN ||
+        token_busy.cleanup.status != CLEANUP_COMPLETE ||
+        !token_busy.cleanup.admission_attempted ||
+        token_busy.cleanup.token_attempted ||
+        !token_busy.cleanup.storage_attempted ||
+        token_busy.cleanup.storage_retained || listener.cleanup_pending ||
+        admission_manager.listener_lease != 0 ||
+        token_manager.listener_lease != 554 ||
+        !token.release_listener(?token_manager, 554)) { ret 16; }
+    if (!admission.lease_listener(?admission_manager, 555)) { ret 17; }
+    val admission_busy: InitializeResult = initialize_result(?listener, config,
+        storage, ?admission_manager, ?token_manager);
+    if (admission_busy.ok || admission_busy.error != ERROR_ADMISSION ||
+        admission_busy.cleanup.status != CLEANUP_COMPLETE ||
+        admission_busy.cleanup.admission_attempted ||
+        admission_busy.cleanup.token_attempted ||
+        !admission_busy.cleanup.storage_attempted ||
+        listener.cleanup_pending || token_manager.listener_lease != 0 ||
+        admission_manager.listener_lease != 555 ||
+        !admission.release_listener(?admission_manager, 555)) { ret 18; }
+    ct.zeroize(?key[0], 32);
+    ret 0;
+}
