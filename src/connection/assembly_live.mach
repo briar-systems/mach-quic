@@ -636,6 +636,30 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
                 data: contracts.Bytes{data: ?listener_parameters[0],
                     len: listener_encoded_two}},
             server.QUIC_TRANSPORT_PARAMETERS)) { ret 228; }
+    cancel.cancel(?listener_scope);
+    val refused_two: assembly.InitResult = assembly.init_server(?listener,
+        ?listener_config_two, ?listener_tls_two, ?listener_scope, clock + 2000);
+    if (refused_two.ok || refused_two.stage != assembly.STAGE_DRIVER ||
+        listener.initialized || !listener.released ||
+        !assembly.reusable(?listener) ||
+        assembly.routing_snapshot(?listener).initialized ||
+        !server.destroy(?listener_tls_two) ||
+        !cancel.destroy(?listener_scope) ||
+        !server.init(?listener_tls_two,
+            ?listener_tls_config, server.Storage{
+                input: ?listener_input[0], input_capacity: 8192,
+                output: ?listener_output[0], output_capacity: 8192,
+                hello: ?listener_hello[0], hello_capacity: 8192,
+                certificates: ?listener_certificates[0],
+                certificate_capacity: 4,
+                peer_parameters: ?listener_peer_parameters[0],
+                peer_parameters_capacity: 512},
+            server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+                data: contracts.Bytes{data: ?listener_parameters[0],
+                    len: listener_encoded_two}},
+            server.QUIC_TRANSPORT_PARAMETERS) ||
+        !cancel.make_root(?listener_scope, false,
+            time.Time{sec: 0, nsec: 0})) { ret 235; }
     val reserved_two: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config_two, ?listener_tls_two, ?listener_scope, clock + 2000);
     if (!reserved_two.ok || reserved_two.core.reason != core.INIT_OK) { ret 229; }
