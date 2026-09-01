@@ -285,18 +285,19 @@ fun version_supported(listener: *Listener, version: u32) bool {
 
 fun physical(listener: *Listener) bool {
     if (listener == nil) { ret false; }
-    val listener_range: ownership.Range = ownership.bytes((?listener.config)::*u8,
-        $size_of(Listener), ownership.ZERO_FORBIDDEN);
+    val listener_range: ownership.Range = ownership.anchored_record[
+        Listener, Config](?listener.config, $offset_of(Listener, config));
     if (!listener_range.valid) { ret false; }
     val admissions: *admission.Manager = listener.admission_manager;
     val tokens: *token.Manager = listener.token_manager;
     if (admissions == nil || tokens == nil ||
         !ownership.bytes(admissions::*u8, $size_of(admission.Manager),
             ownership.ZERO_FORBIDDEN).valid ||
-        !ownership.bytes((?tokens.config)::*u8, $size_of(token.Manager),
-            ownership.ZERO_FORBIDDEN).valid) { ret false; }
-    val token_range: ownership.Range = ownership.bytes((?tokens.config)::*u8,
-        $size_of(token.Manager), ownership.ZERO_FORBIDDEN);
+        !ownership.anchored_record[token.Manager, token.Config](?tokens.config,
+            $offset_of(token.Manager, config)).valid) { ret false; }
+    val token_range: ownership.Range =
+        ownership.anchored_record[token.Manager, token.Config](?tokens.config,
+            $offset_of(token.Manager, config));
     var ranges: [8]ownership.Range;
     ranges[0] = listener_range;
     ranges[1] = ownership.array(listener.config.supported_versions::*u8,
@@ -430,15 +431,17 @@ pub fun initialize_result(listener: *Listener, config: Config, storage: Storage,
     }
     if (!ownership.bytes(admission_manager::*u8, $size_of(admission.Manager),
             ownership.ZERO_FORBIDDEN).valid ||
-        !ownership.bytes((?token_manager.config)::*u8, $size_of(token.Manager),
-            ownership.ZERO_FORBIDDEN).valid) {
+        !ownership.anchored_record[token.Manager, token.Config](
+            ?token_manager.config,
+            $offset_of(token.Manager, config)).valid) {
         result.error = ERROR_CONFIG;
         ret result;
     }
-    val listener_range: ownership.Range = ownership.bytes((?listener.config)::*u8,
-        $size_of(Listener), ownership.ZERO_FORBIDDEN);
-    val token_range: ownership.Range = ownership.bytes((?token_manager.config)::*u8,
-        $size_of(token.Manager), ownership.ZERO_FORBIDDEN);
+    val listener_range: ownership.Range = ownership.anchored_record[
+        Listener, Config](?listener.config, $offset_of(Listener, config));
+    val token_range: ownership.Range =
+        ownership.anchored_record[token.Manager, token.Config](
+            ?token_manager.config, $offset_of(token.Manager, config));
     var ranges: [8]ownership.Range;
     ranges[0] = listener_range;
     ranges[1] = ownership.array(config.supported_versions::*u8,
@@ -823,10 +826,11 @@ fun external_disjoint(listener: *Listener, value: ownership.Range) bool {
     if (!value.valid) { ret false; }
     val admissions: *admission.Manager = listener.admission_manager;
     val tokens: *token.Manager = listener.token_manager;
-    val listener_range: ownership.Range = ownership.bytes((?listener.config)::*u8,
-        $size_of(Listener), ownership.ZERO_FORBIDDEN);
-    val token_range: ownership.Range = ownership.bytes((?tokens.config)::*u8,
-        $size_of(token.Manager), ownership.ZERO_FORBIDDEN);
+    val listener_range: ownership.Range = ownership.anchored_record[
+        Listener, Config](?listener.config, $offset_of(Listener, config));
+    val token_range: ownership.Range =
+        ownership.anchored_record[token.Manager, token.Config](?tokens.config,
+            $offset_of(token.Manager, config));
     var ranges: [8]ownership.Range;
     ranges[0] = listener_range;
     ranges[1] = ownership.array(listener.config.supported_versions::*u8,

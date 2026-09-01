@@ -243,6 +243,8 @@ val FAULT_COMPONENT_OVERLAP: u8 = 4;
 val FAULT_COMPONENT_BORROWED: u8 = 5;
 val FAULT_PROVIDER_SECRETS: u8 = 6;
 val FAULT_PROVIDER_START: u8 = 7;
+val FAULT_RECEIVE_KEYS: u8 = 8;
+val FAULT_SEND_KEYS: u8 = 9;
 
 fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
                           now_ns: u64, fault: u8) bool {
@@ -400,7 +402,7 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
         negotiation: negotiation.Storage{
             retry_token: ?fixture.retry_token[0], retry_token_capacity: 128,
             retry_pseudo: ?fixture.retry_pseudo[0], retry_pseudo_capacity: 256}};
-    val secret_storage: core.SecretStorage = core.SecretStorage{
+    var secret_storage: core.SecretStorage = core.SecretStorage{
         receive_plaintext: ?fixture.secret_receive[0],
         receive_plaintext_capacity: 1200,
         send_plaintext: ?fixture.secret_send[0],
@@ -420,6 +422,14 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
     }
     if (fault == FAULT_PROVIDER_SECRETS) {
         fixture.adapter.protocol.secret_context = ?fixture.secret_receive[0];
+    }
+    if (fault == FAULT_RECEIVE_KEYS) {
+        secret_storage.receive_plaintext =
+            ?fixture.secrets.initial_keys.client.secret[0];
+    }
+    if (fault == FAULT_SEND_KEYS) {
+        secret_storage.send_plaintext =
+            ?fixture.secrets.application_receive.next.hp[0];
     }
     if (role == transport.CLIENT) {
         fixture.init_result = core.init_client_result(?fixture.engine,
@@ -775,6 +785,20 @@ test "quic.connection.core: a refused initialization names the check that reject
         clean.init_result.reason_kind != ownership.OVERLAP_NONE ||
         clean.init_result.reason_first != 0 ||
         clean.init_result.reason_second != 0) { ret 6; }
+    ret 0;
+}
+
+test "quic.connection.core: external plaintext cannot alias welded keys" {
+    var receive: Fixture;
+    if (initialize_with_fault(?receive, transport.CLIENT, true, 1,
+            FAULT_RECEIVE_KEYS) ||
+        receive.init_result.reason != core.INIT_STORAGE_SECRETS ||
+        receive.engine.initialized || receive.secrets.initialized) { ret 1; }
+    var send: Fixture;
+    if (initialize_with_fault(?send, transport.CLIENT, true, 1,
+            FAULT_SEND_KEYS) ||
+        send.init_result.reason != core.INIT_STORAGE_SECRETS ||
+        send.engine.initialized || send.secrets.initialized) { ret 2; }
     ret 0;
 }
 

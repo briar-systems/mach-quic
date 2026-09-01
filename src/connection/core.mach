@@ -446,17 +446,31 @@ fun datagram_prepared_token(token: datagram_api.Token) datagram_api.Prepared {
     ret value;
 }
 
+fun core_range(core: *Core) ownership.Range {
+    if (core == nil) { var empty: ownership.Range; ret empty; }
+    ret ownership.anchored_record[Core, Config](?core.config,
+        $offset_of(Core, config));
+}
+
+fun secrets_range(secrets: *Secrets) ownership.Range {
+    if (secrets == nil) { var empty: ownership.Range; ret empty; }
+    ret ownership.anchored_record[Secrets, bool](?secrets.initialized,
+        $offset_of(Secrets, initialized));
+}
+
+fun secret_storage_range(storage: *SecretStorage) ownership.Range {
+    if (storage == nil) { var empty: ownership.Range; ret empty; }
+    ret ownership.anchored_record[SecretStorage, usize](
+        ?storage.receive_plaintext_capacity,
+        $offset_of(SecretStorage, receive_plaintext_capacity));
+}
+
 fun core_record_valid(core: *Core) bool {
-    ret core != nil && ownership.bytes((?core.config)::*u8, $size_of(Core),
-        ownership.ZERO_FORBIDDEN).valid;
+    ret core_range(core).valid;
 }
 
 fun secret_record_valid(secrets: *Secrets) bool {
-    if (secrets == nil) { ret false; }
-    val address: usize = (?secrets.initialized)::usize;
-    val offset: usize = $offset_of(Secrets, initialized);
-    ret address >= offset && ownership.bytes((address - offset)::*u8,
-        $size_of(Secrets), ownership.ZERO_FORBIDDEN).valid;
+    ret secrets_range(secrets).valid;
 }
 
 fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
@@ -563,14 +577,40 @@ fun fail(core: *Core, error: u64, now_ns: u64) transport_api.CoreResult {
     ret core_result(core, transport_api.STATUS_ERROR, error);
 }
 
+fun key_set_disjoint(data: *^u8, length: usize,
+                     keys: *protection.KeySet) bool {
+    ret ownership.secret_disjoint(data, length, ?keys.secret[0], 48) &&
+        ownership.secret_disjoint(data, length, ?keys.key[0], 32) &&
+        ownership.secret_disjoint(data, length, ?keys.iv[0], 12) &&
+        ownership.secret_disjoint(data, length, ?keys.hp[0], 32);
+}
+
+fun welded_keys_disjoint(secrets: *Secrets, data: *^u8,
+                         length: usize) bool {
+    ret key_set_disjoint(data, length, ?secrets.initial_keys.client) &&
+        key_set_disjoint(data, length, ?secrets.initial_keys.server) &&
+        key_set_disjoint(data, length, ?secrets.early_send) &&
+        key_set_disjoint(data, length, ?secrets.early_receive) &&
+        key_set_disjoint(data, length, ?secrets.handshake_send) &&
+        key_set_disjoint(data, length, ?secrets.handshake_receive) &&
+        key_set_disjoint(data, length, ?secrets.application_send.current) &&
+        key_set_disjoint(data, length,
+            ?secrets.application_receive.previous) &&
+        key_set_disjoint(data, length,
+            ?secrets.application_receive.current) &&
+        key_set_disjoint(data, length, ?secrets.application_receive.next);
+}
+
 fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
                   storage: *Storage, secret_storage: *SecretStorage,
                   result: *InitResult) bool {
     if (core == nil || secrets == nil || config == nil || storage == nil ||
         secret_storage == nil) { ret refuse(result, INIT_ARGUMENT); }
-    val secret_state_address: usize = (?secrets.initialized)::usize;
-    val secret_state_offset: usize = $offset_of(Secrets, initialized);
-    if (secret_state_address < secret_state_offset ||
+    if (!core_range(core).valid ||
+        !secrets_range(secrets).valid ||
+        !ownership.record[Config](config).valid ||
+        !ownership.record[Storage](storage).valid ||
+        !secret_storage_range(secret_storage).valid ||
         secret_storage.receive_plaintext == nil ||
         secret_storage.send_plaintext == nil ||
         secret_storage.receive_plaintext == secret_storage.send_plaintext ||
@@ -598,10 +638,8 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         zero_versions = ownership.ZERO_ALLOWED;
     }
     var ranges: [23]ownership.Range;
-    ranges[0] = ownership.bytes((?core.config)::*u8, $size_of(Core),
-        ownership.ZERO_FORBIDDEN);
-    ranges[1] = ownership.bytes((secret_state_address - secret_state_offset)::*u8,
-        $size_of(Secrets), ownership.ZERO_FORBIDDEN);
+    ranges[0] = core_range(core);
+    ranges[1] = secrets_range(secrets);
     ranges[2] = ownership.bytes(storage.receive_header,
         storage.receive_header_capacity, ownership.ZERO_FORBIDDEN);
     ranges[3] = ownership.bytes(storage.receive_decoded,
@@ -661,6 +699,10 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     if (!ownership.secret_disjoint(secret_storage.receive_plaintext,
             secret_storage.receive_plaintext_capacity,
             secret_storage.send_plaintext,
+            secret_storage.send_plaintext_capacity) ||
+        !welded_keys_disjoint(secrets, secret_storage.receive_plaintext,
+            secret_storage.receive_plaintext_capacity) ||
+        !welded_keys_disjoint(secrets, secret_storage.send_plaintext,
             secret_storage.send_plaintext_capacity)) {
         ret refuse(result, INIT_STORAGE_SECRETS);
     }
@@ -740,15 +782,11 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     if (handshake == nil || cids == nil || paths == nil || streams == nil ||
         datagrams == nil) { ret refuse(result, INIT_ARGUMENT); }
     var ranges: [63]ownership.Range;
-    ranges[0] = ownership.bytes((?core.config)::*u8, $size_of(Core),
-        ownership.ZERO_FORBIDDEN);
-    val secret_state_address: usize = (?secrets.initialized)::usize;
-    val secret_state_offset: usize = $offset_of(Secrets, initialized);
-    if (secret_state_address < secret_state_offset) {
+    ranges[0] = core_range(core);
+    ranges[1] = secrets_range(secrets);
+    if (!ranges[0].valid || !ranges[1].valid) {
         ret refuse(result, INIT_STORAGE_CAPACITY);
     }
-    ranges[1] = ownership.bytes((secret_state_address - secret_state_offset)::*u8,
-        $size_of(Secrets), ownership.ZERO_FORBIDDEN);
     ranges[2] = ownership.bytes(storage.receive_header,
         storage.receive_header_capacity, ownership.ZERO_FORBIDDEN);
     ranges[3] = ownership.bytes(storage.receive_decoded,
@@ -805,9 +843,10 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.negotiation.retry_token_capacity, zero_negotiation);
     ranges[22] = ownership.bytes(storage.negotiation.retry_pseudo,
         storage.negotiation.retry_pseudo_capacity, zero_negotiation);
-    # public first-field anchors validate mixed records before field access
-    ranges[23] = ownership.bytes((?handshake.config)::*u8,
-        $size_of(handshake_api.Adapter), ownership.ZERO_FORBIDDEN);
+    # public-field anchors validate mixed records before field access
+    ranges[23] = ownership.anchored_record[
+        handshake_api.Adapter, handshake_api.Config](?handshake.config,
+            $offset_of(handshake_api.Adapter, config));
     ranges[24] = ownership.bytes((?cids.config)::*u8,
         $size_of(cid_api.Manager), ownership.ZERO_FORBIDDEN);
     ranges[25] = ownership.bytes((?paths.config)::*u8,
