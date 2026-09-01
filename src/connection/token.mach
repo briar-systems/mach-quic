@@ -132,8 +132,8 @@ fun key_aliases_manager(manager: *Manager, key: contracts.SecretBytes) bool {
 
 fun physical(manager: *Manager) bool {
     if (manager == nil) { ret false; }
-    val manager_range: ownership.Range = ownership.bytes((?manager.config)::*u8,
-        $size_of(Manager), ownership.ZERO_FORBIDDEN);
+    val manager_range: ownership.Range = ownership.anchored_record[
+        Manager, Config](?manager.config, $offset_of(Manager, config));
     if (!manager_range.valid) { ret false; }
     val replay_range: ownership.Range = ownership.array(manager.storage.replay::*u8,
         manager.storage.replay_capacity, $size_of(ReplaySlot),
@@ -148,8 +148,8 @@ pub fun initialize(manager: *Manager, config: Config, storage: Storage,
         storage.replay == nil || storage.replay_capacity == 0 || key.data == nil ||
         key.len != KEY_SIZE) { ret false; }
     if (manager == nil) { ret false; }
-    val manager_range: ownership.Range = ownership.bytes((?manager.config)::*u8,
-        $size_of(Manager), ownership.ZERO_FORBIDDEN);
+    val manager_range: ownership.Range = ownership.anchored_record[
+        Manager, Config](?manager.config, $offset_of(Manager, config));
     val replay_range: ownership.Range = ownership.array(storage.replay::*u8,
         storage.replay_capacity, $size_of(ReplaySlot), ownership.ZERO_FORBIDDEN);
     if (!manager_range.valid || !replay_range.valid ||
@@ -304,8 +304,8 @@ pub fun seal_scoped(manager: *Manager, listener_source: u64, purpose: u8,
     }
     val output_range: ownership.Range = ownership.bytes(output, capacity,
         ownership.ZERO_FORBIDDEN);
-    val manager_range: ownership.Range = ownership.bytes((?manager.config)::*u8,
-        $size_of(Manager), ownership.ZERO_FORBIDDEN);
+    val manager_range: ownership.Range = ownership.anchored_record[
+        Manager, Config](?manager.config, $offset_of(Manager, config));
     val replay_range: ownership.Range = ownership.array(manager.storage.replay::*u8,
         manager.storage.replay_capacity, $size_of(ReplaySlot),
         ownership.ZERO_FORBIDDEN);
@@ -416,8 +416,8 @@ pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
     }
     val input_range: ownership.Range = ownership.bytes(input, length,
         ownership.ZERO_FORBIDDEN);
-    val manager_range: ownership.Range = ownership.bytes((?manager.config)::*u8,
-        $size_of(Manager), ownership.ZERO_FORBIDDEN);
+    val manager_range: ownership.Range = ownership.anchored_record[
+        Manager, Config](?manager.config, $offset_of(Manager, config));
     val replay_range: ownership.Range = ownership.array(manager.storage.replay::*u8,
         manager.storage.replay_capacity, $size_of(ReplaySlot),
         ownership.ZERO_FORBIDDEN);

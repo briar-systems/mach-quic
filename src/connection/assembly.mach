@@ -12,6 +12,7 @@ use datagram_api: quic.stream.datagram;
 use handshake_api: quic.connection.handshake;
 use listener_api: quic.connection.listener;
 use quic.connection.negotiation;
+use quic.connection.ownership;
 use quic.frame.frame;
 use quic.packet.packet;
 use quic.recovery.recovery;
@@ -34,9 +35,7 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
-# the capacities the assembly commits to. they are fixed because the record
-# embeds its own storage: that is what lets a consumer declare one Connection
-# and import nothing from packet, crypto, recovery, congestion, path or stream
+# the exact capacities required of caller-owned public and secret backing
 pub val MAX_UDP_PAYLOAD: usize = 1500;
 pub val CRYPTO_LENGTH: usize = 16384;
 pub val CRYPTO_STRIDE: usize = 4096;
@@ -66,6 +65,7 @@ pub val STAGE_PARAMETERS: Stage = 7;
 pub val STAGE_CORE: Stage = 8;
 pub val STAGE_BINDING: Stage = 9;
 pub val STAGE_DRIVER: Stage = 10;
+pub val STAGE_STORAGE: Stage = 11;
 
 # `core` carries the reason code the core itself reported, so a refusal at
 # STAGE_CORE names which ownership or precondition check rejected
@@ -73,6 +73,7 @@ pub rec InitResult {
     ok: bool;
     stage: Stage;
     core: core_api.InitResult;
+    cleanup_retained: bool;
 }
 
 pub rec RoutingId {
@@ -155,6 +156,71 @@ pub fun default_config(source: u64, local: ip.Endpoint,
     ret value;
 }
 
+# fixed arrays make the public backing size part of the type
+pub rec Storage {
+    sends: [SEND_CAPACITY]transport_api.SendSlot;
+    supported_versions: [2]u32;
+    local_parameters: [PARAMETER_CAPACITY]u8;
+    receive_header: [MAX_UDP_PAYLOAD]u8;
+    receive_decoded: [MAX_UDP_PAYLOAD]u8;
+    send_plaintext: [MAX_UDP_PAYLOAD]u8;
+    close_reason: [256]u8;
+    frame_ack_ranges: [32]frame.AckRange;
+    recovery_events: [32]recovery.Event;
+    recovery_initial: [32]recovery.SentPacket;
+    recovery_handshake: [32]recovery.SentPacket;
+    recovery_application: [32]recovery.SentPacket;
+    ack_initial: [32]ack_api.Range;
+    ack_handshake: [32]ack_api.Range;
+    ack_application: [32]ack_api.Range;
+    owners: [OWNER_CAPACITY]core_api.Owner;
+    peer_extensions: [16]transport_parameters.Parameter;
+    peer_extension_bytes: [PARAMETER_CAPACITY]u8;
+    local_extensions: [16]transport_parameters.Parameter;
+    local_extension_bytes: [PARAMETER_CAPACITY]u8;
+    received_token: [TOKEN_CAPACITY]u8;
+    send_token: [TOKEN_CAPACITY]u8;
+    retry_token: [TOKEN_CAPACITY]u8;
+    retry_pseudo: [1024]u8;
+    crypto_receive: [CRYPTO_LENGTH]u8;
+    crypto_receive_present: [CRYPTO_LENGTH]bool;
+    crypto_send: [CRYPTO_LENGTH]u8;
+    crypto_send_pending: [CRYPTO_LENGTH]bool;
+    crypto_send_acked: [CRYPTO_LENGTH]bool;
+    crypto_send_inflight: [CRYPTO_LENGTH]u16;
+    crypto_attempts: [8]handshake_api.Attempt;
+    local_cids: [CONNECTION_ID_CAPACITY]cid_api.Entry;
+    peer_cids: [CONNECTION_ID_CAPACITY]cid_api.Entry;
+    path_values: [2]path_api.Path;
+    path_challenges: [4]path_api.Challenge;
+    path_responses: [4]path_api.Response;
+    path_sends: [8]path_api.SendReservation;
+    stream_values: [STREAM_CAPACITY]stream_api.Stream;
+    stream_attempts: [STREAM_ATTEMPT_CAPACITY]stream_api.Attempt;
+    stream_send: [STREAM_WINDOW]u8;
+    stream_send_pending: [STREAM_WINDOW]bool;
+    stream_send_acked: [STREAM_WINDOW]bool;
+    stream_send_inflight: [STREAM_WINDOW]u8;
+    stream_receive: [STREAM_WINDOW]u8;
+    stream_receive_present: [STREAM_WINDOW]bool;
+    datagram_send_entries: [DATAGRAM_CAPACITY]datagram_api.Entry;
+    datagram_receive_entries: [DATAGRAM_CAPACITY]datagram_api.Entry;
+    datagram_send_bytes: [DATAGRAM_CAPACITY * DATAGRAM_STRIDE]u8;
+    datagram_receive_bytes: [DATAGRAM_CAPACITY * DATAGRAM_STRIDE]u8;
+    source: u64;
+    generation: u64;
+    leased: bool;
+}
+
+# secret storage is allocated only through classification-preserving ownership
+pub rec SecretStorage {
+    receive_plaintext: [MAX_UDP_PAYLOAD]^u8;
+    send_plaintext: [MAX_UDP_PAYLOAD]^u8;
+    source: u64;
+    generation: u64;
+    leased: bool;
+}
+
 pub rec Connection {
     core: core_api.Core;
     secrets: core_api.Secrets;
@@ -165,66 +231,11 @@ pub rec Connection {
     datagrams: datagram_api.Queue;
     binding: binding_api.Binding;
     driver: transport_api.Driver[binding_api.Binding];
-    sends: [4]transport_api.SendSlot;
-
-    supported_versions: [2]u32;
-    local_parameters: [512]u8;
+    storage: *Storage;
+    secret_storage: *SecretStorage;
+    storage_generation: u64;
+    secret_storage_generation: u64;
     local_parameter_length: usize;
-
-    receive_header: [1500]u8;
-    receive_decoded: [1500]u8;
-    send_plaintext: [1500]u8;
-    close_reason: [256]u8;
-    frame_ack_ranges: [32]frame.AckRange;
-    recovery_events: [32]recovery.Event;
-    recovery_initial: [32]recovery.SentPacket;
-    recovery_handshake: [32]recovery.SentPacket;
-    recovery_application: [32]recovery.SentPacket;
-    ack_initial: [32]ack_api.Range;
-    ack_handshake: [32]ack_api.Range;
-    ack_application: [32]ack_api.Range;
-    owners: [16]core_api.Owner;
-    peer_extensions: [16]transport_parameters.Parameter;
-    peer_extension_bytes: [512]u8;
-    local_extensions: [16]transport_parameters.Parameter;
-    local_extension_bytes: [512]u8;
-    received_token: [512]u8;
-    send_token: [512]u8;
-    retry_token: [512]u8;
-    retry_pseudo: [1024]u8;
-
-    secret_receive: [1500]^u8;
-    secret_send: [1500]^u8;
-
-    crypto_receive: [16384]u8;
-    crypto_receive_present: [16384]bool;
-    crypto_send: [16384]u8;
-    crypto_send_pending: [16384]bool;
-    crypto_send_acked: [16384]bool;
-    crypto_send_inflight: [16384]u16;
-    crypto_attempts: [8]handshake_api.Attempt;
-
-    local_cids: [4]cid_api.Entry;
-    peer_cids: [4]cid_api.Entry;
-    path_values: [2]path_api.Path;
-    path_challenges: [4]path_api.Challenge;
-    path_responses: [4]path_api.Response;
-    path_sends: [8]path_api.SendReservation;
-
-    stream_values: [STREAM_CAPACITY]stream_api.Stream;
-    stream_attempts: [STREAM_ATTEMPT_CAPACITY]stream_api.Attempt;
-    stream_send: [STREAM_WINDOW]u8;
-    stream_send_pending: [STREAM_WINDOW]bool;
-    stream_send_acked: [STREAM_WINDOW]bool;
-    stream_send_inflight: [STREAM_WINDOW]u8;
-    stream_receive: [STREAM_WINDOW]u8;
-    stream_receive_present: [STREAM_WINDOW]bool;
-
-    datagram_send_entries: [4]datagram_api.Entry;
-    datagram_receive_entries: [4]datagram_api.Entry;
-    datagram_send_bytes: [4800]u8;
-    datagram_receive_bytes: [4800]u8;
-
     initialized: bool;
     released: bool;
 }
@@ -359,6 +370,216 @@ fun config_valid(config: *Config, role: transport_api.Role) bool {
     ret config.server_name != nil && config.server_name_length != 0;
 }
 
+fun next_generation(value: u64) u64 {
+    var next: u64 = value + 1;
+    if (next == 0) { next = 1; }
+    ret next;
+}
+
+fun public_core_storage(storage: *Storage) core_api.Storage {
+    ret core_api.Storage{
+        receive_header: ?storage.receive_header[0],
+        receive_header_capacity: MAX_UDP_PAYLOAD,
+        receive_decoded: ?storage.receive_decoded[0],
+        receive_decoded_capacity: MAX_UDP_PAYLOAD,
+        send_plaintext: ?storage.send_plaintext[0],
+        send_plaintext_capacity: MAX_UDP_PAYLOAD,
+        close_reason: ?storage.close_reason[0], close_reason_capacity: 256,
+        frame_ack_ranges: ?storage.frame_ack_ranges[0], frame_ack_capacity: 32,
+        recovery_events: ?storage.recovery_events[0], recovery_event_capacity: 32,
+        recovery_initial: recovery.HistoryStorage{
+            packets: ?storage.recovery_initial[0], capacity: 32},
+        recovery_handshake: recovery.HistoryStorage{
+            packets: ?storage.recovery_handshake[0], capacity: 32},
+        recovery_application: recovery.HistoryStorage{
+            packets: ?storage.recovery_application[0], capacity: 32},
+        ack_initial: ack_api.SpaceStorage{ranges: ?storage.ack_initial[0],
+            capacity: 32},
+        ack_handshake: ack_api.SpaceStorage{ranges: ?storage.ack_handshake[0],
+            capacity: 32},
+        ack_application: ack_api.SpaceStorage{ranges: ?storage.ack_application[0],
+            capacity: 32},
+        owners: ?storage.owners[0], owner_capacity: OWNER_CAPACITY,
+        peer_extensions: ?storage.peer_extensions[0], peer_extension_capacity: 16,
+        peer_extension_bytes: ?storage.peer_extension_bytes[0],
+        peer_extension_byte_capacity: PARAMETER_CAPACITY,
+        local_extensions: ?storage.local_extensions[0],
+        local_extension_capacity: 16,
+        local_extension_bytes: ?storage.local_extension_bytes[0],
+        local_extension_byte_capacity: PARAMETER_CAPACITY,
+        received_token: ?storage.received_token[0],
+        received_token_capacity: TOKEN_CAPACITY,
+        send_token: ?storage.send_token[0], send_token_capacity: TOKEN_CAPACITY,
+        negotiation: negotiation.Storage{
+            retry_token: ?storage.retry_token[0],
+            retry_token_capacity: TOKEN_CAPACITY,
+            retry_pseudo: ?storage.retry_pseudo[0], retry_pseudo_capacity: 1024}};
+}
+
+fun public_handshake_storage(storage: *Storage) handshake_api.Storage {
+    ret handshake_api.Storage{
+        receive_data: ?storage.crypto_receive[0],
+        receive_present: ?storage.crypto_receive_present[0],
+        receive_length: CRYPTO_LENGTH, receive_stride: CRYPTO_STRIDE,
+        send_data: ?storage.crypto_send[0],
+        send_pending: ?storage.crypto_send_pending[0],
+        send_acked: ?storage.crypto_send_acked[0],
+        send_inflight: ?storage.crypto_send_inflight[0],
+        send_length: CRYPTO_LENGTH, send_stride: CRYPTO_STRIDE,
+        attempts: ?storage.crypto_attempts[0], attempt_capacity: 8};
+}
+
+fun public_cid_storage(storage: *Storage) cid_api.Storage {
+    ret cid_api.Storage{local: ?storage.local_cids[0],
+        local_capacity: CONNECTION_ID_CAPACITY, peer: ?storage.peer_cids[0],
+        peer_capacity: CONNECTION_ID_CAPACITY};
+}
+
+fun public_path_storage(storage: *Storage) path_api.Storage {
+    ret path_api.Storage{paths: ?storage.path_values[0], path_capacity: 2,
+        challenges: ?storage.path_challenges[0], challenge_capacity: 4,
+        responses: ?storage.path_responses[0], response_capacity: 4,
+        sends: ?storage.path_sends[0], send_capacity: 8};
+}
+
+fun public_stream_storage(storage: *Storage) stream_api.Storage {
+    ret stream_api.Storage{streams: ?storage.stream_values[0],
+        stream_capacity: STREAM_CAPACITY, send_data: ?storage.stream_send[0],
+        send_data_length: STREAM_WINDOW,
+        send_pending: ?storage.stream_send_pending[0],
+        send_acked: ?storage.stream_send_acked[0],
+        send_inflight: ?storage.stream_send_inflight[0],
+        send_state_length: STREAM_WINDOW, send_stride: STREAM_STRIDE,
+        receive_data: ?storage.stream_receive[0],
+        receive_data_length: STREAM_WINDOW,
+        receive_present: ?storage.stream_receive_present[0],
+        receive_state_length: STREAM_WINDOW, receive_stride: STREAM_STRIDE,
+        attempts: ?storage.stream_attempts[0],
+        attempt_capacity: STREAM_ATTEMPT_CAPACITY};
+}
+
+fun public_datagram_storage(storage: *Storage) datagram_api.Storage {
+    ret datagram_api.Storage{
+        send_entries: ?storage.datagram_send_entries[0],
+        send_capacity: DATAGRAM_CAPACITY,
+        send_bytes: ?storage.datagram_send_bytes[0],
+        send_bytes_length: DATAGRAM_CAPACITY * DATAGRAM_STRIDE,
+        send_stride: DATAGRAM_STRIDE,
+        receive_entries: ?storage.datagram_receive_entries[0],
+        receive_capacity: DATAGRAM_CAPACITY,
+        receive_bytes: ?storage.datagram_receive_bytes[0],
+        receive_bytes_length: DATAGRAM_CAPACITY * DATAGRAM_STRIDE,
+        receive_stride: DATAGRAM_STRIDE};
+}
+
+fun private_core_storage(storage: *SecretStorage) core_api.SecretStorage {
+    ret core_api.SecretStorage{
+        receive_plaintext: ?storage.receive_plaintext[0],
+        receive_plaintext_capacity: MAX_UDP_PAYLOAD,
+        send_plaintext: ?storage.send_plaintext[0],
+        send_plaintext_capacity: MAX_UDP_PAYLOAD};
+}
+
+fun connection_range(c: *Connection) ownership.Range {
+    if (c == nil) { var empty: ownership.Range; ret empty; }
+    ret ownership.anchored_record[Connection, usize](
+        ?c.local_parameter_length,
+        $offset_of(Connection, local_parameter_length));
+}
+
+fun secret_storage_range(storage: *SecretStorage) ownership.Range {
+    if (storage == nil) { var empty: ownership.Range; ret empty; }
+    ret ownership.anchored_record[SecretStorage, u64](?storage.source,
+        $offset_of(SecretStorage, source));
+}
+
+fun capacities_valid(storage: *Storage, secret_storage: *SecretStorage) bool {
+    ret !storage.leased && storage.source == 0 &&
+        !secret_storage.leased && secret_storage.source == 0;
+}
+
+fun storage_ranges_valid(c: *Connection, config: *Config, storage: *Storage,
+                         secret_storage: *SecretStorage,
+                         scope: *cancel.Scope) bool {
+    var ranges: [5]ownership.Range;
+    ranges[0] = connection_range(c);
+    ranges[1] = ownership.record[Storage](storage);
+    ranges[2] = secret_storage_range(secret_storage);
+    ranges[3] = ownership.record[cancel.Scope](scope);
+    ranges[4] = ownership.record[Config](config);
+    if (!ownership.all_disjoint(?ranges[0], 5) ||
+        !ownership.secret_disjoint(?secret_storage.receive_plaintext[0],
+            MAX_UDP_PAYLOAD, ?secret_storage.send_plaintext[0],
+            MAX_UDP_PAYLOAD)) { ret false; }
+    var borrowed: [7]ownership.Range;
+    borrowed[0] = ownership.bytes(config.local_source,
+        config.local_source_length, ownership.ZERO_FORBIDDEN);
+    borrowed[1] = ownership.bytes(config.peer_destination,
+        config.peer_destination_length, ownership.ZERO_FORBIDDEN);
+    borrowed[2] = ownership.bytes(config.original_destination,
+        config.original_destination_length, ownership.ZERO_FORBIDDEN);
+    borrowed[3] = ownership.bytes(config.initial_destination,
+        config.initial_destination_length, ownership.ZERO_ALLOWED);
+    borrowed[4] = ownership.bytes(config.retry_source,
+        config.retry_source_length, ownership.ZERO_ALLOWED);
+    borrowed[5] = ownership.bytes(config.alpn, config.alpn_length,
+        ownership.ZERO_FORBIDDEN);
+    borrowed[6] = ownership.bytes(config.server_name,
+        config.server_name_length, ownership.ZERO_ALLOWED);
+    var i: usize = 0;
+    for (i < 7) {
+        if (ownership.disjoint_from(borrowed[i], i, ?ranges[0], 0, 4).kind !=
+            ownership.OVERLAP_NONE) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun backing_lease_valid(c: *Connection) bool {
+    ret c != nil && c.storage != nil && c.secret_storage != nil &&
+        c.storage.leased && c.secret_storage.leased &&
+        c.storage.source != 0 && c.storage.source == c.secret_storage.source &&
+        c.storage.generation == c.storage_generation &&
+        c.secret_storage.generation == c.secret_storage_generation;
+}
+
+fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
+                    secret_storage: *SecretStorage,
+                    scope: *cancel.Scope) bool {
+    if (c == nil || config == nil || c.storage != nil ||
+        c.secret_storage != nil ||
+        !storage_ranges_valid(c, config, storage, secret_storage, scope) ||
+        !capacities_valid(storage, secret_storage)) { ret false; }
+    storage.generation = next_generation(storage.generation);
+    secret_storage.generation = next_generation(secret_storage.generation);
+    storage.source = config.source;
+    secret_storage.source = config.source;
+    storage.leased = true;
+    secret_storage.leased = true;
+    c.storage = storage;
+    c.secret_storage = secret_storage;
+    c.storage_generation = storage.generation;
+    c.secret_storage_generation = secret_storage.generation;
+    c.released = false;
+    ret true;
+}
+
+fun release_backing(c: *Connection) bool {
+    if (!backing_lease_valid(c)) { ret false; }
+    c.storage.source = 0;
+    c.storage.leased = false;
+    c.secret_storage.source = 0;
+    c.secret_storage.leased = false;
+    c.storage = nil;
+    c.secret_storage = nil;
+    c.storage_generation = 0;
+    c.secret_storage_generation = 0;
+    c.local_parameter_length = 0;
+    c.initialized = false;
+    c.released = true;
+    ret true;
+}
+
 # the single source of truth for what this connection will enforce. the stream
 # manager configuration below and the encoded parameters are two renderings of
 # it, which is what makes the core's equality checks hold by construction
@@ -447,16 +668,7 @@ pub fun encode_parameters(config: *Config, role: transport_api.Role,
 }
 
 fun crypto_storage(c: *Connection) handshake_api.Storage {
-    ret handshake_api.Storage{
-        receive_data: ?c.crypto_receive[0],
-        receive_present: ?c.crypto_receive_present[0],
-        receive_length: 16384, receive_stride: 4096,
-        send_data: ?c.crypto_send[0],
-        send_pending: ?c.crypto_send_pending[0],
-        send_acked: ?c.crypto_send_acked[0],
-        send_inflight: ?c.crypto_send_inflight[0],
-        send_length: 16384, send_stride: 4096,
-        attempts: ?c.crypto_attempts[0], attempt_capacity: 8};
+    ret public_handshake_storage(c.storage);
 }
 
 fun crypto_config(config: *Config) handshake_api.Config {
@@ -481,55 +693,28 @@ fun server_tls_configuration(config: *Config) tls_server_api.Config {
 }
 
 fun core_storage(c: *Connection) core_api.Storage {
-    ret core_api.Storage{
-        receive_header: ?c.receive_header[0], receive_header_capacity: 1500,
-        receive_decoded: ?c.receive_decoded[0], receive_decoded_capacity: 1500,
-        send_plaintext: ?c.send_plaintext[0], send_plaintext_capacity: 1500,
-        close_reason: ?c.close_reason[0], close_reason_capacity: 256,
-        frame_ack_ranges: ?c.frame_ack_ranges[0], frame_ack_capacity: 32,
-        recovery_events: ?c.recovery_events[0], recovery_event_capacity: 32,
-        recovery_initial: recovery.HistoryStorage{
-            packets: ?c.recovery_initial[0], capacity: 32},
-        recovery_handshake: recovery.HistoryStorage{
-            packets: ?c.recovery_handshake[0], capacity: 32},
-        recovery_application: recovery.HistoryStorage{
-            packets: ?c.recovery_application[0], capacity: 32},
-        ack_initial: ack_api.SpaceStorage{ranges: ?c.ack_initial[0],
-            capacity: 32},
-        ack_handshake: ack_api.SpaceStorage{ranges: ?c.ack_handshake[0],
-            capacity: 32},
-        ack_application: ack_api.SpaceStorage{ranges: ?c.ack_application[0],
-            capacity: 32},
-        owners: ?c.owners[0], owner_capacity: 16,
-        peer_extensions: ?c.peer_extensions[0], peer_extension_capacity: 16,
-        peer_extension_bytes: ?c.peer_extension_bytes[0],
-        peer_extension_byte_capacity: 512,
-        local_extensions: ?c.local_extensions[0], local_extension_capacity: 16,
-        local_extension_bytes: ?c.local_extension_bytes[0],
-        local_extension_byte_capacity: 512,
-        received_token: ?c.received_token[0], received_token_capacity: 512,
-        send_token: ?c.send_token[0], send_token_capacity: 512,
-        negotiation: negotiation.Storage{retry_token: ?c.retry_token[0],
-            retry_token_capacity: 512, retry_pseudo: ?c.retry_pseudo[0],
-            retry_pseudo_capacity: 1024}};
+    ret public_core_storage(c.storage);
 }
 
 fun secret_storage(c: *Connection) core_api.SecretStorage {
-    ret core_api.SecretStorage{
-        receive_plaintext: ?c.secret_receive[0],
-        receive_plaintext_capacity: 1500,
-        send_plaintext: ?c.secret_send[0],
-        send_plaintext_capacity: 1500};
+    ret private_core_storage(c.secret_storage);
 }
 
 fun datagram_storage(c: *Connection) datagram_api.Storage {
-    ret datagram_api.Storage{
-        send_entries: ?c.datagram_send_entries[0], send_capacity: 4,
-        send_bytes: ?c.datagram_send_bytes[0], send_bytes_length: 4800,
-        send_stride: 1200,
-        receive_entries: ?c.datagram_receive_entries[0], receive_capacity: 4,
-        receive_bytes: ?c.datagram_receive_bytes[0], receive_bytes_length: 4800,
-        receive_stride: 1200};
+    ret public_datagram_storage(c.storage);
+}
+
+fun scope_provider_disjoint(c: *Connection, scope: *cancel.Scope) bool {
+    val scope_range: ownership.Range = ownership.record[cancel.Scope](scope);
+    var ranges: [handshake_api.PROVIDER_RANGE_CAPACITY]ownership.Range;
+    if (!scope_range.valid || !handshake_api.provider_ranges(?c.handshake,
+            ?ranges[0], handshake_api.PROVIDER_RANGE_CAPACITY)) { ret false; }
+    var i: usize = 0;
+    for (i < handshake_api.PROVIDER_RANGE_CAPACITY) {
+        if (!ownership.disjoint(scope_range, ranges[i])) { ret false; }
+        i = i + 1;
+    }
+    ret true;
 }
 
 fun core_configuration(c: *Connection, config: *Config,
@@ -538,7 +723,7 @@ fun core_configuration(c: *Connection, config: *Config,
     value.source = config.source;
     value.role = role;
     value.version = config.version;
-    value.supported_versions = ?c.supported_versions[0];
+    value.supported_versions = ?c.storage.supported_versions[0];
     value.supported_version_count = 2;
     value.local = config.local;
     value.peer = config.peer;
@@ -559,7 +744,7 @@ fun core_configuration(c: *Connection, config: *Config,
     value.server_name = core_api.View{data: config.server_name,
         length: config.server_name_length};
     value.local_transport_parameters = core_api.View{
-        data: ?c.local_parameters[0], length: c.local_parameter_length};
+        data: ?c.storage.local_parameters[0], length: c.local_parameter_length};
     value.max_udp_payload = config.max_udp_payload;
     value.max_idle_timeout_ns = config.max_idle_timeout_ms * 1000000;
     value.drain_timeout_ns = config.drain_timeout_ns;
@@ -573,32 +758,20 @@ fun core_configuration(c: *Connection, config: *Config,
 # decides the shape of
 fun build_managers(c: *Connection, config: *Config,
                    role: transport_api.Role) Stage {
-    c.supported_versions[0] = packet.VERSION_1;
-    c.supported_versions[1] = packet.VERSION_2;
+    c.storage.supported_versions[0] = packet.VERSION_1;
+    c.storage.supported_versions[1] = packet.VERSION_2;
     val local_id: packet.ConnectionId = connection_id(config.local_source,
         config.local_source_length);
     val peer_id: packet.ConnectionId = connection_id(config.peer_destination,
         config.peer_destination_length);
     if (!stream_api.initialize(?c.streams, stream_configuration(config, role),
-        stream_api.Storage{
-            streams: ?c.stream_values[0], stream_capacity: STREAM_CAPACITY,
-            send_data: ?c.stream_send[0], send_data_length: STREAM_WINDOW,
-            send_pending: ?c.stream_send_pending[0],
-            send_acked: ?c.stream_send_acked[0],
-            send_inflight: ?c.stream_send_inflight[0],
-            send_state_length: STREAM_WINDOW, send_stride: STREAM_STRIDE,
-            receive_data: ?c.stream_receive[0], receive_data_length: STREAM_WINDOW,
-            receive_present: ?c.stream_receive_present[0],
-            receive_state_length: STREAM_WINDOW, receive_stride: STREAM_STRIDE,
-            attempts: ?c.stream_attempts[0],
-            attempt_capacity: STREAM_ATTEMPT_CAPACITY})) {
+        public_stream_storage(c.storage))) {
         ret STAGE_STREAMS;
     }
     if (!cid_api.initialize(?c.cids, cid_api.Config{source: config.source,
         local_active_limit: config.active_connection_id_limit::usize,
         peer_active_limit: config.active_connection_id_limit::usize},
-        cid_api.Storage{local: ?c.local_cids[0], local_capacity: 4,
-            peer: ?c.peer_cids[0], peer_capacity: 4}, local_id, peer_id)) {
+        public_cid_storage(c.storage), local_id, peer_id)) {
         ret STAGE_CONNECTION_IDS;
     }
     var path_role: u8 = path_api.ROLE_CLIENT;
@@ -606,11 +779,8 @@ fun build_managers(c: *Connection, config: *Config,
     var path_config: path_api.Config = path_api.default_config(config.source,
         path_role, config.peer_validated);
     path_config.maximum_mtu = config.max_udp_payload::u16;
-    if (!path_api.initialize(?c.paths, path_config, path_api.Storage{
-        paths: ?c.path_values[0], path_capacity: 2,
-        challenges: ?c.path_challenges[0], challenge_capacity: 4,
-        responses: ?c.path_responses[0], response_capacity: 4,
-        sends: ?c.path_sends[0], send_capacity: 8},
+    if (!path_api.initialize(?c.paths, path_config,
+        public_path_storage(c.storage),
         path_api.Endpoint{local: path_address(config.local),
             peer: path_address(config.peer)})) {
         ret STAGE_PATHS;
@@ -629,8 +799,9 @@ fun build_managers(c: *Connection, config: *Config,
 
 fun finish(c: *Connection, config: *Config, role: transport_api.Role,
            scope: *cancel.Scope, now_ns: u64) InitResult {
+    if (!scope_provider_disjoint(c, scope)) { ret staged(STAGE_STORAGE); }
     val encoded: transport_parameters.EncodeResult = encode_parameters(config,
-        role, ?c.local_parameters[0], 512);
+        role, ?c.storage.local_parameters[0], PARAMETER_CAPACITY);
     if (!encoded.ok) { ret staged(STAGE_PARAMETERS); }
     c.local_parameter_length = encoded.count;
     var value: InitResult;
@@ -660,7 +831,7 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
         source: config.source, max_udp_payload: config.max_udp_payload,
         max_close_reason: 256};
     val driver_storage: transport_api.Storage = transport_api.Storage{
-        sends: ?c.sends[0], send_capacity: 4};
+        sends: ?c.storage.sends[0], send_capacity: SEND_CAPACITY};
     var started: bool = false;
     if (role == transport_api.CLIENT) {
         started = transport_api.init_client[binding_api.Binding](?c.driver,
@@ -683,7 +854,9 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
 }
 
 fun abandon_manager_initialization(c: *Connection) bool {
-    if (c.driver.initialized || c.initialized) { ret false; }
+    if (!backing_lease_valid(c) || c.driver.initialized || c.initialized) {
+        ret false;
+    }
     if (c.binding.initialized &&
         !binding_api.abandon_initialization(?c.binding)) { ret false; }
     if (c.core.initialized &&
@@ -714,15 +887,15 @@ fun abandon_manager_initialization(c: *Connection) bool {
         if (stream_api.finish_close(?c.streams).status !=
             stream_api.STATUS_OK) { ret false; }
     }
-    c.local_parameter_length = 0;
-    c.initialized = false;
-    c.released = true;
-    ret true;
+    ret release_backing(c);
 }
 
 fun failed(c: *Connection, value: InitResult) InitResult {
-    if (c != nil) { abandon_manager_initialization(c); }
-    ret value;
+    var result: InitResult = value;
+    if (c != nil && !abandon_manager_initialization(c)) {
+        result.cleanup_retained = true;
+    }
+    ret result;
 }
 
 pub fun routing_snapshot(c: *Connection) RoutingSnapshot {
@@ -765,7 +938,7 @@ pub fun route_valid(c: *Connection, route: *Route) bool {
 }
 
 fun release_ready(c: *Connection) bool {
-    ret c != nil && c.initialized &&
+    ret c != nil && c.initialized && backing_lease_valid(c) &&
         c.driver.protocol.context == ?c.binding &&
         c.binding.core == ?c.core && c.binding.secrets == ?c.secrets &&
         c.core.cids == ?c.cids && c.core.paths == ?c.paths &&
@@ -780,7 +953,12 @@ fun release_ready(c: *Connection) bool {
 # removing every live protocol and caller-borrowed reference
 pub fun release_closed(c: *Connection) bool {
     if (c == nil) { ret false; }
-    if (!c.initialized) { ret c.released; }
+    if (!c.initialized) {
+        if (c.storage != nil || c.secret_storage != nil) {
+            ret abandon_manager_initialization(c);
+        }
+        ret c.released;
+    }
     if (!release_ready(c)) { ret false; }
     if (transport_api.release_closed[binding_api.Binding](?c.driver).status !=
         transport_api.STATUS_OK) { ret false; }
@@ -800,27 +978,40 @@ pub fun release_closed(c: *Connection) bool {
     var empty_handshake: handshake_api.Adapter;
     empty_handshake.event_generation = event_generation;
     c.handshake = empty_handshake;
-    c.local_parameter_length = 0;
-    c.initialized = false;
-    c.released = true;
-    ret true;
+    ret release_backing(c);
 }
 
 pub fun reusable(c: *Connection) bool {
     ret c != nil && !c.initialized && c.released &&
+        c.storage == nil && c.secret_storage == nil &&
         !c.driver.initialized && !c.binding.initialized &&
         !c.core.initialized && !c.secrets.initialized &&
         !c.handshake.initialized && !c.cids.initialized &&
         !c.paths.valid && !c.streams.valid && !c.datagrams.valid;
 }
 
-pub fun init_client(c: *Connection, config: *Config, tls: *client.Client,
+pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
+                    secret_storage: *SecretStorage, tls: *client.Client,
                     scope: *cancel.Scope, now_ns: u64) InitResult {
-    if (c == nil || tls == nil || scope == nil || c.initialized ||
-        !config_valid(config, transport_api.CLIENT)) {
+    if (!connection_range(c).valid ||
+        !ownership.record[Config](config).valid ||
+        !ownership.record[cancel.Scope](scope).valid) {
         ret staged(STAGE_CONFIG);
     }
-    c.released = false;
+    if (c.initialized) { ret staged(STAGE_CONFIG); }
+    if (c.storage != nil || c.secret_storage != nil) {
+        var retained: InitResult = staged(STAGE_STORAGE);
+        retained.cleanup_retained = true;
+        ret retained;
+    }
+    if (tls == nil || !config_valid(config, transport_api.CLIENT)) {
+        ret staged(STAGE_CONFIG);
+    }
+    if (!ownership.record[Storage](storage).valid ||
+        !secret_storage_range(secret_storage).valid ||
+        !acquire_backing(c, config, storage, secret_storage, scope)) {
+        ret staged(STAGE_STORAGE);
+    }
     val built: Stage = build_managers(c, config, transport_api.CLIENT);
     if (built != STAGE_OK) { ret failed(c, staged(built)); }
     if (!tls_client_api.initialize(?c.handshake, crypto_config(config),
@@ -833,13 +1024,28 @@ pub fun init_client(c: *Connection, config: *Config, tls: *client.Client,
     ret result;
 }
 
-pub fun init_server(c: *Connection, config: *Config, tls: *server.Server,
+pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
+                    secret_storage: *SecretStorage, tls: *server.Server,
                     scope: *cancel.Scope, now_ns: u64) InitResult {
-    if (c == nil || tls == nil || scope == nil || c.initialized ||
-        !config_valid(config, transport_api.SERVER)) {
+    if (!connection_range(c).valid ||
+        !ownership.record[Config](config).valid ||
+        !ownership.record[cancel.Scope](scope).valid) {
         ret staged(STAGE_CONFIG);
     }
-    c.released = false;
+    if (c.initialized) { ret staged(STAGE_CONFIG); }
+    if (c.storage != nil || c.secret_storage != nil) {
+        var retained: InitResult = staged(STAGE_STORAGE);
+        retained.cleanup_retained = true;
+        ret retained;
+    }
+    if (tls == nil || !config_valid(config, transport_api.SERVER)) {
+        ret staged(STAGE_CONFIG);
+    }
+    if (!ownership.record[Storage](storage).valid ||
+        !secret_storage_range(secret_storage).valid ||
+        !acquire_backing(c, config, storage, secret_storage, scope)) {
+        ret staged(STAGE_STORAGE);
+    }
     val built: Stage = build_managers(c, config, transport_api.SERVER);
     if (built != STAGE_OK) { ret failed(c, staged(built)); }
     if (!tls_server_api.initialize(?c.handshake, crypto_config(config),
