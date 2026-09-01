@@ -64,6 +64,50 @@ var wire: [1500]u8;
 var dialer_scope: cancel.Scope;
 var listener_scope: cancel.Scope;
 
+var secret_storage_delegate: secret.ArrayAllocator[assembly.SecretStorage];
+var secret_storage_deallocations: usize;
+var secret_storage_zeroed_releases: usize;
+var secret_storage_nonzero_releases: usize;
+
+fun secret_storage_allocate(context: ptr, secret_context: *^u8, count: usize,
+                            bytes: usize, alignment: usize,
+                            output: **assembly.SecretStorage) i64 {
+    ret secret_storage_delegate.allocate_fn(secret_storage_delegate.context,
+        secret_storage_delegate.secret_context, count, bytes, alignment,
+        output);
+}
+
+fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
+                              data: *assembly.SecretStorage, count: usize,
+                              bytes: usize, alignment: usize) i64 {
+    secret_storage_deallocations = secret_storage_deallocations + 1;
+    var zeroed: bool = true;
+    var i: usize = 0;
+    for (i < count) {
+        if (data[i].source != 0 || data[i].generation != 0 || data[i].leased ||
+            data[i].receive_plaintext[0]:^ != 0 ||
+            data[i].receive_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:^ != 0 ||
+            data[i].send_plaintext[0]:^ != 0 ||
+            data[i].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:^ != 0) {
+            zeroed = false;
+        }
+        i = i + 1;
+    }
+    if (zeroed) {
+        secret_storage_zeroed_releases =
+            secret_storage_zeroed_releases + 1;
+    } or {
+        secret_storage_nonzero_releases =
+            secret_storage_nonzero_releases + 1;
+    }
+    if (secret_storage_deallocations == 1) {
+        data[0].receive_plaintext[0] = 0xCC;
+        ret -1;
+    }
+    ret secret_storage_delegate.deallocate_fn(secret_storage_delegate.context,
+        secret_storage_delegate.secret_context, data, count, bytes, alignment);
+}
+
 rec RollbackProbe {
     attempt_state: *u8;
     calls: usize;
@@ -926,5 +970,58 @@ test "quic.connection.assembly: public storage supports ordinary dynamic pools" 
         ?storage[0] == ?storage[1] ||
         ?storage[0].receive_header[0] == ?storage[1].receive_header[0] ||
         os.deallocate(storage::ptr, bytes) != 0) { ret 2; }
+    ret 0;
+}
+
+test "quic.connection.assembly: typed secret pools retain wiped deallocation for retry" {
+    var control_owner: secret.ArrayAllocator[assembly.Connection] =
+        secret.system_array_allocator[assembly.Connection]();
+    secret_storage_delegate =
+        secret.system_array_allocator[assembly.SecretStorage]();
+    secret_storage_deallocations = 0;
+    secret_storage_zeroed_releases = 0;
+    secret_storage_nonzero_releases = 0;
+    var storage_owner: secret.ArrayAllocator[assembly.SecretStorage] =
+        secret.ArrayAllocator[assembly.SecretStorage]{context: nil,
+            secret_context: nil, allocate_fn: secret_storage_allocate,
+            deallocate_fn: secret_storage_deallocate, initialized: true};
+    var controls: secret.SecretArray[assembly.Connection] =
+        secret.empty_array[assembly.Connection]();
+    var storage: secret.SecretArray[assembly.SecretStorage] =
+        secret.empty_array[assembly.SecretStorage]();
+    if (secret.init_array[assembly.Connection](?controls, ?control_owner, 2) !=
+            contracts.OK ||
+        secret.init_array[assembly.SecretStorage](?storage, ?storage_owner, 2) !=
+            contracts.OK) { ret 1; }
+    val control_data: *assembly.Connection =
+        secret.array_data[assembly.Connection](?controls);
+    val storage_data: *assembly.SecretStorage =
+        secret.array_data[assembly.SecretStorage](?storage);
+    if (control_data == nil || storage_data == nil) { ret 2; }
+    control_data[0].local_parameter_length = 77;
+    control_data[0].secrets.initial_keys.client.secret[0] = 0xA5;
+    storage_data[0].source = 41;
+    storage_data[0].generation = 9;
+    storage_data[0].leased = true;
+    storage_data[0].receive_plaintext[0] = 0x5A;
+    storage_data[1].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1] = 0xC3;
+    if (secret.destroy_array[assembly.Connection](?controls) != contracts.OK ||
+        secret.destroy_array[assembly.SecretStorage](?storage) !=
+            contracts.DEALLOCATION_FAILED ||
+        !secret.array_cleanup_pending[assembly.SecretStorage](?storage) ||
+        secret.array_active[assembly.SecretStorage](?storage) ||
+        secret.array_data[assembly.SecretStorage](?storage) != nil ||
+        storage.data == nil || storage.data[0].receive_plaintext[0]:^ != 0 ||
+        secret_storage_deallocations != 1 ||
+        secret_storage_zeroed_releases != 1 ||
+        secret_storage_nonzero_releases != 0) { ret 3; }
+    if (secret.destroy_array[assembly.SecretStorage](?storage) != contracts.OK ||
+        secret_storage_deallocations != 2 ||
+        secret_storage_zeroed_releases != 2 ||
+        secret_storage_nonzero_releases != 0 ||
+        secret.destroy_array[assembly.Connection](?controls) != contracts.OK ||
+        secret.destroy_array[assembly.SecretStorage](?storage) != contracts.OK) {
+        ret 4;
+    }
     ret 0;
 }
