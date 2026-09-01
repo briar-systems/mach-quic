@@ -369,6 +369,14 @@ keys, and restarts TLS with an explicit reason. Stateless server preflight parse
 and validates Initial packets before connection allocation. Listener admission
 charges connection and peer capacity before token validation or state allocation.
 The listener exclusively leases its admission and token managers until close.
+`initialize_result` records those leases and its pending storage independently
+and returns a generation-tagged `LeaseHandle`. A caller whose enclosing server
+transaction is not published can pass that handle to `abort_initialize`.
+Initialization abort and normal close attempt both manager lease legs, retain
+only refusals, and expose every attempted and retained leg.
+`retry_initialization_cleanup` accepts the same handle and touches only retained
+legs. Pending storage remains generation stamped until both manager leases have
+been released, so neither the Listener nor its storage can be reused early.
 Every successful preflight returns an `Acceptance` that owns its admission charge
 and, for Retry, its replay reservation through one pending slot. `commit` and
 `cancel` attempt both cleanup legs even if one fails. Their cleanup result names
