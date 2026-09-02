@@ -3311,6 +3311,7 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         ret result;
     }
     core.packet_numbers[index] = number + 1;
+    recovery.note_prepared(?core.recovery_state, space, number);
     owner.packet_number = number;
     owner.bytes = packet_size;
     owner.space = space;

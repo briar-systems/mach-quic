@@ -663,3 +663,38 @@ test "quic.stream.simulated: a closing manager releases a stream whose fin was n
     if (stream.release(?manager, opened.handle).status != stream.STATUS_OK || manager.active_streams != 0) { ret 5; }
     ret 0;
 }
+
+test "quic.stream.simulated: an attempt settles after its stream is released" {
+    var records: [1]stream.Stream;
+    var send_data: [4]u8;
+    var send_pending: [4]bool;
+    var send_acked: [4]bool;
+    var send_inflight: [4]u8;
+    var receive_data: [4]u8;
+    var receive_present: [4]bool;
+    var attempts: [1]stream.Attempt;
+    val storage: stream.Storage = stream.Storage{
+        streams: ?records[0], stream_capacity: 1,
+        send_data: ?send_data[0], send_data_length: 4,
+        send_pending: ?send_pending[0], send_acked: ?send_acked[0],
+        send_inflight: ?send_inflight[0], send_state_length: 4, send_stride: 4,
+        receive_data: ?receive_data[0], receive_data_length: 4,
+        receive_present: ?receive_present[0], receive_state_length: 4, receive_stride: 4,
+        attempts: ?attempts[0], attempt_capacity: 1
+    };
+    var manager: stream.Manager = initialize_manager(config(18, 1, 4), storage);
+    val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    var data: [1]u8 = [1]u8{6};
+    stream.write(?manager, opened.handle, ?data[0], 1);
+    val prepared: stream.Prepared = stream.prepare(?manager, opened.handle, 1, false);
+    if (!prepared.ok || stream.publish(?manager, prepared).status != stream.STATUS_OK) { ret 1; }
+    if (stream.begin_close(?manager).status != stream.STATUS_OK) { ret 2; }
+    # the attempt is still in flight, so the stream cannot release yet
+    if (stream.release(?manager, opened.handle).error != stream.ERROR_STATE) { ret 3; }
+    if (stream.on_terminal(?manager, prepared.token, stream.TERMINAL_LOST).status != stream.STATUS_OK) { ret 4; }
+    if (stream.release(?manager, opened.handle).status != stream.STATUS_OK) { ret 5; }
+    val again: stream.Prepared = stream.prepare(?manager, opened.handle, 1, false);
+    if (again.ok) { ret 6; }
+    if (manager.active_attempts != 0) { ret 7; }
+    ret 0;
+}
