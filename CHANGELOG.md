@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Removed
+
+- `tools/check-version.sh`. The manifest-against-constant comparison it did now
+  runs inline in CI, which is the only place it was ever run.
+- `tools/partial_literal_sweep.py`. It enumerated record literals naming fewer
+  fields than their record declares, which is a workaround for
+  briar-systems/mach#3108; that defect is being fixed in the compiler.
+
 ## [0.5.7] - 2026-09-02
 
 ### Changed
