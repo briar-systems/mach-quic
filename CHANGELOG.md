@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- A send completion for an ack-only packet whose acknowledgement generation
+  was superseded by a packet received in the meantime no longer closes the
+  connection with INTERNAL_ERROR. The loopback seam completes sends
+  synchronously and could not reach this state; a real socket reaches it as
+  soon as traffic is dense in both directions.
+
 ## [0.5.1] - 2026-09-01
 
 ### Fixed
