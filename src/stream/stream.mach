@@ -1274,14 +1274,7 @@ pub fun on_terminal(manager: *Manager, value: AttemptToken, terminal: u8) Operat
     }
     if (attempt.stream_index >= manager.storage.stream_capacity) { ret operation_error(ERROR_TOKEN); }
     val stream: *Stream = ?manager.storage.streams[attempt.stream_index];
-    if (!stream.active || stream.generation != attempt.stream_generation) {
-        # the stream is gone; the attempt still settles so its owner is freed
-        if (manager.active_attempts > 0) { manager.active_attempts = manager.active_attempts - 1; }
-        free_attempt(manager, value.index);
-        var settled: OperationResult;
-        settled.status = STATUS_OK;
-        ret settled;
-    }
+    if (!stream.active || stream.generation != attempt.stream_generation) { ret operation_error(ERROR_TOKEN); }
     if (attempt.kind == SEND_STREAM) {
         var i: usize = 0;
         for (i < attempt.length) {
