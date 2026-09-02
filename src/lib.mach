@@ -3,7 +3,7 @@ use std.types.string.str;
 use std.types.size.usize;
 use std.types.bool.bool;
 
-pub val VERSION: str = "0.5.2";
+pub val VERSION: str = "0.5.3";
 
 fwd quic.packet.packet;
 fwd quic.frame.frame;
