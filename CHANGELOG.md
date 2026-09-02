@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.4] - 2026-09-02
+
+### Fixed
+
+- A closing stream manager releases a stream as soon as nothing of it is
+  still in flight, instead of waiting for send and receive completions the
+  peer can no longer acknowledge. A peer that closes right after the last
+  data left the server's FIN-only frame unacknowledged and the stream, its
+  HTTP/3 engine, and the connection unreleasable.
+
 ## [0.5.3] - 2026-09-02
 
 ### Fixed

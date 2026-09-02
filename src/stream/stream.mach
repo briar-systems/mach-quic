@@ -1736,9 +1736,16 @@ pub fun snapshot(manager: *Manager, value: Handle) Snapshot {
 pub fun release(manager: *Manager, value: Handle) OperationResult {
     if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
     val stream: *Stream = ?manager.storage.streams[value.index];
-    if (!stream.send_closed || !stream.receive_closed || stream.active_attempts != 0 || stream.has_prepared ||
-        (stream.stop_received && !stream.reset_acked) || (stream.receive_cancelled && !stream.stop_acked && !stream.reset_received)) {
-        ret operation_error(ERROR_STATE);
+    # once the manager is closing no acknowledgement can arrive, so a stream
+    # is releasable as soon as nothing of it is still in flight
+    val unsettled: bool = stream.active_attempts != 0 || stream.has_prepared;
+    if (manager.closing) {
+        if (unsettled) { ret operation_error(ERROR_STATE); }
+    } or {
+        if (!stream.send_closed || !stream.receive_closed || unsettled ||
+            (stream.stop_received && !stream.reset_acked) || (stream.receive_cancelled && !stream.stop_acked && !stream.reset_received)) {
+            ret operation_error(ERROR_STATE);
+        }
     }
     val peer: bool = !stream.local;
     val uni: bool = stream.unidirectional;
