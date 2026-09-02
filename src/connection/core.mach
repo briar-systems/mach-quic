@@ -3421,6 +3421,11 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
         if (owner.kind == OWNER_CLOSE) {
             core.close_transmissions = core.close_transmissions + 1;
         }
+        # the peer may acknowledge this number, so recovery must know it was sent
+        if (!recovery.on_untracked_sent(?core.recovery_state, owner.space,
+            owner.packet_number, now_ns).ok) {
+            ret fail(core, INTERNAL_ERROR, now_ns);
+        }
         free_owner(owner);
         ret core_result(core, transport_api.STATUS_OK, 0);
     }

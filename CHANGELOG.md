@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Recovery now records the number of every sent packet, including ack-only
+  packets that carry nothing recoverable, so a peer acknowledging such a
+  packet is no longer treated as acknowledging an unsent number and closed
+  with PROTOCOL_VIOLATION.
+
 ## [0.5.2] - 2026-09-02
 
 ### Fixed

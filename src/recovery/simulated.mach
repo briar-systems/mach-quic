@@ -348,3 +348,27 @@ test "quic.recovery.simulated: old path acknowledgements cannot update selected 
         events[0].path_index != 1 || events[0].path_generation != 2) { ret 1; }
     ret 0;
 }
+
+test "quic.recovery.simulated: an acknowledged untracked packet number is accepted" {
+    var initial: [4]recovery.SentPacket;
+    var handshake: [4]recovery.SentPacket;
+    var application: [8]recovery.SentPacket;
+    var state: recovery.Recovery = recovery.init(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 8},
+        recovery.default_config()
+    );
+    recovery.confirm_handshake(?state, 0);
+    if (!recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 1000000, 100)).ok) { ret 1; }
+    if (!recovery.on_untracked_sent(?state, packet.SPACE_APPLICATION, 1, 2000000).ok) { ret 2; }
+    if (recovery.on_untracked_sent(?state, packet.SPACE_APPLICATION, 1, 3000000).ok) { ret 3; }
+    var events: [8]recovery.Event;
+    var ack: frame.Frame = ack_one(1);
+    val accepted: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 100000000, 3, ?events[0], 8);
+    if (!accepted.ok || accepted.acked_count != 0 || state.spaces[2].len != 1) { ret 4; }
+    ack = ack_one(2);
+    val beyond: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 101000000, 3, ?events[0], 8);
+    if (beyond.ok || beyond.error != recovery.ERROR_ACK) { ret 5; }
+    ret 0;
+}

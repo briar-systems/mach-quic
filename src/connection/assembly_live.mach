@@ -718,9 +718,13 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         transport.snapshot[binding.Binding](?listener.driver).active_streams != 16) {
         ret 212;
     }
-    # a packet received between preparing an ack-only packet and its send
-    # completion supersedes that ack's generation; the completion must not
-    # fail the connection
+    # one ack-eliciting listener packet leaves the dialer holding a delayed ack
+    stream_byte[0] = 0xC0;
+    if (transport.write_stream[binding.Binding](?listener.driver,
+            listener_critical[0], ?stream_byte[0], 1).count != 1) { ret 214; }
+    if (carry(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+        listener_endpoint(), ?clock, ?moved) != 0) { ret refusal(); }
+    # two dialer packets make the listener's next ack immediate
     i = 0;
     for (i < 2) {
         stream_byte[0] = (0xA0 + i)::u8;
@@ -730,6 +734,9 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
             dialer_endpoint(), ?clock, ?moved) != 0) { ret refusal(); }
         i = i + 1;
     }
+    # a packet received between preparing an ack-only packet and its send
+    # completion supersedes that ack's generation; the completion must not
+    # fail the connection
     var ack_wire: [1500]u8;
     clock = clock + 1000;
     val ack_only: transport.Generated =
@@ -748,6 +755,40 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (superseded.status != transport.STATUS_OK ||
         transport.snapshot[binding.Binding](?listener.driver).state !=
             transport.ACTIVE) { ret 217; }
+    # the ack-only packet is now the largest the dialer has received; when its
+    # delayed ack fires it acknowledges that number, which the listener never
+    # tracked for loss, and the listener must accept it
+    var ack_datagram: transport.Datagram;
+    ack_datagram.local = dialer_endpoint();
+    ack_datagram.peer = listener_endpoint();
+    ack_datagram.data = ?ack_wire[0];
+    ack_datagram.length = ack_only.count;
+    ack_datagram.received_at_ns = clock;
+    ack_datagram.ecn = 0;
+    if (transport.receive_datagram[binding.Binding](?dialer.driver,
+        ?ack_datagram).status != transport.STATUS_OK) { ret 218; }
+    clock = clock + 100000000;
+    var reply_wire: [1500]u8;
+    val reply: transport.Generated =
+        transport.generate[binding.Binding](?dialer.driver, ?dialer_scope,
+            ?reply_wire[0], 1500, clock, 0);
+    if (reply.status != transport.STATUS_OK || reply.count == 0) { ret 219; }
+    clock = clock + 1000;
+    if (transport.complete_send[binding.Binding](?dialer.driver, reply.token,
+        transport.SEND_SENT, reply.count, clock).status != transport.STATUS_OK) {
+        ret 219;
+    }
+    var reply_datagram: transport.Datagram;
+    reply_datagram.local = listener_endpoint();
+    reply_datagram.peer = dialer_endpoint();
+    reply_datagram.data = ?reply_wire[0];
+    reply_datagram.length = reply.count;
+    reply_datagram.received_at_ns = clock;
+    reply_datagram.ecn = 0;
+    if (transport.receive_datagram[binding.Binding](?listener.driver,
+            ?reply_datagram).status != transport.STATUS_OK ||
+        transport.snapshot[binding.Binding](?listener.driver).state !=
+            transport.ACTIVE) { ret 220; }
     if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
     if (!transport.cancel_connection[binding.Binding](?dialer.driver) ||
         !transport.cancel_connection[binding.Binding](?listener.driver)) { ret 213; }
