@@ -1549,10 +1549,9 @@ pub fun release_stream[T](driver: *Driver[T], value: Stream) OperationResult {
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
     mutex.lock(?driver.lock);
     apply_cancellation[T](driver);
-    if (driver.state == CLOSED) {
-        mutex.unlock(?driver.lock);
-        ret operation_error(ERROR_STATE);
-    }
+    # releasing is the owner's bookkeeping and stays possible in every state,
+    # including CLOSED: finish_close waits for the stream storage to drain and
+    # release_ready for every stream to be released
     val released: stream_api.OperationResult = stream_api.release(driver.streams,
         stream_handle(value));
     var result: OperationResult;
