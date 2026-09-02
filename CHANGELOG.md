@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.5] - 2026-09-02
+
+### Fixed
+
+- `transport.release_stream` no longer refuses once the driver is CLOSED.
+  A stream whose last attempt was settled by the drain could be released
+  neither before it (something in flight) nor after it (driver closed), which
+  left HTTP/3 engines and their connections unreleasable.
+
 ## [0.5.4] - 2026-09-02
 
 ### Fixed

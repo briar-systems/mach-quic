@@ -702,10 +702,13 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         i = i + 1;
     }
     if (pump(?clock, ?moved, 16) != 0) { ret refusal(); }
+    var accepted_streams: [13]transport.Stream;
     i = 0;
     for (i < 13) {
-        if (transport.accept_stream[binding.Binding](?listener.driver).status !=
-            transport.STATUS_OK) { ret 210; }
+        val accepted_stream: transport.OpenResult =
+            transport.accept_stream[binding.Binding](?listener.driver);
+        if (accepted_stream.status != transport.STATUS_OK) { ret 210; }
+        accepted_streams[i] = accepted_stream.stream;
         i = i + 1;
     }
     i = 0;
@@ -792,6 +795,23 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
     if (!transport.cancel_connection[binding.Binding](?dialer.driver) ||
         !transport.cancel_connection[binding.Binding](?listener.driver)) { ret 213; }
+    # the abortive cancel drained the listener at once; releasing its streams
+    # is still the owner's call and must succeed in every closing state
+    i = 0;
+    for (i < 13) {
+        if (transport.release_stream[binding.Binding](?listener.driver,
+            accepted_streams[i]).status != transport.STATUS_OK) { ret 224; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < 3) {
+        if (transport.release_stream[binding.Binding](?listener.driver,
+            listener_critical[i]).status != transport.STATUS_OK) { ret 225; }
+        i = i + 1;
+    }
+    if (transport.snapshot[binding.Binding](?listener.driver).active_streams != 0) {
+        ret 226;
+    }
     if (transport.finish_close[binding.Binding](?dialer.driver).status !=
         transport.STATUS_OK) { ret 214; }
     if (transport.finish_close[binding.Binding](?listener.driver).status !=
