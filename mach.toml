@@ -62,4 +62,4 @@ ref = "tag/v0.8.1"
 
 [dep.mach-tls]
 git = "https://github.com/briar-systems/mach-tls"
-ref = "tag/v0.2.2"
+ref = "tag/v0.2.3"
