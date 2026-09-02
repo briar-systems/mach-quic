@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Recovery bounds acknowledgements by the highest packet number handed to the
+  driver, so an ACK that arrives before the packet's send completion is
+  accepted instead of closing the connection with PROTOCOL_VIOLATION.
+- Settling a send attempt whose stream has already been released succeeds and
+  frees the attempt instead of failing the connection.
+
 ## [0.5.5] - 2026-09-02
 
 ### Fixed

@@ -75,11 +75,13 @@ pub rec History {
     capacity: usize;
     len: usize;
     largest_sent: u64;
+    largest_prepared: u64;
     largest_acked: u64;
     loss_time_ns: u64;
     last_ack_eliciting_at_ns: u64;
     ack_eliciting_in_flight: usize;
     has_largest_sent: bool;
+    has_largest_prepared: bool;
     has_largest_acked: bool;
     active: bool;
 }
@@ -481,6 +483,20 @@ pub fun on_untracked_sent(recovery: *Recovery, pn_space: u8, number: u64,
     ret operation;
 }
 
+# record the highest packet number handed to the driver for a space so an
+# acknowledgement that arrives before the send completion is not refused
+pub fun note_prepared(recovery: *Recovery, pn_space: u8, number: u64) bool {
+    val i: usize = index(pn_space);
+    if (recovery == nil || !recovery.valid || i >= 3 || !recovery.spaces[i].active ||
+        number > packet.MAX_PACKET_NUMBER) { ret false; }
+    val history: *History = ?recovery.spaces[i];
+    if (!history.has_largest_prepared || number > history.largest_prepared) {
+        history.largest_prepared = number;
+        history.has_largest_prepared = true;
+    }
+    ret true;
+}
+
 pub fun on_packet_sent(recovery: *Recovery, pn_space: u8, sent: SentPacket) OperationResult {
     val i: usize = index(pn_space);
     if (recovery == nil || !recovery.valid) { var empty: Timer; ret operation_error(ERROR_STATE, empty); }
@@ -704,7 +720,15 @@ pub fun on_ack_path(recovery: *Recovery, pn_space: u8, ack: *frame.Frame,
     if (recovery.has_last_sent && received_at_ns < recovery.last_sent_at_ns) { ret ack_error(ERROR_TIME, recovery.timer); }
     if (!valid_ack(ack) || ack_delay_exponent > 20) { ret ack_error(ERROR_ACK, recovery.timer); }
     val history: *History = ?recovery.spaces[i];
-    if (!history.has_largest_sent || ack.largest_acknowledged > history.largest_sent) {
+    # a packet handed to the driver may be acknowledged before its send
+    # completion records it, so the bound is the largest number prepared
+    var largest_known: u64 = history.largest_sent;
+    var has_known: bool = history.has_largest_sent;
+    if (history.has_largest_prepared && (!has_known || history.largest_prepared > largest_known)) {
+        largest_known = history.largest_prepared;
+        has_known = true;
+    }
+    if (!has_known || ack.largest_acknowledged > largest_known) {
         ret ack_error(ERROR_ACK, recovery.timer);
     }
     if (history.len > capacity || (history.len > 0 && events == nil)) {

@@ -372,3 +372,29 @@ test "quic.recovery.simulated: an acknowledged untracked packet number is accept
     if (beyond.ok || beyond.error != recovery.ERROR_ACK) { ret 5; }
     ret 0;
 }
+
+test "quic.recovery.simulated: an acknowledgement may precede the send completion" {
+    var initial: [4]recovery.SentPacket;
+    var handshake: [4]recovery.SentPacket;
+    var application: [8]recovery.SentPacket;
+    var state: recovery.Recovery = recovery.init(
+        recovery.HistoryStorage{packets: ?initial[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?handshake[0], capacity: 4},
+        recovery.HistoryStorage{packets: ?application[0], capacity: 8},
+        recovery.default_config()
+    );
+    recovery.confirm_handshake(?state, 0);
+    if (!recovery.note_prepared(?state, packet.SPACE_APPLICATION, 0)) { ret 1; }
+    var events: [8]recovery.Event;
+    var ack: frame.Frame = ack_one(0);
+    val early: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 100000000, 3, ?events[0], 8);
+    if (!early.ok || early.acked_count != 0) { ret 2; }
+    ack = ack_one(1);
+    val beyond: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 101000000, 3, ?events[0], 8);
+    if (beyond.ok || beyond.error != recovery.ERROR_ACK) { ret 3; }
+    if (!recovery.on_packet_sent(?state, packet.SPACE_APPLICATION, sent(0, 102000000, 100)).ok) { ret 4; }
+    ack = ack_one(0);
+    val later: recovery.AckResult = recovery.on_ack(?state, packet.SPACE_APPLICATION, ?ack, 103000000, 3, ?events[0], 8);
+    if (!later.ok || later.acked_count != 1) { ret 5; }
+    ret 0;
+}
