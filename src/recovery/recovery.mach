@@ -460,6 +460,27 @@ pub fun set_max_ack_delay(recovery: *Recovery, value_ns: u64,
     ret result;
 }
 
+# record a packet that carried nothing recoverable so an acknowledgement
+# covering its number is accepted; it is never tracked for loss or rtt
+pub fun on_untracked_sent(recovery: *Recovery, pn_space: u8, number: u64,
+                          sent_at_ns: u64) OperationResult {
+    val i: usize = index(pn_space);
+    if (recovery == nil || !recovery.valid) { var empty: Timer; ret operation_error(ERROR_STATE, empty); }
+    if (i >= 3 || !recovery.spaces[i].active) { ret operation_error(ERROR_SPACE, recovery.timer); }
+    if (number > packet.MAX_PACKET_NUMBER) { ret operation_error(ERROR_PACKET_NUMBER, recovery.timer); }
+    val history: *History = ?recovery.spaces[i];
+    if (history.has_largest_sent && number <= history.largest_sent) { ret operation_error(ERROR_PACKET_NUMBER, recovery.timer); }
+    if (recovery.has_last_sent && sent_at_ns < recovery.last_sent_at_ns) { ret operation_error(ERROR_TIME, recovery.timer); }
+    history.largest_sent = number;
+    history.has_largest_sent = true;
+    recovery.last_sent_at_ns = sent_at_ns;
+    recovery.has_last_sent = true;
+    var operation: OperationResult;
+    operation.ok = true;
+    operation.timer = recovery.timer;
+    ret operation;
+}
+
 pub fun on_packet_sent(recovery: *Recovery, pn_space: u8, sent: SentPacket) OperationResult {
     val i: usize = index(pn_space);
     if (recovery == nil || !recovery.valid) { var empty: Timer; ret operation_error(ERROR_STATE, empty); }
