@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Removed the unreachable settle branch for attempts on released streams added
+  in 0.5.6; a stream cannot be released while an attempt is still in flight,
+  so the branch and its test described a state the API does not permit.
+
 ## [0.5.6] - 2026-09-02
 
 ### Fixed
