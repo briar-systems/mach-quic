@@ -3340,8 +3340,12 @@ fun publish_payload(core: *Core, secrets: *Secrets, owner: *Owner,
                     now_ns: u64) bool {
     if (owner.kind == OWNER_ACK) {
         core.ack_prepared[space_index(owner.space)] = false;
-        ret ack_api.on_ack_sent(?core.acknowledgements, owner.space,
+        # a packet received between preparing this ack and its completion
+        # supersedes its generation; the sent ack stays valid and the newer
+        # pending state must survive, so a stale publication is not a failure
+        ack_api.on_ack_sent(?core.acknowledgements, owner.space,
             owner.ack_generation);
+        ret true;
     }
     if (owner.kind == OWNER_CRYPTO) {
         ret handshake_api.publish_scoped(secrets.handshake, core.config.source, owner.handshake).status == handshake_api.STATUS_OK;

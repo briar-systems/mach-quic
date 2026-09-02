@@ -718,6 +718,37 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         transport.snapshot[binding.Binding](?listener.driver).active_streams != 16) {
         ret 212;
     }
+    # a packet received between preparing an ack-only packet and its send
+    # completion supersedes that ack's generation; the completion must not
+    # fail the connection
+    i = 0;
+    for (i < 2) {
+        stream_byte[0] = (0xA0 + i)::u8;
+        if (transport.write_stream[binding.Binding](?dialer.driver,
+                dialer_critical[i], ?stream_byte[0], 1).count != 1) { ret 214; }
+        if (carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+            dialer_endpoint(), ?clock, ?moved) != 0) { ret refusal(); }
+        i = i + 1;
+    }
+    var ack_wire: [1500]u8;
+    clock = clock + 1000;
+    val ack_only: transport.Generated =
+        transport.generate[binding.Binding](?listener.driver, ?listener_scope,
+            ?ack_wire[0], 1500, clock, 0);
+    if (ack_only.status != transport.STATUS_OK || ack_only.count == 0) { ret 215; }
+    stream_byte[0] = 0xA2;
+    if (transport.write_stream[binding.Binding](?dialer.driver,
+            dialer_critical[2], ?stream_byte[0], 1).count != 1) { ret 216; }
+    if (carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        dialer_endpoint(), ?clock, ?moved) != 0) { ret refusal(); }
+    clock = clock + 1000;
+    val superseded: transport.Completion =
+        transport.complete_send[binding.Binding](?listener.driver,
+            ack_only.token, transport.SEND_SENT, ack_only.count, clock);
+    if (superseded.status != transport.STATUS_OK ||
+        transport.snapshot[binding.Binding](?listener.driver).state !=
+            transport.ACTIVE) { ret 217; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
     if (!transport.cancel_connection[binding.Binding](?dialer.driver) ||
         !transport.cancel_connection[binding.Binding](?listener.driver)) { ret 213; }
     if (transport.finish_close[binding.Binding](?dialer.driver).status !=
