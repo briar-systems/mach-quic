@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.8] - 2026-09-05
 
 ### Removed
 
@@ -9,6 +9,14 @@
 - `tools/partial_literal_sweep.py`. It enumerated record literals naming fewer
   fields than their record declares, which is a workaround for
   briar-systems/mach#3108; that defect is being fixed in the compiler.
+
+### Added
+
+- GitHub Actions CI: every pull request builds the library, runs the suite in both profiles, checks the release version constant, and verifies IR across all six targets.
+
+### Changed
+
+- Dependencies: mach-tls v0.2.4, mach-crypto v0.8.2.
 
 ## [0.5.7] - 2026-09-02
 
