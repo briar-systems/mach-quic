@@ -1,6 +1,6 @@
 [project]
 id = "quic"
-version = "0.5.8"
+version = "0.5.9"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -62,4 +62,4 @@ ref = "tag/v0.8.2"
 
 [dep.mach-tls]
 git = "https://github.com/briar-systems/mach-tls"
-ref = "tag/v0.2.4"
+ref = "tag/v0.2.5"

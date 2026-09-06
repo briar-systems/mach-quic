@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.9] - 2026-09-05
+
+### Changed
+
+- Dependencies: mach-tls v0.2.5.
+
 ## [0.5.8] - 2026-09-05
 
 ### Removed
