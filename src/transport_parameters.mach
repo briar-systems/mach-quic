@@ -6,10 +6,22 @@ use std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
-use std.types.result;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
+
+fun is_err_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
+    ret sel outcome.err;
+}
+
+fun is_ok_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
+    ret sel outcome.ok;
+}
+
+fun is_ok_usize_u8(outcome: res[usize, u8]) bool {
+    ret sel outcome.ok;
+}
 pub val ORIGINAL_DESTINATION_CONNECTION_ID: u64 = 0x00;
 pub val MAX_IDLE_TIMEOUT: u64 = 0x01;
 pub val STATELESS_RESET_TOKEN: u64 = 0x02;
@@ -465,11 +477,11 @@ pub fun encoded_size(parameters: *Parameters, role: u8, limits: Limits) EncodeRe
 }
 
 fun write_v(b: *binary.Builder, value: u64) bool {
-    ret result.is_ok[usize, u8](varint.write(b, value, 0));
+    ret is_ok_usize_u8(varint.write(b, value, 0));
 }
 
 fun write_bytes(b: *binary.Builder, data: *u8, len: usize) bool {
-    ret result.is_ok[usize, str](binary.builder_write_bytes(b, data, len));
+    ret is_ok_usize_encode(binary.builder_write_bytes(b, data, len));
 }
 
 fun write_header(b: *binary.Builder, id: u64, value_len: usize) bool {
@@ -487,10 +499,10 @@ fun write_known(b: *binary.Builder, parameters: *Parameters, id: u64) bool {
     if (id == RETRY_SOURCE_CONNECTION_ID) { ret write_bytes(b, ?parameters.retry_source_connection_id.data[0], parameters.retry_source_connection_id.len::usize); }
     if (id == PREFERRED_ADDRESS) {
         ret write_bytes(b, ?parameters.preferred_address.ipv4[0], 4) &&
-            result.is_ok[usize, str](binary.builder_write_u16(b, parameters.preferred_address.ipv4_port)) &&
+            is_ok_usize_encode(binary.builder_write_u16(b, parameters.preferred_address.ipv4_port)) &&
             write_bytes(b, ?parameters.preferred_address.ipv6[0], 16) &&
-            result.is_ok[usize, str](binary.builder_write_u16(b, parameters.preferred_address.ipv6_port)) &&
-            result.is_ok[usize, str](binary.builder_write_u8(b, parameters.preferred_address.connection_id.len)) &&
+            is_ok_usize_encode(binary.builder_write_u16(b, parameters.preferred_address.ipv6_port)) &&
+            is_ok_usize_encode(binary.builder_write_u8(b, parameters.preferred_address.connection_id.len)) &&
             write_bytes(b, ?parameters.preferred_address.connection_id.data[0], parameters.preferred_address.connection_id.len::usize) &&
             write_bytes(b, ?parameters.preferred_address.stateless_reset_token[0], 16);
     }
@@ -502,9 +514,9 @@ pub fun encode(b: *binary.Builder, parameters: *Parameters, role: u8, limits: Li
     if (b == nil || b.order != binary.BIG) { ret encode_error(ERROR_OUTPUT); }
     val measured: EncodeResult = encoded_size(parameters, role, limits);
     if (!measured.ok) { ret measured; }
-    val reserved: result.Result[binary.Reservation, str] = binary.builder_reserve(b, measured.count);
-    if (result.is_err[binary.Reservation, str](reserved)) { ret encode_error(ERROR_OUTPUT); }
-    var reservation: binary.Reservation = result.unwrap_ok[binary.Reservation, str](reserved);
+    val reserved: res[binary.Reservation, binary.EncodeError] = binary.builder_reserve(b, measured.count);
+    if (sel reserved.err) { ret encode_error(ERROR_OUTPUT); }
+    var reservation: binary.Reservation = reserved.ok;
     val body: *binary.Builder = ?reservation.body;
     var ok: bool = true;
     var id: u64 = 0;
@@ -525,7 +537,7 @@ pub fun encode(b: *binary.Builder, parameters: *Parameters, role: u8, limits: Li
         binary.reservation_rollback(?reservation);
         ret encode_error(ERROR_OUTPUT);
     }
-    if (result.is_err[usize, str](binary.builder_commit(?reservation))) { ret encode_error(ERROR_OUTPUT); }
+    if (is_err_usize_encode(binary.builder_commit(?reservation))) { ret encode_error(ERROR_OUTPUT); }
     ret measured;
 }
 

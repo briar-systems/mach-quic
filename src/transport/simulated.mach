@@ -7,9 +7,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
+use std.types.result.res;
 use std.sync.cancel;
 use std.sync.atomic;
 use std.sync.thread;
@@ -20,6 +18,14 @@ use io_error: std.io.error;
 use io_lifecycle: std.io.lifecycle;
 use net_types: std.net.async.types;
 
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}
 rec Core {
     driver: *transport_api.Driver[Core];
     streams: *stream_api.Manager;
@@ -281,7 +287,7 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     candidate.next_owner = 1;
     candidate.timer_generation = 1;
     fixture.core = candidate;
-    if (!cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0})) { ret false; }
+    if (!operation_ok(cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0}))) { ret false; }
     val protocol: transport_api.Protocol[Core] = transport_api.Protocol[Core]{
         context: ?fixture.core, context_range: core_range,
         receive: core_receive, timeout: core_timeout,
@@ -318,7 +324,7 @@ fun close_fixture(fixture: *Fixture, now_ns: u64) bool {
             transport_api.STATUS_OK) { ret false; }
     }
     if (transport_api.finish_close[Core](?fixture.driver).status != transport_api.STATUS_OK) { ret false; }
-    ret cancel.destroy(?fixture.scope);
+    ret operation_ok(cancel.destroy(?fixture.scope));
 }
 
 test "quic.transport.simulated: client and server expose only application contracts" {
@@ -450,7 +456,7 @@ test "quic.transport.simulated: terminal release preserves generations across re
         fixture.sends[first.token.index::usize].token.source != 0 ||
         fixture.sends[first.token.index::usize].packet.buffer != nil ||
         transport_api.release_closed[Core](?fixture.driver).status !=
-            transport_api.STATUS_OK || !cancel.destroy(?fixture.scope)) { ret 4; }
+            transport_api.STATUS_OK || !operation_ok(cancel.destroy(?fixture.scope))) { ret 4; }
     if (!make_fixture(?fixture, 119, stream_api.ROLE_CLIENT)) { ret 5; }
     fixture.core.outbound = 1;
     var second_buffer: [8]u8;
@@ -484,9 +490,9 @@ test "quic.transport.simulated: malformed generation and scope inputs publish no
     if (generated.status != transport_api.STATUS_OK || generated.token.generation != 1 ||
         generated.count != 5) { ret 3; }
     var unrelated: cancel.Scope;
-    if (!cancel.make_root(?unrelated, false, time.Time{sec: 0, nsec: 0}) ||
+    if (!operation_ok(cancel.make_root(?unrelated, false, time.Time{sec: 0, nsec: 0})) ||
         transport_api.generate[Core](?fixture.driver, ?unrelated, ?bytes[0], 8, 3, 3).status !=
-            transport_api.STATUS_CANCELLED || !cancel.destroy(?unrelated)) { ret 4; }
+            transport_api.STATUS_CANCELLED || !operation_ok(cancel.destroy(?unrelated))) { ret 4; }
     if (transport_api.cancel_send[Core](?fixture.driver, generated.token, 4).status !=
         transport_api.STATUS_OK || !close_fixture(?fixture, 5)) { ret 5; }
     ret 0;
@@ -543,7 +549,7 @@ test "quic.transport.simulated: send completion and connection cancellation race
         fixture.core.completed != 1 || fixture.core.active_count != 0 ||
         transport_api.snapshot[Core](?fixture.driver).state != transport_api.DRAINING ||
         transport_api.finish_close[Core](?fixture.driver).status != transport_api.STATUS_OK ||
-        !cancel.destroy(?fixture.scope)) { ret 4; }
+        !operation_ok(cancel.destroy(?fixture.scope))) { ret 4; }
     ret 0;
 }
 
@@ -583,12 +589,12 @@ test "quic.transport.simulated: cancellation and graceful close retain exact bor
         !transport_api.cancel_connection[Core](?cancelled.driver)) { ret 2; }
     val state: transport_api.Snapshot = transport_api.snapshot[Core](?cancelled.driver);
     if (state.state != transport_api.DRAINING || state.close_mode != io_lifecycle.ABORTIVE ||
-        state.cancellation_reason != cancel.CANCELLED ||
+        !(sel state.cancellation_reason.cancelled) ||
         transport_api.finish_close[Core](?cancelled.driver).status != transport_api.STATUS_BLOCKED ||
         transport_api.operation_snapshot[Core](?cancelled.driver, pending.token).buffer != ?output[0]) { ret 3; }
     if (transport_api.cancel_send[Core](?cancelled.driver, pending.token, 3).status !=
         transport_api.STATUS_OK || transport_api.finish_close[Core](?cancelled.driver).status !=
-        transport_api.STATUS_OK || !cancel.destroy(?cancelled.scope)) { ret 4; }
+        transport_api.STATUS_OK || !operation_ok(cancel.destroy(?cancelled.scope))) { ret 4; }
 
     var graceful: Fixture;
     if (!make_fixture(?graceful, 106, stream_api.ROLE_CLIENT)) { ret 5; }
@@ -606,7 +612,7 @@ test "quic.transport.simulated: cancellation and graceful close retain exact bor
         escalated.close_mode != io_lifecycle.ABORTIVE || escalated.application_error != 42) { ret 8; }
     if (transport_api.release_datagram[Core](?graceful.driver, borrowed.token).status !=
         transport_api.STATUS_OK || transport_api.finish_close[Core](?graceful.driver).status !=
-        transport_api.STATUS_OK || !cancel.destroy(?graceful.scope)) { ret 9; }
+        transport_api.STATUS_OK || !operation_ok(cancel.destroy(?graceful.scope))) { ret 9; }
     ret 0;
 }
 
@@ -638,35 +644,37 @@ test "quic.transport.simulated: sustained independent streams remain bounded" {
 test "quic.transport.native: loopback udp preserves generated and received datagrams" {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 108, stream_api.ROLE_CLIENT)) { ret 1; }
-    val bound: Result[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
-    val made: Result[udp.Socket, io_error.Error] = udp.create();
-    if (is_err[udp.Socket, io_error.Error](bound) || is_err[udp.Socket, io_error.Error](made)) { ret 2; }
-    var receiver: udp.Socket = unwrap_ok[udp.Socket, io_error.Error](bound);
-    var sender: udp.Socket = unwrap_ok[udp.Socket, io_error.Error](made);
-    val receiver_endpoint: Result[ip.Endpoint, io_error.Error] = udp.local_endpoint(?receiver);
-    if (is_err[ip.Endpoint, io_error.Error](receiver_endpoint)) { ret 3; }
+    val bound: res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
+    val made: res[udp.Socket, io_error.Error] = udp.create();
+    if (sel bound.err) { ret 2; }
+    if (sel made.err) { ret 2; }
+    var receiver: udp.Socket = bound.ok;
+    var sender: udp.Socket = made.ok;
+    val receiver_endpoint: res[ip.Endpoint, io_error.Error] = udp.local_endpoint(?receiver);
+    if (sel receiver_endpoint.err) { ret 3; }
     fixture.core.outbound = 1;
     var output: [8]u8;
     val generated: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
         ?fixture.scope, ?output[0], 8, 1, 9);
-    val sent: Result[usize, io_error.Error] = udp.send_to(?sender, generated.buffer,
-        generated.count, unwrap_ok[ip.Endpoint, io_error.Error](receiver_endpoint));
-    if (generated.status != transport_api.STATUS_OK || is_err[usize, io_error.Error](sent) ||
-        unwrap_ok[usize, io_error.Error](sent) != 5 ||
+    val sent: res[usize, io_error.Error] = udp.send_to(?sender, generated.buffer,
+        generated.count, receiver_endpoint.ok);
+    if (generated.status != transport_api.STATUS_OK) { ret 4; }
+    if (sel sent.err) { ret 4; }
+    if (sent.ok != 5 ||
         transport_api.complete_send[Core](?fixture.driver, generated.token,
             transport_api.SEND_SENT, 5, 2).status != transport_api.STATUS_OK) { ret 4; }
     var received_bytes: [16]u8;
     var peer: ip.Endpoint;
-    val received: Result[usize, io_error.Error] = udp.recv_from(?receiver,
+    val received: res[usize, io_error.Error] = udp.recv_from(?receiver,
         ?received_bytes[0], 16, ?peer);
-    if (is_err[usize, io_error.Error](received)) { ret 5; }
+    if (sel received.err) { ret 5; }
     var packet: net_types.Packet;
     packet.buffer = ?received_bytes[0];
     packet.capacity = 16;
-    packet.length = unwrap_ok[usize, io_error.Error](received);
+    packet.length = received.ok;
     packet.peer = peer;
     if (transport_api.receive_native[Core](?fixture.driver, ?packet,
-        unwrap_ok[ip.Endpoint, io_error.Error](receiver_endpoint), 3, 0).status !=
+        receiver_endpoint.ok, 3, 0).status !=
         transport_api.STATUS_OK || fixture.core.received != 1) { ret 6; }
     udp.socket_close(?sender);
     udp.socket_close(?receiver);
@@ -677,7 +685,7 @@ test "quic.transport.native: loopback udp preserves generated and received datag
 test "quic.transport.simulated: a cancelled scope closes on the owner's next call" {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 111, stream_api.ROLE_CLIENT)) { ret 1; }
-    if (!cancel.cancel(?fixture.scope)) { ret 2; }
+    if (!transition_ok(cancel.cancel(?fixture.scope))) { ret 2; }
     # the scope's callback is handed an untyped ptr and cannot reach a protocol
     # whose context is secret-welded, so it records the cancellation and touches
     # nothing else
@@ -690,9 +698,9 @@ test "quic.transport.simulated: a cancelled scope closes on the owner's next cal
         ?fixture.driver);
     if (state.state != transport_api.DRAINING ||
         state.close_mode != io_lifecycle.ABORTIVE ||
-        state.cancellation_reason != cancel.CANCELLED ||
+        !(sel state.cancellation_reason.cancelled) ||
         !fixture.core.closing || !fixture.core.abortive) { ret 4; }
     if (transport_api.finish_close[Core](?fixture.driver).status !=
-        transport_api.STATUS_OK || !cancel.destroy(?fixture.scope)) { ret 5; }
+        transport_api.STATUS_OK || !operation_ok(cancel.destroy(?fixture.scope))) { ret 5; }
     ret 0;
 }

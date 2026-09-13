@@ -5,10 +5,14 @@ use std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
-use std.types.result;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
+
+fun is_err_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
+    ret sel outcome.err;
+}
 pub val VERSION_1: u32 = 0x00000001;
 pub val VERSION_2: u32 = 0x6b3343cf;
 pub val MAX_CONNECTION_ID: usize = 20;
@@ -438,12 +442,12 @@ fun encode_failed(code: u8) EncodeResult {
     ret r;
 }
 
-fun write_ok(r: result.Result[usize, str]) bool {
-    ret result.is_ok[usize, str](r);
+fun write_ok(r: res[usize, binary.EncodeError]) bool {
+    ret (sel r.ok);
 }
 
-fun varint_ok(r: result.Result[usize, u8]) bool {
-    ret result.is_ok[usize, u8](r);
+fun varint_ok(r: res[usize, u8]) bool {
+    ret (sel r.ok);
 }
 
 fun validate_span(span: Span, limit: usize) bool {
@@ -525,9 +529,9 @@ pub fun encode(b: *binary.Builder, packet: *Packet, limits: Limits) EncodeResult
     if (b == nil || b.order != binary.BIG) { ret encode_failed(ERROR_OUTPUT); }
     val measured: EncodeResult = encoded_size(packet, limits);
     if (!measured.ok) { ret measured; }
-    val reserved_result: result.Result[binary.Reservation, str] = binary.builder_reserve(b, measured.count);
-    if (result.is_err[binary.Reservation, str](reserved_result)) { ret encode_failed(ERROR_OUTPUT); }
-    var reservation: binary.Reservation = result.unwrap_ok[binary.Reservation, str](reserved_result);
+    val reserved_result: res[binary.Reservation, binary.EncodeError] = binary.builder_reserve(b, measured.count);
+    if (sel reserved_result.err) { ret encode_failed(ERROR_OUTPUT); }
+    var reservation: binary.Reservation = reserved_result.ok;
     val body: *binary.Builder = ?reservation.body;
 
     var first: u8 = 0;
@@ -599,7 +603,7 @@ pub fun encode(b: *binary.Builder, packet: *Packet, limits: Limits) EncodeResult
         }
     }
 
-    if (body.len != measured.count || result.is_err[usize, str](binary.builder_commit(?reservation))) {
+    if (body.len != measured.count || is_err_usize_encode(binary.builder_commit(?reservation))) {
         if (reservation.active) { binary.reservation_rollback(?reservation); }
         ret encode_failed(ERROR_OUTPUT);
     }

@@ -34,6 +34,10 @@ use tls.server;
 use tls.tls13;
 
 # assembled controls and backing are far past a stack frame
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
 var dialer: assembly.Connection;
 var listener: assembly.Connection;
 var dialer_storage: assembly.Storage;
@@ -85,10 +89,10 @@ fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
     var i: usize = 0;
     for (i < count) {
         if (data[i].source != 0 || data[i].generation != 0 || data[i].leased ||
-            data[i].receive_plaintext[0]:^ != 0 ||
-            data[i].receive_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:^ != 0 ||
-            data[i].send_plaintext[0]:^ != 0 ||
-            data[i].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:^ != 0) {
+            data[i].receive_plaintext[0]:>u8 != 0 ||
+            data[i].receive_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:>u8 != 0 ||
+            data[i].send_plaintext[0]:>u8 != 0 ||
+            data[i].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:>u8 != 0) {
             zeroed = false;
         }
         i = i + 1;
@@ -419,8 +423,8 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
                 len: dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS)) { ret 6; }
 
-    if (!cancel.make_root(?listener_scope, false, time.Time{sec: 0, nsec: 0}) ||
-        !cancel.make_root(?dialer_scope, false, time.Time{sec: 0, nsec: 0})) {
+    if (!operation_ok(cancel.make_root(?listener_scope, false, time.Time{sec: 0, nsec: 0})) ||
+        !operation_ok(cancel.make_root(?dialer_scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret 7;
     }
     val core_scope: *cancel.Scope = embedded_scope(
@@ -828,7 +832,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         listener.initialized || !dialer.released || !listener.released ||
         !assembly.release_closed(?dialer) ||
         !assembly.release_closed(?listener) ||
-        !cancel.destroy(?dialer_scope) || !cancel.destroy(?listener_scope)) {
+        !operation_ok(cancel.destroy(?dialer_scope)) || !operation_ok(cancel.destroy(?listener_scope))) {
         ret 223;
     }
 
@@ -844,10 +848,10 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
             data: contracts.Bytes{data: ?dialer_parameters[0],
                 len: dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS) ||
-        !cancel.make_root(?dialer_scope, false,
-            time.Time{sec: 0, nsec: 0}) ||
-        !cancel.make_root(?listener_scope, false,
-            time.Time{sec: 0, nsec: 0})) { ret 224; }
+        !operation_ok(cancel.make_root(?dialer_scope, false,
+            time.Time{sec: 0, nsec: 0})) ||
+        !operation_ok(cancel.make_root(?listener_scope, false,
+            time.Time{sec: 0, nsec: 0}))) { ret 224; }
     val redialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
         ?dialer_tls_two, ?dialer_scope,
@@ -904,7 +908,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !assembly.reusable(?listener) ||
         assembly.routing_snapshot(?listener).initialized ||
         !server.destroy(?listener_tls_two) ||
-        !cancel.destroy(?listener_scope) ||
+        !operation_ok(cancel.destroy(?listener_scope)) ||
         !server.init(?listener_tls_two,
             ?listener_tls_config, server.Storage{
                 input: ?listener_input[0], input_capacity: 8192,
@@ -918,8 +922,8 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
                 data: contracts.Bytes{data: ?listener_parameters[0],
                     len: listener_encoded_two}},
             server.QUIC_TRANSPORT_PARAMETERS) ||
-        !cancel.make_root(?listener_scope, false,
-            time.Time{sec: 0, nsec: 0})) { ret 235; }
+        !operation_ok(cancel.make_root(?listener_scope, false,
+            time.Time{sec: 0, nsec: 0}))) { ret 235; }
     val reserved_two: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config_two, ?listener_storage, ?listener_secret_storage,
         ?listener_tls_two,
@@ -965,7 +969,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         transport.finish_close[binding.Binding](?listener.driver).status !=
             transport.STATUS_OK || !assembly.release_closed(?dialer) ||
         !assembly.release_closed(?listener) ||
-        !cancel.destroy(?dialer_scope) || !cancel.destroy(?listener_scope)) {
+        !operation_ok(cancel.destroy(?dialer_scope)) || !operation_ok(cancel.destroy(?listener_scope))) {
         ret 233;
     }
 
@@ -991,8 +995,8 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
             data: contracts.Bytes{data: ?dialer_parameters[0],
                 len: dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS) ||
-        !cancel.make_root(?dialer_scope, false,
-            time.Time{sec: 0, nsec: 0})) { ret 239; }
+        !operation_ok(cancel.make_root(?dialer_scope, false,
+            time.Time{sec: 0, nsec: 0}))) { ret 239; }
     val retained: assembly.InitResult = assembly.init_client(?dialer,
         ?rollback_config, ?dialer_storage, ?dialer_secret_storage,
         ?rollback_tls, ?dialer_scope, clock + 1000);
@@ -1040,7 +1044,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (!assembly.release_closed(?dialer) ||
         dialer_storage.generation != retained_storage_generation ||
         dialer_secret_storage.generation != retained_secret_generation ||
-        !client.destroy(?rollback_tls) || !cancel.destroy(?dialer_scope)) {
+        !client.destroy(?rollback_tls) || !operation_ok(cancel.destroy(?dialer_scope))) {
         ret 243;
     }
     ct.zeroize(?token_key[0], 32);
@@ -1103,7 +1107,7 @@ test "quic.connection.assembly: typed secret pools retain wiped deallocation for
         !secret.array_cleanup_pending[assembly.SecretStorage](?storage) ||
         secret.array_active[assembly.SecretStorage](?storage) ||
         secret.array_data[assembly.SecretStorage](?storage) != nil ||
-        storage.data == nil || storage.data[0].receive_plaintext[0]:^ != 0 ||
+        storage.data == nil || storage.data[0].receive_plaintext[0]:>u8 != 0 ||
         secret_storage_deallocations != 1 ||
         secret_storage_zeroed_releases != 1 ||
         secret_storage_nonzero_releases != 0) { ret 3; }

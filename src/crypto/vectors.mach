@@ -14,7 +14,7 @@ fun secret_matches(actual: *^u8, expected: *u8, len: usize) bool {
     if (actual == nil || expected == nil) { ret false; }
     var i: usize = 0;
     for (i < len) {
-        if (actual[i]:^ != expected[i]) { ret false; }
+        if (actual[i]:>u8 != expected[i]) { ret false; }
         i = i + 1;
     }
     ret true;
@@ -136,7 +136,7 @@ test "quic.crypto.protection: RFC 9001 initial secrets and AES header mask" {
     protection.destroy_initial(?keys);
     ct.zeroize(?mask[0], 5);
     if (keys.client.state != protection.STATE_DISCARDED
-        || keys.client.key[0]:^ != 0 || keys.server.secret[31]:^ != 0) { ret 6; }
+        || keys.client.key[0]:>u8 != 0 || keys.server.secret[31]:>u8 != 0) { ret 6; }
     ret 0;
 }
 
@@ -250,7 +250,7 @@ test "quic.crypto.protection: RFC 9001 ChaCha packet and key update" {
     if (opened.packet_number_len != 3) { ret 42; }
     if (opened.key_phase) { ret 43; }
     if (opened.key_updated || opened.generation != 1) { ret 46; }
-    if (opened_plaintext[0]:^ != 1) { ret 44; }
+    if (opened_plaintext[0]:>u8 != 1) { ret 44; }
     if (!public_matches(?header_scratch[0], ?header[0], 4)) { ret 45; }
 
     if (protection.initiate_update(?send) != protection.KEY_UPDATE_ERROR
@@ -351,7 +351,7 @@ test "quic.crypto.protection: Retry integrity is exact and transactional" {
         contracts.Bytes{data: ?retry[0], len: 20},
         contracts.Buffer{data: ?pseudo[0], capacity: 29},
         contracts.SecretBuffer{data: ?sentinel[0], capacity: 16}).error
-        != protection.UNSUPPORTED_VERSION || sentinel[0]:^ != 0xaa) {
+        != protection.UNSUPPORTED_VERSION || sentinel[0]:>u8 != 0xaa) {
         ct.zeroize(?tag[0], 16);
         ct.zeroize(?sentinel[0], 16);
         ret 4;
@@ -397,7 +397,7 @@ test "quic.crypto.protection: invalid tags release no packet plaintext" {
     if (opened.header_len != 0) { ret 31; }
     if (opened.packet_number != 0) { ret 32; }
     i = 0;
-    for (i < 20) { if (output[i]:^ != 0) { ret 33; } i = i + 1; }
+    for (i < 20) { if (output[i]:>u8 != 0) { ret 33; } i = i + 1; }
     if (protection.seal_packet(?keys, 7,
         contracts.Bytes{data: ?header[0], len: 2}, 1,
         contracts.SecretBytes{data: ?plaintext[0], len: 20},
@@ -408,7 +408,7 @@ test "quic.crypto.protection: invalid tags release no packet plaintext" {
         contracts.Bytes{data: ?wire[0], len: 38}, 1,
         contracts.Buffer{data: ?scratch[0], capacity: 5},
         contracts.SecretBuffer{data: ?output[0], capacity: 20});
-    if (sample_corrupted.error != protection.AUTH_FAILED || output[0]:^ != 0) { ret 35; }
+    if (sample_corrupted.error != protection.AUTH_FAILED || output[0]:>u8 != 0) { ret 35; }
     protection.destroy(?keys);
     ct.zeroize(?secret[0], 32);
     ct.zeroize(?plaintext[0], 20);
@@ -466,7 +466,7 @@ test "quic.crypto.protection: receive key phases retain old and prederive next" 
     if (opened.error != protection.OK || opened.packet_number != 100
         || opened.key_updated || opened.generation != 1
         || receive.generation != 1 || receive.current_floor != 100
-        || opened_payload[2]:^ != 3) {
+        || opened_payload[2]:>u8 != 3) {
         protection.destroy_send(?send); protection.destroy_send(?response_send);
         protection.destroy_receive(?receive);
         ct.zeroize(?secret[0], 32); ct.zeroize(?payload[0], 3);
@@ -493,7 +493,7 @@ test "quic.crypto.protection: receive key phases retain old and prederive next" 
         contracts.Buffer{data: ?scratch[0], capacity: 5},
         contracts.SecretBuffer{data: ?opened_payload[0], capacity: 3});
     if (opened.error != protection.KEY_UPDATE_ERROR || receive.generation != 1
-        || opened_payload[0]:^ != 0
+        || opened_payload[0]:>u8 != 0
         || protection.confirm_handshake_receive(?receive) != protection.OK) {
         protection.destroy_send(?send); protection.destroy_send(?response_send);
         protection.destroy_receive(?receive);
@@ -543,7 +543,7 @@ test "quic.crypto.protection: receive key phases retain old and prederive next" 
         contracts.Bytes{data: ?third_wire[0], len: 21}, 1,
         contracts.Buffer{data: ?scratch[0], capacity: 5},
         contracts.SecretBuffer{data: ?opened_payload[0], capacity: 3});
-    if (opened.error != protection.KEY_UPDATE_ERROR || opened_payload[0]:^ != 0
+    if (opened.error != protection.KEY_UPDATE_ERROR || opened_payload[0]:>u8 != 0
         || receive.generation != 2
         || protection.confirm_update_response(?receive, 2, 100)
             != protection.KEY_UPDATE_ERROR
@@ -624,13 +624,13 @@ test "quic.crypto.protection: bounds and discarded states are transactional" {
     if (protection.derive_tls(?keys, 7, protection.LEVEL_APPLICATION,
         protection.AES_128_GCM_SHA256,
         contracts.SecretBytes{data: ?secret[0], len: 32}) != protection.UNSUPPORTED_VERSION
-        || keys.version != 77 || keys.secret[0]:^ != 0xaa) {
+        || keys.version != 77 || keys.secret[0]:>u8 != 0xaa) {
         protection.destroy(?keys); ct.zeroize(?secret[0], 32); ret 1;
     }
     if (protection.derive_tls(?keys, packet.VERSION_1, protection.LEVEL_INITIAL,
         protection.AES_128_GCM_SHA256,
         contracts.SecretBytes{data: ?secret[0], len: 32}) != protection.INVALID_INPUT
-        || keys.version != 77 || keys.secret[0]:^ != 0xaa) {
+        || keys.version != 77 || keys.secret[0]:>u8 != 0xaa) {
         protection.destroy(?keys); ct.zeroize(?secret[0], 32); ret 2;
     }
     if (protection.derive_tls(?keys, packet.VERSION_1, protection.LEVEL_EARLY,
@@ -645,7 +645,7 @@ test "quic.crypto.protection: bounds and discarded states are transactional" {
     if (protection.header_mask(?keys,
         contracts.Bytes{data: ?short_sample[0], len: 15},
         contracts.SecretBuffer{data: ?mask[0], capacity: 5}).error != protection.SAMPLE_ERROR
-        || mask[0]:^ != 0xa5) {
+        || mask[0]:>u8 != 0xa5) {
         protection.destroy(?keys); ct.zeroize(?secret[0], 32);
         ct.zeroize(?mask[0], 5); ret 4;
     }

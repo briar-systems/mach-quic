@@ -15,10 +15,18 @@ use std.net.ip;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
-use std.types.result;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
+
+fun is_err_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
+    ret sel outcome.err;
+}
+
+fun is_err_usize_u8(outcome: res[usize, u8]) bool {
+    ret sel outcome.err;
+}
 pub def Action: u8;
 pub val ACTION_ACCEPT: Action = 1;
 pub val ACTION_RETRY: Action = 2;
@@ -789,7 +797,7 @@ fun retry(listener: *Listener, request: *Request, initial: *Initial) Result {
     }
     var i: usize = 0;
     for (i < 16) {
-        request.output[encoded.count - 16 + i] = tag[i]:^;
+        request.output[encoded.count - 16 + i] = tag[i]:>u8;
         i = i + 1;
     }
     ct.zeroize(?tag[0], 16);
@@ -1287,10 +1295,10 @@ fun test_initial_version(output: *u8, version: u32,
     val variable_position: usize = source_length_position + 1 + source.len::usize;
     var builder: binary.Builder = binary.builder(?output[variable_position],
         1200 - variable_position, binary.BIG);
-    if (result.is_err[usize, u8](varint.write(?builder,
+    if (is_err_usize_u8(varint.write(?builder,
         token_length::u64, 0))) { ret false; }
     if (token_length > 0 &&
-        result.is_err[usize, str](binary.builder_write_bytes(?builder,
+        is_err_usize_encode(binary.builder_write_bytes(?builder,
             token_data, token_length))) {
         ret false;
     }
@@ -1299,7 +1307,7 @@ fun test_initial_version(output: *u8, version: u32,
     var tail: usize = remaining - 1;
     if (tail >= 64) { width = 2; tail = remaining - 2; }
     if (tail >= 16384) { width = 4; tail = remaining - 4; }
-    if (result.is_err[usize, u8](varint.write(?builder,
+    if (is_err_usize_u8(varint.write(?builder,
         tail::u64, width))) { ret false; }
     ret builder.len + tail == 1200 - variable_position;
 }

@@ -27,7 +27,7 @@ use std.net.ip;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
-use std.types.result;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
@@ -2280,7 +2280,7 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     var plaintext_index: usize = 0;
     for (plaintext_index < opened.written) {
         core.storage.receive_decoded[plaintext_index] =
-            secrets.storage.receive_plaintext[plaintext_index]:^;
+            secrets.storage.receive_plaintext[plaintext_index]:>u8;
         plaintext_index = plaintext_index + 1;
     }
     if (core.state == transport_api.CLOSING) {
