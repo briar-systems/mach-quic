@@ -1,7 +1,6 @@
 out/
-doc/
-/dep/
 *.swp
-*.swo
+*~
 .wt/
 .mach-seed/
+.mach-txn-lock

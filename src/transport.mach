@@ -8,12 +8,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.err;
-use std.types.result.is_err;
-use std.types.result.ok;
-use std.types.result.unwrap_err;
-use std.types.result.unwrap_ok;
+use std.types.result.res;
 use std.system.os;
 use std.sync.cancel;
 use std.sync.atomic;
@@ -26,6 +21,15 @@ use net_types: std.net.async.types;
 use io_error: std.io.error;
 use io_runtime: std.io.runtime;
 
+
+
+fun transition_ok(outcome: cancel.Transition) bool {
+    ret (sel outcome.ok) && outcome.ok;
+}
+fun scope_active(scope: *cancel.Scope) bool {
+    val reason: cancel.Reason = cancel.reason(scope);
+    ret sel reason.active;
+}
 pub def Role: u8;
 pub val CLIENT: Role = 1;
 pub val SERVER: Role = 2;
@@ -365,7 +369,7 @@ fun callback_intact[T](driver: *Driver[T], before: *Driver[T]) bool {
         driver.close_mode == before.close_mode &&
         driver.close_cause == before.close_cause &&
         driver.terminal_cause == before.terminal_cause &&
-        driver.cancellation_reason == before.cancellation_reason &&
+        reason_code(driver.cancellation_reason) == reason_code(before.cancellation_reason) &&
         driver.cancellation.attached == before.cancellation.attached &&
         driver.initialized == before.initialized &&
         driver.released == before.released &&
@@ -782,9 +786,26 @@ fun begin_close_locked[T](driver: *Driver[T], abortive: bool, cause: lifecycle.C
 # runs on whichever thread cancelled the scope, with no access to the protocol.
 # it records the cancellation; apply_cancellation performs the close under the
 # owner's next call
+# a cancel.Reason as the integer the callback can publish atomically
+fun reason_code(reason: cancel.Reason) i64 {
+    if (sel reason.cancelled) { ret 1; }
+    if (sel reason.timed_out) { ret 2; }
+    if (sel reason.destroyed) { ret 3; }
+    if (sel reason.invalid) { ret 4; }
+    ret 0;
+}
+
+fun reason_from_code(code: i64) cancel.Reason {
+    if (code == 1) { ret cancel.Reason.cancelled{}; }
+    if (code == 2) { ret cancel.Reason.timed_out{}; }
+    if (code == 3) { ret cancel.Reason.destroyed{}; }
+    if (code == 4) { ret cancel.Reason.invalid{}; }
+    ret cancel.Reason.active{};
+}
+
 fun cancellation_callback(context: ptr, reason: cancel.Reason) {
     val state: *Cancellation = context::*Cancellation;
-    atomic.store(?state.reason, reason::i64);
+    atomic.store(?state.reason, reason_code(reason));
     atomic.store(?state.pending, 1);
 }
 
@@ -793,10 +814,10 @@ fun apply_cancellation[T](driver: *Driver[T]) {
     if (atomic.load(?driver.cancellation.pending) == 0) { ret; }
     atomic.store(?driver.cancellation.pending, 0);
     driver.cancellation.attached = false;
-    val reason: cancel.Reason = atomic.load(?driver.cancellation.reason)::cancel.Reason;
+    val reason: cancel.Reason = reason_from_code(atomic.load(?driver.cancellation.reason));
     driver.cancellation_reason = reason;
     var cause: lifecycle.Cause = lifecycle.CANCELLATION;
-    if (reason == cancel.TIMED_OUT) { cause = lifecycle.DEADLINE; }
+    if (sel reason.timed_out) { cause = lifecycle.DEADLINE; }
     begin_close_locked[T](driver, true, cause, 0, nil, 0, driver.last_now_ns);
 }
 
@@ -808,7 +829,7 @@ fun init_driver[T](driver: *Driver[T], role: Role, config: Config, protocol: Pro
         config.max_udp_payload < 1200 || config.max_udp_payload > 65527 ||
         !protocol_valid[T](?protocol) || streams == nil || !streams.valid ||
         datagrams == nil || !datagrams.valid || scope == nil ||
-        cancel.reason(scope) != cancel.ACTIVE || storage.sends == nil ||
+        !scope_active(scope) || storage.sends == nil ||
         storage.send_capacity == 0 || storage.send_capacity > 0xffffffff ||
         streams.config.source != config.source || datagrams.config.source != config.source ||
         (role == CLIENT && streams.config.role != stream_api.ROLE_CLIENT) ||
@@ -828,7 +849,7 @@ fun init_driver[T](driver: *Driver[T], role: Role, config: Config, protocol: Pro
     candidate.close_mode = lifecycle.GRACEFUL;
     candidate.close_cause = lifecycle.EXPLICIT;
     candidate.terminal_cause = lifecycle.EXPLICIT;
-    candidate.cancellation_reason = cancel.ACTIVE;
+    candidate.cancellation_reason = cancel.Reason.active{};
     candidate.lock = mutex.make();
     cancel.init_registration(?candidate.cancellation.registration);
     candidate.initialized = true;
@@ -838,7 +859,7 @@ fun init_driver[T](driver: *Driver[T], role: Role, config: Config, protocol: Pro
     val attached: cancel.Reason = cancel.attach(scope,
         ?driver.cancellation.registration, cancellation_callback,
         (?driver.cancellation)::ptr);
-    if (attached != cancel.ACTIVE) {
+    if (!(sel attached.active)) {
         mutex.unlock(?driver.lock);
         @driver = original;
         ret false;
@@ -950,7 +971,7 @@ pub fun receive_datagram[T](driver: *Driver[T], input: *Datagram) OperationResul
         ret operation_result(STATUS_CLOSED, ERROR_NONE, 0, 0, state);
     }
     if (driver.operation_scope == nil ||
-        cancel.reason(driver.operation_scope) != cancel.ACTIVE) {
+        !scope_active(driver.operation_scope)) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
         ret operation_result(STATUS_CANCELLED, ERROR_CANCELLED, 0, 0, state);
@@ -990,7 +1011,7 @@ pub fun timer[T](driver: *Driver[T]) Timer {
     apply_cancellation[T](driver);
     if (driver.state != CLOSED && !(driver.closing &&
         driver.close_mode == lifecycle.ABORTIVE) && driver.operation_scope != nil &&
-        cancel.reason(driver.operation_scope) == cancel.ACTIVE) {
+        scope_active(driver.operation_scope)) {
         val core: CoreTimer = callback_timer[T](driver);
         if (core.armed && core.generation != 0) {
             result.source = driver.config.source;
@@ -1016,7 +1037,7 @@ pub fun on_timeout[T](driver: *Driver[T], value: Timer, now_ns: u64) OperationRe
         ret operation_result(STATUS_CLOSED, ERROR_NONE, 0, 0, CLOSED);
     }
     if ((driver.closing && driver.close_mode == lifecycle.ABORTIVE) ||
-        driver.operation_scope == nil || cancel.reason(driver.operation_scope) != cancel.ACTIVE) {
+        driver.operation_scope == nil || !scope_active(driver.operation_scope)) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
         ret operation_result(STATUS_CANCELLED, ERROR_CANCELLED, 0, 0, state);
@@ -1060,7 +1081,7 @@ pub fun generate[T](driver: *Driver[T], scope: *cancel.Scope, buffer: *u8,
     }
     mutex.lock(?driver.lock);
     apply_cancellation[T](driver);
-    if (!source_scope(scope, driver.operation_scope) || cancel.reason(scope) != cancel.ACTIVE) {
+    if (!source_scope(scope, driver.operation_scope) || !scope_active(scope)) {
         mutex.unlock(?driver.lock);
         result.status = STATUS_CANCELLED;
         result.error = ERROR_CANCELLED;
@@ -1207,37 +1228,34 @@ pub fun cancel_send[T](driver: *Driver[T], token: Token, now_ns: u64) Completion
 }
 
 pub fun submit_native[T](driver: *Driver[T], network: *net_async.Driver, socket: *udp.Socket,
-                      scope: *cancel.Scope, token: Token) Result[io_runtime.Token, io_error.Error] {
+                      scope: *cancel.Scope, token: Token) res[io_runtime.Token, io_error.Error] {
     if (callback_reentry[T](driver)) {
-        ret err[io_runtime.Token, io_error.Error](
-            io_error.from_code(os.EBUSY, io_error.OP_SEND));
+        ret res[io_runtime.Token, io_error.Error].err{io_error.from_code(os.EBUSY, io_error.OP_SEND)};
     }
     if (driver == nil || !driver.initialized || network == nil || socket == nil || scope == nil) {
-        ret err[io_runtime.Token, io_error.Error](
-            io_error.from_code(os.EINVAL, io_error.OP_SEND));
+        ret res[io_runtime.Token, io_error.Error].err{io_error.from_code(os.EINVAL, io_error.OP_SEND)};
     }
     mutex.lock(?driver.lock);
     apply_cancellation[T](driver);
     val slot: *SendSlot = slot_for[T](driver, token);
     if (slot == nil || slot.state != SLOT_PREPARED ||
-        !source_scope(scope, driver.operation_scope) || cancel.reason(scope) != cancel.ACTIVE) {
+        !source_scope(scope, driver.operation_scope) || !scope_active(scope)) {
         mutex.unlock(?driver.lock);
-        ret err[io_runtime.Token, io_error.Error](
-            io_error.from_code(os.EBADF, io_error.OP_SEND));
+        ret res[io_runtime.Token, io_error.Error].err{io_error.from_code(os.EBADF, io_error.OP_SEND)};
     }
-    val submitted: Result[io_runtime.Token, io_error.Error] = net_async.submit_send_batch(
+    val submitted: res[io_runtime.Token, io_error.Error] = net_async.submit_send_batch(
         network, scope, socket, ?slot.packet, 1, token_context(token));
-    if (is_err[io_runtime.Token, io_error.Error](submitted)) {
-        val failure: io_error.Error = unwrap_err[io_runtime.Token, io_error.Error](submitted);
+    if (sel submitted.err) {
+        val failure: io_error.Error = submitted.err;
         complete_locked[T](driver, slot, SEND_FAILED, 0, driver.last_now_ns);
         mutex.unlock(?driver.lock);
-        ret err[io_runtime.Token, io_error.Error](failure);
+        ret res[io_runtime.Token, io_error.Error].err{failure};
     }
-    slot.native_token = unwrap_ok[io_runtime.Token, io_error.Error](submitted);
+    slot.native_token = submitted.ok;
     slot.state = SLOT_SUBMITTED;
     val result: io_runtime.Token = slot.native_token;
     mutex.unlock(?driver.lock);
-    ret ok[io_runtime.Token, io_error.Error](result);
+    ret res[io_runtime.Token, io_error.Error].ok{result};
 }
 
 pub fun complete_native[T](driver: *Driver[T], native: *io_runtime.Completion,
@@ -1324,7 +1342,7 @@ pub fun operation_snapshot[T](driver: *Driver[T], token: Token) Generated {
 
 fun app_available[T](driver: *Driver[T]) bool {
     ret driver.initialized && !driver.closing &&
-        driver.operation_scope != nil && cancel.reason(driver.operation_scope) == cancel.ACTIVE &&
+        driver.operation_scope != nil && scope_active(driver.operation_scope) &&
         (driver.state == HANDSHAKING || driver.state == ACTIVE);
 }
 
@@ -1739,7 +1757,7 @@ pub fun cancel_connection[T](driver: *Driver[T]) bool {
     val scope: *cancel.Scope = driver.operation_scope;
     driver.cancellation_calls = driver.cancellation_calls + 1;
     mutex.unlock(?driver.lock);
-    val cancelled: bool = cancel.cancel(scope);
+    val cancelled: bool = transition_ok(cancel.cancel(scope));
     mutex.lock(?driver.lock);
     driver.cancellation_calls = driver.cancellation_calls - 1;
     apply_cancellation[T](driver);
@@ -1773,7 +1791,7 @@ pub fun finish_close[T](driver: *Driver[T]) OperationResult {
         ret operation_error(ERROR_PROTOCOL);
     }
     if (driver.cancellation.attached) {
-        if (!cancel.unregister(?driver.cancellation.registration)) {
+        if (!transition_ok(cancel.unregister(?driver.cancellation.registration))) {
             mutex.unlock(?driver.lock);
             ret operation_result(STATUS_BLOCKED, ERROR_CANCELLED, 0, 0, DRAINING);
         }

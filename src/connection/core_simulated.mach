@@ -634,7 +634,7 @@ test "quic.connection.core: authenticated Retry rotates Initial identity and own
     if (tagged.error != protection.OK) { ret 4; }
     var tag_index: usize = 0;
     for (tag_index < 16) {
-        value.integrity_tag[tag_index] = retry_tag[tag_index]:^;
+        value.integrity_tag[tag_index] = retry_tag[tag_index]:>u8;
         tag_index = tag_index + 1;
     }
     builder = binary.builder(?datagram_bytes[0], 128, binary.BIG);
@@ -679,7 +679,7 @@ test "quic.connection.core: abortive close drains ownership before secret teardo
     if (!core.close_ready(?fixture.engine)) { ret 4; }
     if (!core.finish_close(?fixture.engine, ?fixture.secrets)) { ret 5; }
     if (!fixture.provider.destroyed || !fixture.secrets.destroyed ||
-        !fixture.engine.destroyed || fixture.adapter_secret[0]:^ != 0 ||
+        !fixture.engine.destroyed || fixture.adapter_secret[0]:>u8 != 0 ||
         fixture.streams.valid || fixture.datagrams.valid || fixture.paths.valid ||
         fixture.cids.initialized) { ret 6; }
     ret 0;

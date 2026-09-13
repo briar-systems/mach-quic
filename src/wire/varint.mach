@@ -2,10 +2,22 @@ use std.encoding.binary;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
-use std.types.result;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
+
+fun is_err_usize_u8(outcome: res[usize, u8]) bool {
+    ret sel outcome.err;
+}
+
+fun is_ok_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
+    ret sel outcome.ok;
+}
+
+fun is_ok_usize_u8(outcome: res[usize, u8]) bool {
+    ret sel outcome.ok;
+}
 pub val MAX: u64 = 4611686018427387903;
 
 pub val STATUS_DONE: u8 = 1;
@@ -88,18 +100,18 @@ pub fun read(d: *binary.Decoder, canonical: bool) Decoded {
 }
 
 # writes one variable-length integer atomically, using width 0 for canonical
-pub fun write(b: *binary.Builder, value: u64, encoded_width: u8) result.Result[usize, u8] {
-    if (b == nil || b.order != binary.BIG) { ret result.err[usize, u8](ERROR_WIDTH); }
+pub fun write(b: *binary.Builder, value: u64, encoded_width: u8) res[usize, u8] {
+    if (b == nil || b.order != binary.BIG) { ret res[usize, u8].err{ERROR_WIDTH}; }
     var actual: u8 = encoded_width;
     if (actual == 0) { actual = width(value); }
-    if (value > MAX) { ret result.err[usize, u8](ERROR_OVERFLOW); }
-    if (!valid_width(value, actual)) { ret result.err[usize, u8](ERROR_WIDTH); }
+    if (value > MAX) { ret res[usize, u8].err{ERROR_OVERFLOW}; }
+    if (!valid_width(value, actual)) { ret res[usize, u8].err{ERROR_WIDTH}; }
 
-    val mark_result: result.Result[binary.Checkpoint, str] = binary.builder_checkpoint(b);
-    if (result.is_err[binary.Checkpoint, str](mark_result)) {
-        ret result.err[usize, u8](ERROR_OVERFLOW);
+    val mark_result: res[binary.Checkpoint, binary.EncodeError] = binary.builder_checkpoint(b);
+    if (sel mark_result.err) {
+        ret res[usize, u8].err{ERROR_OVERFLOW};
     }
-    val mark: binary.Checkpoint = result.unwrap_ok[binary.Checkpoint, str](mark_result);
+    val mark: binary.Checkpoint = mark_result.ok;
 
     var encoded: u64 = value;
     if (actual == 2) { encoded = encoded | 0x4000; }
@@ -108,23 +120,23 @@ pub fun write(b: *binary.Builder, value: u64, encoded_width: u8) result.Result[u
 
     var ok: bool = false;
     if (actual == 1) {
-        ok = result.is_ok[usize, str](binary.builder_write_u8(b, encoded::u8));
+        ok = is_ok_usize_encode(binary.builder_write_u8(b, encoded::u8));
     }
     if (actual == 2) {
-        ok = result.is_ok[usize, str](binary.builder_write_u16(b, encoded::u16));
+        ok = is_ok_usize_encode(binary.builder_write_u16(b, encoded::u16));
     }
     if (actual == 4) {
-        ok = result.is_ok[usize, str](binary.builder_write_u32(b, encoded::u32));
+        ok = is_ok_usize_encode(binary.builder_write_u32(b, encoded::u32));
     }
     if (actual == 8) {
-        ok = result.is_ok[usize, str](binary.builder_write_u64(b, encoded));
+        ok = is_ok_usize_encode(binary.builder_write_u64(b, encoded));
     }
 
     if (!ok) {
         binary.builder_rollback(b, mark);
-        ret result.err[usize, u8](ERROR_OVERFLOW);
+        ret res[usize, u8].err{ERROR_OVERFLOW};
     }
-    ret result.ok[usize, u8](b.len);
+    ret res[usize, u8].ok{b.len};
 }
 
 test "quic.wire.varint: RFC 9000 vectors round trip" {
@@ -133,8 +145,8 @@ test "quic.wire.varint: RFC 9000 vectors round trip" {
     var b: binary.Builder = binary.builder(?encoded[0], 64, binary.BIG);
     var i: usize = 0;
     for (i < 8) {
-        val wr: result.Result[usize, u8] = write(?b, values[i], 0);
-        if (result.is_err[usize, u8](wr)) { ret 1; }
+        val wr: res[usize, u8] = write(?b, values[i], 0);
+        if (sel wr.err) { ret 1; }
         i = i + 1;
     }
 
@@ -180,11 +192,11 @@ test "quic.wire.varint: truncation and canonical failure are transactional" {
 test "quic.wire.varint: overflow and fixed-buffer failure do not publish" {
     var data: [1]u8;
     var b: binary.Builder = binary.builder(?data[0], 1, binary.BIG);
-    if (result.is_ok[usize, u8](write(?b, MAX + 1, 0)) || b.len != 0) { ret 1; }
-    if (result.is_ok[usize, u8](write(?b, 64, 0)) || b.len != 0) { ret 1; }
-    if (result.is_ok[usize, u8](write(?b, 64, 1)) || b.len != 0) { ret 1; }
+    if (is_ok_usize_u8(write(?b, MAX + 1, 0)) || b.len != 0) { ret 1; }
+    if (is_ok_usize_u8(write(?b, 64, 0)) || b.len != 0) { ret 1; }
+    if (is_ok_usize_u8(write(?b, 64, 1)) || b.len != 0) { ret 1; }
     b = binary.builder(?data[0], 1, binary.LITTLE);
-    if (result.is_ok[usize, u8](write(?b, 1, 0)) || b.len != 0) { ret 1; }
+    if (is_ok_usize_u8(write(?b, 1, 0)) || b.len != 0) { ret 1; }
     ret 0;
 }
 
@@ -194,7 +206,7 @@ test "quic.wire.varint: every byte boundary reports incomplete transactionally" 
     for (i < 4) {
         var bytes: [8]u8;
         var b: binary.Builder = binary.builder(?bytes[0], 8, binary.BIG);
-        if (result.is_err[usize, u8](write(?b, values[i], 0))) { ret 1; }
+        if (is_err_usize_u8(write(?b, values[i], 0))) { ret 1; }
         var prefix: usize = 0;
         for (prefix < b.len) {
             var d: binary.Decoder = binary.decoder(?bytes[0], prefix, binary.BIG);

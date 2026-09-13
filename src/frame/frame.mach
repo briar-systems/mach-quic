@@ -6,10 +6,22 @@ use std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
-use std.types.result;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
+
+fun is_err_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
+    ret sel outcome.err;
+}
+
+fun is_ok_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
+    ret sel outcome.ok;
+}
+
+fun is_ok_usize_u8(outcome: res[usize, u8]) bool {
+    ret sel outcome.ok;
+}
 pub val PADDING: u64 = 0x00;
 pub val PING: u64 = 0x01;
 pub val ACK: u64 = 0x02;
@@ -500,15 +512,15 @@ pub fun encoded_size(frame: *Frame, limits: Limits) EncodeResult {
 }
 
 fun write_v(b: *binary.Builder, value: u64) bool {
-    ret result.is_ok[usize, u8](varint.write(b, value, 0));
+    ret is_ok_usize_u8(varint.write(b, value, 0));
 }
 
 fun write_b(b: *binary.Builder, value: u8) bool {
-    ret result.is_ok[usize, str](binary.builder_write_u8(b, value));
+    ret is_ok_usize_encode(binary.builder_write_u8(b, value));
 }
 
 fun write_bytes(b: *binary.Builder, data: *u8, len: usize) bool {
-    ret result.is_ok[usize, str](binary.builder_write_bytes(b, data, len));
+    ret is_ok_usize_encode(binary.builder_write_bytes(b, data, len));
 }
 
 # encodes one complete frame as a builder transaction
@@ -516,9 +528,9 @@ pub fun encode(b: *binary.Builder, frame: *Frame, limits: Limits) EncodeResult {
     if (b == nil || b.order != binary.BIG) { ret encode_error(ERROR_OUTPUT); }
     val measured: EncodeResult = encoded_size(frame, limits);
     if (!measured.ok) { ret measured; }
-    val reserved: result.Result[binary.Reservation, str] = binary.builder_reserve(b, measured.count);
-    if (result.is_err[binary.Reservation, str](reserved)) { ret encode_error(ERROR_OUTPUT); }
-    var reservation: binary.Reservation = result.unwrap_ok[binary.Reservation, str](reserved);
+    val reserved: res[binary.Reservation, binary.EncodeError] = binary.builder_reserve(b, measured.count);
+    if (sel reserved.err) { ret encode_error(ERROR_OUTPUT); }
+    var reservation: binary.Reservation = reserved.ok;
     val body: *binary.Builder = ?reservation.body;
     var ok: bool = true;
 
@@ -577,7 +589,7 @@ pub fun encode(b: *binary.Builder, frame: *Frame, limits: Limits) EncodeResult {
         binary.reservation_rollback(?reservation);
         ret encode_error(ERROR_OUTPUT);
     }
-    if (result.is_err[usize, str](binary.builder_commit(?reservation))) {
+    if (is_err_usize_encode(binary.builder_commit(?reservation))) {
         ret encode_error(ERROR_OUTPUT);
     }
     ret measured;
