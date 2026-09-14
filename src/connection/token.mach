@@ -1,7 +1,7 @@
 # authenticated address and retry tokens with bounded replay ownership
 
-use quic.packet.packet;
 use quic.connection.ownership;
+use quic.packet.packet;
 
 use crypto.contracts;
 use crypto.hmac;
@@ -14,94 +14,94 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
-pub val PURPOSE_RETRY: u8 = 1;
+pub val PURPOSE_RETRY:   u8 = 1;
 pub val PURPOSE_ADDRESS: u8 = 2;
 
 pub val TOKEN_SIZE: usize = 110;
-pub val BODY_SIZE: usize = 94;
-pub val TAG_SIZE: usize = 16;
-pub val KEY_SIZE: usize = 32;
+pub val BODY_SIZE:  usize = 94;
+pub val TAG_SIZE:   usize = 16;
+pub val KEY_SIZE:   usize = 32;
 
 pub def Status: u8;
-pub val STATUS_OK: Status = 1;
-pub val STATUS_STALE: Status = 2;
+pub val STATUS_OK:      Status = 1;
+pub val STATUS_STALE:   Status = 2;
 pub val STATUS_BLOCKED: Status = 3;
-pub val STATUS_ERROR: Status = 4;
+pub val STATUS_ERROR:   Status = 4;
 
 pub def Error: u8;
-pub val ERROR_NONE: Error = 0;
-pub val ERROR_STATE: Error = 1;
-pub val ERROR_CONFIG: Error = 2;
-pub val ERROR_BUFFER: Error = 3;
-pub val ERROR_FORMAT: Error = 4;
-pub val ERROR_KEY: Error = 5;
-pub val ERROR_AUTH: Error = 6;
-pub val ERROR_EXPIRED: Error = 7;
-pub val ERROR_ADDRESS: Error = 8;
-pub val ERROR_REPLAY: Error = 9;
+pub val ERROR_NONE:     Error = 0;
+pub val ERROR_STATE:    Error = 1;
+pub val ERROR_CONFIG:   Error = 2;
+pub val ERROR_BUFFER:   Error = 3;
+pub val ERROR_FORMAT:   Error = 4;
+pub val ERROR_KEY:      Error = 5;
+pub val ERROR_AUTH:     Error = 6;
+pub val ERROR_EXPIRED:  Error = 7;
+pub val ERROR_ADDRESS:  Error = 8;
+pub val ERROR_REPLAY:   Error = 9;
 pub val ERROR_CAPACITY: Error = 10;
-pub val ERROR_TOKEN: Error = 11;
-pub val ERROR_TIME: Error = 12;
+pub val ERROR_TOKEN:    Error = 11;
+pub val ERROR_TIME:     Error = 12;
 
 pub def ReplayState: u8;
-pub val REPLAY_FREE: ReplayState = 0;
+pub val REPLAY_FREE:     ReplayState = 0;
 pub val REPLAY_RESERVED: ReplayState = 1;
 pub val REPLAY_CONSUMED: ReplayState = 2;
 
 pub rec ReplaySlot {
-    nonce: u64;
+    nonce:          u64;
     key_generation: u64;
-    expires_at_ns: u64;
-    generation: u64;
-    state: ReplayState;
+    expires_at_ns:  u64;
+    generation:     u64;
+    state:          ReplayState;
 }
 
 pub rec Storage {
-    replay: *ReplaySlot;
+    replay:          *ReplaySlot;
     replay_capacity: usize;
 }
 
 pub rec Config {
-    source: u64;
-    retry_max_age_ns: u64;
+    source:             u64;
+    retry_max_age_ns:   u64;
     address_max_age_ns: u64;
 }
 
 pub rec Manager {
-    config: Config;
-    storage: Storage;
-    current: [32]^u8;
-    previous: [32]^u8;
-    current_generation: u64;
+    config:              Config;
+    storage:             Storage;
+    current:             [32]^u8;
+    previous:            [32]^u8;
+    current_generation:  u64;
     previous_generation: u64;
-    next_replay: usize;
-    listener_lease: u64;
-    initialized: bool;
-    closing: bool;
+    next_replay:         usize;
+    listener_lease:      u64;
+    initialized:         bool;
+    closing:             bool;
 }
 
 pub rec Reservation {
-    source: u64;
-    index: usize;
-    generation: u64;
-    nonce: u64;
+    source:         u64;
+    index:          usize;
+    generation:     u64;
+    nonce:          u64;
     key_generation: u64;
 }
 
 pub rec Claims {
-    purpose: u8;
-    issued_at_ns: u64;
-    nonce: u64;
-    peer: ip.Endpoint;
+    purpose:              u8;
+    issued_at_ns:         u64;
+    nonce:                u64;
+    peer:                 ip.Endpoint;
     original_destination: packet.ConnectionId;
-    retry_source: packet.ConnectionId;
-    reservation: Reservation;
+    retry_source:         packet.ConnectionId;
+    reservation:          Reservation;
 }
 
 pub rec Result {
     status: Status;
-    error: Error;
-    count: usize;
+    error:  Error;
+    count:  usize;
     claims: Claims;
 }
 
@@ -118,16 +118,19 @@ fun valid_purpose(purpose: u8) bool {
 fun copy_key(output: *^u8, input: contracts.SecretBytes) bool {
     if (output == nil || input.data == nil || input.len != KEY_SIZE) { ret false; }
     var i: usize = 0;
-    for (i < KEY_SIZE) { output[i] = input.data[i]; i = i + 1; }
+    for (i < KEY_SIZE) {
+        output[i] = input.data[i];
+        i         = i + 1;
+    }
     ret true;
 }
 
 fun key_aliases_manager(manager: *Manager, key: contracts.SecretBytes) bool {
     if (manager == nil || key.data == nil || key.len != KEY_SIZE) { ret false; }
     ret !ownership.secret_disjoint(key.data, key.len,
-            ?manager.current[0], KEY_SIZE) ||
+        ?manager.current[0], KEY_SIZE) ||
         !ownership.secret_disjoint(key.data, key.len,
-            ?manager.previous[0], KEY_SIZE);
+        ?manager.previous[0], KEY_SIZE);
 }
 
 fun physical(manager: *Manager) bool {
@@ -142,7 +145,7 @@ fun physical(manager: *Manager) bool {
 }
 
 pub fun initialize(manager: *Manager, config: Config, storage: Storage,
-                   generation: u64, key: contracts.SecretBytes) bool {
+    generation: u64, key: contracts.SecretBytes) bool {
     if (config.source == 0 || config.retry_max_age_ns == 0 ||
         config.address_max_age_ns == 0 || generation == 0 ||
         storage.replay == nil || storage.replay_capacity == 0 || key.data == nil ||
@@ -161,15 +164,15 @@ pub fun initialize(manager: *Manager, config: Config, storage: Storage,
     if (!copy_key(?next.current[0], key)) { ret false; }
     var i: usize = 0;
     for (i < storage.replay_capacity) {
-        storage.replay[i].state = REPLAY_FREE;
+        storage.replay[i].state      = REPLAY_FREE;
         storage.replay[i].generation = next_generation(storage.replay[i].generation);
-        i = i + 1;
+        i                            = i + 1;
     }
-    next.config = config;
-    next.storage = storage;
+    next.config             = config;
+    next.storage            = storage;
     next.current_generation = generation;
-    next.initialized = true;
-    @manager = next;
+    next.initialized        = true;
+    @manager                = next;
     ret true;
 }
 
@@ -197,7 +200,7 @@ pub fun rotate(manager: *Manager, generation: u64, key: contracts.SecretBytes) b
 }
 
 pub fun rotate_scoped(manager: *Manager, listener_source: u64, generation: u64,
-                      key: contracts.SecretBytes) bool {
+    key: contracts.SecretBytes) bool {
     if (!physical(manager) || !manager.initialized || manager.closing ||
         !scope_allowed(manager, listener_source) ||
         generation == 0 || generation <= manager.current_generation ||
@@ -207,11 +210,11 @@ pub fun rotate_scoped(manager: *Manager, listener_source: u64, generation: u64,
     var i: usize = 0;
     for (i < KEY_SIZE) {
         manager.previous[i] = manager.current[i];
-        manager.current[i] = key.data[i];
-        i = i + 1;
+        manager.current[i]  = key.data[i];
+        i                   = i + 1;
     }
     manager.previous_generation = manager.current_generation;
-    manager.current_generation = generation;
+    manager.current_generation  = generation;
     ret true;
 }
 
@@ -222,19 +225,21 @@ fun write_endpoint(output: *u8, endpoint: ip.Endpoint) {
     memory.raw_zero(?output[36], 16);
     if (endpoint.addr.is_v6 != 0) {
         memory.copy[u8](?output[36], ?endpoint.addr.v6.octets[0], 16);
-    } or {
+    }
+    or {
         memory.copy[u8](?output[36], ?endpoint.addr.v4.octets[0], 4);
     }
 }
 
 fun read_endpoint(input: *u8) ip.Endpoint {
     var endpoint: ip.Endpoint;
-    endpoint.port = binary.get_uint(?input[34], 2, binary.BIG)::u16;
+    endpoint.port  = binary.get_uint(?input[34], 2, binary.BIG)::u16;
     endpoint.scope = binary.get_uint(?input[30], 4, binary.BIG)::u32;
     if (input[29] != 0) {
         endpoint.addr.is_v6 = 1;
         memory.copy[u8](?endpoint.addr.v6.octets[0], ?input[36], 16);
-    } or {
+    }
+    or {
         memory.copy[u8](?endpoint.addr.v4.octets[0], ?input[36], 4);
     }
     ret endpoint;
@@ -243,12 +248,12 @@ fun read_endpoint(input: *u8) ip.Endpoint {
 fun endpoint_equal(left: ip.Endpoint, right: ip.Endpoint) bool {
     if (left.addr.is_v6 != right.addr.is_v6 || left.port != right.port ||
         left.scope != right.scope) { ret false; }
-    var length: usize = 4;
-    var left_data: *u8 = ?left.addr.v4.octets[0];
-    var right_data: *u8 = ?right.addr.v4.octets[0];
+    var length:     usize = 4;
+    var left_data:  *u8   = ?left.addr.v4.octets[0];
+    var right_data: *u8   = ?right.addr.v4.octets[0];
     if (left.addr.is_v6 != 0) {
-        length = 16;
-        left_data = ?left.addr.v6.octets[0];
+        length     = 16;
+        left_data  = ?left.addr.v6.octets[0];
         right_data = ?right.addr.v6.octets[0];
     }
     var i: usize = 0;
@@ -261,9 +266,9 @@ fun endpoint_equal(left: ip.Endpoint, right: ip.Endpoint) bool {
 
 fun mac(manager: *Manager, generation: u64, input: *u8, output: *u8) bool {
     var key: *^u8 = nil;
-    if (generation == manager.current_generation) { key = ?manager.current[0]; }
+    if (generation == manager.current_generation)  { key = ?manager.current[0]; }
     if (generation == manager.previous_generation) { key = ?manager.previous[0]; }
-    if (key == nil) { ret false; }
+    if (key == nil)                                { ret false; }
     val operation: contracts.Operation = hmac.sha256(
         contracts.SecretBytes{data: key, len: KEY_SIZE},
         contracts.Bytes{data: input, len: BODY_SIZE},
@@ -272,34 +277,34 @@ fun mac(manager: *Manager, generation: u64, input: *u8, output: *u8) bool {
 }
 
 pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
-             original_destination: packet.ConnectionId,
-             retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
-             output: *u8, capacity: usize) Result {
+    original_destination: packet.ConnectionId,
+    retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
+    output: *u8, capacity: usize) Result {
     ret seal_scoped(manager, 0, purpose, peer, original_destination,
         retry_source, issued_at_ns, nonce, output, capacity);
 }
 
 pub fun seal_scoped(manager: *Manager, listener_source: u64, purpose: u8,
-                    peer: ip.Endpoint, original_destination: packet.ConnectionId,
-                    retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
-                    output: *u8, capacity: usize) Result {
+    peer: ip.Endpoint, original_destination: packet.ConnectionId,
+    retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
+    output: *u8, capacity: usize) Result {
     var result: Result;
     if (!physical(manager) || !manager.initialized || manager.closing ||
         !scope_allowed(manager, listener_source)) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_STATE;
+        result.error  = ERROR_STATE;
         ret result;
     }
     if (!valid_purpose(purpose) ||
         original_destination.len::usize > packet.MAX_CONNECTION_ID ||
         retry_source.len::usize > packet.MAX_CONNECTION_ID ||
         (purpose == PURPOSE_RETRY &&
-            (original_destination.len == 0 || retry_source.len == 0)) ||
+        (original_destination.len == 0 || retry_source.len == 0)) ||
         (purpose == PURPOSE_ADDRESS &&
-            (original_destination.len != 0 || retry_source.len != 0)) ||
+        (original_destination.len != 0 || retry_source.len != 0)) ||
         issued_at_ns == 0 || nonce == 0) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_FORMAT;
+        result.error  = ERROR_FORMAT;
         ret result;
     }
     val output_range: ownership.Range = ownership.bytes(output, capacity,
@@ -313,10 +318,13 @@ pub fun seal_scoped(manager: *Manager, listener_source: u64, purpose: u8,
         !ownership.disjoint(output_range, manager_range) ||
         !ownership.disjoint(output_range, replay_range)) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_BUFFER;
+        result.error  = ERROR_BUFFER;
         ret result;
     }
-    output[0] = 'M'; output[1] = 'Q'; output[2] = 'T'; output[3] = '1';
+    output[0] = 'M';
+    output[1] = 'Q';
+    output[2] = 'T';
+    output[3] = '1';
     output[4] = purpose;
     binary.put_uint(?output[5], manager.current_generation, 8, binary.BIG);
     binary.put_uint(?output[13], issued_at_ns, 8, binary.BIG);
@@ -335,43 +343,43 @@ pub fun seal_scoped(manager: *Manager, listener_source: u64, purpose: u8,
     if (!mac(manager, manager.current_generation, output, ?full_tag[0])) {
         memory.raw_zero(output, TOKEN_SIZE);
         result.status = STATUS_ERROR;
-        result.error = ERROR_KEY;
+        result.error  = ERROR_KEY;
         ret result;
     }
     memory.copy[u8](?output[BODY_SIZE], ?full_tag[0], TAG_SIZE);
     memory.raw_zero(?full_tag[0], 32);
     result.status = STATUS_OK;
-    result.count = TOKEN_SIZE;
+    result.count  = TOKEN_SIZE;
     ret result;
 }
 
 fun valid_tag(manager: *Manager, generation: u64, input: *u8) bool {
     var full_tag: [32]u8;
     if (!mac(manager, generation, input, ?full_tag[0])) { ret false; }
-    var difference: u8 = 0;
-    var i: usize = 0;
+    var difference: u8    = 0;
+    var i:          usize = 0;
     for (i < TAG_SIZE) {
         difference = difference | (full_tag[i] ^ input[BODY_SIZE + i]);
-        i = i + 1;
+        i          = i + 1;
     }
     memory.raw_zero(?full_tag[0], 32);
     ret difference == 0;
 }
 
 fun reserve_replay(manager: *Manager, generation: u64, nonce: u64,
-                   expires_at_ns: u64, now_ns: u64) Result {
+    expires_at_ns: u64, now_ns: u64) Result {
     var result: Result;
-    var i: usize = 0;
+    var i:      usize = 0;
     for (i < manager.storage.replay_capacity) {
         val slot: *ReplaySlot = ?manager.storage.replay[i];
         if (slot.state != REPLAY_FREE && now_ns > slot.expires_at_ns) {
-            slot.state = REPLAY_FREE;
+            slot.state      = REPLAY_FREE;
             slot.generation = next_generation(slot.generation);
         }
         if (slot.state != REPLAY_FREE && slot.nonce == nonce &&
             slot.key_generation == generation) {
             result.status = STATUS_ERROR;
-            result.error = ERROR_REPLAY;
+            result.error  = ERROR_REPLAY;
             ret result;
         }
         i = i + 1;
@@ -381,37 +389,37 @@ fun reserve_replay(manager: *Manager, generation: u64, nonce: u64,
         i = (manager.next_replay + offset) % manager.storage.replay_capacity;
         val slot: *ReplaySlot = ?manager.storage.replay[i];
         if (slot.state == REPLAY_FREE) {
-            slot.nonce = nonce;
-            slot.key_generation = generation;
-            slot.expires_at_ns = expires_at_ns;
-            slot.generation = next_generation(slot.generation);
-            slot.state = REPLAY_RESERVED;
-            manager.next_replay = (i + 1) % manager.storage.replay_capacity;
-            result.status = STATUS_OK;
+            slot.nonce                = nonce;
+            slot.key_generation       = generation;
+            slot.expires_at_ns        = expires_at_ns;
+            slot.generation           = next_generation(slot.generation);
+            slot.state                = REPLAY_RESERVED;
+            manager.next_replay       = (i + 1) % manager.storage.replay_capacity;
+            result.status             = STATUS_OK;
             result.claims.reservation = Reservation{source: manager.config.source,
-                index: i, generation: slot.generation, nonce: nonce,
+                index:          i, generation: slot.generation, nonce: nonce,
                 key_generation: generation};
             ret result;
         }
         offset = offset + 1;
     }
     result.status = STATUS_BLOCKED;
-    result.error = ERROR_CAPACITY;
+    result.error  = ERROR_CAPACITY;
     ret result;
 }
 
 pub fun open(manager: *Manager, input: *u8, length: usize,
-             expected_peer: ip.Endpoint, now_ns: u64) Result {
+    expected_peer: ip.Endpoint, now_ns: u64) Result {
     ret open_scoped(manager, 0, input, length, expected_peer, now_ns);
 }
 
 pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
-                    length: usize, expected_peer: ip.Endpoint, now_ns: u64) Result {
+    length: usize, expected_peer: ip.Endpoint, now_ns: u64) Result {
     var result: Result;
     if (!physical(manager) || !manager.initialized || manager.closing ||
         !scope_allowed(manager, listener_source)) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_STATE;
+        result.error  = ERROR_STATE;
         ret result;
     }
     val input_range: ownership.Range = ownership.bytes(input, length,
@@ -430,15 +438,15 @@ pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
         (input[4] == PURPOSE_RETRY && (input[52] == 0 || input[73] == 0)) ||
         (input[4] == PURPOSE_ADDRESS && (input[52] != 0 || input[73] != 0))) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_FORMAT;
+        result.error  = ERROR_FORMAT;
         ret result;
     }
     val cid_length: usize = input[52]::usize;
-    var i: usize = cid_length;
+    var i:          usize = cid_length;
     for (i < packet.MAX_CONNECTION_ID) {
         if (input[53 + i] != 0) {
             result.status = STATUS_ERROR;
-            result.error = ERROR_FORMAT;
+            result.error  = ERROR_FORMAT;
             ret result;
         }
         i = i + 1;
@@ -448,7 +456,7 @@ pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
     for (i < packet.MAX_CONNECTION_ID) {
         if (input[74 + i] != 0) {
             result.status = STATUS_ERROR;
-            result.error = ERROR_FORMAT;
+            result.error  = ERROR_FORMAT;
             ret result;
         }
         i = i + 1;
@@ -458,7 +466,7 @@ pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
         for (i < 16) {
             if (input[36 + i] != 0) {
                 result.status = STATUS_ERROR;
-                result.error = ERROR_FORMAT;
+                result.error  = ERROR_FORMAT;
                 ret result;
             }
             i = i + 1;
@@ -467,32 +475,32 @@ pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
     val key_generation: u64 = binary.get_uint(?input[5], 8, binary.BIG);
     if ((key_generation != manager.current_generation &&
         key_generation != manager.previous_generation) || !valid_tag(manager,
-            key_generation, input)) {
+        key_generation, input)) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_AUTH;
+        result.error  = ERROR_AUTH;
         ret result;
     }
     val issued_at_ns: u64 = binary.get_uint(?input[13], 8, binary.BIG);
-    var max_age_ns: u64 = manager.config.address_max_age_ns;
+    var max_age_ns:   u64 = manager.config.address_max_age_ns;
     if (input[4] == PURPOSE_RETRY) { max_age_ns = manager.config.retry_max_age_ns; }
     if (issued_at_ns == 0 || now_ns < issued_at_ns ||
         now_ns - issued_at_ns > max_age_ns ||
         issued_at_ns > (0 - 1::u64) - max_age_ns) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_EXPIRED;
+        result.error  = ERROR_EXPIRED;
         ret result;
     }
     val encoded_peer: ip.Endpoint = read_endpoint(input);
     if (!endpoint_equal(encoded_peer, expected_peer)) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_ADDRESS;
+        result.error  = ERROR_ADDRESS;
         ret result;
     }
-    result.status = STATUS_OK;
-    result.claims.purpose = input[4];
+    result.status              = STATUS_OK;
+    result.claims.purpose      = input[4];
     result.claims.issued_at_ns = issued_at_ns;
-    result.claims.nonce = binary.get_uint(?input[21], 8, binary.BIG);
-    result.claims.peer = encoded_peer;
+    result.claims.nonce        = binary.get_uint(?input[21], 8, binary.BIG);
+    result.claims.peer         = encoded_peer;
     packet.set_connection_id(?result.claims.original_destination,
         ?input[53], cid_length);
     packet.set_connection_id(?result.claims.retry_source,
@@ -522,21 +530,21 @@ pub fun commit(manager: *Manager, reservation: Reservation) Result {
 }
 
 pub fun commit_scoped(manager: *Manager, listener_source: u64,
-                      reservation: Reservation) Result {
+    reservation: Reservation) Result {
     var result: Result;
     if (!physical(manager) || !manager.initialized || manager.closing ||
         !scope_allowed(manager, listener_source)) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_STATE;
+        result.error  = ERROR_STATE;
         ret result;
     }
     val slot: *ReplaySlot = replay_slot(manager, reservation);
     if (slot == nil || slot.state != REPLAY_RESERVED) {
         result.status = STATUS_STALE;
-        result.error = ERROR_TOKEN;
+        result.error  = ERROR_TOKEN;
         ret result;
     }
-    slot.state = REPLAY_CONSUMED;
+    slot.state    = REPLAY_CONSUMED;
     result.status = STATUS_OK;
     ret result;
 }
@@ -546,23 +554,23 @@ pub fun cancel(manager: *Manager, reservation: Reservation) Result {
 }
 
 pub fun cancel_scoped(manager: *Manager, listener_source: u64,
-                      reservation: Reservation) Result {
+    reservation: Reservation) Result {
     var result: Result;
     if (!physical(manager) || !manager.initialized ||
         !scope_allowed(manager, listener_source)) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_STATE;
+        result.error  = ERROR_STATE;
         ret result;
     }
     val slot: *ReplaySlot = replay_slot(manager, reservation);
     if (slot == nil || slot.state != REPLAY_RESERVED) {
         result.status = STATUS_STALE;
-        result.error = ERROR_TOKEN;
+        result.error  = ERROR_TOKEN;
         ret result;
     }
-    slot.state = REPLAY_FREE;
+    slot.state      = REPLAY_FREE;
     slot.generation = next_generation(slot.generation);
-    result.status = STATUS_OK;
+    result.status   = STATUS_OK;
     ret result;
 }
 
@@ -585,7 +593,7 @@ pub fun finish_close(manager: *Manager) bool {
     ct.zeroize(?manager.previous[0], KEY_SIZE);
     i = 0;
     for (i < manager.storage.replay_capacity) {
-        manager.storage.replay[i].state = REPLAY_FREE;
+        manager.storage.replay[i].state      = REPLAY_FREE;
         manager.storage.replay[i].generation =
             next_generation(manager.storage.replay[i].generation);
         i = i + 1;
@@ -597,8 +605,11 @@ pub fun finish_close(manager: *Manager) bool {
 #[oblivious]
 fun test_key(value: u8) [32]^u8 {
     var key: [32]^u8;
-    var i: usize = 0;
-    for (i < 32) { key[i] = value + i::u8; i = i + 1; }
+    var i:   usize = 0;
+    for (i < 32) {
+        key[i] = value + i::u8;
+        i      = i + 1;
+    }
     ret key;
 }
 
@@ -606,20 +617,23 @@ fun test_id(value: u8) packet.ConnectionId {
     var id: packet.ConnectionId;
     id.len = 8;
     var i: usize = 0;
-    for (i < 8) { id.data[i] = value + i::u8; i = i + 1; }
+    for (i < 8) {
+        id.data[i] = value + i::u8;
+        i          = i + 1;
+    }
     ret id;
 }
 
 test "quic.connection.token: retry tokens bind address and are single use" {
-    var replay: [4]ReplaySlot;
-    var key: [32]^u8 = test_key(1);
+    var replay:  [4]ReplaySlot;
+    var key:     [32]^u8 = test_key(1);
     var manager: Manager;
     if (!initialize(?manager, Config{source: 301, retry_max_age_ns: 100,
         address_max_age_ns: 1000}, Storage{replay: ?replay[0], replay_capacity: 4},
         1, contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
-    val peer: ip.Endpoint = ip.endpoint(192, 0, 2, 10, 4433);
+    val peer:    ip.Endpoint = ip.endpoint(192, 0, 2, 10, 4433);
     var encoded: [TOKEN_SIZE]u8;
-    val sealed: Result = seal(?manager, PURPOSE_RETRY, peer, test_id(9),
+    val sealed:  Result      = seal(?manager, PURPOSE_RETRY, peer, test_id(9),
         test_id(19), 10, 77, ?encoded[0], TOKEN_SIZE);
     val opened: Result = open(?manager, ?encoded[0], TOKEN_SIZE, peer, 50);
     if (sealed.status != STATUS_OK || opened.status != STATUS_OK ||
@@ -635,15 +649,15 @@ test "quic.connection.token: retry tokens bind address and are single use" {
 }
 
 test "quic.connection.token: reservation cancellation, expiry, and key rotation are bounded" {
-    var replay: [1]ReplaySlot;
+    var replay:  [1]ReplaySlot;
     var key_one: [32]^u8 = test_key(2);
     var key_two: [32]^u8 = test_key(3);
     var manager: Manager;
     if (!initialize(?manager, Config{source: 302, retry_max_age_ns: 100,
         address_max_age_ns: 1000}, Storage{replay: ?replay[0], replay_capacity: 1},
         4, contracts.SecretBytes{data: ?key_one[0], len: 32})) { ret 1; }
-    val peer: ip.Endpoint = ip.endpoint(203, 0, 113, 2, 8443);
-    var first: [TOKEN_SIZE]u8;
+    val peer:   ip.Endpoint = ip.endpoint(203, 0, 113, 2, 8443);
+    var first:  [TOKEN_SIZE]u8;
     var second: [TOKEN_SIZE]u8;
     if (seal(?manager, PURPOSE_RETRY, peer, test_id(1), test_id(11), 10, 1,
         ?first[0], TOKEN_SIZE).status != STATUS_OK) { ret 1; }
@@ -654,7 +668,7 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
         open(?manager, ?first[0], TOKEN_SIZE, peer, 21).status != STATUS_OK) { ret 3; }
     val old: Result = open(?manager, ?first[0], TOKEN_SIZE, peer, 21);
     if (old.error != ERROR_REPLAY) { ret 4; }
-    var no_destination: packet.ConnectionId;
+    var no_destination:  packet.ConnectionId;
     var no_retry_source: packet.ConnectionId;
     if (seal(?manager, PURPOSE_ADDRESS, peer, no_destination, no_retry_source, 30, 2,
         ?second[0], TOKEN_SIZE).status != STATUS_OK ||
@@ -667,28 +681,28 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
 
 test "quic.connection.token: hostile ranges and aliases never expose or mutate key state" {
     val maximum: usize = ~(0::usize);
-    var replay: [1]ReplaySlot;
+    var replay:  [1]ReplaySlot;
     replay[0].state = REPLAY_CONSUMED;
-    var key: [32]^u8 = test_key(7);
-    var manager: Manager;
-    val replay_overflow: usize = maximum / $size_of(ReplaySlot) + 1;
+    var key:             [32]^u8 = test_key(7);
+    var manager:         Manager;
+    val replay_overflow: usize   = maximum / $size_of(ReplaySlot) + 1;
     if (initialize(?manager, Config{source: 303, retry_max_age_ns: 100,
-            address_max_age_ns: 1000}, Storage{replay: (1::usize)::*ReplaySlot,
-            replay_capacity: replay_overflow}, 1,
-            contracts.SecretBytes{data: ?key[0], len: 32}) ||
+        address_max_age_ns: 1000}, Storage{replay: (1::usize)::*ReplaySlot,
+        replay_capacity:    replay_overflow}, 1,
+        contracts.SecretBytes{data: ?key[0], len: 32}) ||
         initialize(?manager, Config{source: 303, retry_max_age_ns: 100,
-            address_max_age_ns: 1000}, Storage{replay: maximum::*ReplaySlot,
-            replay_capacity: 1}, 1,
-            contracts.SecretBytes{data: ?key[0], len: 32}) ||
+        address_max_age_ns: 1000}, Storage{replay: maximum::*ReplaySlot,
+        replay_capacity:    1}, 1,
+        contracts.SecretBytes{data: ?key[0], len: 32}) ||
         manager.initialized || replay[0].state != REPLAY_CONSUMED) { ret 1; }
     if (!initialize(?manager, Config{source: 303, retry_max_age_ns: 100,
-            address_max_age_ns: 1000}, Storage{replay: ?replay[0],
-            replay_capacity: 1}, 1,
-            contracts.SecretBytes{data: ?key[0], len: 32})) { ret 2; }
+        address_max_age_ns: 1000}, Storage{replay: ?replay[0],
+        replay_capacity:    1}, 1,
+        contracts.SecretBytes{data: ?key[0], len: 32})) { ret 2; }
     if (initialize(?manager, Config{source: 304, retry_max_age_ns: 100,
-            address_max_age_ns: 1000}, Storage{replay: ?replay[0],
-            replay_capacity: 1}, 2,
-            contracts.SecretBytes{data: ?key[0], len: 32}) ||
+        address_max_age_ns: 1000}, Storage{replay: ?replay[0],
+        replay_capacity:    1}, 2,
+        contracts.SecretBytes{data: ?key[0], len: 32}) ||
         manager.current_generation != 1) { ret 3; }
     ct.zeroize(?key[0], 32);
     ret 0;

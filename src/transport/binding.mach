@@ -10,40 +10,40 @@ use core_api: quic.connection.core;
 use quic.connection.ownership;
 use transport_api: quic.transport;
 
+use std.sync.atomic;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
-use std.sync.atomic;
 
 pub val ROUTING_ID_CAPACITY: usize = 1;
-pub val ROUTING_ID_LENGTH: usize = 20;
+pub val ROUTING_ID_LENGTH:   usize = 20;
 
 pub rec RoutingId {
-    data: [20]u8;
+    data:   [20]u8;
     length: usize;
 }
 
 pub rec Route {
-    source: u64;
-    index: usize;
+    source:     u64;
+    index:      usize;
     generation: u64;
-    sequence: u64;
-    id: RoutingId;
-    active: bool;
+    sequence:   u64;
+    id:         RoutingId;
+    active:     bool;
 }
 
 pub rec RoutingSnapshot {
-    source: u64;
-    capacity: usize;
-    active: usize;
+    source:      u64;
+    capacity:    usize;
+    active:      usize;
     initialized: bool;
 }
 
 rec RoutingEntry {
-    id: RoutingId;
+    id:       RoutingId;
     sequence: u64;
-    epoch: i64;
+    epoch:    i64;
     prepared: bool;
 }
 
@@ -51,13 +51,13 @@ rec RoutingEntry {
 # protocol context, so it must stay disjoint from the driver record the
 # transport validates it against
 pub rec Binding {
-    anchor: u64;
-    core: *core_api.Core;
-    secrets: *core_api.Secrets;
-    routing: [1]RoutingEntry;
+    anchor:         u64;
+    core:           *core_api.Core;
+    secrets:        *core_api.Secrets;
+    routing:        [1]RoutingEntry;
     routing_source: u64;
-    initialized: bool;
-    released: bool;
+    initialized:    bool;
+    released:       bool;
 }
 
 fun next_epoch(value: i64) i64 {
@@ -74,7 +74,7 @@ fun retire_routes(binding: *Binding) {
     var i: usize = 0;
     for (i < ROUTING_ID_CAPACITY) {
         val entry: *RoutingEntry = ?binding.routing[i];
-        val epoch: i64 = atomic.load(?entry.epoch);
+        val epoch: i64           = atomic.load(?entry.epoch);
         if ((epoch & 1) == 1) {
             atomic.store(?entry.epoch, next_epoch(epoch));
         }
@@ -89,57 +89,60 @@ fun bound(binding: *Binding) bool {
 
 fun refused() transport_api.CoreResult {
     var value: transport_api.CoreResult;
-    value.status = transport_api.STATUS_ERROR;
-    value.error = core_api.INTERNAL_ERROR;
+    value.status         = transport_api.STATUS_ERROR;
+    value.error          = core_api.INTERNAL_ERROR;
     value.provider_error = 0;
-    value.state = transport_api.DRAINING;
+    value.state          = transport_api.DRAINING;
     ret value;
 }
 
 fun refused_datagram() transport_api.CoreDatagram {
     var value: transport_api.CoreDatagram;
     value.status = transport_api.STATUS_ERROR;
-    value.error = core_api.INTERNAL_ERROR;
-    value.state = transport_api.DRAINING;
+    value.error  = core_api.INTERNAL_ERROR;
+    value.state  = transport_api.DRAINING;
     ret value;
 }
 
 fun binding_range(binding: *Binding) ownership.Range {
-    if (binding == nil) { var empty: ownership.Range; ret empty; }
+    if (binding == nil) {
+        var empty: ownership.Range;
+        ret empty;
+    }
     ret ownership.anchored_record[Binding, u64](?binding.anchor,
         $offset_of(Binding, anchor));
 }
 
 fun on_receive(binding: *Binding,
-               input: *transport_api.Datagram) transport_api.CoreResult {
+    input: *transport_api.Datagram) transport_api.CoreResult {
     if (!bound(binding)) { ret refused(); }
     ret core_api.receive(binding.core, binding.secrets, input);
 }
 
 fun on_timeout(binding: *Binding, generation: u64,
-               now_ns: u64) transport_api.CoreResult {
+    now_ns: u64) transport_api.CoreResult {
     if (!bound(binding)) { ret refused(); }
     ret core_api.on_timeout(binding.core, binding.secrets, generation, now_ns);
 }
 
 fun on_generate(binding: *Binding, output: *u8, capacity: usize,
-                now_ns: u64) transport_api.CoreDatagram {
+    now_ns: u64) transport_api.CoreDatagram {
     if (!bound(binding)) { ret refused_datagram(); }
     ret core_api.generate(binding.core, binding.secrets, output, capacity,
         now_ns);
 }
 
 fun on_complete_send(binding: *Binding, owner: u64,
-                     status: transport_api.SendStatus, count: usize,
-                     now_ns: u64) transport_api.CoreResult {
+    status: transport_api.SendStatus, count: usize,
+    now_ns: u64) transport_api.CoreResult {
     if (!bound(binding)) { ret refused(); }
     ret core_api.complete_send(binding.core, binding.secrets, owner, status,
         count, now_ns);
 }
 
 fun on_begin_close(binding: *Binding, abortive: bool, application_error: u64,
-                   reason: *u8, reason_length: usize,
-                   now_ns: u64) transport_api.CoreResult {
+    reason: *u8, reason_length: usize,
+    now_ns: u64) transport_api.CoreResult {
     if (!bound(binding)) { ret refused(); }
     ret core_api.begin_close(binding.core, binding.secrets, abortive,
         application_error, reason, reason_length, now_ns);
@@ -151,7 +154,7 @@ fun on_close_ready(binding: *Binding) bool {
 }
 
 fun on_finish_close(binding: *Binding) bool {
-    if (!bound(binding)) { ret false; }
+    if (!bound(binding))                                       { ret false; }
     if (!core_api.finish_close(binding.core, binding.secrets)) { ret false; }
     retire_routes(binding);
     ret true;
@@ -166,32 +169,35 @@ fun on_timer(binding: *Binding) transport_api.CoreTimer {
 # binds an already-initialized core. the core has validated its own ownership
 # set by then, so the binding only refuses a core that is not live
 pub fun bind(binding: *Binding, core: *core_api.Core,
-             secrets: *core_api.Secrets) bool {
+    secrets: *core_api.Secrets) bool {
     if (binding == nil || core == nil || secrets == nil || binding.initialized ||
         !core.initialized || core.destroyed || !secrets.initialized ||
         secrets.destroyed) { ret false; }
-    binding.anchor = 1;
-    binding.core = core;
-    binding.secrets = secrets;
+    binding.anchor         = 1;
+    binding.core           = core;
+    binding.secrets        = secrets;
     binding.routing_source = core.config.source;
-    binding.initialized = true;
-    binding.released = false;
+    binding.initialized    = true;
+    binding.released       = false;
     ret true;
 }
 
 # stages the stable sequence-zero route while it is not externally visible.
 # assembly publishes it only after the transport driver is initialized
 pub fun prepare_initial_route(binding: *Binding, data: *u8,
-                              length: usize) bool {
+    length: usize) bool {
     if (!bound(binding) || data == nil || length == 0 ||
         length > ROUTING_ID_LENGTH) { ret false; }
     val entry: *RoutingEntry = ?binding.routing[0];
     if (entry.prepared || (atomic.load(?entry.epoch) & 1) == 1) { ret false; }
     var i: usize = 0;
-    for (i < length) { entry.id.data[i] = data[i]; i = i + 1; }
+    for (i < length) {
+        entry.id.data[i] = data[i];
+        i                = i + 1;
+    }
     entry.id.length = length;
-    entry.sequence = 0;
-    entry.prepared = true;
+    entry.sequence  = 0;
+    entry.prepared  = true;
     ret true;
 }
 
@@ -202,29 +208,29 @@ pub fun abandon_initialization(binding: *Binding) bool {
     var i: usize = 0;
     for (i < ROUTING_ID_CAPACITY) {
         val entry: *RoutingEntry = ?binding.routing[i];
-        var byte: usize = 0;
+        var byte:  usize         = 0;
         for (byte < ROUTING_ID_LENGTH) {
             entry.id.data[byte] = 0;
-            byte = byte + 1;
+            byte                = byte + 1;
         }
         entry.id.length = 0;
-        entry.sequence = 0;
-        entry.prepared = false;
-        i = i + 1;
+        entry.sequence  = 0;
+        entry.prepared  = false;
+        i               = i + 1;
     }
-    binding.anchor = 0;
-    binding.core = nil;
-    binding.secrets = nil;
+    binding.anchor         = 0;
+    binding.core           = nil;
+    binding.secrets        = nil;
     binding.routing_source = 0;
-    binding.initialized = false;
-    binding.released = true;
+    binding.initialized    = false;
+    binding.released       = true;
     ret true;
 }
 
 pub fun publish_initial_route(binding: *Binding) bool {
     if (!bound(binding)) { ret false; }
     val entry: *RoutingEntry = ?binding.routing[0];
-    val epoch: i64 = atomic.load(?entry.epoch);
+    val epoch: i64           = atomic.load(?entry.epoch);
     if (!entry.prepared || (epoch & 1) == 1) { ret false; }
     atomic.store(?entry.epoch, next_epoch(epoch));
     ret true;
@@ -233,7 +239,7 @@ pub fun publish_initial_route(binding: *Binding) bool {
 # release is valid only after the production core has destroyed its secrets,
 # handshake provider, and every leased manager, and after routing is invisible
 pub fun release_ready(binding: *Binding) bool {
-    if (binding == nil) { ret false; }
+    if (binding == nil)       { ret false; }
     if (!binding.initialized) { ret binding.released; }
     if (binding.core == nil || binding.secrets == nil ||
         binding.core.initialized || !binding.core.destroyed ||
@@ -270,34 +276,34 @@ pub fun release_ready(binding: *Binding) bool {
 # the stable record can never validate after the next publication
 pub fun release_closed(binding: *Binding) bool {
     if (!release_ready(binding)) { ret false; }
-    if (!binding.initialized) { ret binding.released; }
+    if (!binding.initialized)    { ret binding.released; }
     var i: usize = 0;
     for (i < ROUTING_ID_CAPACITY) {
         val entry: *RoutingEntry = ?binding.routing[i];
-        var byte: usize = 0;
+        var byte:  usize         = 0;
         for (byte < ROUTING_ID_LENGTH) {
             entry.id.data[byte] = 0;
-            byte = byte + 1;
+            byte                = byte + 1;
         }
         entry.id.length = 0;
-        entry.sequence = 0;
-        entry.prepared = false;
-        i = i + 1;
+        entry.sequence  = 0;
+        entry.prepared  = false;
+        i               = i + 1;
     }
-    binding.anchor = 0;
-    binding.core = nil;
-    binding.secrets = nil;
+    binding.anchor         = 0;
+    binding.core           = nil;
+    binding.secrets        = nil;
     binding.routing_source = 0;
-    binding.initialized = false;
-    binding.released = true;
+    binding.initialized    = false;
+    binding.released       = true;
     ret true;
 }
 
 pub fun routing_snapshot(binding: *Binding) RoutingSnapshot {
     var value: RoutingSnapshot;
     if (!bound(binding)) { ret value; }
-    value.source = binding.routing_source;
-    value.capacity = ROUTING_ID_CAPACITY;
+    value.source      = binding.routing_source;
+    value.capacity    = ROUTING_ID_CAPACITY;
     value.initialized = true;
     var i: usize = 0;
     for (i < ROUTING_ID_CAPACITY) {
@@ -310,14 +316,14 @@ pub fun routing_snapshot(binding: *Binding) RoutingSnapshot {
 pub fun route_at(binding: *Binding, index: usize) Route {
     var value: Route;
     if (!bound(binding) || index >= ROUTING_ID_CAPACITY) { ret value; }
-    val entry: *RoutingEntry = ?binding.routing[index];
-    val before: i64 = atomic.load(?entry.epoch);
+    val entry:  *RoutingEntry = ?binding.routing[index];
+    val before: i64           = atomic.load(?entry.epoch);
     if ((before & 1) == 0) { ret value; }
-    value.source = binding.routing_source;
-    value.index = index;
+    value.source     = binding.routing_source;
+    value.index      = index;
     value.generation = before::u64;
-    value.sequence = entry.sequence;
-    value.id = entry.id;
+    value.sequence   = entry.sequence;
+    value.id         = entry.id;
     val after: i64 = atomic.load(?entry.epoch);
     if (after != before || (after & 1) == 0) {
         var retired: Route;
@@ -348,15 +354,15 @@ pub fun route_valid(binding: *Binding, route: *Route) bool {
 pub fun protocol(binding: *Binding) transport_api.Protocol[Binding] {
     var value: transport_api.Protocol[Binding];
     if (!bound(binding)) { ret value; }
-    value.context = binding;
+    value.context       = binding;
     value.context_range = binding_range;
-    value.receive = on_receive;
-    value.timeout = on_timeout;
-    value.generate = on_generate;
+    value.receive       = on_receive;
+    value.timeout       = on_timeout;
+    value.generate      = on_generate;
     value.complete_send = on_complete_send;
-    value.begin_close = on_begin_close;
-    value.close_ready = on_close_ready;
-    value.finish_close = on_finish_close;
-    value.timer = on_timer;
+    value.begin_close   = on_begin_close;
+    value.close_ready   = on_close_ready;
+    value.finish_close  = on_finish_close;
+    value.timer         = on_timer;
     ret value;
 }

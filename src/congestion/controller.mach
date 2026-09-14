@@ -6,93 +6,93 @@ use std.types.bool.true;
 use std.types.size.usize;
 
 pub val ALGORITHM_NEW_RENO: u8 = 1;
-pub val ALGORITHM_CUBIC: u8 = 2;
+pub val ALGORITHM_CUBIC:    u8 = 2;
 
 pub val MODE_SLOW_START: u8 = 1;
-pub val MODE_RECOVERY: u8 = 2;
-pub val MODE_AVOIDANCE: u8 = 3;
+pub val MODE_RECOVERY:   u8 = 2;
+pub val MODE_AVOIDANCE:  u8 = 3;
 
-pub val ERROR_NONE: u8 = 0;
-pub val ERROR_STATE: u8 = 1;
-pub val ERROR_CONFIG: u8 = 2;
-pub val ERROR_TIME: u8 = 3;
-pub val ERROR_EVENTS: u8 = 4;
+pub val ERROR_NONE:     u8 = 0;
+pub val ERROR_STATE:    u8 = 1;
+pub val ERROR_CONFIG:   u8 = 2;
+pub val ERROR_TIME:     u8 = 3;
+pub val ERROR_EVENTS:   u8 = 4;
 pub val ERROR_OVERFLOW: u8 = 5;
 
 val MAX_EXACT_WINDOW: u64 = 9007199254740992;
 
 pub rec Config {
-    algorithm: u8;
-    max_datagram_size: u64;
-    initial_window: u64;
-    minimum_window: u64;
-    maximum_window: u64;
+    algorithm:              u8;
+    max_datagram_size:      u64;
+    initial_window:         u64;
+    minimum_window:         u64;
+    maximum_window:         u64;
     cubic_fast_convergence: bool;
 }
 
 pub rec State {
-    config: Config;
-    congestion_window: u64;
-    slow_start_threshold: u64;
-    recovery_start_ns: u64;
-    last_event_at_ns: u64;
-    limited_started_at_ns: u64;
-    reno_accumulator: u64;
-    cubic_window_prior: u64;
-    cubic_window_max: u64;
-    cubic_epoch_window: u64;
+    config:                    Config;
+    congestion_window:         u64;
+    slow_start_threshold:      u64;
+    recovery_start_ns:         u64;
+    last_event_at_ns:          u64;
+    limited_started_at_ns:     u64;
+    reno_accumulator:          u64;
+    cubic_window_prior:        u64;
+    cubic_window_max:          u64;
+    cubic_epoch_window:        u64;
     cubic_epoch_started_at_ns: u64;
-    cubic_paused_ns: u64;
-    cubic_estimate: f64;
-    cubic_accumulator: u64;
-    mode: u8;
-    valid: bool;
-    in_recovery: bool;
-    has_recovery_start: bool;
-    cubic_epoch_active: bool;
-    cubic_timeout_epoch: bool;
-    application_limited: bool;
-    flow_control_limited: bool;
-    limited_active: bool;
+    cubic_paused_ns:           u64;
+    cubic_estimate:            f64;
+    cubic_accumulator:         u64;
+    mode:                      u8;
+    valid:                     bool;
+    in_recovery:               bool;
+    has_recovery_start:        bool;
+    cubic_epoch_active:        bool;
+    cubic_timeout_epoch:       bool;
+    application_limited:       bool;
+    flow_control_limited:      bool;
+    limited_active:            bool;
 }
 
 pub rec Signals {
-    events: *recovery.Event;
-    event_count: usize;
+    events:                 *recovery.Event;
+    event_count:            usize;
     bytes_in_flight_before: u64;
-    now_ns: u64;
-    smoothed_rtt_ns: u64;
-    ecn_congestion: bool;
-    ecn_sent_at_ns: u64;
-    persistent_congestion: bool;
-    growth_permitted: bool;
-    retry: bool;
+    now_ns:                 u64;
+    smoothed_rtt_ns:        u64;
+    ecn_congestion:         bool;
+    ecn_sent_at_ns:         u64;
+    persistent_congestion:  bool;
+    growth_permitted:       bool;
+    retry:                  bool;
 }
 
 pub rec UpdateResult {
-    ok: bool;
-    error: u8;
+    ok:                 bool;
+    error:              u8;
     acknowledged_bytes: u64;
-    lost_bytes: u64;
-    discarded_bytes: u64;
-    congestion_window: u64;
-    mode: u8;
-    reduced: bool;
-    reset: bool;
+    lost_bytes:         u64;
+    discarded_bytes:    u64;
+    congestion_window:  u64;
+    mode:               u8;
+    reduced:            bool;
+    reset:              bool;
 }
 
 pub rec Admission {
-    ok: bool;
-    error: u8;
-    permitted: bool;
-    congestion_blocked: bool;
-    flow_control_blocked: bool;
-    congestion_allowance: u64;
+    ok:                     bool;
+    error:                  u8;
+    permitted:              bool;
+    congestion_blocked:     bool;
+    flow_control_blocked:   bool;
+    congestion_allowance:   u64;
     flow_control_allowance: u64;
 }
 
 pub rec OperationResult {
-    ok: bool;
+    ok:    bool;
     error: u8;
 }
 
@@ -113,18 +113,18 @@ fun checked_add(a: u64, b: u64, out: *u64) bool {
 }
 
 fun valid_config(config: Config) bool {
-    if (config.algorithm != ALGORITHM_NEW_RENO && config.algorithm != ALGORITHM_CUBIC) { ret false; }
-    if (config.max_datagram_size < 1200 || config.max_datagram_size > 65527) { ret false; }
-    if (config.minimum_window < 2 * config.max_datagram_size) { ret false; }
+    if (config.algorithm != ALGORITHM_NEW_RENO && config.algorithm != ALGORITHM_CUBIC)                  { ret false; }
+    if (config.max_datagram_size < 1200 || config.max_datagram_size > 65527)                            { ret false; }
+    if (config.minimum_window < 2 * config.max_datagram_size)                                           { ret false; }
     if (config.initial_window < config.minimum_window || config.initial_window > config.maximum_window) { ret false; }
-    if (config.maximum_window > MAX_EXACT_WINDOW) { ret false; }
-    if (config.maximum_window > (0 - 1::u64) / (config.max_datagram_size + 1)) { ret false; }
+    if (config.maximum_window > MAX_EXACT_WINDOW)                                                       { ret false; }
+    if (config.maximum_window > (0 - 1::u64) / (config.max_datagram_size + 1))                          { ret false; }
     ret true;
 }
 
 pub fun default_config(algorithm: u8, max_datagram_size: u64) Config {
     var config: Config;
-    config.algorithm = algorithm;
+    config.algorithm         = algorithm;
     config.max_datagram_size = max_datagram_size;
     if (max_datagram_size < 1200 || max_datagram_size > 65527) { ret config; }
     config.initial_window = minimum(10 * max_datagram_size, maximum(14720, 2 * max_datagram_size));
@@ -140,11 +140,11 @@ pub fun init(config: Config, now_ns: u64) State {
     var state: State;
     state.config = config;
     if (!valid_config(config)) { ret state; }
-    state.congestion_window = config.initial_window;
+    state.congestion_window    = config.initial_window;
     state.slow_start_threshold = config.maximum_window;
-    state.last_event_at_ns = now_ns;
-    state.mode = MODE_SLOW_START;
-    state.valid = true;
+    state.last_event_at_ns     = now_ns;
+    state.mode                 = MODE_SLOW_START;
+    state.valid                = true;
     ret state;
 }
 
@@ -155,7 +155,7 @@ fun operation_error(code: u8) OperationResult {
 }
 
 pub fun reset(state: *State, now_ns: u64) OperationResult {
-    if (state == nil || !state.valid) { ret operation_error(ERROR_STATE); }
+    if (state == nil || !state.valid)    { ret operation_error(ERROR_STATE); }
     if (now_ns < state.last_event_at_ns) { ret operation_error(ERROR_TIME); }
     val config: Config = state.config;
     state[0] = init(config, now_ns);
@@ -165,13 +165,14 @@ pub fun reset(state: *State, now_ns: u64) OperationResult {
 }
 
 pub fun set_limited(state: *State, application_limited: bool, flow_control_limited: bool, now_ns: u64) OperationResult {
-    if (state == nil || !state.valid) { ret operation_error(ERROR_STATE); }
+    if (state == nil || !state.valid)    { ret operation_error(ERROR_STATE); }
     if (now_ns < state.last_event_at_ns) { ret operation_error(ERROR_TIME); }
     val limited: bool = application_limited || flow_control_limited;
     if (limited && !state.limited_active) {
         state.limited_started_at_ns = now_ns;
-        state.limited_active = true;
-    } or (!limited && state.limited_active) {
+        state.limited_active        = true;
+    }
+    or (!limited && state.limited_active) {
         if (state.cubic_epoch_active) {
             val paused: u64 = now_ns - state.limited_started_at_ns;
             if (paused > (0 - 1::u64) - state.cubic_paused_ns) { ret operation_error(ERROR_OVERFLOW); }
@@ -179,9 +180,9 @@ pub fun set_limited(state: *State, application_limited: bool, flow_control_limit
         }
         state.limited_active = false;
     }
-    state.application_limited = application_limited;
+    state.application_limited  = application_limited;
     state.flow_control_limited = flow_control_limited;
-    state.last_event_at_ns = now_ns;
+    state.last_event_at_ns     = now_ns;
     var result: OperationResult;
     result.ok = true;
     ret result;
@@ -193,14 +194,14 @@ pub fun allowance(state: *State, bytes_in_flight: u64) u64 {
 }
 
 pub fun admit(state: *State, bytes_in_flight: u64, flow_control_allowance: u64,
-              congestion_bytes: u64, flow_control_bytes: u64, in_flight: bool, probe: bool) Admission {
+    congestion_bytes: u64, flow_control_bytes: u64, in_flight: bool, probe: bool) Admission {
     var result: Admission;
     if (state == nil || !state.valid) {
         result.error = ERROR_STATE;
         ret result;
     }
-    result.ok = true;
-    result.congestion_allowance = allowance(state, bytes_in_flight);
+    result.ok                     = true;
+    result.congestion_allowance   = allowance(state, bytes_in_flight);
     result.flow_control_allowance = flow_control_allowance;
     if (congestion_bytes == 0 && flow_control_bytes == 0) {
         result.permitted = true;
@@ -219,44 +220,48 @@ pub fun admit(state: *State, bytes_in_flight: u64, flow_control_allowance: u64,
 fun update_mode(state: *State) {
     if (state.in_recovery) {
         state.mode = MODE_RECOVERY;
-    } or (state.congestion_window < state.slow_start_threshold) {
+    }
+    or (state.congestion_window < state.slow_start_threshold) {
         state.mode = MODE_SLOW_START;
-    } or {
+    }
+    or {
         state.mode = MODE_AVOIDANCE;
     }
 }
 
 fun scaled(value: u64, numerator: u64, denominator: u64) u64 {
-    val whole: u64 = value / denominator;
+    val whole:     u64 = value / denominator;
     val remainder: u64 = value % denominator;
     ret whole * numerator + remainder * numerator / denominator;
 }
 
 fun reset_epoch(state: *State) {
     state.cubic_epoch_active = false;
-    state.cubic_paused_ns = 0;
-    state.cubic_accumulator = 0;
+    state.cubic_paused_ns    = 0;
+    state.cubic_accumulator  = 0;
 }
 
 fun enter_recovery(state: *State, flight_size: u64, now_ns: u64) {
     if (state.config.algorithm == ALGORITHM_NEW_RENO) {
         state.slow_start_threshold = maximum(state.congestion_window / 2, state.config.minimum_window);
-    } or {
+    }
+    or {
         if (state.config.cubic_fast_convergence && state.cubic_window_max != 0 &&
             state.congestion_window < state.cubic_window_max) {
             state.cubic_window_max = scaled(state.congestion_window, 17, 20);
-        } or {
+        }
+        or {
             state.cubic_window_max = state.congestion_window;
         }
-        state.cubic_window_prior = state.congestion_window;
+        state.cubic_window_prior   = state.congestion_window;
         state.slow_start_threshold = maximum(scaled(flight_size, 7, 10), state.config.minimum_window);
         state.slow_start_threshold = minimum(state.slow_start_threshold, state.config.maximum_window);
     }
-    state.congestion_window = minimum(state.slow_start_threshold, state.config.maximum_window);
-    state.recovery_start_ns = now_ns;
-    state.in_recovery = true;
+    state.congestion_window  = minimum(state.slow_start_threshold, state.config.maximum_window);
+    state.recovery_start_ns  = now_ns;
+    state.in_recovery        = true;
     state.has_recovery_start = true;
-    state.reno_accumulator = 0;
+    state.reno_accumulator   = 0;
     reset_epoch(state);
     state.cubic_timeout_epoch = false;
     update_mode(state);
@@ -269,10 +274,10 @@ fun persistent_collapse(state: *State, now_ns: u64) {
         state.slow_start_threshold = minimum(state.config.maximum_window,
             state.congestion_window + state.config.max_datagram_size);
     }
-    state.recovery_start_ns = now_ns;
-    state.in_recovery = false;
+    state.recovery_start_ns  = now_ns;
+    state.in_recovery        = false;
     state.has_recovery_start = true;
-    state.reno_accumulator = 0;
+    state.reno_accumulator   = 0;
     reset_epoch(state);
     if (state.config.algorithm == ALGORITHM_CUBIC) { state.cubic_timeout_epoch = true; }
     update_mode(state);
@@ -284,8 +289,8 @@ fun grow_slow_start(state: *State, acknowledged: u64) {
 }
 
 fun grow_reno(state: *State, acknowledged: u64) {
-    val product: u64 = acknowledged * state.config.max_datagram_size;
-    val total: u64 = state.reno_accumulator + product;
+    val product:  u64 = acknowledged * state.config.max_datagram_size;
+    val total:    u64 = state.reno_accumulator + product;
     val increase: u64 = total / state.congestion_window;
     state.reno_accumulator = total % state.congestion_window;
     val room: u64 = state.config.maximum_window - state.congestion_window;
@@ -294,13 +299,14 @@ fun grow_reno(state: *State, acknowledged: u64) {
 
 fun cube_root(value: f64) f64 {
     if (value <= 0.0) { ret 0.0; }
-    var low: f64 = 0.0;
+    var low:  f64 = 0.0;
     var high: f64 = 1.0;
     for (high * high * high < value) { high = high * 2.0; }
     var iteration: u8 = 0;
     for (iteration < 64) {
         val middle: f64 = (low + high) / 2.0;
-        if (middle * middle * middle < value) { low = middle; } or { high = middle; }
+        if (middle * middle * middle < value) { low = middle; }
+        or                                    { high = middle; }
         iteration = iteration + 1;
     }
     ret (low + high) / 2.0;
@@ -310,13 +316,13 @@ fun start_cubic_epoch(state: *State, now_ns: u64) {
     if (state.cubic_timeout_epoch || state.cubic_window_max < state.congestion_window) {
         state.cubic_window_max = state.congestion_window;
     }
-    state.cubic_timeout_epoch = false;
-    state.cubic_epoch_active = true;
+    state.cubic_timeout_epoch       = false;
+    state.cubic_epoch_active        = true;
     state.cubic_epoch_started_at_ns = now_ns;
-    state.cubic_paused_ns = 0;
-    state.cubic_epoch_window = state.congestion_window;
-    state.cubic_estimate = state.congestion_window::f64;
-    state.cubic_accumulator = 0;
+    state.cubic_paused_ns           = 0;
+    state.cubic_epoch_window        = state.congestion_window;
+    state.cubic_estimate            = state.congestion_window::f64;
+    state.cubic_accumulator         = 0;
 }
 
 fun cubic_elapsed_ns(state: *State, now_ns: u64) u64 {
@@ -332,15 +338,15 @@ fun cubic_elapsed_ns(state: *State, now_ns: u64) u64 {
 }
 
 fun cubic_target(state: *State, now_ns: u64, rtt_ns: u64) u64 {
-    val mds: f64 = state.config.max_datagram_size::f64;
-    val origin: f64 = state.cubic_window_max::f64 / mds;
+    val mds:          f64 = state.config.max_datagram_size::f64;
+    val origin:       f64 = state.cubic_window_max::f64 / mds;
     val epoch_window: f64 = state.cubic_epoch_window::f64 / mds;
-    var k: f64 = 0.0;
+    var k:            f64 = 0.0;
     if (origin > epoch_window) { k = cube_root((origin - epoch_window) / 0.4); }
     val elapsed: f64 = cubic_elapsed_ns(state, now_ns)::f64 / 1000000000.0;
-    val rtt: f64 = rtt_ns::f64 / 1000000000.0;
-    val offset: f64 = elapsed + rtt - k;
-    var target: f64 = origin + 0.4 * offset * offset * offset;
+    val rtt:     f64 = rtt_ns::f64 / 1000000000.0;
+    val offset:  f64 = elapsed + rtt - k;
+    var target:  f64 = origin + 0.4 * offset * offset * offset;
     if (target < 0.0) { target = 0.0; }
     if (target >= state.config.maximum_window::f64 / mds) {
         ret state.config.maximum_window;
@@ -348,27 +354,27 @@ fun cubic_target(state: *State, now_ns: u64, rtt_ns: u64) u64 {
     var bytes: u64 = (target * mds)::u64;
     if (bytes < state.congestion_window) { bytes = state.congestion_window; }
     val maximum_target: u64 = state.congestion_window + state.congestion_window / 2;
-    if (bytes > maximum_target) { bytes = maximum_target; }
+    if (bytes > maximum_target)              { bytes = maximum_target; }
     if (bytes > state.config.maximum_window) { bytes = state.config.maximum_window; }
     ret bytes;
 }
 
 fun grow_cubic(state: *State, acknowledged: u64, now_ns: u64, rtt_ns: u64) {
     if (!state.cubic_epoch_active) { start_cubic_epoch(state, now_ns); }
-    val mds: f64 = state.config.max_datagram_size::f64;
+    val mds:   f64 = state.config.max_datagram_size::f64;
     var alpha: f64 = 9.0 / 17.0;
     if (state.cubic_estimate >= state.cubic_window_prior::f64) { alpha = 1.0; }
     state.cubic_estimate = state.cubic_estimate +
         alpha * acknowledged::f64 * mds / state.congestion_window::f64;
-    val target: u64 = cubic_target(state, now_ns, rtt_ns);
+    val target:  u64 = cubic_target(state, now_ns, rtt_ns);
     var desired: u64 = target;
-    if (state.cubic_estimate > desired::f64) { desired = state.cubic_estimate::u64; }
+    if (state.cubic_estimate > desired::f64)   { desired = state.cubic_estimate::u64; }
     if (desired > state.config.maximum_window) { desired = state.config.maximum_window; }
-    if (desired <= state.congestion_window) { ret; }
+    if (desired <= state.congestion_window)    { ret; }
     val difference: u64 = desired - state.congestion_window;
-    val product: u64 = difference * acknowledged;
-    val total: u64 = state.cubic_accumulator + product;
-    val increase: u64 = total / state.congestion_window;
+    val product:    u64 = difference * acknowledged;
+    val total:      u64 = state.cubic_accumulator + product;
+    val increase:   u64 = total / state.congestion_window;
     state.cubic_accumulator = total % state.congestion_window;
     val room: u64 = state.config.maximum_window - state.congestion_window;
     state.congestion_window = state.congestion_window + minimum(increase, room);
@@ -378,9 +384,11 @@ fun grow(state: *State, acknowledged: u64, now_ns: u64, rtt_ns: u64) {
     if (acknowledged == 0) { ret; }
     if (state.congestion_window < state.slow_start_threshold) {
         grow_slow_start(state, acknowledged);
-    } or (state.config.algorithm == ALGORITHM_NEW_RENO) {
+    }
+    or (state.config.algorithm == ALGORITHM_NEW_RENO) {
         grow_reno(state, acknowledged);
-    } or {
+    }
+    or {
         grow_cubic(state, acknowledged, now_ns, rtt_ns);
     }
     update_mode(state);
@@ -391,7 +399,7 @@ fun update_error(code: u8, state: *State) UpdateResult {
     result.error = code;
     if (state != nil) {
         result.congestion_window = state.congestion_window;
-        result.mode = state.mode;
+        result.mode              = state.mode;
     }
     ret result;
 }
@@ -406,15 +414,15 @@ pub fun on_recovery(state: *State, signals: Signals) UpdateResult {
     }
     if (signals.event_count > 0 && signals.events == nil) { ret update_error(ERROR_EVENTS, state); }
 
-    var acknowledged: u64 = 0;
-    var lost: u64 = 0;
-    var discarded: u64 = 0;
-    var terminal_flight: u64 = 0;
-    var latest_lost_sent_at: u64 = 0;
-    var has_loss: bool = false;
-    var has_retry: bool = false;
-    var has_non_retry: bool = false;
-    var i: usize = 0;
+    var acknowledged:        u64   = 0;
+    var lost:                u64   = 0;
+    var discarded:           u64   = 0;
+    var terminal_flight:     u64   = 0;
+    var latest_lost_sent_at: u64   = 0;
+    var has_loss:            bool  = false;
+    var has_retry:           bool  = false;
+    var has_non_retry:       bool  = false;
+    var i:                   usize = 0;
     for (i < signals.event_count) {
         val event: recovery.Event = signals.events[i];
         if (event.sent_at_ns > signals.now_ns || event.bytes::u64 > state.config.max_datagram_size) {
@@ -431,7 +439,8 @@ pub fun on_recovery(state: *State, signals: Signals) UpdateResult {
                 if (!checked_add(acknowledged, event.bytes::u64, ?next)) { ret update_error(ERROR_OVERFLOW, state); }
                 acknowledged = next;
             }
-        } or (event.kind == recovery.EVENT_LOST) {
+        }
+        or (event.kind == recovery.EVENT_LOST) {
             has_non_retry = true;
             if (event.in_flight) {
                 if (!checked_add(lost, event.bytes::u64, ?next)) { ret update_error(ERROR_OVERFLOW, state); }
@@ -439,15 +448,18 @@ pub fun on_recovery(state: *State, signals: Signals) UpdateResult {
             }
             if (!has_loss || event.sent_at_ns > latest_lost_sent_at) { latest_lost_sent_at = event.sent_at_ns; }
             has_loss = true;
-        } or (event.kind == recovery.EVENT_DISCARDED) {
+        }
+        or (event.kind == recovery.EVENT_DISCARDED) {
             has_non_retry = true;
             if (event.in_flight) {
                 if (!checked_add(discarded, event.bytes::u64, ?next)) { ret update_error(ERROR_OVERFLOW, state); }
                 discarded = next;
             }
-        } or (event.kind == recovery.EVENT_RETRY) {
+        }
+        or (event.kind == recovery.EVENT_RETRY) {
             has_retry = true;
-        } or {
+        }
+        or {
             ret update_error(ERROR_EVENTS, state);
         }
         i = i + 1;
@@ -458,13 +470,14 @@ pub fun on_recovery(state: *State, signals: Signals) UpdateResult {
     }
 
     var next_state: State = state[0];
-    var result: UpdateResult;
+    var result:     UpdateResult;
     if (has_retry || signals.retry) {
-        next_state = init(next_state.config, signals.now_ns);
+        next_state   = init(next_state.config, signals.now_ns);
         result.reset = true;
-    } or {
-        val old_recovery_start: u64 = next_state.recovery_start_ns;
-        var new_congestion: bool = signals.ecn_congestion &&
+    }
+    or {
+        val old_recovery_start: u64  = next_state.recovery_start_ns;
+        var new_congestion:     bool = signals.ecn_congestion &&
             (!next_state.has_recovery_start || signals.ecn_sent_at_ns > old_recovery_start);
         if (has_loss && (!next_state.has_recovery_start || latest_lost_sent_at > old_recovery_start)) {
             new_congestion = true;
@@ -473,10 +486,12 @@ pub fun on_recovery(state: *State, signals: Signals) UpdateResult {
             enter_recovery(?next_state, signals.bytes_in_flight_before, signals.now_ns);
             persistent_collapse(?next_state, signals.now_ns);
             result.reduced = true;
-        } or (new_congestion) {
+        }
+        or (new_congestion) {
             enter_recovery(?next_state, signals.bytes_in_flight_before, signals.now_ns);
             result.reduced = true;
-        } or {
+        }
+        or {
             i = 0;
             for (i < signals.event_count) {
                 val event: recovery.Event = signals.events[i];
@@ -495,34 +510,34 @@ pub fun on_recovery(state: *State, signals: Signals) UpdateResult {
         }
         next_state.last_event_at_ns = signals.now_ns;
     }
-    state[0] = next_state;
-    result.ok = true;
+    state[0]                  = next_state;
+    result.ok                 = true;
     result.acknowledged_bytes = acknowledged;
-    result.lost_bytes = lost;
-    result.discarded_bytes = discarded;
-    result.congestion_window = state.congestion_window;
-    result.mode = state.mode;
+    result.lost_bytes         = lost;
+    result.discarded_bytes    = discarded;
+    result.congestion_window  = state.congestion_window;
+    result.mode               = state.mode;
     ret result;
 }
 
 pub fun set_max_datagram_size(state: *State, max_datagram_size: u64, now_ns: u64) OperationResult {
-    if (state == nil || !state.valid) { ret operation_error(ERROR_STATE); }
-    if (now_ns < state.last_event_at_ns) { ret operation_error(ERROR_TIME); }
+    if (state == nil || !state.valid)                          { ret operation_error(ERROR_STATE); }
+    if (now_ns < state.last_event_at_ns)                       { ret operation_error(ERROR_TIME); }
     if (max_datagram_size < 1200 || max_datagram_size > 65527) { ret operation_error(ERROR_CONFIG); }
     var config: Config = state.config;
     config.max_datagram_size = max_datagram_size;
-    config.minimum_window = 2 * max_datagram_size;
+    config.minimum_window    = 2 * max_datagram_size;
     if (config.initial_window < config.minimum_window) { config.initial_window = config.minimum_window; }
     val arithmetic_limit: u64 = (0 - 1::u64) / (max_datagram_size + 1);
     if (config.maximum_window > arithmetic_limit) { config.maximum_window = arithmetic_limit; }
-    if (!valid_config(config)) { ret operation_error(ERROR_CONFIG); }
-    state.config = config;
-    state.congestion_window = maximum(state.congestion_window, config.minimum_window);
-    state.congestion_window = minimum(state.congestion_window, config.maximum_window);
+    if (!valid_config(config))                    { ret operation_error(ERROR_CONFIG); }
+    state.config               = config;
+    state.congestion_window    = maximum(state.congestion_window, config.minimum_window);
+    state.congestion_window    = minimum(state.congestion_window, config.maximum_window);
     state.slow_start_threshold = maximum(state.slow_start_threshold, config.minimum_window);
     state.slow_start_threshold = minimum(state.slow_start_threshold, config.maximum_window);
-    state.last_event_at_ns = now_ns;
-    state.reno_accumulator = 0;
+    state.last_event_at_ns     = now_ns;
+    state.reno_accumulator     = 0;
     reset_epoch(state);
     var result: OperationResult;
     result.ok = true;

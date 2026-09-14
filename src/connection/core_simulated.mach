@@ -1,104 +1,104 @@
-use quic.connection.core;
-use quic.connection.handshake;
-use quic.connection.cid;
-use quic.path.path;
-use quic.packet.packet;
-use quic.recovery.recovery;
-use quic.recovery.ack;
-use quic.stream.stream;
-use quic.stream.datagram;
-use quic.transport;
-use quic.crypto.protection;
-use quic.frame.frame;
-use quic.transport_parameters;
-use quic.connection.negotiation;
-use quic.connection.ownership;
 use quic.congestion.controller;
 use quic.congestion.pacer;
+use quic.connection.cid;
+use quic.connection.core;
+use quic.connection.handshake;
+use quic.connection.negotiation;
+use quic.connection.ownership;
+use quic.crypto.protection;
+use quic.frame.frame;
+use quic.packet.packet;
+use quic.path.path;
+use quic.recovery.ack;
+use quic.recovery.recovery;
+use quic.stream.datagram;
+use quic.stream.stream;
+use quic.transport;
+use quic.transport_parameters;
 
 use crypto.contracts;
+use std.crypto.ct;
 use std.encoding.binary;
 use std.net.ip;
-use std.crypto.ct;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
 rec Provider {
-    hello: [8]u8;
-    active: u64;
-    restarts: usize;
-    closes: usize;
-    started: bool;
-    emitted: bool;
-    destroyed: bool;
-    fail_start: bool;
-    emit_alert: u64;
+    hello:         [8]u8;
+    active:        u64;
+    restarts:      usize;
+    closes:        usize;
+    started:       bool;
+    emitted:       bool;
+    destroyed:     bool;
+    fail_start:    bool;
+    emit_alert:    u64;
     alert_emitted: bool;
 }
 
 rec Fixture {
-    provider: Provider;
-    adapter_receive: [256]u8;
+    provider:                Provider;
+    adapter_receive:         [256]u8;
     adapter_receive_present: [256]bool;
-    adapter_send: [256]u8;
-    adapter_send_pending: [256]bool;
-    adapter_send_acked: [256]bool;
-    adapter_send_inflight: [256]u16;
-    adapter_attempts: [8]handshake.Attempt;
-    adapter_secret: [32]^u8;
-    adapter: handshake.Adapter;
+    adapter_send:            [256]u8;
+    adapter_send_pending:    [256]bool;
+    adapter_send_acked:      [256]bool;
+    adapter_send_inflight:   [256]u16;
+    adapter_attempts:        [8]handshake.Attempt;
+    adapter_secret:          [32]^u8;
+    adapter:                 handshake.Adapter;
 
     local_cids: [4]cid.Entry;
-    peer_cids: [4]cid.Entry;
-    cids: cid.Manager;
+    peer_cids:  [4]cid.Entry;
+    cids:       cid.Manager;
 
-    path_values: [2]path.Path;
+    path_values:     [2]path.Path;
     path_challenges: [4]path.Challenge;
-    path_responses: [4]path.Response;
-    path_sends: [8]path.SendReservation;
-    paths: path.Manager;
+    path_responses:  [4]path.Response;
+    path_sends:      [8]path.SendReservation;
+    paths:           path.Manager;
 
-    streams_values: [2]stream.Stream;
-    streams_send: [128]u8;
-    streams_send_pending: [128]bool;
-    streams_send_acked: [128]bool;
-    streams_send_inflight: [128]u8;
-    streams_receive: [128]u8;
+    streams_values:          [2]stream.Stream;
+    streams_send:            [128]u8;
+    streams_send_pending:    [128]bool;
+    streams_send_acked:      [128]bool;
+    streams_send_inflight:   [128]u8;
+    streams_receive:         [128]u8;
     streams_receive_present: [128]bool;
-    stream_attempts: [8]stream.Attempt;
-    streams: stream.Manager;
-    datagrams: datagram.Queue;
+    stream_attempts:         [8]stream.Attempt;
+    streams:                 stream.Manager;
+    datagrams:               datagram.Queue;
 
-    receive_header: [1200]u8;
-    receive_decoded: [1200]u8;
-    send_plaintext: [1200]u8;
-    close_reason: [64]u8;
-    secret_receive: [1200]^u8;
-    secret_send: [1200]^u8;
-    frame_ranges: [8]frame.AckRange;
-    recovery_events: [24]recovery.Event;
-    recovery_initial: [8]recovery.SentPacket;
-    recovery_handshake: [8]recovery.SentPacket;
-    recovery_application: [8]recovery.SentPacket;
-    ack_initial: [8]ack.Range;
-    ack_handshake: [8]ack.Range;
-    ack_application: [8]ack.Range;
-    owners: [8]core.Owner;
-    peer_extensions: [4]transport_parameters.Parameter;
-    peer_extension_bytes: [64]u8;
-    local_extensions: [4]transport_parameters.Parameter;
+    receive_header:        [1200]u8;
+    receive_decoded:       [1200]u8;
+    send_plaintext:        [1200]u8;
+    close_reason:          [64]u8;
+    secret_receive:        [1200]^u8;
+    secret_send:           [1200]^u8;
+    frame_ranges:          [8]frame.AckRange;
+    recovery_events:       [24]recovery.Event;
+    recovery_initial:      [8]recovery.SentPacket;
+    recovery_handshake:    [8]recovery.SentPacket;
+    recovery_application:  [8]recovery.SentPacket;
+    ack_initial:           [8]ack.Range;
+    ack_handshake:         [8]ack.Range;
+    ack_application:       [8]ack.Range;
+    owners:                [8]core.Owner;
+    peer_extensions:       [4]transport_parameters.Parameter;
+    peer_extension_bytes:  [64]u8;
+    local_extensions:      [4]transport_parameters.Parameter;
     local_extension_bytes: [64]u8;
-    local_parameters: [256]u8;
-    received_token: [128]u8;
-    send_token: [128]u8;
-    retry_token: [128]u8;
-    retry_pseudo: [256]u8;
-    supported_versions: [2]u32;
-    engine: core.Core;
-    secrets: core.Secrets;
-    init_result: core.InitResult;
+    local_parameters:      [256]u8;
+    received_token:        [128]u8;
+    send_token:            [128]u8;
+    retry_token:           [128]u8;
+    retry_pseudo:          [256]u8;
+    supported_versions:    [2]u32;
+    engine:                core.Core;
+    secrets:               core.Secrets;
+    init_result:           core.InitResult;
 }
 
 fun provider_result(status: u8, error: u64) handshake.ProviderResult {
@@ -106,7 +106,7 @@ fun provider_result(status: u8, error: u64) handshake.ProviderResult {
 }
 
 fun provider_start(context: ptr, secret_context: *^u8,
-                   start: *handshake.Start) handshake.ProviderResult {
+    start: *handshake.Start) handshake.ProviderResult {
     val provider: *Provider = context::*Provider;
     if (provider.started || start == nil || start.version == 0 ||
         provider.fail_start) {
@@ -117,62 +117,62 @@ fun provider_start(context: ptr, secret_context: *^u8,
 }
 
 fun provider_ingest(context: ptr, secret_context: *^u8, level: u8,
-                    offset: u64, data: *u8, length: usize,
-                    now_ns: u64) handshake.ProviderResult {
+    offset: u64, data: *u8, length: usize,
+    now_ns: u64) handshake.ProviderResult {
     ret provider_result(handshake.STATUS_OK, 0);
 }
 
 fun provider_restart(context: ptr, secret_context: *^u8, reason: u8,
-                     version: u32, now_ns: u64) handshake.ProviderResult {
+    version: u32, now_ns: u64) handshake.ProviderResult {
     val provider: *Provider = context::*Provider;
     if (!provider.started || version == 0) {
         ret provider_result(handshake.STATUS_ERROR, 2);
     }
     provider.restarts = provider.restarts + 1;
-    provider.emitted = false;
+    provider.emitted  = false;
     ret provider_result(handshake.STATUS_OK, 0);
 }
 
 fun provider_poll(context: ptr, secret_context: *^u8,
-                  now_ns: u64) handshake.ProviderResult {
+    now_ns: u64) handshake.ProviderResult {
     ret provider_result(handshake.STATUS_EMPTY, 0);
 }
 
 fun provider_next(context: ptr, secret_context: *^u8,
-                  output: *handshake.ProviderEvent) bool {
+    output: *handshake.ProviderEvent) bool {
     val provider: *Provider = context::*Provider;
     if (!provider.started || provider.active != 0 || output == nil) {
         ret false;
     }
     if (provider.emitted) {
         if (provider.emit_alert == 0 || provider.alert_emitted) { ret false; }
-        output.token = 0x101 + provider.restarts::u64;
-        output.kind = handshake.EVENT_ALERT;
-        output.alert = provider.emit_alert;
+        output.token           = 0x101 + provider.restarts::u64;
+        output.kind            = handshake.EVENT_ALERT;
+        output.alert           = provider.emit_alert;
         provider.alert_emitted = true;
-        provider.active = output.token;
+        provider.active        = output.token;
         ret true;
     }
-    output.token = 1 + provider.restarts::u64;
-    output.kind = handshake.EVENT_CRYPTO;
-    output.level = handshake.INITIAL;
-    output.offset = 0;
-    output.data = handshake.View{data: ?provider.hello[0], length: 8};
+    output.token    = 1 + provider.restarts::u64;
+    output.kind     = handshake.EVENT_CRYPTO;
+    output.level    = handshake.INITIAL;
+    output.offset   = 0;
+    output.data     = handshake.View{data: ?provider.hello[0], length: 8};
     provider.active = output.token;
     ret true;
 }
 
 fun provider_complete(context: ptr, secret_context: *^u8, token: u64,
-                      accepted: bool) bool {
+    accepted: bool) bool {
     val provider: *Provider = context::*Provider;
     if (!accepted || provider.active != token) { ret false; }
-    provider.active = 0;
+    provider.active  = 0;
     provider.emitted = true;
     ret true;
 }
 
 fun provider_close(context: ptr, secret_context: *^u8, alert: u64,
-                   now_ns: u64) handshake.ProviderResult {
+    now_ns: u64) handshake.ProviderResult {
     val provider: *Provider = context::*Provider;
     if (!provider.started || alert > 255) {
         ret provider_result(handshake.STATUS_ERROR, 3);
@@ -206,7 +206,10 @@ fun connection_id(seed: u8) packet.ConnectionId {
     var value: packet.ConnectionId;
     value.len = 8;
     var i: usize = 0;
-    for (i < 8) { value.data[i] = seed + i::u8; i = i + 1; }
+    for (i < 8) {
+        value.data[i] = seed + i::u8;
+        i             = i + 1;
+    }
     ret value;
 }
 
@@ -216,7 +219,7 @@ fun endpoint(host: u8, port: u16) ip.Endpoint {
     value.addr.v4.octets[1] = 0;
     value.addr.v4.octets[2] = 2;
     value.addr.v4.octets[3] = host;
-    value.port = port;
+    value.port              = port;
     ret value;
 }
 
@@ -235,109 +238,115 @@ fun parameter_role(role: u8) u8 {
 
 # each fault is one specific wiring mistake, so a test can assert that
 # initialization named that mistake rather than merely refused
-val FAULT_NONE: u8 = 0;
-val FAULT_STORAGE_CAPACITY: u8 = 1;
-val FAULT_STORAGE_OVERLAP: u8 = 2;
-val FAULT_STORAGE_BORROWED: u8 = 3;
-val FAULT_COMPONENT_OVERLAP: u8 = 4;
+val FAULT_NONE:               u8 = 0;
+val FAULT_STORAGE_CAPACITY:   u8 = 1;
+val FAULT_STORAGE_OVERLAP:    u8 = 2;
+val FAULT_STORAGE_BORROWED:   u8 = 3;
+val FAULT_COMPONENT_OVERLAP:  u8 = 4;
 val FAULT_COMPONENT_BORROWED: u8 = 5;
-val FAULT_PROVIDER_SECRETS: u8 = 6;
-val FAULT_PROVIDER_START: u8 = 7;
-val FAULT_RECEIVE_KEYS: u8 = 8;
-val FAULT_SEND_KEYS: u8 = 9;
+val FAULT_PROVIDER_SECRETS:   u8 = 6;
+val FAULT_PROVIDER_START:     u8 = 7;
+val FAULT_RECEIVE_KEYS:       u8 = 8;
+val FAULT_SEND_KEYS:          u8 = 9;
 
 fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
-                          now_ns: u64, fault: u8) bool {
+    now_ns: u64, fault: u8) bool {
     fixture.provider.fail_start = fault == FAULT_PROVIDER_START;
     var i: usize = 0;
-    for (i < 8) { fixture.provider.hello[i] = 0x80 + i::u8; i = i + 1; }
+    for (i < 8) {
+        fixture.provider.hello[i] = 0x80 + i::u8;
+        i                         = i + 1;
+    }
     if (!handshake.initialize(?fixture.adapter, handshake.Config{source: 901,
         max_crypto_per_level: 64, max_event_data: 64,
-        max_peer_identity: 64}, handshake.Storage{
-        receive_data: ?fixture.adapter_receive[0],
-        receive_present: ?fixture.adapter_receive_present[0],
-        receive_length: 256, receive_stride: 64,
-        send_data: ?fixture.adapter_send[0],
-        send_pending: ?fixture.adapter_send_pending[0],
-        send_acked: ?fixture.adapter_send_acked[0],
-        send_inflight: ?fixture.adapter_send_inflight[0],
-        send_length: 256, send_stride: 64,
-        attempts: ?fixture.adapter_attempts[0], attempt_capacity: 8},
+        max_peer_identity:    64}, handshake.Storage{
+        receive_data:         ?fixture.adapter_receive[0],
+        receive_present:      ?fixture.adapter_receive_present[0],
+        receive_length:       256, receive_stride: 64,
+        send_data:            ?fixture.adapter_send[0],
+        send_pending:         ?fixture.adapter_send_pending[0],
+        send_acked:           ?fixture.adapter_send_acked[0],
+        send_inflight:        ?fixture.adapter_send_inflight[0],
+        send_length:          256, send_stride: 64,
+        attempts:             ?fixture.adapter_attempts[0], attempt_capacity: 8
+    },
         handshake.Protocol{context: (?fixture.provider)::ptr,
-            context_size: $size_of(Provider),
-            secret_context: ?fixture.adapter_secret[0], secret_context_size: 32,
-            start: provider_start, ingest: provider_ingest,
-            restart: provider_restart, poll: provider_poll,
-            next_event: provider_next,
-            complete_event: provider_complete, close: provider_close,
-            destroy: provider_destroy, initialized: true})) { ret false; }
+        context_size:   $size_of(Provider),
+        secret_context: ?fixture.adapter_secret[0], secret_context_size: 32,
+        start:          provider_start, ingest: provider_ingest,
+        restart:        provider_restart, poll: provider_poll,
+        next_event:     provider_next,
+        complete_event: provider_complete, close: provider_close,
+        destroy:        provider_destroy, initialized: true})) { ret false; }
 
     val local_id: packet.ConnectionId = connection_id(1);
-    val peer_id: packet.ConnectionId = connection_id(21);
+    val peer_id:  packet.ConnectionId = connection_id(21);
     if (!cid.initialize(?fixture.cids,
         cid.Config{source: 901, local_active_limit: 2,
         peer_active_limit: 2}, cid.Storage{local: ?fixture.local_cids[0],
-        local_capacity: 4, peer: ?fixture.peer_cids[0], peer_capacity: 4},
+        local_capacity:    4, peer: ?fixture.peer_cids[0], peer_capacity: 4},
         local_id, peer_id)) { ret false; }
 
-    val local: ip.Endpoint = endpoint(1, 4433);
-    val peer: ip.Endpoint = endpoint(2, 55000);
-    var path_role: u8 = path.ROLE_CLIENT;
+    val local:     ip.Endpoint = endpoint(1, 4433);
+    val peer:      ip.Endpoint = endpoint(2, 55000);
+    var path_role: u8          = path.ROLE_CLIENT;
     if (role == transport.SERVER) { path_role = path.ROLE_SERVER; }
     var path_config: path.Config = path.default_config(901, path_role, validated);
     path_config.maximum_mtu = 1200;
     if (!path.initialize(?fixture.paths, path_config, path.Storage{
-        paths: ?fixture.path_values[0], path_capacity: 2,
+        paths:      ?fixture.path_values[0], path_capacity: 2,
         challenges: ?fixture.path_challenges[0], challenge_capacity: 4,
-        responses: ?fixture.path_responses[0], response_capacity: 4,
-        sends: ?fixture.path_sends[0], send_capacity: 8},
+        responses:  ?fixture.path_responses[0], response_capacity: 4,
+        sends:      ?fixture.path_sends[0], send_capacity: 8
+    },
         path_endpoint(local, peer))) { ret false; }
 
     var stream_role: u8 = stream.ROLE_CLIENT;
     if (role == transport.SERVER) { stream_role = stream.ROLE_SERVER; }
     var stream_config: stream.Config;
-    stream_config.source = 901;
-    stream_config.role = stream_role;
-    stream_config.local_bidirectional_limit = 0;
-    stream_config.local_unidirectional_limit = 0;
-    stream_config.peer_bidirectional_limit = 2;
-    stream_config.peer_unidirectional_limit = 2;
-    stream_config.send_max_data = 0;
-    stream_config.receive_max_data = 128;
-    stream_config.send_local_bidirectional_limit = 0;
-    stream_config.send_peer_bidirectional_limit = 0;
-    stream_config.send_unidirectional_limit = 0;
+    stream_config.source                            = 901;
+    stream_config.role                              = stream_role;
+    stream_config.local_bidirectional_limit         = 0;
+    stream_config.local_unidirectional_limit        = 0;
+    stream_config.peer_bidirectional_limit          = 2;
+    stream_config.peer_unidirectional_limit         = 2;
+    stream_config.send_max_data                     = 0;
+    stream_config.receive_max_data                  = 128;
+    stream_config.send_local_bidirectional_limit    = 0;
+    stream_config.send_peer_bidirectional_limit     = 0;
+    stream_config.send_unidirectional_limit         = 0;
     stream_config.receive_local_bidirectional_limit = 64;
-    stream_config.receive_peer_bidirectional_limit = 64;
-    stream_config.receive_unidirectional_limit = 64;
+    stream_config.receive_peer_bidirectional_limit  = 64;
+    stream_config.receive_unidirectional_limit      = 64;
     if (!stream.initialize(?fixture.streams, stream_config, stream.Storage{
-        streams: ?fixture.streams_values[0], stream_capacity: 2,
-        send_data: ?fixture.streams_send[0], send_data_length: 128,
-        send_pending: ?fixture.streams_send_pending[0],
-        send_acked: ?fixture.streams_send_acked[0],
-        send_inflight: ?fixture.streams_send_inflight[0],
-        send_state_length: 128, send_stride: 64,
-        receive_data: ?fixture.streams_receive[0], receive_data_length: 128,
-        receive_present: ?fixture.streams_receive_present[0],
+        streams:              ?fixture.streams_values[0], stream_capacity: 2,
+        send_data:            ?fixture.streams_send[0], send_data_length: 128,
+        send_pending:         ?fixture.streams_send_pending[0],
+        send_acked:           ?fixture.streams_send_acked[0],
+        send_inflight:        ?fixture.streams_send_inflight[0],
+        send_state_length:    128, send_stride: 64,
+        receive_data:         ?fixture.streams_receive[0], receive_data_length: 128,
+        receive_present:      ?fixture.streams_receive_present[0],
         receive_state_length: 128, receive_stride: 64,
-        attempts: ?fixture.stream_attempts[0], attempt_capacity: 8})) { ret false; }
+        attempts:             ?fixture.stream_attempts[0], attempt_capacity: 8
+    })) { ret false; }
     if (!datagram.initialize(?fixture.datagrams, datagram.Config{source: 901,
         peer_max_frame_size: 0, local_max_frame_size: 0,
-        enabled: false}, datagram.empty_storage())) { ret false; }
+        enabled:             false}, datagram.empty_storage())) { ret false; }
 
     fixture.supported_versions[0] = packet.VERSION_2;
     fixture.supported_versions[1] = packet.VERSION_1;
-    var alpn: [2]u8 = [2]u8{'h', '3'};
+    var alpn:       [2]u8                           = [2]u8{'h', '3'};
     var parameters: transport_parameters.Parameters = transport_parameters.defaults();
-    parameters.max_idle_timeout = 1;
-    parameters.max_udp_payload_size = 1200;
-    parameters.initial_max_data = 128;
-    parameters.initial_max_stream_data_bidi_local = 64;
+    parameters.max_idle_timeout                    = 1;
+    parameters.max_udp_payload_size                = 1200;
+    parameters.initial_max_data                    = 128;
+    parameters.initial_max_stream_data_bidi_local  = 64;
     parameters.initial_max_stream_data_bidi_remote = 64;
-    parameters.initial_max_stream_data_uni = 64;
-    parameters.initial_max_streams_bidi = 2;
-    parameters.initial_max_streams_uni = 2;
-    parameters.initial_source_connection_id = local_id;
+    parameters.initial_max_stream_data_uni         = 64;
+    parameters.initial_max_streams_bidi            = 2;
+    parameters.initial_max_streams_uni             = 2;
+    parameters.initial_source_connection_id        = local_id;
     if (role == transport.SERVER) {
         parameters.original_destination_connection_id = peer_id;
         transport_parameters.set_present(?parameters,
@@ -359,54 +368,60 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
         ?fixture.local_parameters[0], 256, binary.BIG);
     val encoded_parameters: transport_parameters.EncodeResult =
         transport_parameters.encode(?parameter_builder, ?parameters,
-            parameter_role(role), transport_parameters.default_limits());
+        parameter_role(role), transport_parameters.default_limits());
     if (!encoded_parameters.ok) { ret false; }
     var config: core.Config = core.Config{source: 901, role: role,
-        version: packet.VERSION_1,
-        supported_versions: ?fixture.supported_versions[0],
-        supported_version_count: 2, local: local, peer: peer,
-        original_destination: peer_id, initial_secret_destination: peer_id,
-        local_source: local_id, peer_destination: peer_id,
-        alpn: core.View{data: ?alpn[0], length: 2},
+        version:                    packet.VERSION_1,
+        supported_versions:         ?fixture.supported_versions[0],
+        supported_version_count:    2, local: local, peer: peer,
+        original_destination:       peer_id, initial_secret_destination: peer_id,
+        local_source:               local_id, peer_destination: peer_id,
+        alpn:                       core.View{data: ?alpn[0], length: 2},
         local_transport_parameters: core.View{data: ?fixture.local_parameters[0],
-            length: encoded_parameters.count},
-        max_udp_payload: 1200, max_idle_timeout_ns: 1000000,
-        drain_timeout_ns: 300, peer_validated: validated,
-        server_name: no_view(), retry_source: no_connection_id(),
-        retry_source_present: false, enable_early_data: false};
+        length:                     encoded_parameters.count},
+        max_udp_payload:            1200, max_idle_timeout_ns: 1000000,
+        drain_timeout_ns:           300, peer_validated: validated,
+        server_name:                no_view(), retry_source: no_connection_id(),
+        retry_source_present:       false, enable_early_data: false};
     var storage: core.Storage = core.Storage{
-        receive_header: ?fixture.receive_header[0], receive_header_capacity: 1200,
-        receive_decoded: ?fixture.receive_decoded[0], receive_decoded_capacity: 1200,
-        send_plaintext: ?fixture.send_plaintext[0], send_plaintext_capacity: 1200,
-        close_reason: ?fixture.close_reason[0], close_reason_capacity: 64,
+        receive_header:   ?fixture.receive_header[0], receive_header_capacity: 1200,
+        receive_decoded:  ?fixture.receive_decoded[0], receive_decoded_capacity: 1200,
+        send_plaintext:   ?fixture.send_plaintext[0], send_plaintext_capacity: 1200,
+        close_reason:     ?fixture.close_reason[0], close_reason_capacity: 64,
         frame_ack_ranges: ?fixture.frame_ranges[0], frame_ack_capacity: 8,
-        recovery_events: ?fixture.recovery_events[0], recovery_event_capacity: 24,
+        recovery_events:  ?fixture.recovery_events[0], recovery_event_capacity: 24,
         recovery_initial: recovery.HistoryStorage{
-            packets: ?fixture.recovery_initial[0], capacity: 8},
+            packets: ?fixture.recovery_initial[0], capacity: 8
+        },
         recovery_handshake: recovery.HistoryStorage{
-            packets: ?fixture.recovery_handshake[0], capacity: 8},
+            packets: ?fixture.recovery_handshake[0], capacity: 8
+        },
         recovery_application: recovery.HistoryStorage{
-            packets: ?fixture.recovery_application[0], capacity: 8},
-        ack_initial: ack.SpaceStorage{ranges: ?fixture.ack_initial[0], capacity: 8},
-        ack_handshake: ack.SpaceStorage{ranges: ?fixture.ack_handshake[0], capacity: 8},
-        ack_application: ack.SpaceStorage{ranges: ?fixture.ack_application[0], capacity: 8},
-        owners: ?fixture.owners[0], owner_capacity: 8,
-        peer_extensions: ?fixture.peer_extensions[0], peer_extension_capacity: 4,
-        peer_extension_bytes: ?fixture.peer_extension_bytes[0],
-        peer_extension_byte_capacity: 64,
-        local_extensions: ?fixture.local_extensions[0], local_extension_capacity: 4,
-        local_extension_bytes: ?fixture.local_extension_bytes[0],
+            packets: ?fixture.recovery_application[0], capacity: 8
+        },
+        ack_initial:                   ack.SpaceStorage{ranges: ?fixture.ack_initial[0], capacity: 8},
+        ack_handshake:                 ack.SpaceStorage{ranges: ?fixture.ack_handshake[0], capacity: 8},
+        ack_application:               ack.SpaceStorage{ranges: ?fixture.ack_application[0], capacity: 8},
+        owners:                        ?fixture.owners[0], owner_capacity: 8,
+        peer_extensions:               ?fixture.peer_extensions[0], peer_extension_capacity: 4,
+        peer_extension_bytes:          ?fixture.peer_extension_bytes[0],
+        peer_extension_byte_capacity:  64,
+        local_extensions:              ?fixture.local_extensions[0], local_extension_capacity: 4,
+        local_extension_bytes:         ?fixture.local_extension_bytes[0],
         local_extension_byte_capacity: 64,
-        received_token: ?fixture.received_token[0], received_token_capacity: 128,
-        send_token: ?fixture.send_token[0], send_token_capacity: 128,
-        negotiation: negotiation.Storage{
-            retry_token: ?fixture.retry_token[0], retry_token_capacity: 128,
-            retry_pseudo: ?fixture.retry_pseudo[0], retry_pseudo_capacity: 256}};
+        received_token:                ?fixture.received_token[0], received_token_capacity: 128,
+        send_token:                    ?fixture.send_token[0], send_token_capacity: 128,
+        negotiation:                   negotiation.Storage{
+            retry_token:  ?fixture.retry_token[0], retry_token_capacity: 128,
+            retry_pseudo: ?fixture.retry_pseudo[0], retry_pseudo_capacity: 256
+        }
+    };
     var secret_storage: core.SecretStorage = core.SecretStorage{
-        receive_plaintext: ?fixture.secret_receive[0],
+        receive_plaintext:          ?fixture.secret_receive[0],
         receive_plaintext_capacity: 1200,
-        send_plaintext: ?fixture.secret_send[0],
-        send_plaintext_capacity: 1200};
+        send_plaintext:             ?fixture.secret_send[0],
+        send_plaintext_capacity:    1200
+    };
     if (fault == FAULT_STORAGE_CAPACITY) { storage.close_reason_capacity = 0; }
     if (fault == FAULT_STORAGE_OVERLAP) {
         storage.close_reason = ?fixture.receive_header[0];
@@ -446,14 +461,14 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
 }
 
 fun initialize(fixture: *Fixture, role: u8, validated: bool,
-               now_ns: u64) bool {
+    now_ns: u64) bool {
     ret initialize_with_fault(fixture, role, validated, now_ns, FAULT_NONE);
 }
 
 test "quic.connection.core: Initial send ownership is padded and transactional" {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
-    var output: [1200]u8;
+    var output:    [1200]u8;
     val generated: transport.CoreDatagram = core.generate(?fixture.engine,
         ?fixture.secrets, ?output[0], 1200, 2);
     if (generated.status != transport.STATUS_OK || generated.count != 1200 ||
@@ -468,14 +483,14 @@ test "quic.connection.core: Initial send ownership is padded and transactional" 
         ?fixture.secrets, ?output[0], 1200, 4);
     if (retried.status != transport.STATUS_OK || retried.count != 1200 ||
         !controller.set_limited(?fixture.path_values[0].congestion, true, false,
-            4).ok ||
+        4).ok ||
         !pacer.sync(?fixture.path_values[0].pacer, 4,
-            fixture.path_values[0].congestion.congestion_window,
-            fixture.engine.recovery_state.rtt.smoothed_ns).ok ||
+        fixture.path_values[0].congestion.congestion_window,
+        fixture.engine.recovery_state.rtt.smoothed_ns).ok ||
         core.complete_send(?fixture.engine, ?fixture.secrets, retried.owner,
-            transport.SEND_SENT, retried.count, 5).status != transport.STATUS_OK ||
+        transport.SEND_SENT, retried.count, 5).status != transport.STATUS_OK ||
         fixture.engine.recovery_state.spaces[0].len != 1) { ret 5; }
-    var published: usize = 0;
+    var published:     usize = 0;
     var attempt_index: usize = 0;
     for (attempt_index < 8) {
         if (fixture.adapter_attempts[attempt_index].state ==
@@ -501,7 +516,7 @@ test "quic.connection.core: unvalidated server send is amplification bounded" {
         ?fixture.secrets, ?output[0], 1200, 4);
     if (generated.status != transport.STATUS_OK || generated.count != 1200 ||
         core.complete_send(?fixture.engine, ?fixture.secrets, generated.owner,
-            transport.SEND_SENT, 1200, 5).status != transport.STATUS_OK ||
+        transport.SEND_SENT, 1200, 5).status != transport.STATUS_OK ||
         fixture.path_values[0].sent_bytes != 1200) { ret 4; }
     ret 0;
 }
@@ -509,7 +524,7 @@ test "quic.connection.core: unvalidated server send is amplification bounded" {
 test "quic.connection.core: partial UDP success cancels every prepared owner" {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
-    var output: [1200]u8;
+    var output:    [1200]u8;
     val generated: transport.CoreDatagram = core.generate(?fixture.engine,
         ?fixture.secrets, ?output[0], 1200, 2);
     if (generated.status != transport.STATUS_OK || generated.count == 0) { ret 2; }
@@ -527,23 +542,23 @@ test "quic.connection.core: partial UDP success cancels every prepared owner" {
 test "quic.connection.core: graceful close preserves send completion before draining" {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
-    var output: [1200]u8;
+    var output:    [1200]u8;
     val generated: transport.CoreDatagram = core.generate(?fixture.engine,
         ?fixture.secrets, ?output[0], 1200, 2);
     if (generated.status != transport.STATUS_OK ||
         core.begin_close(?fixture.engine, ?fixture.secrets, false, 0, nil, 0,
-            3).state != transport.CLOSING ||
+        3).state != transport.CLOSING ||
         core.complete_send(?fixture.engine, ?fixture.secrets, generated.owner,
-            transport.SEND_SENT, generated.count, 4).status !=
-            transport.STATUS_OK) { ret 2; }
+        transport.SEND_SENT, generated.count, 4).status !=
+        transport.STATUS_OK) { ret 2; }
     val closing: transport.CoreTimer = core.timer(?fixture.engine);
     if (!closing.armed || closing.deadline_ns != 303 ||
         core.on_timeout(?fixture.engine, ?fixture.secrets, closing.generation,
-            303).state != transport.DRAINING) { ret 3; }
+        303).state != transport.DRAINING) { ret 3; }
     val draining: transport.CoreTimer = core.timer(?fixture.engine);
     if (!draining.armed || draining.deadline_ns != 603 ||
         core.on_timeout(?fixture.engine, ?fixture.secrets, draining.generation,
-            603).state != transport.CLOSED) { ret 4; }
+        603).state != transport.CLOSED) { ret 4; }
     ret 0;
 }
 
@@ -551,11 +566,11 @@ test "quic.connection.core: Version Negotiation releases sent and prepared Initi
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     var output: [1200]u8;
-    val sent: transport.CoreDatagram = core.generate(?fixture.engine,
+    val sent:   transport.CoreDatagram = core.generate(?fixture.engine,
         ?fixture.secrets, ?output[0], 1200, 2);
     if (sent.status != transport.STATUS_OK ||
         core.complete_send(?fixture.engine, ?fixture.secrets, sent.owner,
-            transport.SEND_SENT, sent.count, 3).status != transport.STATUS_OK) {
+        transport.SEND_SENT, sent.count, 3).status != transport.STATUS_OK) {
         ret 2;
     }
     fixture.engine.idle_timer_enabled = false;
@@ -569,18 +584,19 @@ test "quic.connection.core: Version Negotiation releases sent and prepared Initi
     var offered: [4]u8;
     binary.put_uint(?offered[0], packet.VERSION_2::u64, 4, binary.BIG);
     var value: packet.Packet;
-    value.header.kind = packet.PACKET_VERSION_NEGOTIATION;
+    value.header.kind        = packet.PACKET_VERSION_NEGOTIATION;
     value.header.destination = fixture.engine.config.local_source;
-    value.header.source = fixture.engine.config.original_destination;
-    value.versions = packet.Span{data: ?offered[0], len: 4};
+    value.header.source      = fixture.engine.config.original_destination;
+    value.versions           = packet.Span{data: ?offered[0], len: 4};
     var datagram_bytes: [64]u8;
-    var builder: binary.Builder = binary.builder(?datagram_bytes[0], 64,
+    var builder:        binary.Builder = binary.builder(?datagram_bytes[0], 64,
         binary.BIG);
     if (!packet.encode(?builder, ?value, packet.default_limits()).ok) { ret 5; }
     var input: transport.Datagram = transport.Datagram{
-        local: fixture.engine.config.local, peer: fixture.engine.config.peer,
-        data: ?datagram_bytes[0], length: builder.len,
-        received_at_ns: pto.deadline_ns + 1, ecn: 0};
+        local:          fixture.engine.config.local, peer: fixture.engine.config.peer,
+        data:           ?datagram_bytes[0], length: builder.len,
+        received_at_ns: pto.deadline_ns + 1, ecn: 0
+    };
     val received: transport.CoreResult = core.receive(?fixture.engine,
         ?fixture.secrets, ?input);
     if (received.status != transport.STATUS_OK) { ret 100 + received.error::i32; }
@@ -589,11 +605,11 @@ test "quic.connection.core: Version Negotiation releases sent and prepared Initi
             ?fixture.engine.negotiation, input.data, input.length);
         ret 200 + checked.status::i32 * 10 + checked.error::i32;
     }
-    if (fixture.engine.version_restart_count != 1) { ret 53; }
-    if (fixture.provider.restarts != 1) { ret 54; }
+    if (fixture.engine.version_restart_count != 1)          { ret 53; }
+    if (fixture.provider.restarts != 1)                     { ret 54; }
     if (fixture.engine.recovery_state.bytes_in_flight != 0) { ret 55; }
-    if (fixture.engine.recovery_state.spaces[0].len != 0) { ret 56; }
-    if (core.snapshot(?fixture.engine).active_owners != 0) { ret 57; }
+    if (fixture.engine.recovery_state.spaces[0].len != 0)   { ret 56; }
+    if (core.snapshot(?fixture.engine).active_owners != 0)  { ret 57; }
     ret 0;
 }
 
@@ -601,59 +617,60 @@ test "quic.connection.core: authenticated Retry rotates Initial identity and own
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     var output: [1200]u8;
-    val sent: transport.CoreDatagram = core.generate(?fixture.engine,
+    val sent:   transport.CoreDatagram = core.generate(?fixture.engine,
         ?fixture.secrets, ?output[0], 1200, 2);
     if (sent.status != transport.STATUS_OK ||
         core.complete_send(?fixture.engine, ?fixture.secrets, sent.owner,
-            transport.SEND_SENT, sent.count, 3).status != transport.STATUS_OK) {
+        transport.SEND_SENT, sent.count, 3).status != transport.STATUS_OK) {
         ret 2;
     }
 
     val retry_source: packet.ConnectionId = connection_id(61);
-    var token: [3]u8 = [3]u8{1, 2, 3};
-    var value: packet.Packet;
-    value.header.kind = packet.PACKET_RETRY;
-    value.header.version = packet.VERSION_1;
+    var token:        [3]u8               = [3]u8{1, 2, 3};
+    var value:        packet.Packet;
+    value.header.kind        = packet.PACKET_RETRY;
+    value.header.version     = packet.VERSION_1;
     value.header.destination = fixture.engine.config.local_source;
-    value.header.source = retry_source;
-    value.token = packet.Span{data: ?token[0], len: 3};
+    value.header.source      = retry_source;
+    value.token              = packet.Span{data: ?token[0], len: 3};
     var datagram_bytes: [128]u8;
-    var builder: binary.Builder = binary.builder(?datagram_bytes[0], 128,
+    var builder:        binary.Builder = binary.builder(?datagram_bytes[0], 128,
         binary.BIG);
     if (!packet.encode(?builder, ?value, packet.default_limits()).ok ||
         builder.len <= packet.RETRY_INTEGRITY_TAG) { ret 3; }
-    var pseudo: [256]u8;
+    var pseudo:    [256]u8;
     var retry_tag: [16]^u8;
-    val tagged: protection.Result = protection.retry_tag(packet.VERSION_1,
+    val tagged:    protection.Result = protection.retry_tag(packet.VERSION_1,
         contracts.Bytes{data: ?fixture.engine.config.original_destination.data[0],
-            len: fixture.engine.config.original_destination.len::usize},
+        len: fixture.engine.config.original_destination.len::usize},
         contracts.Bytes{data: ?datagram_bytes[0],
-            len: builder.len - packet.RETRY_INTEGRITY_TAG},
+        len: builder.len - packet.RETRY_INTEGRITY_TAG},
         contracts.Buffer{data: ?pseudo[0], capacity: 256},
         contracts.SecretBuffer{data: ?retry_tag[0], capacity: 16});
     if (tagged.error != protection.OK) { ret 4; }
     var tag_index: usize = 0;
     for (tag_index < 16) {
         value.integrity_tag[tag_index] = retry_tag[tag_index]:>u8;
-        tag_index = tag_index + 1;
+        tag_index                      = tag_index + 1;
     }
     builder = binary.builder(?datagram_bytes[0], 128, binary.BIG);
     if (!packet.encode(?builder, ?value, packet.default_limits()).ok) { ret 5; }
     var input: transport.Datagram = transport.Datagram{
         local: fixture.engine.config.local, peer: fixture.engine.config.peer,
-        data: ?datagram_bytes[0], length: builder.len, received_at_ns: 4, ecn: 0};
+        data:  ?datagram_bytes[0], length: builder.len, received_at_ns: 4, ecn: 0
+    };
     fixture.engine.expected_packet_numbers[0] = 9;
     val received: transport.CoreResult = core.receive(?fixture.engine,
         ?fixture.secrets, ?input);
     val selected: cid.Selected = cid.current(?fixture.cids, false);
-    if (received.status != transport.STATUS_OK) { ret 60 + received.error::i32; }
-    if (fixture.engine.retry_count != 1) { ret 62; }
-    if (fixture.provider.restarts != 1) { ret 63; }
-    if (selected.status != cid.STATUS_OK) { ret 64; }
+    if (received.status != transport.STATUS_OK)                   { ret 60 + received.error::i32; }
+    if (fixture.engine.retry_count != 1)                          { ret 62; }
+    if (fixture.provider.restarts != 1)                           { ret 63; }
+    if (selected.status != cid.STATUS_OK)                         { ret 64; }
     if (!packet.connection_id_equal(?selected.id, ?retry_source)) { ret 65; }
-    if (fixture.engine.recovery_state.bytes_in_flight != 0) { ret 66; }
-    if (core.snapshot(?fixture.engine).active_owners != 0) { ret 67; }
-    if (negotiation.token(?fixture.engine.negotiation).len != 3) { ret 68; }
+    if (fixture.engine.recovery_state.bytes_in_flight != 0)       { ret 66; }
+    if (core.snapshot(?fixture.engine).active_owners != 0)        { ret 67; }
+    if (negotiation.token(?fixture.engine.negotiation).len != 3)  { ret 68; }
     if (fixture.engine.packet_numbers[0] != 1 ||
         fixture.engine.expected_packet_numbers[0] != 9) { ret 69; }
     ret 0;
@@ -662,12 +679,12 @@ test "quic.connection.core: authenticated Retry rotates Initial identity and own
 test "quic.connection.core: abortive close drains ownership before secret teardown" {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
-    var output: [1200]u8;
+    var output:    [1200]u8;
     val generated: transport.CoreDatagram = core.generate(?fixture.engine,
         ?fixture.secrets, ?output[0], 1200, 2);
     if (generated.status != transport.STATUS_OK ||
         core.complete_send(?fixture.engine, ?fixture.secrets, generated.owner,
-            transport.SEND_SENT, generated.count, 3).status != transport.STATUS_OK) {
+        transport.SEND_SENT, generated.count, 3).status != transport.STATUS_OK) {
         ret 2;
     }
     val closed: transport.CoreResult = core.begin_close(?fixture.engine,
@@ -676,7 +693,7 @@ test "quic.connection.core: abortive close drains ownership before secret teardo
         if (fixture.owners[0].state == core.OWNER_FREE) { ret 41; }
         ret 42;
     }
-    if (!core.close_ready(?fixture.engine)) { ret 4; }
+    if (!core.close_ready(?fixture.engine))                    { ret 4; }
     if (!core.finish_close(?fixture.engine, ?fixture.secrets)) { ret 5; }
     if (!fixture.provider.destroyed || !fixture.secrets.destroyed ||
         !fixture.engine.destroyed || fixture.adapter_secret[0]:>u8 != 0 ||
@@ -691,16 +708,17 @@ test "quic.connection.core: idle timer enters bounded draining" {
     val armed: transport.CoreTimer = core.timer(?fixture.engine);
     if (!armed.armed || armed.deadline_ns != 1000010 ||
         core.on_timeout(?fixture.engine, ?fixture.secrets, armed.generation,
-            1000009).status != transport.STATUS_EARLY ||
+        1000009).status != transport.STATUS_EARLY ||
         core.on_timeout(?fixture.engine, ?fixture.secrets, armed.generation,
-            1000010).state != transport.DRAINING) { ret 2; }
-    var ignored: [1]u8 = [1]u8{0};
-    var input: transport.Datagram = transport.Datagram{
+        1000010).state != transport.DRAINING) { ret 2; }
+    var ignored: [1]u8              = [1]u8{0};
+    var input:   transport.Datagram = transport.Datagram{
         local: fixture.engine.config.local, peer: fixture.engine.config.peer,
-        data: ?ignored[0], length: 1, received_at_ns: 1000011, ecn: 0};
+        data:  ?ignored[0], length: 1, received_at_ns: 1000011, ecn: 0
+    };
     if (core.receive(?fixture.engine, ?fixture.secrets,
         ?input).status != transport.STATUS_CLOSED) { ret 2; }
-    val drain: transport.CoreTimer = core.timer(?fixture.engine);
+    val drain:   transport.CoreTimer  = core.timer(?fixture.engine);
     val drained: transport.CoreResult = core.on_timeout(?fixture.engine,
         ?fixture.secrets, drain.generation, 1000310);
     if (!drain.armed || drain.deadline_ns != 1000310 ||
@@ -717,12 +735,13 @@ test "quic.connection.core: public descriptors reject wrapping maximum ranges" {
         1200, 2).status != transport.STATUS_ERROR) { ret 3; }
     var input: transport.Datagram = transport.Datagram{
         local: fixture.engine.config.local, peer: fixture.engine.config.peer,
-        data: maximum::*u8, length: 2, received_at_ns: 2, ecn: 0};
+        data:  maximum::*u8, length: 2, received_at_ns: 2, ecn: 0
+    };
     if (core.receive(?fixture.engine, ?fixture.secrets,
-            ?input).status != transport.STATUS_ERROR ||
+        ?input).status != transport.STATUS_ERROR ||
         core.queue_new_token(?fixture.engine, maximum::*u8, 2) ||
         core.begin_close(?fixture.engine, ?fixture.secrets, false, 0,
-            maximum::*u8, 2, 2).status != transport.STATUS_ERROR ||
+        maximum::*u8, 2, 2).status != transport.STATUS_ERROR ||
         core.snapshot(?fixture.engine).active_owners != 0) { ret 4; }
     ret 0;
 }
@@ -730,7 +749,7 @@ test "quic.connection.core: public descriptors reject wrapping maximum ranges" {
 test "quic.connection.core: initialization rejects cross-component ownership overlap" {
     var fixture: Fixture;
     if (initialize_with_fault(?fixture, transport.CLIENT, true, 1,
-            FAULT_COMPONENT_OVERLAP) ||
+        FAULT_COMPONENT_OVERLAP) ||
         fixture.engine.initialized || fixture.secrets.initialized ||
         fixture.adapter.started || fixture.adapter.core_lease != 0 ||
         fixture.cids.core_lease != 0 || fixture.paths.core_lease != 0 ||
@@ -748,13 +767,13 @@ test "quic.connection.core: initialization rejects cross-component ownership ove
 test "quic.connection.core: a refused initialization names the check that rejected" {
     var capacity: Fixture;
     if (initialize_with_fault(?capacity, transport.CLIENT, true, 1,
-            FAULT_STORAGE_CAPACITY) ||
+        FAULT_STORAGE_CAPACITY) ||
         capacity.init_result.error != core.INTERNAL_ERROR ||
         capacity.init_result.reason != core.INIT_STORAGE_CAPACITY) { ret 1; }
     # close_reason was aliased onto the receive header, ranges 5 and 2
     var owned: Fixture;
     if (initialize_with_fault(?owned, transport.CLIENT, true, 1,
-            FAULT_STORAGE_OVERLAP) ||
+        FAULT_STORAGE_OVERLAP) ||
         owned.init_result.reason != core.INIT_STORAGE_RANGES ||
         owned.init_result.reason_kind != ownership.OVERLAP_PAIR ||
         owned.init_result.reason_first != 2 ||
@@ -762,7 +781,7 @@ test "quic.connection.core: a refused initialization names the check that reject
     # the borrowed ALPN was pointed into the send plaintext buffer, range 4
     var lent: Fixture;
     if (initialize_with_fault(?lent, transport.CLIENT, true, 1,
-            FAULT_STORAGE_BORROWED) ||
+        FAULT_STORAGE_BORROWED) ||
         lent.init_result.reason != core.INIT_STORAGE_BORROWED ||
         lent.init_result.reason_kind != ownership.OVERLAP_PAIR ||
         lent.init_result.reason_first != 0 ||
@@ -770,14 +789,14 @@ test "quic.connection.core: a refused initialization names the check that reject
     # the same borrowed range aimed at a component buffer, stream sends
     var component_lent: Fixture;
     if (initialize_with_fault(?component_lent, transport.CLIENT, true, 1,
-            FAULT_COMPONENT_BORROWED) ||
+        FAULT_COMPONENT_BORROWED) ||
         component_lent.init_result.reason != core.INIT_COMPONENT_BORROWED ||
         component_lent.init_result.reason_kind != ownership.OVERLAP_PAIR ||
         component_lent.init_result.reason_first != 0 ||
         component_lent.init_result.reason_second != 43) { ret 4; }
     var secrets: Fixture;
     if (initialize_with_fault(?secrets, transport.CLIENT, true, 1,
-            FAULT_PROVIDER_SECRETS) ||
+        FAULT_PROVIDER_SECRETS) ||
         secrets.init_result.reason != core.INIT_PROVIDER_SECRETS) { ret 5; }
     var clean: Fixture;
     if (!initialize(?clean, transport.CLIENT, true, 1) ||
@@ -791,12 +810,12 @@ test "quic.connection.core: a refused initialization names the check that reject
 test "quic.connection.core: external plaintext cannot alias welded keys" {
     var receive: Fixture;
     if (initialize_with_fault(?receive, transport.CLIENT, true, 1,
-            FAULT_RECEIVE_KEYS) ||
+        FAULT_RECEIVE_KEYS) ||
         receive.init_result.reason != core.INIT_STORAGE_SECRETS ||
         receive.engine.initialized || receive.secrets.initialized) { ret 1; }
     var send: Fixture;
     if (initialize_with_fault(?send, transport.CLIENT, true, 1,
-            FAULT_SEND_KEYS) ||
+        FAULT_SEND_KEYS) ||
         send.init_result.reason != core.INIT_STORAGE_SECRETS ||
         send.engine.initialized || send.secrets.initialized) { ret 2; }
     ret 0;
@@ -805,7 +824,7 @@ test "quic.connection.core: external plaintext cannot alias welded keys" {
 test "quic.connection.core: failed provider start rolls back every manager lease" {
     var fixture: Fixture;
     if (initialize_with_fault(?fixture, transport.CLIENT, true, 1,
-            FAULT_PROVIDER_START) ||
+        FAULT_PROVIDER_START) ||
         fixture.engine.initialized || fixture.secrets.initialized ||
         fixture.adapter.started || !fixture.adapter.closing ||
         fixture.adapter.core_lease != 0 || fixture.cids.core_lease != 0 ||
@@ -825,7 +844,7 @@ test "quic.connection.core: active manager leases reject unscoped protocol mutat
         path.on_timeout(?fixture.paths, 1).status != path.STATUS_ERROR ||
         stream.prepare_control(?fixture.streams).status != stream.STATUS_ERROR ||
         datagram.prepare(?fixture.datagrams, true).error !=
-            datagram.ERROR_STATE ||
+        datagram.ERROR_STATE ||
         fixture.adapter.core_lease != fixture.engine.config.source ||
         fixture.paths.core_lease != fixture.engine.config.source ||
         fixture.streams.core_lease != fixture.engine.config.source ||
@@ -837,7 +856,7 @@ test "quic.connection.core: public path operations retain the core lease" {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1) ||
         path.confirm_handshake_scoped(?fixture.paths,
-            fixture.engine.config.source).status != path.STATUS_OK) { ret 1; }
+        fixture.engine.config.source).status != path.STATUS_OK) { ret 1; }
     var candidate: path.Endpoint = path_endpoint(fixture.engine.config.local,
         fixture.engine.config.peer);
     candidate.peer.port = candidate.peer.port + 1;
@@ -852,14 +871,14 @@ test "quic.connection.core: public path operations retain the core lease" {
     val migrated: path.Observation = core.migrate_path(?fixture.engine,
         probed.handle, true, 2);
     val selected: path.PathResult = path.selected(?fixture.paths);
-    val mtu: path.MtuResult = core.on_path_packet_too_big(?fixture.engine,
+    val mtu:      path.MtuResult  = core.on_path_packet_too_big(?fixture.engine,
         probed.handle, 1200, true, 3);
     if (migrated.status != path.STATUS_OK ||
         selected.status != path.STATUS_OK ||
         selected.handle.index != probed.handle.index ||
         selected.handle.generation != probed.handle.generation ||
         mtu.status != path.STATUS_OK || fixture.paths.core_lease !=
-            fixture.engine.config.source) { ret 3; }
+        fixture.engine.config.source) { ret 3; }
     ret 0;
 }
 
@@ -882,7 +901,7 @@ test "quic.connection.core: handshake_failure reaches CONNECTION_CLOSE unflatten
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     val delivered: i64 = deliver_alert(?fixture, 0x28);
-    if (delivered != 0) { ret 10 + delivered::i32; }
+    if (delivered != 0)                                              { ret 10 + delivered::i32; }
     if (fixture.engine.close_error != core.CRYPTO_ERROR_BASE + 0x28) { ret 2; }
     ret 0;
 }
@@ -891,7 +910,7 @@ test "quic.connection.core: bad_certificate reaches CONNECTION_CLOSE unflattened
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     val delivered: i64 = deliver_alert(?fixture, 0x2a);
-    if (delivered != 0) { ret 10 + delivered::i32; }
+    if (delivered != 0)                                              { ret 10 + delivered::i32; }
     if (fixture.engine.close_error != core.CRYPTO_ERROR_BASE + 0x2a) { ret 2; }
     ret 0;
 }
@@ -900,20 +919,27 @@ test "quic.connection.core: bad_certificate reaches CONNECTION_CLOSE unflattened
 # an incomplete literal never named shows up as residue rather than zero
 fun dirty_frame(seed: u64) u64 {
     var scratch: [128]u64;
-    var i: usize = 0;
-    for (i < 128) { scratch[i] = seed + i::u64 + 1; i = i + 1; }
+    var i:       usize = 0;
+    for (i < 128) {
+        scratch[i] = seed + i::u64 + 1;
+        i          = i + 1;
+    }
     var total: u64 = 0;
     i = 0;
-    for (i < 128) { total = total + scratch[i]; i = i + 1; }
+    for (i < 128) {
+        total = total + scratch[i];
+        i     = i + 1;
+    }
     ret total;
 }
 
 test "quic.connection.core: a refusal reports every field it did not set" {
     var fixture: Fixture;
     var payload: [16]u8;
-    var input: transport.Datagram = transport.Datagram{
+    var input:   transport.Datagram = transport.Datagram{
         local: endpoint(1, 4433), peer: endpoint(2, 55000),
-        data: ?payload[0], length: 16, received_at_ns: 1, ecn: 0};
+        data:  ?payload[0], length: 16, received_at_ns: 1, ecn: 0
+    };
     if (dirty_frame(0x5151515151515151) == 0) { ret 1; }
     # the engine was never initialized, so every operation takes its guard
     val received: transport.CoreResult = core.receive(?fixture.engine,
