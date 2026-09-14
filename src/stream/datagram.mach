@@ -8,115 +8,115 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
-pub val ENTRY_FREE: u8 = 0;
-pub val ENTRY_QUEUED: u8 = 1;
-pub val ENTRY_RESERVED: u8 = 2;
+pub val ENTRY_FREE:      u8 = 0;
+pub val ENTRY_QUEUED:    u8 = 1;
+pub val ENTRY_RESERVED:  u8 = 2;
 pub val ENTRY_DELIVERED: u8 = 3;
 
-pub val STATUS_OK: u8 = 1;
+pub val STATUS_OK:    u8 = 1;
 pub val STATUS_EMPTY: u8 = 2;
 pub val STATUS_STALE: u8 = 3;
 pub val STATUS_ERROR: u8 = 4;
 
-pub val ERROR_NONE: u8 = 0;
-pub val ERROR_STATE: u8 = 1;
+pub val ERROR_NONE:     u8 = 0;
+pub val ERROR_STATE:    u8 = 1;
 pub val ERROR_DISABLED: u8 = 2;
-pub val ERROR_LIMIT: u8 = 3;
+pub val ERROR_LIMIT:    u8 = 3;
 pub val ERROR_CAPACITY: u8 = 4;
-pub val ERROR_TOKEN: u8 = 5;
+pub val ERROR_TOKEN:    u8 = 5;
 pub val ERROR_OVERFLOW: u8 = 6;
 
 pub rec Config {
-    source: u64;
-    peer_max_frame_size: usize;
+    source:               u64;
+    peer_max_frame_size:  usize;
     local_max_frame_size: usize;
-    enabled: bool;
+    enabled:              bool;
 }
 
 pub rec Entry {
     generation: u64;
-    sequence: u64;
-    length: usize;
-    state: u8;
+    sequence:   u64;
+    length:     usize;
+    state:      u8;
 }
 
 pub rec Storage {
-    send_entries: *Entry;
-    send_capacity: usize;
-    send_bytes: *u8;
-    send_bytes_length: usize;
-    send_stride: usize;
-    receive_entries: *Entry;
-    receive_capacity: usize;
-    receive_bytes: *u8;
+    send_entries:         *Entry;
+    send_capacity:        usize;
+    send_bytes:           *u8;
+    send_bytes_length:    usize;
+    send_stride:          usize;
+    receive_entries:      *Entry;
+    receive_capacity:     usize;
+    receive_bytes:        *u8;
     receive_bytes_length: usize;
-    receive_stride: usize;
+    receive_stride:       usize;
 }
 
 # every field is assigned by name: an empty record literal does not reliably
 # clear one, and these become ownership ranges
 pub fun empty_storage() Storage {
     var value: Storage;
-    value.send_entries = nil;
-    value.send_capacity = 0;
-    value.send_bytes = nil;
-    value.send_bytes_length = 0;
-    value.send_stride = 0;
-    value.receive_entries = nil;
-    value.receive_capacity = 0;
-    value.receive_bytes = nil;
+    value.send_entries         = nil;
+    value.send_capacity        = 0;
+    value.send_bytes           = nil;
+    value.send_bytes_length    = 0;
+    value.send_stride          = 0;
+    value.receive_entries      = nil;
+    value.receive_capacity     = 0;
+    value.receive_bytes        = nil;
     value.receive_bytes_length = 0;
-    value.receive_stride = 0;
+    value.receive_stride       = 0;
     ret value;
 }
 
 pub rec Queue {
-    config: Config;
-    storage: Storage;
-    next_sequence: u64;
-    send_count: usize;
-    receive_count: usize;
-    delivered_count: usize;
-    core_lease: u64;
+    config:           Config;
+    storage:          Storage;
+    next_sequence:    u64;
+    send_count:       usize;
+    receive_count:    usize;
+    delivered_count:  usize;
+    core_lease:       u64;
     peer_limit_bound: bool;
-    valid: bool;
-    closing: bool;
+    valid:            bool;
+    closing:          bool;
 }
 
 pub rec Token {
-    source: u64;
-    index: usize;
+    source:     u64;
+    index:      usize;
     generation: u64;
-    receive: bool;
+    receive:    bool;
 }
 
 pub rec QueueResult {
-    ok: bool;
+    ok:     bool;
     status: u8;
-    error: u8;
-    token: Token;
+    error:  u8;
+    token:  Token;
 }
 
 pub rec Prepared {
-    ok: bool;
-    status: u8;
-    error: u8;
-    token: Token;
-    data: packet.Span;
-    frame_size: usize;
+    ok:          bool;
+    status:      u8;
+    error:       u8;
+    token:       Token;
+    data:        packet.Span;
+    frame_size:  usize;
     with_length: bool;
 }
 
 pub rec Delivery {
     status: u8;
-    error: u8;
-    token: Token;
-    data: packet.Span;
+    error:  u8;
+    token:  Token;
+    data:   packet.Span;
 }
 
 pub rec OperationResult {
     status: u8;
-    error: u8;
+    error:  u8;
 }
 
 fun checked_size(count: usize, stride: usize, available: usize) bool {
@@ -127,9 +127,9 @@ fun checked_size(count: usize, stride: usize, available: usize) bool {
 fun valid_storage(storage: Storage) bool {
     if (storage.send_capacity == 0 || storage.receive_capacity == 0 ||
         !checked_size(storage.send_capacity, storage.send_stride,
-            storage.send_bytes_length) ||
+        storage.send_bytes_length) ||
         !checked_size(storage.receive_capacity, storage.receive_stride,
-            storage.receive_bytes_length)) { ret false; }
+        storage.receive_bytes_length)) { ret false; }
     var ranges: [4]ownership.Range;
     ranges[0] = ownership.array(storage.send_entries::*u8,
         storage.send_capacity, $size_of(Entry), ownership.ZERO_FORBIDDEN);
@@ -158,7 +158,7 @@ fun next_generation(value: u64) u64 {
 
 fun take_sequence(queue: *Queue, value: *u64) bool {
     if (queue.next_sequence == 0 - 1::u64) { ret false; }
-    @value = queue.next_sequence;
+    @value              = queue.next_sequence;
     queue.next_sequence = queue.next_sequence + 1;
     ret true;
 }
@@ -181,24 +181,24 @@ pub fun initialize(queue: *Queue, config: Config, storage: Storage) bool {
     if (!ownership.all_disjoint(?ranges[0], 5) || queue.valid ||
         !valid_config(config, storage)) { ret false; }
     var candidate: Queue;
-    candidate.config = config;
+    candidate.config  = config;
     candidate.storage = storage;
     var i: usize = 0;
     for (i < storage.send_capacity) {
         storage.send_entries[i].generation = 1;
-        storage.send_entries[i].state = ENTRY_FREE;
-        i = i + 1;
+        storage.send_entries[i].state      = ENTRY_FREE;
+        i                                  = i + 1;
     }
     i = 0;
     for (i < storage.receive_capacity) {
         storage.receive_entries[i].generation = 1;
-        storage.receive_entries[i].state = ENTRY_FREE;
-        i = i + 1;
+        storage.receive_entries[i].state      = ENTRY_FREE;
+        i                                     = i + 1;
     }
-    candidate.next_sequence = 1;
+    candidate.next_sequence    = 1;
     candidate.peer_limit_bound = config.peer_max_frame_size > 0;
-    candidate.valid = true;
-    queue[0] = candidate;
+    candidate.valid            = true;
+    queue[0]                   = candidate;
     ret true;
 }
 
@@ -210,7 +210,7 @@ fun queue_record_valid(queue: *Queue) bool {
 fun borrowed_disjoint(queue: *Queue, borrowed: ownership.Range) bool {
     if (!queue_record_valid(queue) || !borrowed.valid ||
         !ownership.disjoint(borrowed, ownership.bytes((?queue.config)::*u8,
-            $size_of(Queue), ownership.ZERO_FORBIDDEN))) { ret false; }
+        $size_of(Queue), ownership.ZERO_FORBIDDEN))) { ret false; }
     if (!queue.config.enabled) { ret true; }
     var owned: [4]ownership.Range;
     owned[0] = ownership.array(queue.storage.send_entries::*u8,
@@ -246,7 +246,7 @@ pub fun release_core(queue: *Queue, source: u64) bool {
 fun queue_error(code: u8) QueueResult {
     var result: QueueResult;
     result.status = STATUS_ERROR;
-    result.error = code;
+    result.error  = code;
     ret result;
 }
 
@@ -262,12 +262,13 @@ fun frame_size(length: usize, with_length: bool) usize {
 
 fun token(queue: *Queue, index: usize, receive: bool) Token {
     var value: Token;
-    value.source = queue.config.source;
-    value.index = index;
+    value.source  = queue.config.source;
+    value.index   = index;
     value.receive = receive;
     if (receive) {
         value.generation = queue.storage.receive_entries[index].generation;
-    } or {
+    }
+    or {
         value.generation = queue.storage.send_entries[index].generation;
     }
     ret value;
@@ -289,8 +290,8 @@ fun receive_valid(queue: *Queue, value: Token, state: u8) bool {
 
 fun free_send(queue: *Queue, index: usize) {
     val entry: *Entry = ?queue.storage.send_entries[index];
-    entry.state = ENTRY_FREE;
-    entry.length = 0;
+    entry.state      = ENTRY_FREE;
+    entry.length     = 0;
     entry.generation = next_generation(entry.generation);
     if (queue.send_count > 0) { queue.send_count = queue.send_count - 1; }
 }
@@ -300,19 +301,19 @@ fun free_receive(queue: *Queue, index: usize) {
     if (entry.state == ENTRY_DELIVERED && queue.delivered_count > 0) {
         queue.delivered_count = queue.delivered_count - 1;
     }
-    entry.state = ENTRY_FREE;
-    entry.length = 0;
+    entry.state      = ENTRY_FREE;
+    entry.length     = 0;
     entry.generation = next_generation(entry.generation);
     if (queue.receive_count > 0) { queue.receive_count = queue.receive_count - 1; }
 }
 
 pub fun enqueue(queue: *Queue, data: *u8, length: usize) QueueResult {
     if (!queue_record_valid(queue) || !queue.valid || queue.closing) { ret queue_error(ERROR_STATE); }
-    if (!queue.config.enabled) { ret queue_error(ERROR_DISABLED); }
-    if (!queue.peer_limit_bound) { ret queue_error(ERROR_STATE); }
+    if (!queue.config.enabled)                                       { ret queue_error(ERROR_DISABLED); }
+    if (!queue.peer_limit_bound)                                     { ret queue_error(ERROR_STATE); }
     if (length > queue.storage.send_stride ||
         !borrowed_disjoint(queue, ownership.bytes(data, length,
-            ownership.ZERO_ALLOWED)) ||
+        ownership.ZERO_ALLOWED)) ||
         frame_size(length, true) > queue.config.peer_max_frame_size) {
         ret queue_error(ERROR_LIMIT);
     }
@@ -320,23 +321,23 @@ pub fun enqueue(queue: *Queue, data: *u8, length: usize) QueueResult {
     var i: usize = 0;
     for (i < queue.storage.send_capacity && queue.storage.send_entries[i].state != ENTRY_FREE) { i = i + 1; }
     if (i == queue.storage.send_capacity) { ret queue_error(ERROR_CAPACITY); }
-    if (length > 0) { memory.copy[u8](?queue.storage.send_bytes[i * queue.storage.send_stride], data, length); }
+    if (length > 0)                       { memory.copy[u8](?queue.storage.send_bytes[i * queue.storage.send_stride], data, length); }
     val entry: *Entry = ?queue.storage.send_entries[i];
     entry.length = length;
     if (!take_sequence(queue, ?entry.sequence)) { ret queue_error(ERROR_OVERFLOW); }
-    entry.state = ENTRY_QUEUED;
+    entry.state      = ENTRY_QUEUED;
     queue.send_count = queue.send_count + 1;
     var result: QueueResult;
-    result.ok = true;
+    result.ok     = true;
     result.status = STATUS_OK;
-    result.token = token(queue, i, false);
+    result.token  = token(queue, i, false);
     ret result;
 }
 
 fun prepared_error(status: u8, code: u8) Prepared {
     var result: Prepared;
     result.status = status;
-    result.error = code;
+    result.error  = code;
     ret result;
 }
 
@@ -347,31 +348,31 @@ pub fun prepare(queue: *Queue, with_length: bool) Prepared {
     if (!queue.peer_limit_bound) {
         ret prepared_error(STATUS_ERROR, ERROR_STATE);
     }
-    var chosen: usize = queue.storage.send_capacity;
-    var sequence: u64 = 0;
-    var i: usize = 0;
+    var chosen:   usize = queue.storage.send_capacity;
+    var sequence: u64   = 0;
+    var i:        usize = 0;
     for (i < queue.storage.send_capacity) {
         val entry: Entry = queue.storage.send_entries[i];
         if (entry.state == ENTRY_QUEUED && (chosen == queue.storage.send_capacity || entry.sequence < sequence)) {
-            chosen = i;
+            chosen   = i;
             sequence = entry.sequence;
         }
         i = i + 1;
     }
     if (chosen == queue.storage.send_capacity) { ret prepared_error(STATUS_EMPTY, ERROR_NONE); }
-    val entry: *Entry = ?queue.storage.send_entries[chosen];
-    val encoded: usize = frame_size(entry.length, with_length);
+    val entry:   *Entry = ?queue.storage.send_entries[chosen];
+    val encoded: usize  = frame_size(entry.length, with_length);
     if (encoded == 0 || encoded > queue.config.peer_max_frame_size) {
         ret prepared_error(STATUS_ERROR, ERROR_LIMIT);
     }
     entry.state = ENTRY_RESERVED;
     var result: Prepared;
-    result.ok = true;
-    result.status = STATUS_OK;
-    result.token = token(queue, chosen, false);
-    result.data.data = ?queue.storage.send_bytes[chosen * queue.storage.send_stride];
-    result.data.len = entry.length;
-    result.frame_size = encoded;
+    result.ok          = true;
+    result.status      = STATUS_OK;
+    result.token       = token(queue, chosen, false);
+    result.data.data   = ?queue.storage.send_bytes[chosen * queue.storage.send_stride];
+    result.data.len    = entry.length;
+    result.frame_size  = encoded;
     result.with_length = with_length;
     ret result;
 }
@@ -381,11 +382,11 @@ pub fun cancel_prepared(queue: *Queue, prepared: Prepared) OperationResult {
     if (!queue_record_valid(queue) || queue.core_lease != 0 || !prepared.ok ||
         !send_valid(queue, prepared.token, ENTRY_RESERVED)) {
         result.status = STATUS_STALE;
-        result.error = ERROR_TOKEN;
+        result.error  = ERROR_TOKEN;
         ret result;
     }
     if (queue.closing) { free_send(queue, prepared.token.index); }
-    or { queue.storage.send_entries[prepared.token.index].state = ENTRY_QUEUED; }
+    or                 { queue.storage.send_entries[prepared.token.index].state = ENTRY_QUEUED; }
     result.status = STATUS_OK;
     ret result;
 }
@@ -394,12 +395,12 @@ pub fun publish(queue: *Queue, prepared: Prepared) OperationResult {
     var result: OperationResult;
     if (!queue_record_valid(queue) || queue.core_lease != 0) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_STATE;
+        result.error  = ERROR_STATE;
         ret result;
     }
     if (!prepared.ok || !send_valid(queue, prepared.token, ENTRY_RESERVED)) {
         result.status = STATUS_STALE;
-        result.error = ERROR_TOKEN;
+        result.error  = ERROR_TOKEN;
         ret result;
     }
     free_send(queue, prepared.token.index);
@@ -413,12 +414,12 @@ pub fun bind_peer_limit(queue: *Queue, maximum: usize) OperationResult {
         queue.core_lease != 0 || !queue.config.enabled ||
         queue.peer_limit_bound || queue.send_count != 0) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_STATE;
+        result.error  = ERROR_STATE;
         ret result;
     }
     queue.config.peer_max_frame_size = maximum;
-    queue.peer_limit_bound = true;
-    result.status = STATUS_OK;
+    queue.peer_limit_bound           = true;
+    result.status                    = STATUS_OK;
     ret result;
 }
 
@@ -426,7 +427,7 @@ pub fun cancel(queue: *Queue, value: Token) OperationResult {
     var result: OperationResult;
     if (!send_valid(queue, value, ENTRY_QUEUED)) {
         result.status = STATUS_STALE;
-        result.error = ERROR_TOKEN;
+        result.error  = ERROR_TOKEN;
         ret result;
     }
     free_send(queue, value.index);
@@ -440,7 +441,7 @@ pub fun receive(queue: *Queue, data: *u8, length: usize, encoded_frame_size: usi
     if (!queue.config.enabled) { ret queue_error(ERROR_DISABLED); }
     if (length > queue.storage.receive_stride ||
         !borrowed_disjoint(queue, ownership.bytes(data, length,
-            ownership.ZERO_ALLOWED)) ||
+        ownership.ZERO_ALLOWED)) ||
         length == 0 - 1::usize || encoded_frame_size < length + 1 ||
         encoded_frame_size > queue.config.local_max_frame_size) {
         ret queue_error(ERROR_LIMIT);
@@ -449,16 +450,16 @@ pub fun receive(queue: *Queue, data: *u8, length: usize, encoded_frame_size: usi
     var i: usize = 0;
     for (i < queue.storage.receive_capacity && queue.storage.receive_entries[i].state != ENTRY_FREE) { i = i + 1; }
     if (i == queue.storage.receive_capacity) { ret queue_error(ERROR_CAPACITY); }
-    if (length > 0) { memory.copy[u8](?queue.storage.receive_bytes[i * queue.storage.receive_stride], data, length); }
+    if (length > 0)                          { memory.copy[u8](?queue.storage.receive_bytes[i * queue.storage.receive_stride], data, length); }
     val entry: *Entry = ?queue.storage.receive_entries[i];
     entry.length = length;
     if (!take_sequence(queue, ?entry.sequence)) { ret queue_error(ERROR_OVERFLOW); }
-    entry.state = ENTRY_QUEUED;
+    entry.state         = ENTRY_QUEUED;
     queue.receive_count = queue.receive_count + 1;
     var result: QueueResult;
-    result.ok = true;
+    result.ok     = true;
     result.status = STATUS_OK;
-    result.token = token(queue, i, true);
+    result.token  = token(queue, i, true);
     ret result;
 }
 
@@ -466,21 +467,21 @@ pub fun next(queue: *Queue) Delivery {
     var result: Delivery;
     if (!queue_record_valid(queue) || !queue.valid || queue.closing) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_STATE;
+        result.error  = ERROR_STATE;
         ret result;
     }
     if (!queue.config.enabled) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_DISABLED;
+        result.error  = ERROR_DISABLED;
         ret result;
     }
-    var chosen: usize = queue.storage.receive_capacity;
-    var sequence: u64 = 0;
-    var i: usize = 0;
+    var chosen:   usize = queue.storage.receive_capacity;
+    var sequence: u64   = 0;
+    var i:        usize = 0;
     for (i < queue.storage.receive_capacity) {
         val entry: Entry = queue.storage.receive_entries[i];
         if (entry.state == ENTRY_QUEUED && (chosen == queue.storage.receive_capacity || entry.sequence < sequence)) {
-            chosen = i;
+            chosen   = i;
             sequence = entry.sequence;
         }
         i = i + 1;
@@ -490,11 +491,11 @@ pub fun next(queue: *Queue) Delivery {
         ret result;
     }
     queue.storage.receive_entries[chosen].state = ENTRY_DELIVERED;
-    queue.delivered_count = queue.delivered_count + 1;
-    result.status = STATUS_OK;
-    result.token = token(queue, chosen, true);
-    result.data.data = ?queue.storage.receive_bytes[chosen * queue.storage.receive_stride];
-    result.data.len = queue.storage.receive_entries[chosen].length;
+    queue.delivered_count                       = queue.delivered_count + 1;
+    result.status                               = STATUS_OK;
+    result.token                                = token(queue, chosen, true);
+    result.data.data                            = ?queue.storage.receive_bytes[chosen * queue.storage.receive_stride];
+    result.data.len                             = queue.storage.receive_entries[chosen].length;
     ret result;
 }
 
@@ -502,7 +503,7 @@ pub fun release(queue: *Queue, value: Token) OperationResult {
     var result: OperationResult;
     if (!receive_valid(queue, value, ENTRY_DELIVERED)) {
         result.status = STATUS_STALE;
-        result.error = ERROR_TOKEN;
+        result.error  = ERROR_TOKEN;
         ret result;
     }
     free_receive(queue, value.index);
@@ -514,7 +515,7 @@ pub fun begin_close(queue: *Queue) OperationResult {
     var result: OperationResult;
     if (!queue_record_valid(queue) || !queue.valid || queue.core_lease != 0) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_STATE;
+        result.error  = ERROR_STATE;
         ret result;
     }
     queue.closing = true;
@@ -537,17 +538,17 @@ pub fun finish_close(queue: *Queue) OperationResult {
     if (!queue_record_valid(queue) || !queue.valid || !queue.closing ||
         queue.core_lease != 0) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_STATE;
+        result.error  = ERROR_STATE;
         ret result;
     }
     if (queue.send_count != 0 || queue.delivered_count != 0) {
         result.status = STATUS_ERROR;
-        result.error = ERROR_CAPACITY;
+        result.error  = ERROR_CAPACITY;
         ret result;
     }
-    queue.valid = false;
+    queue.valid      = false;
     queue.core_lease = 0;
-    result.status = STATUS_OK;
+    result.status    = STATUS_OK;
     ret result;
 }
 
@@ -564,7 +565,7 @@ fun leave_core_scope(queue: *Queue, source: u64) {
 }
 
 pub fun prepare_scoped(queue: *Queue, source: u64,
-                       with_length: bool) Prepared {
+    with_length: bool) Prepared {
     if (!enter_core_scope(queue, source)) {
         ret prepared_error(STATUS_ERROR, ERROR_STATE);
     }
@@ -574,11 +575,11 @@ pub fun prepare_scoped(queue: *Queue, source: u64,
 }
 
 pub fun cancel_prepared_scoped(queue: *Queue, source: u64,
-                              prepared: Prepared) OperationResult {
+    prepared: Prepared) OperationResult {
     if (!enter_core_scope(queue, source)) {
         var failed: OperationResult;
         failed.status = STATUS_ERROR;
-        failed.error = ERROR_STATE;
+        failed.error  = ERROR_STATE;
         ret failed;
     }
     val result: OperationResult = cancel_prepared(queue, prepared);
@@ -587,11 +588,11 @@ pub fun cancel_prepared_scoped(queue: *Queue, source: u64,
 }
 
 pub fun publish_scoped(queue: *Queue, source: u64,
-                       prepared: Prepared) OperationResult {
+    prepared: Prepared) OperationResult {
     if (!enter_core_scope(queue, source)) {
         var failed: OperationResult;
         failed.status = STATUS_ERROR;
-        failed.error = ERROR_STATE;
+        failed.error  = ERROR_STATE;
         ret failed;
     }
     val result: OperationResult = publish(queue, prepared);
@@ -600,7 +601,7 @@ pub fun publish_scoped(queue: *Queue, source: u64,
 }
 
 pub fun receive_scoped(queue: *Queue, source: u64, data: *u8,
-                       length: usize, encoded_frame_size: usize) QueueResult {
+    length: usize, encoded_frame_size: usize) QueueResult {
     if (!enter_core_scope(queue, source)) { ret queue_error(ERROR_STATE); }
     val result: QueueResult = receive(queue, data, length, encoded_frame_size);
     leave_core_scope(queue, source);
@@ -608,11 +609,11 @@ pub fun receive_scoped(queue: *Queue, source: u64, data: *u8,
 }
 
 pub fun bind_peer_limit_scoped(queue: *Queue, source: u64,
-                               maximum: usize) OperationResult {
+    maximum: usize) OperationResult {
     if (!enter_core_scope(queue, source)) {
         var failed: OperationResult;
         failed.status = STATUS_ERROR;
-        failed.error = ERROR_STATE;
+        failed.error  = ERROR_STATE;
         ret failed;
     }
     val result: OperationResult = bind_peer_limit(queue, maximum);
@@ -624,7 +625,7 @@ pub fun begin_close_scoped(queue: *Queue, source: u64) OperationResult {
     if (!enter_core_scope(queue, source)) {
         var failed: OperationResult;
         failed.status = STATUS_ERROR;
-        failed.error = ERROR_STATE;
+        failed.error  = ERROR_STATE;
         ret failed;
     }
     val result: OperationResult = begin_close(queue);
@@ -636,7 +637,7 @@ pub fun finish_close_scoped(queue: *Queue, source: u64) OperationResult {
     if (!enter_core_scope(queue, source)) {
         var failed: OperationResult;
         failed.status = STATUS_ERROR;
-        failed.error = ERROR_STATE;
+        failed.error  = ERROR_STATE;
         ret failed;
     }
     val result: OperationResult = finish_close(queue);
@@ -651,22 +652,22 @@ fun initialized_for_test(config: Config, storage: Storage) Queue {
 }
 
 test "quic.stream.datagram: optional queues copy, order, cancel, and publish" {
-    var send_entries: [2]Entry;
+    var send_entries:    [2]Entry;
     var receive_entries: [2]Entry;
-    var send_bytes: [16]u8;
-    var receive_bytes: [16]u8;
-    val storage: Storage = Storage{
-        send_entries: ?send_entries[0], send_capacity: 2,
-        send_bytes: ?send_bytes[0], send_bytes_length: 16, send_stride: 8,
+    var send_bytes:      [16]u8;
+    var receive_bytes:   [16]u8;
+    val storage:         Storage = Storage{
+        send_entries:    ?send_entries[0], send_capacity: 2,
+        send_bytes:      ?send_bytes[0], send_bytes_length: 16, send_stride: 8,
         receive_entries: ?receive_entries[0], receive_capacity: 2,
-        receive_bytes: ?receive_bytes[0], receive_bytes_length: 16, receive_stride: 8
+        receive_bytes:   ?receive_bytes[0], receive_bytes_length: 16, receive_stride: 8
     };
     var queue: Queue = initialized_for_test(Config{source: 7, peer_max_frame_size: 10,
         local_max_frame_size: 10, enabled: true}, storage);
-    var first: [3]u8 = [3]u8{1, 2, 3};
-    var second: [2]u8 = [2]u8{4, 5};
-    val a: QueueResult = enqueue(?queue, ?first[0], 3);
-    val b: QueueResult = enqueue(?queue, ?second[0], 2);
+    var first:  [3]u8       = [3]u8{1, 2, 3};
+    var second: [2]u8       = [2]u8{4, 5};
+    val a:      QueueResult = enqueue(?queue, ?first[0], 3);
+    val b:      QueueResult = enqueue(?queue, ?second[0], 2);
     first[0] = 9;
     if (!a.ok || !b.ok || cancel(?queue, b.token).status != STATUS_OK) { ret 1; }
     val prepared: Prepared = prepare(?queue, true);
@@ -675,44 +676,44 @@ test "quic.stream.datagram: optional queues copy, order, cancel, and publish" {
     if (!receive(?queue, ?second[0], 2, 4).ok) { ret 1; }
     val delivered: Delivery = next(?queue);
     if (delivered.status != STATUS_OK || delivered.data.len != 2 || delivered.data.data[0] != 4) { ret 1; }
-    if (release(?queue, delivered.token).status != STATUS_OK) { ret 1; }
+    if (release(?queue, delivered.token).status != STATUS_OK)                                    { ret 1; }
     ret 0;
 }
 
 test "quic.stream.datagram: capacity and close preserve delivered ownership" {
-    var send_entries: [1]Entry;
+    var send_entries:    [1]Entry;
     var receive_entries: [1]Entry;
-    var send_bytes: [4]u8;
-    var receive_bytes: [4]u8;
-    val storage: Storage = Storage{
-        send_entries: ?send_entries[0], send_capacity: 1,
-        send_bytes: ?send_bytes[0], send_bytes_length: 4, send_stride: 4,
+    var send_bytes:      [4]u8;
+    var receive_bytes:   [4]u8;
+    val storage:         Storage = Storage{
+        send_entries:    ?send_entries[0], send_capacity: 1,
+        send_bytes:      ?send_bytes[0], send_bytes_length: 4, send_stride: 4,
         receive_entries: ?receive_entries[0], receive_capacity: 1,
-        receive_bytes: ?receive_bytes[0], receive_bytes_length: 4, receive_stride: 4
+        receive_bytes:   ?receive_bytes[0], receive_bytes_length: 4, receive_stride: 4
     };
     var queue: Queue = initialized_for_test(Config{source: 8, peer_max_frame_size: 6,
         local_max_frame_size: 6, enabled: true}, storage);
     var data: [4]u8 = [4]u8{1, 2, 3, 4};
     if (!receive(?queue, ?data[0], 4, 6).ok || receive(?queue, ?data[0], 1, 3).error != ERROR_CAPACITY) { ret 1; }
     val delivered: Delivery = next(?queue);
-    if (begin_close(?queue).status != STATUS_OK || finish_close(?queue).error != ERROR_CAPACITY) { ret 1; }
+    if (begin_close(?queue).status != STATUS_OK || finish_close(?queue).error != ERROR_CAPACITY)          { ret 1; }
     if (release(?queue, delivered.token).status != STATUS_OK || finish_close(?queue).status != STATUS_OK) { ret 1; }
-    if (next(?queue).error != ERROR_STATE) { ret 1; }
+    if (next(?queue).error != ERROR_STATE)                                                                { ret 1; }
     ret 0;
 }
 
 test "quic.stream.datagram: authenticated limits bind once and close preserves sends" {
-    var send_entries: [1]Entry;
+    var send_entries:    [1]Entry;
     var receive_entries: [1]Entry;
-    var send_bytes: [4]u8;
-    var receive_bytes: [4]u8;
-    var queue: Queue = initialized_for_test(Config{source: 12,
+    var send_bytes:      [4]u8;
+    var receive_bytes:   [4]u8;
+    var queue:           Queue = initialized_for_test(Config{source: 12,
         peer_max_frame_size: 0, local_max_frame_size: 8, enabled: true},
         Storage{send_entries: ?send_entries[0], send_capacity: 1,
-            send_bytes: ?send_bytes[0], send_bytes_length: 4, send_stride: 4,
-            receive_entries: ?receive_entries[0], receive_capacity: 1,
-            receive_bytes: ?receive_bytes[0], receive_bytes_length: 4,
-            receive_stride: 4});
+        send_bytes:      ?send_bytes[0], send_bytes_length: 4, send_stride: 4,
+        receive_entries: ?receive_entries[0], receive_capacity: 1,
+        receive_bytes:   ?receive_bytes[0], receive_bytes_length: 4,
+        receive_stride:  4});
     var data: [3]u8 = [3]u8{1, 2, 3};
     if (enqueue(?queue, ?data[0], 3).error != ERROR_STATE ||
         !lease_core(?queue, 12) ||
@@ -728,33 +729,33 @@ test "quic.stream.datagram: authenticated limits bind once and close preserves s
 }
 
 test "quic.stream.datagram: disabled mode needs no storage" {
-    var empty_storage: Storage;
+    var empty_storage:   Storage;
     var disabled_config: Config;
-    disabled_config.source = 9;
+    disabled_config.source  = 9;
     disabled_config.enabled = false;
     var disabled: Queue = initialized_for_test(disabled_config, empty_storage);
-    var byte: [1]u8 = [1]u8{7};
+    var byte:     [1]u8 = [1]u8{7};
     if (!disabled.valid || enqueue(?disabled, ?byte[0], 1).error != ERROR_DISABLED ||
         prepare(?disabled, true).error != ERROR_DISABLED || next(?disabled).error != ERROR_DISABLED) { ret 1; }
     ret 0;
 }
 
 test "quic.stream.datagram: frame and sequence bounds are transactional" {
-    var byte: [1]u8 = [1]u8{7};
-    var send_entries: [1]Entry;
+    var byte:            [1]u8   = [1]u8{7};
+    var send_entries:    [1]Entry;
     var receive_entries: [1]Entry;
-    var send_bytes: [1]u8;
-    var receive_bytes: [1]u8;
-    val storage: Storage = Storage{
-        send_entries: ?send_entries[0], send_capacity: 1,
-        send_bytes: ?send_bytes[0], send_bytes_length: 1, send_stride: 1,
+    var send_bytes:      [1]u8;
+    var receive_bytes:   [1]u8;
+    val storage:         Storage = Storage{
+        send_entries:    ?send_entries[0], send_capacity: 1,
+        send_bytes:      ?send_bytes[0], send_bytes_length: 1, send_stride: 1,
         receive_entries: ?receive_entries[0], receive_capacity: 1,
-        receive_bytes: ?receive_bytes[0], receive_bytes_length: 1, receive_stride: 1
+        receive_bytes:   ?receive_bytes[0], receive_bytes_length: 1, receive_stride: 1
     };
     var queue: Queue = initialized_for_test(Config{source: 10, peer_max_frame_size: 3,
         local_max_frame_size: 2, enabled: true}, storage);
-    val queued: QueueResult = enqueue(?queue, ?byte[0], 1);
-    val with_length: Prepared = prepare(?queue, true);
+    val queued:      QueueResult = enqueue(?queue, ?byte[0], 1);
+    val with_length: Prepared    = prepare(?queue, true);
     if (!queued.ok || !with_length.ok || with_length.frame_size != 3 ||
         publish(?queue, with_length).status != STATUS_OK) { ret 1; }
     queue.next_sequence = 0 - 1::u64;
@@ -764,15 +765,15 @@ test "quic.stream.datagram: frame and sequence bounds are transactional" {
 }
 
 test "quic.stream.datagram: close preserves prepared publication ownership" {
-    var send_entries: [1]Entry;
+    var send_entries:    [1]Entry;
     var receive_entries: [1]Entry;
-    var send_bytes: [4]u8;
-    var receive_bytes: [4]u8;
-    val storage: Storage = Storage{
-        send_entries: ?send_entries[0], send_capacity: 1,
-        send_bytes: ?send_bytes[0], send_bytes_length: 4, send_stride: 4,
+    var send_bytes:      [4]u8;
+    var receive_bytes:   [4]u8;
+    val storage:         Storage = Storage{
+        send_entries:    ?send_entries[0], send_capacity: 1,
+        send_bytes:      ?send_bytes[0], send_bytes_length: 4, send_stride: 4,
         receive_entries: ?receive_entries[0], receive_capacity: 1,
-        receive_bytes: ?receive_bytes[0], receive_bytes_length: 4, receive_stride: 4
+        receive_bytes:   ?receive_bytes[0], receive_bytes_length: 4, receive_stride: 4
     };
     var queue: Queue = initialized_for_test(Config{source: 11, peer_max_frame_size: 6,
         local_max_frame_size: 6, enabled: true}, storage);
@@ -789,33 +790,36 @@ test "quic.stream.datagram: close preserves prepared publication ownership" {
 
 test "quic.stream.datagram: owned regions reject maximum addresses and aliases" {
     var entries: [2]Entry;
-    var bytes: [8]u8;
-    val config: Config = Config{source: 90, peer_max_frame_size: 8,
+    var bytes:   [8]u8;
+    val config:  Config = Config{source: 90, peer_max_frame_size: 8,
         local_max_frame_size: 8, enabled: true};
     val maximum: usize = 0 - 1::usize;
     if (initialize(maximum::*Queue, config, Storage{
-        send_entries: ?entries[0], send_capacity: 1,
-        send_bytes: ?bytes[0], send_bytes_length: 4, send_stride: 4,
+        send_entries:    ?entries[0], send_capacity: 1,
+        send_bytes:      ?bytes[0], send_bytes_length: 4, send_stride: 4,
         receive_entries: ?entries[1], receive_capacity: 1,
-        receive_bytes: ?bytes[4], receive_bytes_length: 4,
-        receive_stride: 4}) || initialize((?entries[0])::*Queue, config,
+        receive_bytes:   ?bytes[4], receive_bytes_length: 4,
+        receive_stride:  4
+    }) || initialize((?entries[0])::*Queue, config,
         Storage{send_entries: ?entries[0], send_capacity: 1,
-        send_bytes: ?bytes[0], send_bytes_length: 4, send_stride: 4,
+        send_bytes:      ?bytes[0], send_bytes_length: 4, send_stride: 4,
         receive_entries: ?entries[1], receive_capacity: 1,
-        receive_bytes: ?bytes[4], receive_bytes_length: 4,
-        receive_stride: 4})) { ret 1; }
+        receive_bytes:   ?bytes[4], receive_bytes_length: 4,
+        receive_stride:  4})) { ret 1; }
     val hostile: Queue = initialized_for_test(config, Storage{
-        send_entries: maximum::*Entry, send_capacity: 1,
-        send_bytes: ?bytes[0], send_bytes_length: 4, send_stride: 4,
+        send_entries:    maximum::*Entry, send_capacity: 1,
+        send_bytes:      ?bytes[0], send_bytes_length: 4, send_stride: 4,
         receive_entries: ?entries[1], receive_capacity: 1,
-        receive_bytes: ?bytes[4], receive_bytes_length: 4,
-        receive_stride: 4});
+        receive_bytes:   ?bytes[4], receive_bytes_length: 4,
+        receive_stride:  4
+    });
     val aliased: Queue = initialized_for_test(config, Storage{
-        send_entries: ?entries[0], send_capacity: 1,
-        send_bytes: ?bytes[0], send_bytes_length: 4, send_stride: 4,
+        send_entries:    ?entries[0], send_capacity: 1,
+        send_bytes:      ?bytes[0], send_bytes_length: 4, send_stride: 4,
         receive_entries: ?entries[1], receive_capacity: 1,
-        receive_bytes: ?bytes[0], receive_bytes_length: 4,
-        receive_stride: 4});
+        receive_bytes:   ?bytes[0], receive_bytes_length: 4,
+        receive_stride:  4
+    });
     if (hostile.valid || aliased.valid) { ret 1; }
     ret 0;
 }
@@ -829,12 +833,12 @@ test "quic.stream.datagram: empty storage is fully cleared" {
     if (value.send_capacity != 0 || value.send_bytes_length != 0 ||
         value.send_stride != 0 || value.receive_capacity != 0 ||
         value.receive_bytes_length != 0 || value.receive_stride != 0) { ret 2; }
-    var queue: Queue;
+    var queue:  Queue;
     var config: Config;
-    config.source = 77;
-    config.peer_max_frame_size = 0;
+    config.source               = 77;
+    config.peer_max_frame_size  = 0;
     config.local_max_frame_size = 0;
-    config.enabled = false;
+    config.enabled              = false;
     if (!initialize(?queue, config, empty_storage())) { ret 3; }
     ret 0;
 }

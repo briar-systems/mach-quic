@@ -9,87 +9,87 @@ use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
-
 fun is_err_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
     ret sel outcome.err;
 }
-pub val VERSION_1: u32 = 0x00000001;
-pub val VERSION_2: u32 = 0x6b3343cf;
-pub val MAX_CONNECTION_ID: usize = 20;
+
+pub val VERSION_1:           u32   = 0x00000001;
+pub val VERSION_2:           u32   = 0x6b3343cf;
+pub val MAX_CONNECTION_ID:   usize = 20;
 pub val RETRY_INTEGRITY_TAG: usize = 16;
-pub val MAX_PACKET_NUMBER: u64 = 4611686018427387903;
+pub val MAX_PACKET_NUMBER:   u64   = 4611686018427387903;
 
 pub val PACKET_VERSION_NEGOTIATION: u8 = 0;
-pub val PACKET_INITIAL: u8 = 1;
-pub val PACKET_ZERO_RTT: u8 = 2;
-pub val PACKET_HANDSHAKE: u8 = 3;
-pub val PACKET_RETRY: u8 = 4;
-pub val PACKET_ONE_RTT: u8 = 5;
-pub val PACKET_UNKNOWN_VERSION: u8 = 6;
+pub val PACKET_INITIAL:             u8 = 1;
+pub val PACKET_ZERO_RTT:            u8 = 2;
+pub val PACKET_HANDSHAKE:           u8 = 3;
+pub val PACKET_RETRY:               u8 = 4;
+pub val PACKET_ONE_RTT:             u8 = 5;
+pub val PACKET_UNKNOWN_VERSION:     u8 = 6;
 
-pub val SPACE_INITIAL: u8 = 1;
-pub val SPACE_HANDSHAKE: u8 = 2;
+pub val SPACE_INITIAL:     u8 = 1;
+pub val SPACE_HANDSHAKE:   u8 = 2;
 pub val SPACE_APPLICATION: u8 = 3;
 
-pub val STATUS_DONE: u8 = 1;
-pub val STATUS_MORE: u8 = 2;
+pub val STATUS_DONE:  u8 = 1;
+pub val STATUS_MORE:  u8 = 2;
 pub val STATUS_ERROR: u8 = 3;
 
-pub val ERROR_NONE: u8 = 0;
-pub val ERROR_TRUNCATED: u8 = 1;
-pub val ERROR_HEADER_FORM: u8 = 2;
-pub val ERROR_FIXED_BIT: u8 = 3;
+pub val ERROR_NONE:          u8 = 0;
+pub val ERROR_TRUNCATED:     u8 = 1;
+pub val ERROR_HEADER_FORM:   u8 = 2;
+pub val ERROR_FIXED_BIT:     u8 = 3;
 pub val ERROR_CONNECTION_ID: u8 = 4;
 pub val ERROR_PACKET_NUMBER: u8 = 5;
 pub val ERROR_PACKET_LENGTH: u8 = 6;
-pub val ERROR_TOKEN_LENGTH: u8 = 7;
-pub val ERROR_VERSION_LIST: u8 = 8;
-pub val ERROR_RETRY: u8 = 9;
-pub val ERROR_LIMIT: u8 = 10;
-pub val ERROR_KIND: u8 = 11;
-pub val ERROR_OUTPUT: u8 = 12;
+pub val ERROR_TOKEN_LENGTH:  u8 = 7;
+pub val ERROR_VERSION_LIST:  u8 = 8;
+pub val ERROR_RETRY:         u8 = 9;
+pub val ERROR_LIMIT:         u8 = 10;
+pub val ERROR_KIND:          u8 = 11;
+pub val ERROR_OUTPUT:        u8 = 12;
 
 pub rec Span {
     data: *u8;
-    len: usize;
+    len:  usize;
 }
 
 pub rec ConnectionId {
     data: [20]u8;
-    len: u8;
+    len:  u8;
 }
 
 pub rec Header {
-    kind: u8;
-    version: u32;
-    destination: ConnectionId;
-    source: ConnectionId;
-    packet_number: u64;
+    kind:                    u8;
+    version:                 u32;
+    destination:             ConnectionId;
+    source:                  ConnectionId;
+    packet_number:           u64;
     truncated_packet_number: u32;
-    packet_number_len: u8;
-    spin: bool;
-    key_phase: bool;
-    retry_bits: u8;
+    packet_number_len:       u8;
+    spin:                    bool;
+    key_phase:               bool;
+    retry_bits:              u8;
 }
 
 pub rec Packet {
-    header: Header;
-    token: Span;
-    payload: Span;
-    versions: Span;
+    header:        Header;
+    token:         Span;
+    payload:       Span;
+    versions:      Span;
     integrity_tag: [16]u8;
 }
 
 pub rec DecodeContext {
-    version: u32;
+    version:                u32;
     expected_packet_number: u64;
-    short_destination_len: u8;
+    short_destination_len:  u8;
 }
 
 pub rec Limits {
     max_packet_size: usize;
-    max_token_size: usize;
-    max_versions: usize;
+    max_token_size:  usize;
+    max_versions:    usize;
 }
 
 # every field is assigned by name: an empty record literal does not reliably
@@ -97,42 +97,42 @@ pub rec Limits {
 # the wire, so a caller with no prior state must still start from a defined one
 pub fun empty_decode_context() DecodeContext {
     var value: DecodeContext;
-    value.version = 0;
+    value.version                = 0;
     value.expected_packet_number = 0;
-    value.short_destination_len = 0;
+    value.short_destination_len  = 0;
     ret value;
 }
 
 pub rec DecodeResult {
-    status: u8;
-    error: u8;
+    status:   u8;
+    error:    u8;
     consumed: usize;
-    needed: usize;
+    needed:   usize;
 }
 
 pub rec EncodeResult {
-    ok: bool;
+    ok:    bool;
     error: u8;
     count: usize;
 }
 
 pub rec ProtectedHeaderResult {
-    ok: bool;
-    error: u8;
-    count: usize;
+    ok:                   bool;
+    error:                u8;
+    count:                usize;
     packet_number_offset: usize;
 }
 
 pub fun default_limits() Limits {
     var limits: Limits;
     limits.max_packet_size = 65527;
-    limits.max_token_size = 16384;
-    limits.max_versions = 64;
+    limits.max_token_size  = 16384;
+    limits.max_versions    = 64;
     ret limits;
 }
 
 pub fun number_space(kind: u8) u8 {
-    if (kind == PACKET_INITIAL) { ret SPACE_INITIAL; }
+    if (kind == PACKET_INITIAL)   { ret SPACE_INITIAL; }
     if (kind == PACKET_HANDSHAKE) { ret SPACE_HANDSHAKE; }
     ret SPACE_APPLICATION;
 }
@@ -161,12 +161,13 @@ pub fun packet_number_width(number: u64, largest_acked: u64) u8 {
     var outstanding: u64 = 0;
     if (largest_acked == 0 - 1::u64) {
         outstanding = number + 1;
-    } or {
+    }
+    or {
         if (number <= largest_acked) { ret 0; }
         outstanding = number - largest_acked;
     }
-    if (outstanding <= 128) { ret 1; }
-    if (outstanding <= 32768) { ret 2; }
+    if (outstanding <= 128)     { ret 1; }
+    if (outstanding <= 32768)   { ret 2; }
     if (outstanding <= 8388608) { ret 3; }
     ret 4;
 }
@@ -181,15 +182,16 @@ pub fun truncate_packet_number(number: u64, encoded_width: u8) u32 {
 
 pub fun reconstruct_packet_number(expected: u64, truncated: u32, encoded_width: u8) u64 {
     if (encoded_width < 1 || encoded_width > 4 || expected > MAX_PACKET_NUMBER) { ret MAX_PACKET_NUMBER + 1; }
-    val bits: u64 = encoded_width::u64 * 8;
-    val window: u64 = 1 << bits;
+    val bits:        u64 = encoded_width::u64 * 8;
+    val window:      u64 = 1 << bits;
     val half_window: u64 = window / 2;
-    val mask: u64 = window - 1;
-    var candidate: u64 = (expected & ~mask) | truncated::u64;
+    val mask:        u64 = window - 1;
+    var candidate:   u64 = (expected & ~mask) | truncated::u64;
 
     if (candidate + half_window <= expected && candidate <= MAX_PACKET_NUMBER - window) {
         candidate = candidate + window;
-    } or (candidate > expected + half_window && candidate >= window) {
+    }
+    or (candidate > expected + half_window && candidate >= window) {
         candidate = candidate - window;
     }
     if (candidate > MAX_PACKET_NUMBER) { ret MAX_PACKET_NUMBER + 1; }
@@ -203,7 +205,7 @@ pub fun version_at(packet: *Packet, index: usize) u32 {
 
 fun decode_done(count: usize) DecodeResult {
     var r: DecodeResult;
-    r.status = STATUS_DONE;
+    r.status   = STATUS_DONE;
     r.consumed = count;
     ret r;
 }
@@ -211,7 +213,7 @@ fun decode_done(count: usize) DecodeResult {
 fun decode_failed(code: u8) DecodeResult {
     var r: DecodeResult;
     r.status = STATUS_ERROR;
-    r.error = code;
+    r.error  = code;
     ret r;
 }
 
@@ -245,7 +247,7 @@ fun take_span(d: *binary.Decoder, width: usize) Span {
     s.len = width;
     if (width > 0) {
         s.data = ?d.data[d.pos];
-        d.pos = d.pos + width;
+        d.pos  = d.pos + width;
     }
     ret s;
 }
@@ -282,15 +284,15 @@ fun kind_from_bits(version: u32, bits: u8) u8 {
 
 fun bits_from_kind(version: u32, kind: u8) u8 {
     if (version == VERSION_1) {
-        if (kind == PACKET_INITIAL) { ret 0; }
-        if (kind == PACKET_ZERO_RTT) { ret 1; }
+        if (kind == PACKET_INITIAL)   { ret 0; }
+        if (kind == PACKET_ZERO_RTT)  { ret 1; }
         if (kind == PACKET_HANDSHAKE) { ret 2; }
-        if (kind == PACKET_RETRY) { ret 3; }
+        if (kind == PACKET_RETRY)     { ret 3; }
     }
     if (version == VERSION_2) {
-        if (kind == PACKET_RETRY) { ret 0; }
-        if (kind == PACKET_INITIAL) { ret 1; }
-        if (kind == PACKET_ZERO_RTT) { ret 2; }
+        if (kind == PACKET_RETRY)     { ret 0; }
+        if (kind == PACKET_INITIAL)   { ret 1; }
+        if (kind == PACKET_ZERO_RTT)  { ret 2; }
         if (kind == PACKET_HANDSHAKE) { ret 3; }
     }
     ret 0xff;
@@ -307,49 +309,49 @@ fun parse_varint(d: *binary.Decoder, final: bool, value: *u64) DecodeResult {
 # decodes one unprotected packet and publishes cursor and output only on success
 pub fun decode(d: *binary.Decoder, final: bool, context: DecodeContext, limits: Limits, out: *Packet) DecodeResult {
     if (d == nil || out == nil || d.pos > d.len) { ret decode_failed(ERROR_OUTPUT); }
-    val start: usize = d.pos;
+    val start:  usize          = d.pos;
     var cursor: binary.Decoder = @d;
     if (!span_fits(?cursor, 1)) { ret decode_missing(final, 1); }
-    if (cursor.data == nil) { ret decode_failed(ERROR_OUTPUT); }
+    if (cursor.data == nil)     { ret decode_failed(ERROR_OUTPUT); }
 
     var packet: Packet;
-    val first: u8 = take_u8(?cursor);
+    val first:  u8 = take_u8(?cursor);
     if ((first & 0x80) == 0) {
-        if (!final) { ret decode_missing(false, 1); }
-        if ((first & 0x40) == 0) { ret decode_failed(ERROR_FIXED_BIT); }
-        if ((first & 0x18) != 0) { ret decode_failed(ERROR_HEADER_FORM); }
+        if (!final)                                                   { ret decode_missing(false, 1); }
+        if ((first & 0x40) == 0)                                      { ret decode_failed(ERROR_FIXED_BIT); }
+        if ((first & 0x18) != 0)                                      { ret decode_failed(ERROR_HEADER_FORM); }
         if (context.short_destination_len::usize > MAX_CONNECTION_ID) { ret decode_failed(ERROR_CONNECTION_ID); }
-        if (cursor.len - start > limits.max_packet_size) { ret decode_failed(ERROR_LIMIT); }
+        if (cursor.len - start > limits.max_packet_size)              { ret decode_failed(ERROR_LIMIT); }
 
         val pn_width: usize = ((first & 0x03) + 1)::usize;
         val required: usize = context.short_destination_len::usize + pn_width;
         if (!span_fits(?cursor, required)) { ret decode_missing(true, required); }
 
-        packet.header.kind = PACKET_ONE_RTT;
-        packet.header.version = context.version;
-        packet.header.spin = (first & 0x20) != 0;
-        packet.header.key_phase = (first & 0x04) != 0;
+        packet.header.kind              = PACKET_ONE_RTT;
+        packet.header.version           = context.version;
+        packet.header.spin              = (first & 0x20) != 0;
+        packet.header.key_phase         = (first & 0x04) != 0;
         packet.header.packet_number_len = pn_width::u8;
-        packet.header.destination = take_connection_id(?cursor, context.short_destination_len::usize);
+        packet.header.destination       = take_connection_id(?cursor, context.short_destination_len::usize);
         val truncated: u32 = binary.get_uint(?cursor.data[cursor.pos], pn_width, binary.BIG)::u32;
-        cursor.pos = cursor.pos + pn_width;
+        cursor.pos                            = cursor.pos + pn_width;
         packet.header.truncated_packet_number = truncated;
-        packet.header.packet_number = reconstruct_packet_number(context.expected_packet_number, truncated, pn_width::u8);
+        packet.header.packet_number           = reconstruct_packet_number(context.expected_packet_number, truncated, pn_width::u8);
         if (packet.header.packet_number > MAX_PACKET_NUMBER) { ret decode_failed(ERROR_PACKET_NUMBER); }
         packet.payload = take_span(?cursor, cursor.len - cursor.pos);
-        @out = packet;
-        d.pos = cursor.pos;
+        @out           = packet;
+        d.pos          = cursor.pos;
         ret decode_done(cursor.pos - start);
     }
 
     if (!span_fits(?cursor, 5)) { ret decode_missing(final, 5); }
     packet.header.version = take_u32(?cursor);
     val destination_len: usize = take_u8(?cursor)::usize;
-    if (destination_len > MAX_CONNECTION_ID) { ret decode_failed(ERROR_CONNECTION_ID); }
+    if (destination_len > MAX_CONNECTION_ID)      { ret decode_failed(ERROR_CONNECTION_ID); }
     if (!span_fits(?cursor, destination_len + 1)) { ret decode_missing(final, destination_len + 1); }
     packet.header.destination = take_connection_id(?cursor, destination_len);
     val source_len: usize = take_u8(?cursor)::usize;
-    if (source_len > MAX_CONNECTION_ID) { ret decode_failed(ERROR_CONNECTION_ID); }
+    if (source_len > MAX_CONNECTION_ID)  { ret decode_failed(ERROR_CONNECTION_ID); }
     if (!span_fits(?cursor, source_len)) { ret decode_missing(final, source_len); }
     packet.header.source = take_connection_id(?cursor, source_len);
 
@@ -357,16 +359,16 @@ pub fun decode(d: *binary.Decoder, final: bool, context: DecodeContext, limits: 
         if (!final) { ret decode_missing(false, 4); }
         val version_bytes: usize = cursor.len - cursor.pos;
         if (version_bytes == 0 || (version_bytes & 3) != 0) { ret decode_failed(ERROR_VERSION_LIST); }
-        if (version_bytes / 4 > limits.max_versions) { ret decode_failed(ERROR_LIMIT); }
+        if (version_bytes / 4 > limits.max_versions)        { ret decode_failed(ERROR_LIMIT); }
         packet.header.kind = PACKET_VERSION_NEGOTIATION;
-        packet.versions = take_span(?cursor, version_bytes);
+        packet.versions    = take_span(?cursor, version_bytes);
         var i: usize = 0;
         for (i < version_bytes / 4) {
             if (version_at(?packet, i) == 0) { ret decode_failed(ERROR_VERSION_LIST); }
             i = i + 1;
         }
         if (cursor.pos - start > limits.max_packet_size) { ret decode_failed(ERROR_LIMIT); }
-        @out = packet;
+        @out  = packet;
         d.pos = cursor.pos;
         ret decode_done(cursor.pos - start);
     }
@@ -375,9 +377,9 @@ pub fun decode(d: *binary.Decoder, final: bool, context: DecodeContext, limits: 
     if (!known_version(packet.header.version)) {
         if (!final) { ret decode_missing(false, 1); }
         packet.header.kind = PACKET_UNKNOWN_VERSION;
-        packet.payload = take_span(?cursor, cursor.len - cursor.pos);
+        packet.payload     = take_span(?cursor, cursor.len - cursor.pos);
         if (cursor.pos - start > limits.max_packet_size) { ret decode_failed(ERROR_LIMIT); }
-        @out = packet;
+        @out  = packet;
         d.pos = cursor.pos;
         ret decode_done(cursor.pos - start);
     }
@@ -390,11 +392,11 @@ pub fun decode(d: *binary.Decoder, final: bool, context: DecodeContext, limits: 
         val token_len: usize = remaining - RETRY_INTEGRITY_TAG;
         if (token_len > limits.max_token_size) { ret decode_failed(ERROR_LIMIT); }
         packet.header.retry_bits = first & 0x0f;
-        packet.token = take_span(?cursor, token_len);
+        packet.token             = take_span(?cursor, token_len);
         memory.copy[u8](?packet.integrity_tag[0], ?cursor.data[cursor.pos], RETRY_INTEGRITY_TAG);
         cursor.pos = cursor.pos + RETRY_INTEGRITY_TAG;
         if (cursor.pos - start > limits.max_packet_size) { ret decode_failed(ERROR_LIMIT); }
-        @out = packet;
+        @out  = packet;
         d.pos = cursor.pos;
         ret decode_done(cursor.pos - start);
     }
@@ -402,36 +404,36 @@ pub fun decode(d: *binary.Decoder, final: bool, context: DecodeContext, limits: 
     if ((first & 0x0c) != 0) { ret decode_failed(ERROR_HEADER_FORM); }
 
     if (packet.header.kind == PACKET_INITIAL) {
-        var token_len_value: u64 = 0;
-        val token_result: DecodeResult = parse_varint(?cursor, final, ?token_len_value);
-        if (token_result.status != STATUS_DONE) { ret token_result; }
+        var token_len_value: u64          = 0;
+        val token_result:    DecodeResult = parse_varint(?cursor, final, ?token_len_value);
+        if (token_result.status != STATUS_DONE)           { ret token_result; }
         if (token_len_value > limits.max_token_size::u64) { ret decode_failed(ERROR_LIMIT); }
         val token_len: usize = token_len_value::usize;
         if (!span_fits(?cursor, token_len)) { ret decode_missing(final, token_len); }
         packet.token = take_span(?cursor, token_len);
     }
 
-    var encoded_length: u64 = 0;
-    val length_result: DecodeResult = parse_varint(?cursor, final, ?encoded_length);
+    var encoded_length: u64          = 0;
+    val length_result:  DecodeResult = parse_varint(?cursor, final, ?encoded_length);
     if (length_result.status != STATUS_DONE) { ret length_result; }
     val pn_width: usize = ((first & 0x03) + 1)::usize;
     if (encoded_length < pn_width::u64 || encoded_length > limits.max_packet_size::u64) {
         ret decode_failed(ERROR_PACKET_LENGTH);
     }
     val packet_tail: usize = encoded_length::usize;
-    if (!span_fits(?cursor, packet_tail)) { ret decode_missing(final, packet_tail); }
-    if (cursor.pos - start > limits.max_packet_size) { ret decode_failed(ERROR_LIMIT); }
+    if (!span_fits(?cursor, packet_tail))                            { ret decode_missing(final, packet_tail); }
+    if (cursor.pos - start > limits.max_packet_size)                 { ret decode_failed(ERROR_LIMIT); }
     if (packet_tail > limits.max_packet_size - (cursor.pos - start)) { ret decode_failed(ERROR_LIMIT); }
 
     packet.header.packet_number_len = pn_width::u8;
     val truncated: u32 = binary.get_uint(?cursor.data[cursor.pos], pn_width, binary.BIG)::u32;
-    cursor.pos = cursor.pos + pn_width;
+    cursor.pos                            = cursor.pos + pn_width;
     packet.header.truncated_packet_number = truncated;
-    packet.header.packet_number = reconstruct_packet_number(context.expected_packet_number, truncated, pn_width::u8);
+    packet.header.packet_number           = reconstruct_packet_number(context.expected_packet_number, truncated, pn_width::u8);
     if (packet.header.packet_number > MAX_PACKET_NUMBER) { ret decode_failed(ERROR_PACKET_NUMBER); }
     packet.payload = take_span(?cursor, packet_tail - pn_width);
 
-    @out = packet;
+    @out  = packet;
     d.pos = cursor.pos;
     ret decode_done(cursor.pos - start);
 }
@@ -474,7 +476,8 @@ pub fun encoded_size(packet: *Packet, limits: Limits) EncodeResult {
         if (!add_count(?count, packet.header.destination.len::usize, limits.max_packet_size) ||
             !add_count(?count, packet.header.packet_number_len::usize, limits.max_packet_size) ||
             !add_count(?count, packet.payload.len, limits.max_packet_size)) { ret encode_failed(ERROR_LIMIT); }
-    } or {
+    }
+    or {
         if (!add_count(?count, 4, limits.max_packet_size) ||
             !add_count(?count, 1, limits.max_packet_size) ||
             !add_count(?count, packet.header.destination.len::usize, limits.max_packet_size) ||
@@ -490,13 +493,15 @@ pub fun encoded_size(packet: *Packet, limits: Limits) EncodeResult {
                 i = i + 1;
             }
             if (!add_count(?count, packet.versions.len, limits.max_packet_size)) { ret encode_failed(ERROR_LIMIT); }
-        } or (packet.header.kind == PACKET_RETRY) {
+        }
+        or (packet.header.kind == PACKET_RETRY) {
             if (!known_version(packet.header.version) || packet.token.len == 0 || !validate_span(packet.token, limits.max_token_size)) {
                 ret encode_failed(ERROR_RETRY);
             }
             if (!add_count(?count, packet.token.len, limits.max_packet_size) ||
                 !add_count(?count, RETRY_INTEGRITY_TAG, limits.max_packet_size)) { ret encode_failed(ERROR_LIMIT); }
-        } or {
+        }
+        or {
             if (bits_from_kind(packet.header.version, packet.header.kind) == 0xff) { ret encode_failed(ERROR_KIND); }
             if (packet.header.packet_number_len < 1 || packet.header.packet_number_len > 4 || packet.header.packet_number > MAX_PACKET_NUMBER) {
                 ret encode_failed(ERROR_PACKET_NUMBER);
@@ -519,7 +524,7 @@ pub fun encoded_size(packet: *Packet, limits: Limits) EncodeResult {
     }
     if (count > limits.max_packet_size) { ret encode_failed(ERROR_LIMIT); }
     var r: EncodeResult;
-    r.ok = true;
+    r.ok    = true;
     r.count = count;
     ret r;
 }
@@ -532,25 +537,28 @@ pub fun encode(b: *binary.Builder, packet: *Packet, limits: Limits) EncodeResult
     val reserved_result: res[binary.Reservation, binary.EncodeError] = binary.builder_reserve(b, measured.count);
     if (sel reserved_result.err) { ret encode_failed(ERROR_OUTPUT); }
     var reservation: binary.Reservation = reserved_result.ok;
-    val body: *binary.Builder = ?reservation.body;
+    val body:        *binary.Builder    = ?reservation.body;
 
     var first: u8 = 0;
     if (packet.header.kind == PACKET_ONE_RTT) {
         first = 0x40 | (packet.header.packet_number_len - 1);
-        if (packet.header.spin) { first = first | 0x20; }
+        if (packet.header.spin)      { first = first | 0x20; }
         if (packet.header.key_phase) { first = first | 0x04; }
         if (!write_ok(binary.builder_write_u8(body, first)) ||
             !write_ok(binary.builder_write_bytes(body, ?packet.header.destination.data[0], packet.header.destination.len::usize))) {
             binary.reservation_rollback(?reservation);
             ret encode_failed(ERROR_OUTPUT);
         }
-    } or {
+    }
+    or {
         first = 0xc0;
         if (packet.header.kind == PACKET_VERSION_NEGOTIATION) {
             first = 0x80 | (packet.header.retry_bits & 0x7f);
-        } or (packet.header.kind == PACKET_RETRY) {
+        }
+        or (packet.header.kind == PACKET_RETRY) {
             first = first | (bits_from_kind(packet.header.version, packet.header.kind) << 4) | (packet.header.retry_bits & 0x0f);
-        } or {
+        }
+        or {
             first = first | (bits_from_kind(packet.header.version, packet.header.kind) << 4) | (packet.header.packet_number_len - 1);
         }
         if (!write_ok(binary.builder_write_u8(body, first)) ||
@@ -567,7 +575,8 @@ pub fun encode(b: *binary.Builder, packet: *Packet, limits: Limits) EncodeResult
                 binary.reservation_rollback(?reservation);
                 ret encode_failed(ERROR_OUTPUT);
             }
-        } or (packet.header.kind == PACKET_RETRY) {
+        }
+        or (packet.header.kind == PACKET_RETRY) {
             if (!write_ok(binary.builder_write_bytes(body, packet.token.data, packet.token.len)) ||
                 !write_ok(binary.builder_write_bytes(body, ?packet.integrity_tag[0], RETRY_INTEGRITY_TAG))) {
                 binary.reservation_rollback(?reservation);
@@ -592,9 +601,9 @@ pub fun encode(b: *binary.Builder, packet: *Packet, limits: Limits) EncodeResult
     }
 
     if (packet.header.kind == PACKET_ONE_RTT || (packet.header.kind != PACKET_VERSION_NEGOTIATION && packet.header.kind != PACKET_RETRY)) {
-        val truncated: u32 = truncate_packet_number(packet.header.packet_number, packet.header.packet_number_len);
-        val pn_width: usize = packet.header.packet_number_len::usize;
-        var pn_bytes: [4]u8;
+        val truncated: u32   = truncate_packet_number(packet.header.packet_number, packet.header.packet_number_len);
+        val pn_width:  usize = packet.header.packet_number_len::usize;
+        var pn_bytes:  [4]u8;
         binary.put_uint(?pn_bytes[0], truncated::u64, pn_width, binary.BIG);
         if (!write_ok(binary.builder_write_bytes(body, ?pn_bytes[0], pn_width)) ||
             !write_ok(binary.builder_write_bytes(body, packet.payload.data, packet.payload.len))) {
@@ -608,15 +617,15 @@ pub fun encode(b: *binary.Builder, packet: *Packet, limits: Limits) EncodeResult
         ret encode_failed(ERROR_OUTPUT);
     }
     var encoded: EncodeResult;
-    encoded.ok = true;
+    encoded.ok    = true;
     encoded.count = measured.count;
     ret encoded;
 }
 
 # encodes authenticated header bytes with the ciphertext length in the long header
 pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
-                                ciphertext_length: usize,
-                                limits: Limits) ProtectedHeaderResult {
+    ciphertext_length: usize,
+    limits: Limits) ProtectedHeaderResult {
     var result: ProtectedHeaderResult;
     if (b == nil || value == nil || b.order != binary.BIG ||
         value.header.packet_number_len < 1 || value.header.packet_number_len > 4 ||
@@ -628,19 +637,20 @@ pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
         ret result;
     }
     val start: usize = b.len;
-    var first: u8 = 0x40 | (value.header.packet_number_len - 1);
+    var first: u8    = 0x40 | (value.header.packet_number_len - 1);
     if (value.header.kind == PACKET_ONE_RTT) {
-        if (value.header.spin) { first = first | 0x20; }
+        if (value.header.spin)      { first = first | 0x20; }
         if (value.header.key_phase) { first = first | 0x04; }
         if (!write_ok(binary.builder_write_u8(b, first)) ||
             !write_ok(binary.builder_write_bytes(b,
-                ?value.header.destination.data[0],
-                value.header.destination.len::usize))) {
-            b.len = start;
+            ?value.header.destination.data[0],
+            value.header.destination.len::usize))) {
+            b.len        = start;
             result.error = ERROR_OUTPUT;
             ret result;
         }
-    } or {
+    }
+    or {
         val bits: u8 = bits_from_kind(value.header.version, value.header.kind);
         if (bits == 0xff || value.header.kind == PACKET_RETRY ||
             value.header.kind == PACKET_VERSION_NEGOTIATION) {
@@ -652,12 +662,12 @@ pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
             !write_ok(binary.builder_write_u32(b, value.header.version)) ||
             !write_ok(binary.builder_write_u8(b, value.header.destination.len)) ||
             !write_ok(binary.builder_write_bytes(b,
-                ?value.header.destination.data[0],
-                value.header.destination.len::usize)) ||
+            ?value.header.destination.data[0],
+            value.header.destination.len::usize)) ||
             !write_ok(binary.builder_write_u8(b, value.header.source.len)) ||
             !write_ok(binary.builder_write_bytes(b, ?value.header.source.data[0],
-                value.header.source.len::usize))) {
-            b.len = start;
+            value.header.source.len::usize))) {
+            b.len        = start;
             result.error = ERROR_OUTPUT;
             ret result;
         }
@@ -665,8 +675,8 @@ pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
             if (!validate_span(value.token, limits.max_token_size) ||
                 !varint_ok(varint.write(b, value.token.len::u64, 0)) ||
                 !write_ok(binary.builder_write_bytes(b, value.token.data,
-                    value.token.len))) {
-                b.len = start;
+                value.token.len))) {
+                b.len        = start;
                 result.error = ERROR_TOKEN_LENGTH;
                 ret result;
             }
@@ -674,8 +684,8 @@ pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
         if (ciphertext_length > limits.max_packet_size -
             value.header.packet_number_len::usize ||
             !varint_ok(varint.write(b,
-                value.header.packet_number_len::u64 + ciphertext_length::u64, 0))) {
-            b.len = start;
+            value.header.packet_number_len::u64 + ciphertext_length::u64, 0))) {
+            b.len        = start;
             result.error = ERROR_PACKET_LENGTH;
             ret result;
         }
@@ -688,18 +698,18 @@ pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
         value.header.packet_number_len::usize, binary.BIG);
     if (!write_ok(binary.builder_write_bytes(b, ?encoded_number[0],
         value.header.packet_number_len::usize)) || b.len - start > limits.max_packet_size) {
-        b.len = start;
+        b.len        = start;
         result.error = ERROR_OUTPUT;
         ret result;
     }
-    result.ok = true;
-    result.count = b.len - start;
+    result.ok                   = true;
+    result.count                = b.len - start;
     result.packet_number_offset = result.packet_number_offset - start;
     ret result;
 }
 
 test "quic.packet.packet: packet types map to number spaces" {
-    if (number_space(PACKET_INITIAL) != SPACE_INITIAL) { ret 1; }
+    if (number_space(PACKET_INITIAL) != SPACE_INITIAL)     { ret 1; }
     if (number_space(PACKET_HANDSHAKE) != SPACE_HANDSHAKE) { ret 1; }
     if (number_space(PACKET_ONE_RTT) != SPACE_APPLICATION) { ret 1; }
     ret 0;
@@ -707,14 +717,14 @@ test "quic.packet.packet: packet types map to number spaces" {
 
 test "quic.packet.packet: protected headers include authentication tag length" {
     var value: Packet;
-    value.header.kind = PACKET_INITIAL;
-    value.header.version = VERSION_1;
-    value.header.destination.len = 8;
-    value.header.source.len = 8;
+    value.header.kind              = PACKET_INITIAL;
+    value.header.version           = VERSION_1;
+    value.header.destination.len   = 8;
+    value.header.source.len        = 8;
     value.header.packet_number_len = 2;
-    value.header.packet_number = 0x1234;
-    var bytes: [64]u8;
-    var builder: binary.Builder = binary.builder(?bytes[0], 64, binary.BIG);
+    value.header.packet_number     = 0x1234;
+    var bytes:   [64]u8;
+    var builder: binary.Builder        = binary.builder(?bytes[0], 64, binary.BIG);
     val encoded: ProtectedHeaderResult = encode_protected_header(?builder,
         ?value, 32, default_limits());
     if (!encoded.ok || encoded.packet_number_offset != 25 || encoded.count != 27 ||
@@ -725,53 +735,53 @@ test "quic.packet.packet: protected headers include authentication tag length" {
 
 test "quic.packet.packet: RFC packet number reconstruction vectors" {
     if (reconstruct_packet_number(0xa82f30ea, 0x9b32, 2) != 0xa82f9b32) { ret 1; }
-    if (packet_number_width(0xabe8bc, 0xabe8b3) != 1) { ret 1; }
-    if (truncate_packet_number(0xabe8bc, 1) != 0xbc) { ret 1; }
-    if (packet_number_width(0, 0 - 1::u64) != 1) { ret 1; }
-    if (packet_number_width(128, 0) != 1) { ret 1; }
-    if (packet_number_width(129, 0) != 2) { ret 1; }
+    if (packet_number_width(0xabe8bc, 0xabe8b3) != 1)                   { ret 1; }
+    if (truncate_packet_number(0xabe8bc, 1) != 0xbc)                    { ret 1; }
+    if (packet_number_width(0, 0 - 1::u64) != 1)                        { ret 1; }
+    if (packet_number_width(128, 0) != 1)                               { ret 1; }
+    if (packet_number_width(129, 0) != 2)                               { ret 1; }
     if (reconstruct_packet_number(MAX_PACKET_NUMBER, 0xffffffff, 4) !=
         MAX_PACKET_NUMBER ||
         reconstruct_packet_number(MAX_PACKET_NUMBER + 1, 0xffffffff, 4) !=
-            MAX_PACKET_NUMBER + 1) { ret 1; }
+        MAX_PACKET_NUMBER + 1) { ret 1; }
     ret 0;
 }
 
 fun fragmented_round_trip(packet: *Packet, context: DecodeContext) bool {
     var bytes: [256]u8;
-    var b: binary.Builder = binary.builder(?bytes[0], 256, binary.BIG);
+    var b:     binary.Builder = binary.builder(?bytes[0], 256, binary.BIG);
     if (!encode(?b, packet, default_limits()).ok) { ret false; }
     var prefix: usize = 0;
     for (prefix < b.len) {
-        var d: binary.Decoder = binary.decoder(?bytes[0], prefix, binary.BIG);
+        var d:   binary.Decoder = binary.decoder(?bytes[0], prefix, binary.BIG);
         var out: Packet;
         out.header.kind = 0xff;
         val r: DecodeResult = decode(?d, false, context, default_limits(), ?out);
         if (r.status != STATUS_MORE || d.pos != 0 || out.header.kind != 0xff) { ret false; }
         prefix = prefix + 1;
     }
-    var d: binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
+    var d:   binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
     var out: Packet;
-    val r: DecodeResult = decode(?d, true, context, default_limits(), ?out);
+    val r:   DecodeResult   = decode(?d, true, context, default_limits(), ?out);
     ret r.status == STATUS_DONE && d.pos == b.len && out.header.kind == packet.header.kind;
 }
 
 test "quic.packet.packet: every packet form accepts every-byte fragmentation" {
     var context: DecodeContext;
-    context.version = VERSION_1;
+    context.version                = VERSION_1;
     context.expected_packet_number = 1;
-    var payload: [2]u8 = [2]u8{1, 2};
-    var token: [1]u8 = [1]u8{3};
+    var payload:  [2]u8 = [2]u8{1, 2};
+    var token:    [1]u8 = [1]u8{3};
     var versions: [4]u8 = [4]u8{0, 0, 0, 1};
-    var packet: Packet;
-    packet.header.version = VERSION_1;
-    packet.header.packet_number = 1;
+    var packet:   Packet;
+    packet.header.version           = VERSION_1;
+    packet.header.packet_number     = 1;
     packet.header.packet_number_len = 1;
-    packet.payload.data = ?payload[0];
-    packet.payload.len = 2;
-    packet.token.data = ?token[0];
-    packet.token.len = 1;
-    packet.header.kind = PACKET_INITIAL;
+    packet.payload.data             = ?payload[0];
+    packet.payload.len              = 2;
+    packet.token.data               = ?token[0];
+    packet.token.len                = 1;
+    packet.header.kind              = PACKET_INITIAL;
     if (!fragmented_round_trip(?packet, context)) { ret 1; }
     packet.header.kind = PACKET_ZERO_RTT;
     if (!fragmented_round_trip(?packet, context)) { ret 1; }
@@ -781,22 +791,22 @@ test "quic.packet.packet: every packet form accepts every-byte fragmentation" {
     if (!fragmented_round_trip(?packet, context)) { ret 1; }
     packet.header.kind = PACKET_ONE_RTT;
     if (!fragmented_round_trip(?packet, context)) { ret 1; }
-    packet.header.kind = PACKET_VERSION_NEGOTIATION;
+    packet.header.kind    = PACKET_VERSION_NEGOTIATION;
     packet.header.version = 0;
-    packet.versions.data = ?versions[0];
-    packet.versions.len = 4;
+    packet.versions.data  = ?versions[0];
+    packet.versions.len   = 4;
     if (!fragmented_round_trip(?packet, context)) { ret 1; }
     ret 0;
 }
 
 test "quic.packet.packet: malformed headers and lengths fail without mutation" {
     val reserved_short: [2]u8 = [2]u8{0x58, 0};
-    var context: DecodeContext;
+    var context:        DecodeContext;
     context.expected_packet_number = 0;
     var out: Packet;
     out.header.kind = 0xaa;
-    var d: binary.Decoder = binary.decoder(?reserved_short[0], 2, binary.BIG);
-    val short_result: DecodeResult = decode(?d, true, context, default_limits(), ?out);
+    var d:            binary.Decoder = binary.decoder(?reserved_short[0], 2, binary.BIG);
+    val short_result: DecodeResult   = decode(?d, true, context, default_limits(), ?out);
     if (short_result.error != ERROR_HEADER_FORM || d.pos != 0 || out.header.kind != 0xaa) { ret 1; }
     val bad_cid: [6]u8 = [6]u8{0xc0, 0, 0, 0, 1, 21};
     d = binary.decoder(?bad_cid[0], 6, binary.BIG);
@@ -806,66 +816,66 @@ test "quic.packet.packet: malformed headers and lengths fail without mutation" {
 
 test "quic.packet.packet: initial packet round trips transactionally" {
     var cid_bytes: [8]u8 = [8]u8{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08};
-    var token: [3]u8 = [3]u8{1, 2, 3};
-    var payload: [5]u8 = [5]u8{4, 5, 6, 7, 8};
-    var packet: Packet;
-    packet.header.kind = PACKET_INITIAL;
-    packet.header.version = VERSION_1;
-    packet.header.packet_number = 2;
+    var token:     [3]u8 = [3]u8{1, 2, 3};
+    var payload:   [5]u8 = [5]u8{4, 5, 6, 7, 8};
+    var packet:    Packet;
+    packet.header.kind              = PACKET_INITIAL;
+    packet.header.version           = VERSION_1;
+    packet.header.packet_number     = 2;
     packet.header.packet_number_len = 2;
     if (!set_connection_id(?packet.header.destination, ?cid_bytes[0], 8)) { ret 1; }
-    packet.token.data = ?token[0];
-    packet.token.len = 3;
+    packet.token.data   = ?token[0];
+    packet.token.len    = 3;
     packet.payload.data = ?payload[0];
-    packet.payload.len = 5;
+    packet.payload.len  = 5;
 
     var encoded: [128]u8;
-    var b: binary.Builder = binary.builder(?encoded[0], 128, binary.BIG);
-    val er: EncodeResult = encode(?b, ?packet, default_limits());
+    var b:       binary.Builder = binary.builder(?encoded[0], 128, binary.BIG);
+    val er:      EncodeResult   = encode(?b, ?packet, default_limits());
     if (!er.ok || er.count != b.len) { ret 1; }
 
     var context: DecodeContext;
-    context.version = VERSION_1;
+    context.version                = VERSION_1;
     context.expected_packet_number = 2;
     var out: Packet;
     out.header.kind = 0xff;
     var prefix: usize = 0;
     for (prefix < b.len) {
         var partial: binary.Decoder = binary.decoder(?encoded[0], prefix, binary.BIG);
-        val pr: DecodeResult = decode(?partial, false, context, default_limits(), ?out);
+        val pr:      DecodeResult   = decode(?partial, false, context, default_limits(), ?out);
         if (pr.status != STATUS_MORE || partial.pos != 0 || out.header.kind != 0xff) { ret 1; }
         prefix = prefix + 1;
     }
-    var d: binary.Decoder = binary.decoder(?encoded[0], b.len, binary.BIG);
-    val dr: DecodeResult = decode(?d, true, context, default_limits(), ?out);
+    var d:  binary.Decoder = binary.decoder(?encoded[0], b.len, binary.BIG);
+    val dr: DecodeResult   = decode(?d, true, context, default_limits(), ?out);
     if (dr.status != STATUS_DONE || d.pos != b.len || out.header.kind != PACKET_INITIAL) { ret 1; }
-    if (out.header.packet_number != 2 || out.token.len != 3 || out.payload.len != 5) { ret 1; }
+    if (out.header.packet_number != 2 || out.token.len != 3 || out.payload.len != 5)     { ret 1; }
     ret 0;
 }
 
 test "quic.packet.packet: version negotiation and Retry are bounded" {
     var versions: [8]u8 = [8]u8{0, 0, 0, 1, 0x6b, 0x33, 0x43, 0xcf};
-    var packet: Packet;
-    packet.header.kind = PACKET_VERSION_NEGOTIATION;
+    var packet:   Packet;
+    packet.header.kind   = PACKET_VERSION_NEGOTIATION;
     packet.versions.data = ?versions[0];
-    packet.versions.len = 8;
+    packet.versions.len  = 8;
     var bytes: [64]u8;
-    var b: binary.Builder = binary.builder(?bytes[0], 64, binary.BIG);
+    var b:     binary.Builder = binary.builder(?bytes[0], 64, binary.BIG);
     if (!encode(?b, ?packet, default_limits()).ok) { ret 1; }
     var context: DecodeContext;
-    var out: Packet;
-    var d: binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
-    if (decode(?d, true, context, default_limits(), ?out).status != STATUS_DONE) { ret 1; }
+    var out:     Packet;
+    var d:       binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
+    if (decode(?d, true, context, default_limits(), ?out).status != STATUS_DONE)           { ret 1; }
     if (out.header.kind != PACKET_VERSION_NEGOTIATION || version_at(?out, 1) != VERSION_2) { ret 1; }
 
     var token: [1]u8 = [1]u8{0xaa};
-    packet.header.kind = PACKET_RETRY;
+    packet.header.kind    = PACKET_RETRY;
     packet.header.version = VERSION_1;
-    packet.token.data = ?token[0];
-    packet.token.len = 1;
-    b = binary.builder(?bytes[0], 64, binary.BIG);
+    packet.token.data     = ?token[0];
+    packet.token.len      = 1;
+    b                     = binary.builder(?bytes[0], 64, binary.BIG);
     if (!encode(?b, ?packet, default_limits()).ok) { ret 1; }
-    d = binary.decoder(?bytes[0], b.len - 1, binary.BIG);
+    d               = binary.decoder(?bytes[0], b.len - 1, binary.BIG);
     out.header.kind = 0xee;
     if (decode(?d, true, context, default_limits(), ?out).status != STATUS_ERROR || d.pos != 0 || out.header.kind != 0xee) { ret 1; }
     ret 0;
@@ -879,13 +889,13 @@ test "quic.packet.packet: RFC 9001 Retry vector decodes and re-encodes exactly" 
         0x0f, 0x24, 0x96, 0xba
     };
     var context: DecodeContext;
-    var packet: Packet;
-    var d: binary.Decoder = binary.decoder(?vector[0], 36, binary.BIG);
-    val decoded: DecodeResult = decode(?d, true, context, default_limits(), ?packet);
+    var packet:  Packet;
+    var d:       binary.Decoder = binary.decoder(?vector[0], 36, binary.BIG);
+    val decoded: DecodeResult   = decode(?d, true, context, default_limits(), ?packet);
     if (decoded.status != STATUS_DONE || packet.header.kind != PACKET_RETRY || packet.token.len != 5) { ret 1; }
-    if (packet.header.source.len != 8 || packet.header.retry_bits != 0x0f) { ret 1; }
+    if (packet.header.source.len != 8 || packet.header.retry_bits != 0x0f)                            { ret 1; }
     var output: [36]u8;
-    var b: binary.Builder = binary.builder(?output[0], 36, binary.BIG);
+    var b:      binary.Builder = binary.builder(?output[0], 36, binary.BIG);
     if (!encode(?b, ?packet, default_limits()).ok || b.len != 36) { ret 1; }
     var i: usize = 0;
     for (i < 36) {
@@ -897,15 +907,15 @@ test "quic.packet.packet: RFC 9001 Retry vector decodes and re-encodes exactly" 
 
 test "quic.packet.packet: fixed builder failure publishes no packet" {
     var payload: [2]u8 = [2]u8{1, 2};
-    var packet: Packet;
-    packet.header.kind = PACKET_ONE_RTT;
-    packet.header.version = VERSION_1;
-    packet.header.packet_number = 1;
+    var packet:  Packet;
+    packet.header.kind              = PACKET_ONE_RTT;
+    packet.header.version           = VERSION_1;
+    packet.header.packet_number     = 1;
     packet.header.packet_number_len = 1;
-    packet.payload.data = ?payload[0];
-    packet.payload.len = 2;
+    packet.payload.data             = ?payload[0];
+    packet.payload.len              = 2;
     var tiny: [2]u8;
-    var b: binary.Builder = binary.builder(?tiny[0], 2, binary.BIG);
+    var b:    binary.Builder = binary.builder(?tiny[0], 2, binary.BIG);
     if (encode(?b, ?packet, default_limits()).ok || b.len != 0) { ret 1; }
     ret 0;
 }
@@ -916,14 +926,14 @@ test "quic.packet.packet: a short header decodes from a defined context" {
     val context: DecodeContext = empty_decode_context();
     if (context.version != 0 || context.expected_packet_number != 0 ||
         context.short_destination_len != 0) { ret 1; }
-    val short: [3]u8 = [3]u8{0x40, 0x07, 0xaa};
-    var out: Packet;
-    var d: binary.Decoder = binary.decoder(?short[0], 3, binary.BIG);
-    val r: DecodeResult = decode(?d, true, context, default_limits(), ?out);
-    if (r.status != STATUS_DONE) { ret 2; }
+    val short: [3]u8          = [3]u8{0x40, 0x07, 0xaa};
+    var out:   Packet;
+    var d:     binary.Decoder = binary.decoder(?short[0], 3, binary.BIG);
+    val r:     DecodeResult   = decode(?d, true, context, default_limits(), ?out);
+    if (r.status != STATUS_DONE)           { ret 2; }
     if (out.header.kind != PACKET_ONE_RTT) { ret 3; }
-    if (out.header.destination.len != 0) { ret 4; }
-    if (out.header.version != 0) { ret 5; }
-    if (out.header.packet_number != 7) { ret 6; }
+    if (out.header.destination.len != 0)   { ret 4; }
+    if (out.header.version != 0)           { ret 5; }
+    if (out.header.packet_number != 7)     { ret 6; }
     ret 0;
 }

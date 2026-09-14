@@ -7,24 +7,24 @@ use std.types.size.usize;
 
 pub def ZeroPolicy: u8;
 pub val ZERO_FORBIDDEN: ZeroPolicy = 1;
-pub val ZERO_ALLOWED: ZeroPolicy = 2;
+pub val ZERO_ALLOWED:   ZeroPolicy = 2;
 
 pub rec Range {
-    start: usize;
+    start:  usize;
     length: usize;
-    valid: bool;
+    valid:  bool;
 }
 
 rec AnchoredFixture {
     secret: [8]^u8;
     anchor: u64;
-    tail: u8;
+    tail:   u8;
 }
 
 pub fun address(start: usize, length: usize,
-                zero_policy: ZeroPolicy) Range {
+    zero_policy: ZeroPolicy) Range {
     var value: Range;
-    value.start = start;
+    value.start  = start;
     value.length = length;
     if (zero_policy != ZERO_FORBIDDEN && zero_policy != ZERO_ALLOWED) { ret value; }
     if (length == 0) {
@@ -76,7 +76,7 @@ pub fun anchored_record[T, U](anchor: *U, offset: usize) Range {
 }
 
 pub fun array(data: *u8, count: usize, item_size: usize,
-              zero_policy: ZeroPolicy) Range {
+    zero_policy: ZeroPolicy) Range {
     var value: Range;
     value.start = data::usize;
     if (item_size == 0 || (count != 0 && item_size > ~(0::usize) / count)) {
@@ -86,12 +86,12 @@ pub fun array(data: *u8, count: usize, item_size: usize,
 }
 
 pub fun disjoint(left: Range, right: Range) bool {
-    if (!left.valid || !right.valid) { ret false; }
+    if (!left.valid || !right.valid)           { ret false; }
     if (left.length == 0 || right.length == 0) { ret true; }
-    val left_start: usize = left.start;
+    val left_start:  usize = left.start;
     val right_start: usize = right.start;
-    val left_end: usize = left_start + left.length - 1;
-    val right_end: usize = right_start + right.length - 1;
+    val left_end:    usize = left_start + left.length - 1;
+    val right_end:   usize = right_start + right.length - 1;
     ret left_end < right_start || right_end < left_start;
 }
 
@@ -105,7 +105,7 @@ pub fun contains(outer: Range, inner: Range) bool {
 }
 
 pub fun secret_disjoint(left: *^u8, left_length: usize,
-                        right: *^u8, right_length: usize) bool {
+    right: *^u8, right_length: usize) bool {
     if (left == nil || right == nil || left_length == 0 || right_length == 0) {
         ret false;
     }
@@ -123,38 +123,41 @@ pub fun secret_disjoint(left: *^u8, left_length: usize,
 }
 
 pub def Overlap: u8;
-pub val OVERLAP_NONE: Overlap = 0;
-pub val OVERLAP_LIST_INVALID: Overlap = 1;
+pub val OVERLAP_NONE:          Overlap = 0;
+pub val OVERLAP_LIST_INVALID:  Overlap = 1;
 pub val OVERLAP_RANGE_INVALID: Overlap = 2;
-pub val OVERLAP_PAIR: Overlap = 3;
+pub val OVERLAP_PAIR:          Overlap = 3;
 
 # which range failed, and which one it collided with, so a caller is not left
 # bisecting a list it did not build
 pub rec Disjointness {
-    kind: Overlap;
-    first: usize;
+    kind:   Overlap;
+    first:  usize;
     second: usize;
 }
 
 pub fun disjointness(ranges: *Range, count: usize) Disjointness {
     var value: Disjointness;
-    value.kind = OVERLAP_NONE;
-    value.first = 0;
+    value.kind   = OVERLAP_NONE;
+    value.first  = 0;
     value.second = 0;
     val list: Range = array(ranges::*u8, count, $size_of(Range), ZERO_FORBIDDEN);
-    if (!list.valid) { value.kind = OVERLAP_LIST_INVALID; ret value; }
+    if (!list.valid) {
+        value.kind = OVERLAP_LIST_INVALID;
+        ret value;
+    }
     var i: usize = 0;
     for (i < count) {
         if (!ranges[i].valid) {
-            value.kind = OVERLAP_RANGE_INVALID;
+            value.kind  = OVERLAP_RANGE_INVALID;
             value.first = i;
             ret value;
         }
         var j: usize = 0;
         for (j < i) {
             if (!disjoint(ranges[i], ranges[j])) {
-                value.kind = OVERLAP_PAIR;
-                value.first = j;
+                value.kind   = OVERLAP_PAIR;
+                value.first  = j;
                 value.second = i;
                 ret value;
             }
@@ -173,10 +176,10 @@ pub fun all_disjoint(ranges: *Range, count: usize) bool {
 # `index` is the subject's own position in whatever list the caller built, so a
 # refusal names both sides rather than only the one that was walked
 pub fun disjoint_from(subject: Range, index: usize, ranges: *Range,
-                      start: usize, count: usize) Disjointness {
+    start: usize, count: usize) Disjointness {
     var value: Disjointness;
-    value.kind = OVERLAP_NONE;
-    value.first = 0;
+    value.kind   = OVERLAP_NONE;
+    value.first  = 0;
     value.second = 0;
     val list: Range = array(ranges::*u8, count, $size_of(Range), ZERO_FORBIDDEN);
     if (!list.valid || start > count) {
@@ -184,15 +187,15 @@ pub fun disjoint_from(subject: Range, index: usize, ranges: *Range,
         ret value;
     }
     if (!subject.valid) {
-        value.kind = OVERLAP_RANGE_INVALID;
+        value.kind  = OVERLAP_RANGE_INVALID;
         value.first = index;
         ret value;
     }
     var j: usize = start;
     for (j < count) {
         if (!disjoint(subject, ranges[j])) {
-            value.kind = OVERLAP_PAIR;
-            value.first = index;
+            value.kind   = OVERLAP_PAIR;
+            value.first  = index;
             value.second = j;
             ret value;
         }
@@ -202,12 +205,12 @@ pub fun disjoint_from(subject: Range, index: usize, ranges: *Range,
 }
 
 test "quic.connection.ownership: inclusive maximum ranges are checked without wrapping" {
-    val maximum: usize = ~(0::usize);
-    val at_maximum: *u8 = maximum::*u8;
-    val before_maximum: *u8 = (maximum - 1)::*u8;
-    val last: Range = bytes(at_maximum, 1, ZERO_FORBIDDEN);
-    val prior: Range = bytes(before_maximum, 1, ZERO_FORBIDDEN);
-    val pair: Range = bytes(before_maximum, 2, ZERO_FORBIDDEN);
+    val maximum:        usize = ~(0::usize);
+    val at_maximum:     *u8   = maximum::*u8;
+    val before_maximum: *u8   = (maximum - 1)::*u8;
+    val last:           Range = bytes(at_maximum, 1, ZERO_FORBIDDEN);
+    val prior:          Range = bytes(before_maximum, 1, ZERO_FORBIDDEN);
+    val pair:           Range = bytes(before_maximum, 2, ZERO_FORBIDDEN);
     if (!last.valid || !prior.valid || !pair.valid || !disjoint(last, prior) ||
         disjoint(last, pair) || bytes(at_maximum, 2, ZERO_FORBIDDEN).valid) { ret 1; }
     ret 0;
@@ -215,14 +218,14 @@ test "quic.connection.ownership: inclusive maximum ranges are checked without wr
 
 test "quic.connection.ownership: containment is inclusive and rejects overhang" {
     var storage: [8]u8;
-    val whole: Range = bytes(?storage[0], 8, ZERO_FORBIDDEN);
+    val whole:   Range = bytes(?storage[0], 8, ZERO_FORBIDDEN);
     if (!contains(whole, whole) ||
         !contains(whole, bytes(?storage[0], 1, ZERO_FORBIDDEN)) ||
         !contains(whole, bytes(?storage[7], 1, ZERO_FORBIDDEN)) ||
         !contains(whole, bytes(?storage[3], 4, ZERO_FORBIDDEN))) { ret 1; }
     if (contains(whole, bytes(?storage[4], 5, ZERO_FORBIDDEN)) ||
         contains(bytes(?storage[1], 6, ZERO_FORBIDDEN),
-            bytes(?storage[0], 2, ZERO_FORBIDDEN)) ||
+        bytes(?storage[0], 2, ZERO_FORBIDDEN)) ||
         contains(whole, bytes(nil, 0, ZERO_ALLOWED)) ||
         contains(bytes(nil, 0, ZERO_ALLOWED), whole)) { ret 2; }
     ret 0;
@@ -235,7 +238,7 @@ test "quic.connection.ownership: zero and scaled ranges have explicit policies" 
         array((1::usize)::*u8, maximum / 3 + 1, 3, ZERO_FORBIDDEN).valid ||
         array((maximum - 1)::*u8, 1, 4, ZERO_FORBIDDEN).valid) { ret 1; }
     var storage: [8]u8;
-    var ranges: [3]Range;
+    var ranges:  [3]Range;
     ranges[0] = bytes(?storage[0], 2, ZERO_FORBIDDEN);
     ranges[1] = bytes(?storage[2], 2, ZERO_FORBIDDEN);
     ranges[2] = bytes(?storage[4], 4, ZERO_FORBIDDEN);
@@ -247,31 +250,31 @@ test "quic.connection.ownership: zero and scaled ranges have explicit policies" 
 
 test "quic.connection.ownership: mixed records use checked numeric anchors" {
     var fixture: AnchoredFixture;
-    val offset: usize = $offset_of(AnchoredFixture, anchor);
-    val value: Range = anchored_record[AnchoredFixture, u64](?fixture.anchor,
+    val offset:  usize = $offset_of(AnchoredFixture, anchor);
+    val value:   Range = anchored_record[AnchoredFixture, u64](?fixture.anchor,
         offset);
     if (!value.valid || value.start != (?fixture.anchor)::usize - offset ||
         value.length != $size_of(AnchoredFixture)) { ret 1; }
     if (anchored_record[AnchoredFixture, u64](nil, offset).valid ||
         anchored_record[AnchoredFixture, u64]((offset - 1)::*u64,
-            offset).valid ||
+        offset).valid ||
         anchored_record[AnchoredFixture, u64](?fixture.anchor,
-            $size_of(AnchoredFixture)).valid ||
+        $size_of(AnchoredFixture)).valid ||
         anchored_record[AnchoredFixture, u64](?fixture.anchor,
-            offset + 1).valid) { ret 2; }
+        offset + 1).valid) { ret 2; }
     var overhang: [16]u8;
     if (anchored_record[AnchoredFixture, [16]u8](?overhang,
-            $size_of(AnchoredFixture) - 8).valid) { ret 3; }
+        $size_of(AnchoredFixture) - 8).valid) { ret 3; }
     if (anchored_record[[16]u8, u64]((8::usize)::*u64, 1).valid) { ret 4; }
     val maximum: usize = ~(0::usize);
     if (array((1::usize)::*u8, maximum / 5 + 1, 5,
-            ZERO_FORBIDDEN).valid) { ret 5; }
+        ZERO_FORBIDDEN).valid) { ret 5; }
     ret 0;
 }
 
 test "quic.connection.ownership: a refusal names the ranges that collided" {
     var storage: [16]u8;
-    var ranges: [4]Range;
+    var ranges:  [4]Range;
     ranges[0] = bytes(?storage[0], 4, ZERO_FORBIDDEN);
     ranges[1] = bytes(?storage[4], 4, ZERO_FORBIDDEN);
     ranges[2] = bytes(?storage[8], 4, ZERO_FORBIDDEN);
@@ -285,18 +288,18 @@ test "quic.connection.ownership: a refusal names the ranges that collided" {
     ranges[2] = bytes(nil, 0, ZERO_FORBIDDEN);
     val invalid: Disjointness = disjointness(?ranges[0], 4);
     if (invalid.kind != OVERLAP_RANGE_INVALID || invalid.first != 2) { ret 3; }
-    if (disjointness(nil, 4).kind != OVERLAP_LIST_INVALID) { ret 4; }
+    if (disjointness(nil, 4).kind != OVERLAP_LIST_INVALID)           { ret 4; }
     ret 0;
 }
 
 test "quic.connection.ownership: a borrowed range names itself and its collision" {
     var storage: [16]u8;
-    var ranges: [4]Range;
+    var ranges:  [4]Range;
     ranges[0] = bytes(?storage[0], 4, ZERO_FORBIDDEN);
     ranges[1] = bytes(?storage[4], 4, ZERO_FORBIDDEN);
     ranges[2] = bytes(?storage[8], 4, ZERO_FORBIDDEN);
     ranges[3] = bytes(?storage[12], 4, ZERO_FORBIDDEN);
-    var lent: [8]u8;
+    var lent:    [8]u8;
     val outside: Disjointness = disjoint_from(bytes(?lent[0], 8, ZERO_FORBIDDEN),
         6, ?ranges[0], 1, 4);
     if (outside.kind != OVERLAP_NONE) { ret 1; }

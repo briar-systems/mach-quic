@@ -8,22 +8,22 @@ use std.types.size.usize;
 
 fun event(kind: u8, sent_at_ns: u64, bytes: usize) recovery.Event {
     var value: recovery.Event;
-    value.kind = kind;
-    value.sent_at_ns = sent_at_ns;
-    value.bytes = bytes;
+    value.kind          = kind;
+    value.sent_at_ns    = sent_at_ns;
+    value.bytes         = bytes;
     value.ack_eliciting = true;
-    value.in_flight = true;
+    value.in_flight     = true;
     ret value;
 }
 
 fun signals(events: *recovery.Event, count: usize, flight: u64, now_ns: u64, rtt_ns: u64) controller.Signals {
     var value: controller.Signals;
-    value.events = events;
-    value.event_count = count;
+    value.events                 = events;
+    value.event_count            = count;
     value.bytes_in_flight_before = flight;
-    value.now_ns = now_ns;
-    value.smoothed_rtt_ns = rtt_ns;
-    value.growth_permitted = true;
+    value.now_ns                 = now_ns;
+    value.smoothed_rtt_ns        = rtt_ns;
+    value.growth_permitted       = true;
     ret value;
 }
 
@@ -33,7 +33,7 @@ fun difference(a: u64, b: u64) u64 {
 }
 
 test "quic.congestion.simulated: NewReno reference trace covers reordering and persistent loss" {
-    var state: controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
+    var state:  controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
     var events: [2]recovery.Event;
     events[0] = event(recovery.EVENT_ACKED, 1, 1200);
     var input: controller.Signals = signals(?events[0], 1, 12000, 10, 100000000);
@@ -41,26 +41,26 @@ test "quic.congestion.simulated: NewReno reference trace covers reordering and p
 
     events[0] = event(recovery.EVENT_ACKED, 11, 1200);
     events[1] = event(recovery.EVENT_LOST, 2, 1200);
-    input = signals(?events[0], 2, 13200, 20, 100000000);
+    input     = signals(?events[0], 2, 13200, 20, 100000000);
     val loss: controller.UpdateResult = controller.on_recovery(?state, input);
     if (!loss.ok || !loss.reduced || state.congestion_window != 6600 ||
         state.slow_start_threshold != 6600 || state.mode != controller.MODE_RECOVERY) { ret 1; }
 
     events[0] = event(recovery.EVENT_ACKED, 19, 1200);
-    input = signals(?events[0], 1, 6600, 30, 100000000);
+    input     = signals(?events[0], 1, 6600, 30, 100000000);
     if (!controller.on_recovery(?state, input).ok || state.congestion_window != 6600 ||
         state.mode != controller.MODE_RECOVERY) { ret 1; }
 
     events[0] = event(recovery.EVENT_ACKED, 21, 1200);
-    input = signals(?events[0], 1, 6600, 40, 100000000);
+    input     = signals(?events[0], 1, 6600, 40, 100000000);
     if (!controller.on_recovery(?state, input).ok || state.congestion_window != 6818 ||
         state.mode != controller.MODE_AVOIDANCE) { ret 1; }
 
     events[0] = event(recovery.EVENT_LOST, 19, 1200);
-    input = signals(?events[0], 1, 6818, 50, 100000000);
+    input     = signals(?events[0], 1, 6818, 50, 100000000);
     if (!controller.on_recovery(?state, input).ok || state.congestion_window != 6818) { ret 1; }
 
-    input = signals(nil, 0, 6818, 60, 100000000);
+    input                       = signals(nil, 0, 6818, 60, 100000000);
     input.persistent_congestion = true;
     if (!controller.on_recovery(?state, input).ok || state.congestion_window != 2400 ||
         state.mode != controller.MODE_SLOW_START) { ret 1; }
@@ -68,7 +68,7 @@ test "quic.congestion.simulated: NewReno reference trace covers reordering and p
 }
 
 test "quic.congestion.simulated: CUBIC beta, epoch, and limited-time exclusion follow RFC 9438" {
-    var state: controller.State = controller.init(controller.default_config(controller.ALGORITHM_CUBIC, 1200), 0);
+    var state:  controller.State = controller.init(controller.default_config(controller.ALGORITHM_CUBIC, 1200), 0);
     var events: [1]recovery.Event;
     events[0] = event(recovery.EVENT_LOST, 1, 1200);
     var input: controller.Signals = signals(?events[0], 1, 12000, 100000000, 100000000);
@@ -76,32 +76,32 @@ test "quic.congestion.simulated: CUBIC beta, epoch, and limited-time exclusion f
         state.slow_start_threshold != 8400 || state.cubic_window_max != 12000) { ret 1; }
 
     events[0] = event(recovery.EVENT_ACKED, 100000001, 1200);
-    input = signals(?events[0], 1, 8400, 200000000, 100000000);
+    input     = signals(?events[0], 1, 8400, 200000000, 100000000);
     if (!controller.on_recovery(?state, input).ok || state.congestion_window != 8474 ||
         !state.cubic_epoch_active) { ret 1; }
 
     var running: controller.State = state;
-    var paused: controller.State = state;
-    if (!controller.set_limited(?paused, true, false, 200000000).ok) { ret 1; }
+    var paused:  controller.State = state;
+    if (!controller.set_limited(?paused, true, false, 200000000).ok)   { ret 1; }
     if (!controller.set_limited(?paused, false, false, 1200000000).ok) { ret 1; }
     events[0] = event(recovery.EVENT_ACKED, 1100000000, 1200);
-    input = signals(?events[0], 1, 8412, 1200000000, 100000000);
+    input     = signals(?events[0], 1, 8412, 1200000000, 100000000);
     if (!controller.on_recovery(?running, input).ok || !controller.on_recovery(?paused, input).ok) { ret 1; }
     if (running.congestion_window <= paused.congestion_window || paused.congestion_window <= 8474) { ret 1; }
     ret 0;
 }
 
 test "quic.congestion.simulated: CUBIC persistent recovery begins a zero-K epoch" {
-    var state: controller.State = controller.init(controller.default_config(controller.ALGORITHM_CUBIC, 1200), 0);
+    var state:  controller.State   = controller.init(controller.default_config(controller.ALGORITHM_CUBIC, 1200), 0);
     var events: [1]recovery.Event;
-    var input: controller.Signals = signals(nil, 0, 12000, 10, 100000000);
+    var input:  controller.Signals = signals(nil, 0, 12000, 10, 100000000);
     input.persistent_congestion = true;
     if (!controller.on_recovery(?state, input).ok || state.congestion_window != 2400 ||
         !state.cubic_timeout_epoch) { ret 1; }
     var i: u8 = 0;
     for (i < 6) {
         events[0] = event(recovery.EVENT_ACKED, 11 + i::u64, 1200);
-        input = signals(?events[0], 1, 8400, 20 + i::u64, 100000000);
+        input     = signals(?events[0], 1, 8400, 20 + i::u64, 100000000);
         if (!controller.on_recovery(?state, input).ok) { ret 1; }
         i = i + 1;
     }
@@ -111,19 +111,19 @@ test "quic.congestion.simulated: CUBIC persistent recovery begins a zero-K epoch
 }
 
 test "quic.congestion.simulated: controller failures are transactional and Retry resets state" {
-    var state: controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
+    var state:  controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
     var events: [2]recovery.Event;
     events[0] = event(99, 1, 1200);
-    var input: controller.Signals = signals(?events[0], 1, 12000, 10, 100000000);
-    val generation_window: u64 = state.congestion_window;
-    val rejected: controller.UpdateResult = controller.on_recovery(?state, input);
+    var input:             controller.Signals      = signals(?events[0], 1, 12000, 10, 100000000);
+    val generation_window: u64                     = state.congestion_window;
+    val rejected:          controller.UpdateResult = controller.on_recovery(?state, input);
     if (rejected.ok || rejected.error != controller.ERROR_EVENTS ||
         state.congestion_window != generation_window || state.last_event_at_ns != 0) { ret 1; }
 
     events[0] = event(recovery.EVENT_ACKED, 1, 1200);
-    input = signals(?events[0], 1, 12000, 10, 100000000);
+    input     = signals(?events[0], 1, 12000, 10, 100000000);
     controller.on_recovery(?state, input);
-    input = signals(nil, 0, 13200, 20, 100000000);
+    input       = signals(nil, 0, 13200, 20, 100000000);
     input.retry = true;
     val retried: controller.UpdateResult = controller.on_recovery(?state, input);
     if (!retried.ok || !retried.reset || state.congestion_window != 12000 || state.last_event_at_ns != 20) { ret 1; }
@@ -131,16 +131,16 @@ test "quic.congestion.simulated: controller failures are transactional and Retry
 }
 
 test "quic.congestion.simulated: repeated ECN signals reduce once per recovery epoch" {
-    var state: controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
+    var state: controller.State   = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
     var input: controller.Signals = signals(nil, 0, 12000, 10, 100000000);
     input.ecn_congestion = true;
     input.ecn_sent_at_ns = 1;
     if (!controller.on_recovery(?state, input).reduced || state.congestion_window != 6000) { ret 1; }
-    input = signals(nil, 0, 6000, 20, 100000000);
+    input                = signals(nil, 0, 6000, 20, 100000000);
     input.ecn_congestion = true;
     input.ecn_sent_at_ns = 1;
     if (controller.on_recovery(?state, input).reduced || state.congestion_window != 6000) { ret 1; }
-    input = signals(nil, 0, 6000, 30, 100000000);
+    input                = signals(nil, 0, 6000, 30, 100000000);
     input.ecn_congestion = true;
     input.ecn_sent_at_ns = 11;
     if (!controller.on_recovery(?state, input).reduced || state.congestion_window != 3000) { ret 1; }
@@ -148,10 +148,10 @@ test "quic.congestion.simulated: repeated ECN signals reduce once per recovery e
 }
 
 test "quic.congestion.simulated: equal paced flows remain fair through deterministic bursts" {
-    var left: pacer.State = pacer.init(pacer.default_config(1200, 12000), 12000, 100000000, 0);
-    var right: pacer.State = pacer.init(pacer.default_config(1200, 12000), 12000, 100000000, 0);
-    var now_ns: u64 = 0;
-    var sent_count: u8 = 0;
+    var left:       pacer.State = pacer.init(pacer.default_config(1200, 12000), 12000, 100000000, 0);
+    var right:      pacer.State = pacer.init(pacer.default_config(1200, 12000), 12000, 100000000, 0);
+    var now_ns:     u64         = 0;
+    var sent_count: u8          = 0;
     for (sent_count < 32) {
         val a: pacer.Schedule = pacer.schedule(?left, now_ns, 12000, 100000000, 1200, false);
         val b: pacer.Schedule = pacer.schedule(?right, now_ns, 12000, 100000000, 1200, false);
@@ -166,37 +166,37 @@ test "quic.congestion.simulated: equal paced flows remain fair through determini
 }
 
 test "quic.congestion.simulated: shared NewReno loss converges unequal flows" {
-    var left: controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
+    var left:  controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
     var right: controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
-    left.slow_start_threshold = left.congestion_window;
-    right.congestion_window = 48000;
+    left.slow_start_threshold  = left.congestion_window;
+    right.congestion_window    = 48000;
     right.slow_start_threshold = right.congestion_window;
     val initial_difference: u64 = difference(left.congestion_window, right.congestion_window);
-    var events: [1]recovery.Event;
-    var round: u8 = 0;
-    var now_ns: u64 = 10;
+    var events:             [1]recovery.Event;
+    var round:              u8  = 0;
+    var now_ns:             u64 = 10;
     for (round < 4) {
         events[0] = event(recovery.EVENT_ACKED, now_ns - 1, 1200);
         var input: controller.Signals = signals(?events[0], 1, left.congestion_window,
-                                                   now_ns, 100000000);
+            now_ns, 100000000);
         if (!controller.on_recovery(?left, input).ok) { ret 1; }
         input.bytes_in_flight_before = right.congestion_window;
         if (!controller.on_recovery(?right, input).ok) { ret 1; }
         events[0] = event(recovery.EVENT_LOST, now_ns, 1200);
-        input = signals(?events[0], 1, left.congestion_window, now_ns + 1, 100000000);
+        input     = signals(?events[0], 1, left.congestion_window, now_ns + 1, 100000000);
         if (!controller.on_recovery(?left, input).ok) { ret 1; }
         input.bytes_in_flight_before = right.congestion_window;
         if (!controller.on_recovery(?right, input).ok) { ret 1; }
         now_ns = now_ns + 10;
-        round = round + 1;
+        round  = round + 1;
     }
     if (difference(left.congestion_window, right.congestion_window) >= initial_difference / 8) { ret 1; }
     ret 0;
 }
 
 test "quic.congestion.simulated: pacing responds to RTT and caps a post-loss burst" {
-    var fast: pacer.State = pacer.init(pacer.default_config(1200, 1200), 1200, 50000000, 0);
-    var slow: pacer.State = pacer.init(pacer.default_config(1200, 1200), 1200, 100000000, 0);
+    var fast:   pacer.State    = pacer.init(pacer.default_config(1200, 1200), 1200, 50000000, 0);
+    var slow:   pacer.State    = pacer.init(pacer.default_config(1200, 1200), 1200, 100000000, 0);
     var queued: pacer.Schedule = pacer.schedule(?fast, 0, 1200, 50000000, 1200, false);
     pacer.publish(?fast, queued, 0, 1200, 50000000);
     queued = pacer.schedule(?slow, 0, 1200, 100000000, 1200, false);
@@ -207,7 +207,7 @@ test "quic.congestion.simulated: pacing responds to RTT and caps a post-loss bur
         slow_next.ready_at_ns > fast_next.ready_at_ns * 2 + 1) { ret 1; }
 
     var burst: pacer.State = pacer.init(pacer.default_config(1200, 12000), 12000, 100000000, 0);
-    var i: u8 = 0;
+    var i:     u8          = 0;
     for (i < 5) {
         queued = pacer.schedule(?burst, 0, 12000, 100000000, 1200, false);
         pacer.publish(?burst, queued, 0, 12000, 100000000);
@@ -220,11 +220,11 @@ test "quic.congestion.simulated: pacing responds to RTT and caps a post-loss bur
 
 test "quic.congestion.simulated: pacing deadline overflow is transactional" {
     var state: pacer.State = pacer.init(pacer.default_config(1200, 1200), 1200, 100000000,
-                                         0 - 2::u64);
+        0 - 2::u64);
     val first: pacer.Schedule = pacer.schedule(?state, 0 - 2::u64, 1200, 100000000, 1200, false);
     if (pacer.publish(?state, first, 0 - 2::u64, 1200, 100000000).status != pacer.PUBLISH_OK) { ret 1; }
-    val generation: u64 = state.generation;
-    val rejected: pacer.Schedule = pacer.schedule(?state, 0 - 2::u64, 1200, 100000000, 1200, false);
+    val generation: u64            = state.generation;
+    val rejected:   pacer.Schedule = pacer.schedule(?state, 0 - 2::u64, 1200, 100000000, 1200, false);
     if (rejected.ok || rejected.error != pacer.ERROR_OVERFLOW || state.generation != generation ||
         state.last_update_ns != 0 - 2::u64) { ret 1; }
     ret 0;
@@ -232,13 +232,13 @@ test "quic.congestion.simulated: pacing deadline overflow is transactional" {
 
 test "quic.congestion.simulated: far-future CUBIC arithmetic saturates at the configured window" {
     var state: controller.State = controller.init(controller.default_config(controller.ALGORITHM_CUBIC, 1200), 0);
-    state.congestion_window = 8400;
+    state.congestion_window    = 8400;
     state.slow_start_threshold = 8400;
-    state.cubic_window_prior = 12000;
-    state.cubic_window_max = 12000;
-    state.cubic_epoch_window = 8400;
-    state.cubic_estimate = 8400.0;
-    state.cubic_epoch_active = true;
+    state.cubic_window_prior   = 12000;
+    state.cubic_window_max     = 12000;
+    state.cubic_epoch_window   = 8400;
+    state.cubic_estimate       = 8400.0;
+    state.cubic_epoch_active   = true;
     var events: [1]recovery.Event;
     events[0] = event(recovery.EVENT_ACKED, 1, 1200);
     val input: controller.Signals = signals(?events[0], 1, 8400, 0 - 1::u64, 100000000);
