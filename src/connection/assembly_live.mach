@@ -1,18 +1,18 @@
 # a real client and a real server, assembled from configuration and driven to a
 # completed handshake and an exchanged stream over real packet protection
 
-use assembly: quic.connection.assembly;
-use admission: quic.connection.admission;
+use quic.connection.admission;
+use quic.connection.assembly;
 use cid_api: quic.connection.cid;
-use core: quic.connection.core;
-use handshake: quic.connection.handshake;
-use listener_api: quic.connection.listener;
-use packet_api: quic.packet.packet;
-use path_api: quic.path.path;
-use token: quic.connection.token;
+use quic.connection.core;
 use test_credentials: quic.connection.credentials_simulated;
-use binding: quic.transport.binding;
-use transport: quic.transport;
+use quic.connection.handshake;
+use listener_api: quic.connection.listener;
+use quic.connection.token;
+use packet_api: quic.packet.packet;
+use path_api:   quic.path.path;
+use quic.transport;
+use quic.transport.binding;
 
 use crypto.contracts;
 use crypto.encoding.keys;
@@ -34,61 +34,66 @@ use tls.server;
 use tls.tls13;
 
 # assembled controls and backing are far past a stack frame
-var dialer: assembly.Connection;
-var listener: assembly.Connection;
-var dialer_storage: assembly.Storage;
-var listener_storage: assembly.Storage;
-var copied_storage: assembly.Storage;
-var dialer_secret_storage: assembly.SecretStorage;
-var listener_secret_storage: assembly.SecretStorage;
-var dialer_tls: client.Client;
-var listener_tls: server.Server;
-var dialer_tls_two: client.Client;
-var listener_tls_two: server.Server;
-var rollback_tls: client.Client;
 
-var dialer_input: [8192]u8;
-var dialer_output: [8192]u8;
-var dialer_hello: [8192]u8;
-var dialer_certificates: [4]cert.Certificate;
-var dialer_peer_parameters: [512]u8;
-var listener_input: [8192]u8;
-var listener_output: [8192]u8;
-var listener_hello: [8192]u8;
-var listener_certificates: [4]cert.Certificate;
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+var dialer:                  assembly.Connection;
+var listener:                assembly.Connection;
+var dialer_storage:          assembly.Storage;
+var listener_storage:        assembly.Storage;
+var copied_storage:          assembly.Storage;
+var dialer_secret_storage:   assembly.SecretStorage;
+var listener_secret_storage: assembly.SecretStorage;
+var dialer_tls:              client.Client;
+var listener_tls:            server.Server;
+var dialer_tls_two:          client.Client;
+var listener_tls_two:        server.Server;
+var rollback_tls:            client.Client;
+
+var dialer_input:             [8192]u8;
+var dialer_output:            [8192]u8;
+var dialer_hello:             [8192]u8;
+var dialer_certificates:      [4]cert.Certificate;
+var dialer_peer_parameters:   [512]u8;
+var listener_input:           [8192]u8;
+var listener_output:          [8192]u8;
+var listener_hello:           [8192]u8;
+var listener_certificates:    [4]cert.Certificate;
 var listener_peer_parameters: [512]u8;
 
-var dialer_parameters: [512]u8;
+var dialer_parameters:   [512]u8;
 var listener_parameters: [512]u8;
-var wire: [1500]u8;
-var dialer_scope: cancel.Scope;
-var listener_scope: cancel.Scope;
+var wire:                [1500]u8;
+var dialer_scope:        cancel.Scope;
+var listener_scope:      cancel.Scope;
 
-var secret_storage_delegate: secret.ArrayAllocator[assembly.SecretStorage];
-var secret_storage_deallocations: usize;
-var secret_storage_zeroed_releases: usize;
+var secret_storage_delegate:         secret.ArrayAllocator[assembly.SecretStorage];
+var secret_storage_deallocations:    usize;
+var secret_storage_zeroed_releases:  usize;
 var secret_storage_nonzero_releases: usize;
 
 fun secret_storage_allocate(context: ptr, secret_context: *^u8, count: usize,
-                            bytes: usize, alignment: usize,
-                            output: **assembly.SecretStorage) i64 {
+    bytes: usize, alignment: usize,
+    output: **assembly.SecretStorage) i64 {
     ret secret_storage_delegate.allocate_fn(secret_storage_delegate.context,
         secret_storage_delegate.secret_context, count, bytes, alignment,
         output);
 }
 
 fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
-                              data: *assembly.SecretStorage, count: usize,
-                              bytes: usize, alignment: usize) i64 {
+    data: *assembly.SecretStorage, count: usize,
+    bytes: usize, alignment: usize) i64 {
     secret_storage_deallocations = secret_storage_deallocations + 1;
-    var zeroed: bool = true;
-    var i: usize = 0;
+    var zeroed: bool  = true;
+    var i:      usize = 0;
     for (i < count) {
         if (data[i].source != 0 || data[i].generation != 0 || data[i].leased ||
-            data[i].receive_plaintext[0]:^ != 0 ||
-            data[i].receive_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:^ != 0 ||
-            data[i].send_plaintext[0]:^ != 0 ||
-            data[i].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:^ != 0) {
+            data[i].receive_plaintext[0]:>u8 != 0 ||
+            data[i].receive_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:>u8 != 0 ||
+            data[i].send_plaintext[0]:>u8 != 0 ||
+            data[i].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:>u8 != 0) {
             zeroed = false;
         }
         i = i + 1;
@@ -96,7 +101,8 @@ fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
     if (zeroed) {
         secret_storage_zeroed_releases =
             secret_storage_zeroed_releases + 1;
-    } or {
+    }
+    or {
         secret_storage_nonzero_releases =
             secret_storage_nonzero_releases + 1;
     }
@@ -110,13 +116,13 @@ fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
 
 rec RollbackProbe {
     attempt_state: *u8;
-    calls: usize;
-    armed: bool;
+    calls:         usize;
+    armed:         bool;
 }
 
 #[oblivious]
 fun rollback_entropy(context: ptr, secret_context: *^u8,
-                     destination: *^u8, length: usize) i64 {
+    destination: *^u8, length: usize) i64 {
     val probe: *RollbackProbe = context::*RollbackProbe;
     probe.calls = probe.calls + 1;
     if (probe.armed) {
@@ -126,23 +132,23 @@ fun rollback_entropy(context: ptr, secret_context: *^u8,
     var i: usize = 0;
     for (i < length) {
         destination[i] = (i + probe.calls)::u8;
-        i = i + 1;
+        i              = i + 1;
     }
     ret 0;
 }
 
 # a failing exit code is one byte, so the detail lands here and the assertion
 # returns only which step refused
-var fault_side: u64;
-var fault_step: u64;
+var fault_side:   u64;
+var fault_step:   u64;
 var fault_status: u64;
-var fault_error: u64;
+var fault_error:  u64;
 
-var dialer_source: [8]u8 = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
-var listener_source: [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
+var dialer_source:       [8]u8 = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+var listener_source:     [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
 var initial_destination: [8]u8 =
     [8]u8{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
-var alpn: [2]u8 = [2]u8{'h', '3'};
+var alpn:        [2]u8  = [2]u8{'h', '3'};
 var server_name: [15]u8 = [15]u8{'a', 'p', 'i', '.', 'e', 'x', 'a', 'm',
     'p', 'l', 'e', '.', 'c', 'o', 'm'};
 
@@ -165,18 +171,23 @@ fun endpoint(host: u8, port: u16) ip.Endpoint {
     value.addr.v4.octets[1] = 0;
     value.addr.v4.octets[2] = 2;
     value.addr.v4.octets[3] = host;
-    value.port = port;
+    value.port              = port;
     ret value;
 }
 
-fun dialer_endpoint() ip.Endpoint { ret endpoint(1, 55000); }
-fun listener_endpoint() ip.Endpoint { ret endpoint(2, 4433); }
+fun dialer_endpoint() ip.Endpoint {
+    ret endpoint(1, 55000);
+}
+
+fun listener_endpoint() ip.Endpoint {
+    ret endpoint(2, 4433);
+}
 
 fun embedded_scope(data: *u8, length: usize) *cancel.Scope {
     if (data == nil || length < $size_of(cancel.Scope)) { ret nil; }
     val alignment: usize = $align_of(cancel.Scope);
-    val start: usize = data::usize;
-    val aligned: usize = (start + alignment - 1) / alignment * alignment;
+    val start:     usize = data::usize;
+    val aligned:   usize = (start + alignment - 1) / alignment * alignment;
     if (aligned < start || aligned - start > length - $size_of(cancel.Scope)) {
         ret nil;
     }
@@ -195,84 +206,88 @@ fun connection_config(role: transport.Role) assembly.Config {
     if (role == transport.CLIENT) {
         value = assembly.default_config(901, dialer_endpoint(),
             listener_endpoint());
-        value.local_source = ?dialer_source[0];
-        value.peer_destination = ?initial_destination[0];
-        value.server_name = ?server_name[0];
+        value.local_source       = ?dialer_source[0];
+        value.peer_destination   = ?initial_destination[0];
+        value.server_name        = ?server_name[0];
         value.server_name_length = 15;
-    } or {
+    }
+    or {
         value = assembly.default_config(902, listener_endpoint(),
             dialer_endpoint());
-        value.local_source = ?listener_source[0];
+        value.local_source     = ?listener_source[0];
         value.peer_destination = ?dialer_source[0];
     }
-    value.local_source_length = 8;
-    value.peer_destination_length = 8;
-    value.original_destination = ?initial_destination[0];
+    value.local_source_length         = 8;
+    value.peer_destination_length     = 8;
+    value.original_destination        = ?initial_destination[0];
     value.original_destination_length = 8;
-    value.alpn = ?alpn[0];
-    value.alpn_length = 2;
-    value.max_udp_payload = 1200;
-    value.max_idle_timeout_ms = 30000;
-    value.peer_bidirectional_streams = (assembly.STREAM_CAPACITY -
+    value.alpn                        = ?alpn[0];
+    value.alpn_length                 = 2;
+    value.max_udp_payload             = 1200;
+    value.max_idle_timeout_ms         = 30000;
+    value.peer_bidirectional_streams  = (assembly.STREAM_CAPACITY -
         assembly.H3_CRITICAL_STREAMS_PER_PEER * 2)::u64;
     value.peer_unidirectional_streams =
         assembly.H3_CRITICAL_STREAMS_PER_PEER::u64;
-    value.receive_max_data = assembly.STREAM_WINDOW::u64;
-    value.receive_stream_data = assembly.STREAM_STRIDE::u64;
+    value.receive_max_data       = assembly.STREAM_WINDOW::u64;
+    value.receive_stream_data    = assembly.STREAM_STRIDE::u64;
     value.verification_time_unix = test_credentials.VERIFICATION_TIME;
-    value.peer_validated = true;
+    value.peer_validated         = true;
     ret value;
 }
 
 # one generated datagram, completed on the sender and delivered to the peer,
 # exactly as an owner's scheduling loop would move it
 fun carry(source: *assembly.Connection, sink: *assembly.Connection,
-          source_scope: *cancel.Scope, sink_local: ip.Endpoint,
-          sink_peer: ip.Endpoint, clock: *u64, moved: *usize) i64 {
+    source_scope: *cancel.Scope, sink_local: ip.Endpoint,
+    sink_peer: ip.Endpoint, clock: *u64, moved: *usize) i64 {
     var guard: usize = 0;
     for (guard < 64) {
         clock[0] = clock[0] + 1000;
         val generated: transport.Generated =
             transport.generate[binding.Binding](?source.driver, source_scope,
-                ?wire[0], 1500, clock[0], 0);
+            ?wire[0], 1500, clock[0], 0);
         if (generated.status == transport.STATUS_EMPTY ||
             generated.status == transport.STATUS_BLOCKED) { ret 0; }
         if (generated.status != transport.STATUS_OK) {
-            fault_step = 1;
+            fault_step   = 1;
             fault_status = generated.status::u64;
-            fault_error = generated.error::u64;
+            fault_error  = generated.error::u64;
             ret 1;
         }
-        if (generated.count == 0) { fault_step = 2; ret 2; }
+        if (generated.count == 0) {
+            fault_step = 2;
+            ret 2;
+        }
         clock[0] = clock[0] + 1000;
         val completed: transport.Completion =
             transport.complete_send[binding.Binding](?source.driver,
-                generated.token, transport.SEND_SENT, generated.count,
-                clock[0]);
+            generated.token, transport.SEND_SENT, generated.count,
+            clock[0]);
         if (completed.status != transport.STATUS_OK) {
-            fault_step = 3;
+            fault_step   = 3;
             fault_status = completed.status::u64;
-            fault_error = completed.error::u64;
+            fault_error  = completed.error::u64;
             ret 3;
         }
         var input: transport.Datagram;
-        input.local = sink_local;
-        input.peer = sink_peer;
-        input.data = ?wire[0];
-        input.length = generated.count;
+        input.local          = sink_local;
+        input.peer           = sink_peer;
+        input.data           = ?wire[0];
+        input.length         = generated.count;
         input.received_at_ns = clock[0];
-        input.ecn = 0;
-        clock[0] = clock[0] + 1000;
+        input.ecn            = 0;
+        clock[0]             = clock[0] + 1000;
         val received: transport.OperationResult =
             transport.receive_datagram[binding.Binding](?sink.driver, ?input);
         if (received.status != transport.STATUS_OK) {
-            fault_step = 4;
+            fault_step   = 4;
             fault_status = received.status::u64;
-            fault_error = received.error::u64;
+            fault_error  = received.error::u64;
             ret 4;
         }
         moved[0] = moved[0] + 1;
-        guard = guard + 1;
+        guard    = guard + 1;
     }
     fault_step = 5;
     ret 5;
@@ -285,10 +300,16 @@ fun pump(clock: *u64, moved: *usize, rounds: usize) i64 {
     for (round < rounds) {
         val forward: i64 = carry(?dialer, ?listener, ?dialer_scope,
             listener_endpoint(), dialer_endpoint(), clock, moved);
-        if (forward != 0) { fault_side = 1; ret forward; }
+        if (forward != 0) {
+            fault_side = 1;
+            ret forward;
+        }
         val backward: i64 = carry(?listener, ?dialer, ?listener_scope,
             dialer_endpoint(), listener_endpoint(), clock, moved);
-        if (backward != 0) { fault_side = 2; ret backward; }
+        if (backward != 0) {
+            fault_side = 2;
+            ret backward;
+        }
         round = round + 1;
     }
     ret 0;
@@ -299,19 +320,29 @@ fun exchange(clock: *u64, moved: *usize, rounds: usize) i64 {
     for (round < rounds) {
         val forward: i64 = carry(?dialer, ?listener, ?dialer_scope,
             listener_endpoint(), dialer_endpoint(), clock, moved);
-        if (forward != 0) { fault_side = 1; ret forward; }
+        if (forward != 0) {
+            fault_side = 1;
+            ret forward;
+        }
         val backward: i64 = carry(?listener, ?dialer, ?listener_scope,
             dialer_endpoint(), listener_endpoint(), clock, moved);
-        if (backward != 0) { fault_side = 2; ret backward; }
+        if (backward != 0) {
+            fault_side = 2;
+            ret backward;
+        }
         clock[0] = clock[0] + 1000;
         if (core.poll_handshake(?dialer.core, ?dialer.secrets,
             clock[0]).status == transport.STATUS_ERROR) {
-            fault_side = 1; fault_step = 6; ret 6;
+            fault_side = 1;
+            fault_step = 6;
+            ret 6;
         }
         clock[0] = clock[0] + 1000;
         if (core.poll_handshake(?listener.core, ?listener.secrets,
             clock[0]).status == transport.STATUS_ERROR) {
-            fault_side = 2; fault_step = 6; ret 6;
+            fault_side = 2;
+            fault_step = 6;
+            ret 6;
         }
         if (core.snapshot(?dialer.core).state == transport.ACTIVE &&
             core.snapshot(?listener.core).state == transport.ACTIVE) { ret 0; }
@@ -321,12 +352,11 @@ fun exchange(clock: *u64, moved: *usize, rounds: usize) i64 {
     ret 7;
 }
 
-
 test "quic.connection.assembly: production H3 capacity, routing, and close share one binding" {
-    var owner: secret.Allocator = secret.system_allocator();
+    var owner:         secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
-    var key: keys.PrivateKey;
-    var identity: credentials.Identity;
+    var key:           keys.PrivateKey;
+    var identity:      credentials.Identity;
     if (!test_credentials.load_credentials(?identity, ?chain_storage[0], ?key,
         ?owner)) { ret 1; }
     var generation: credentials.Generation = credentials.empty_generation();
@@ -337,90 +367,94 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         ret 3;
     }
 
-    var versions: [1]u16 = [1]u16{tls13.VERSION};
-    var suites: [1]tls13.CipherSuite =
+    var versions: [1]u16               = [1]u16{tls13.VERSION};
+    var suites:   [1]tls13.CipherSuite =
         [1]tls13.CipherSuite{tls13.AES_128_GCM_SHA256};
-    var groups: [1]tls13.NamedGroup = [1]tls13.NamedGroup{tls13.X25519};
+    var groups:     [1]tls13.NamedGroup      = [1]tls13.NamedGroup{tls13.X25519};
     var signatures: [1]tls13.SignatureScheme =
         [1]tls13.SignatureScheme{tls13.ED25519};
     var protocols: [1]config.ProtocolName = [1]config.ProtocolName{
-        config.ProtocolName{data: ?alpn[0], len: 2}};
+        config.ProtocolName{data: ?alpn[0], len: 2}
+    };
 
     var listener_config: assembly.Config = connection_config(transport.SERVER);
-    val dialer_config: assembly.Config = connection_config(transport.CLIENT);
-    val dialer_encoded: usize = assembly.encode_parameters(?dialer_config,
+    val dialer_config:   assembly.Config = connection_config(transport.CLIENT);
+    val dialer_encoded:  usize           = assembly.encode_parameters(?dialer_config,
         transport.CLIENT, ?dialer_parameters[0], 512).count;
     if (dialer_encoded == 0) { ret 4; }
 
-    var listener_counter: u8 = 3;
+    var listener_counter: u8             = 3;
     var listener_entropy: secret.Entropy = secret.Entropy{
         context: ?listener_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true};
+        fill_fn: test_credentials.deterministic_entropy, initialized: true
+    };
     var listener_tls_config: config.ServerConfig;
-    listener_tls_config.credentials = ?store;
-    listener_tls_config.alpn = ?protocols[0];
-    listener_tls_config.alpn_len = 1;
-    listener_tls_config.require_alpn = true;
-    listener_tls_config.versions = ?versions[0];
-    listener_tls_config.version_len = 1;
-    listener_tls_config.suites = ?suites[0];
-    listener_tls_config.suite_len = 1;
-    listener_tls_config.groups = ?groups[0];
-    listener_tls_config.group_len = 1;
-    listener_tls_config.signatures = ?signatures[0];
-    listener_tls_config.signature_len = 1;
-    listener_tls_config.entropy = ?listener_entropy;
-    listener_tls_config.entropy_context_size = 1;
-    listener_tls_config.limits = config.production_limits();
+    listener_tls_config.credentials                     = ?store;
+    listener_tls_config.alpn                            = ?protocols[0];
+    listener_tls_config.alpn_len                        = 1;
+    listener_tls_config.require_alpn                    = true;
+    listener_tls_config.versions                        = ?versions[0];
+    listener_tls_config.version_len                     = 1;
+    listener_tls_config.suites                          = ?suites[0];
+    listener_tls_config.suite_len                       = 1;
+    listener_tls_config.groups                          = ?groups[0];
+    listener_tls_config.group_len                       = 1;
+    listener_tls_config.signatures                      = ?signatures[0];
+    listener_tls_config.signature_len                   = 1;
+    listener_tls_config.entropy                         = ?listener_entropy;
+    listener_tls_config.entropy_context_size            = 1;
+    listener_tls_config.limits                          = config.production_limits();
     listener_tls_config.limits.max_peer_handshake_bytes = 8192;
-    listener_tls_config.limits.max_client_hello_bytes = 8192;
-    listener_tls_config.limits.max_client_flight_bytes = 8192;
-    listener_tls_config.limits.max_server_flight_bytes = 8192;
-    listener_tls_config.limits.max_chain_bytes = 4096;
-    listener_tls_config.limits.max_ticket_bytes = 4096;
-    var anchor: cert.Certificate = test_credentials.anchor();
-    var trust: cert.TrustStore = cert.TrustStore{anchors: ?anchor, len: 1};
-    var dialer_counter: u8 = 91;
-    var dialer_entropy: secret.Entropy = secret.Entropy{
+    listener_tls_config.limits.max_client_hello_bytes   = 8192;
+    listener_tls_config.limits.max_client_flight_bytes  = 8192;
+    listener_tls_config.limits.max_server_flight_bytes  = 8192;
+    listener_tls_config.limits.max_chain_bytes          = 4096;
+    listener_tls_config.limits.max_ticket_bytes         = 4096;
+    var anchor:         cert.Certificate = test_credentials.anchor();
+    var trust:          cert.TrustStore  = cert.TrustStore{anchors: ?anchor, len: 1};
+    var dialer_counter: u8               = 91;
+    var dialer_entropy: secret.Entropy   = secret.Entropy{
         context: ?dialer_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true};
+        fill_fn: test_credentials.deterministic_entropy, initialized: true
+    };
     var dialer_tls_config: config.ClientConfig;
     dialer_tls_config.server_name = contracts.Bytes{data: ?server_name[0],
         len: 15};
-    dialer_tls_config.alpn = ?protocols[0];
-    dialer_tls_config.alpn_len = 1;
-    dialer_tls_config.trust = ?trust;
-    dialer_tls_config.versions = ?versions[0];
-    dialer_tls_config.version_len = 1;
-    dialer_tls_config.suites = ?suites[0];
-    dialer_tls_config.suite_len = 1;
-    dialer_tls_config.groups = ?groups[0];
-    dialer_tls_config.group_len = 1;
-    dialer_tls_config.signatures = ?signatures[0];
-    dialer_tls_config.signature_len = 1;
-    dialer_tls_config.client_identity = nil;
-    dialer_tls_config.entropy = ?dialer_entropy;
-    dialer_tls_config.entropy_context_size = 1;
-    dialer_tls_config.limits = config.production_limits();
+    dialer_tls_config.alpn                            = ?protocols[0];
+    dialer_tls_config.alpn_len                        = 1;
+    dialer_tls_config.trust                           = ?trust;
+    dialer_tls_config.versions                        = ?versions[0];
+    dialer_tls_config.version_len                     = 1;
+    dialer_tls_config.suites                          = ?suites[0];
+    dialer_tls_config.suite_len                       = 1;
+    dialer_tls_config.groups                          = ?groups[0];
+    dialer_tls_config.group_len                       = 1;
+    dialer_tls_config.signatures                      = ?signatures[0];
+    dialer_tls_config.signature_len                   = 1;
+    dialer_tls_config.client_identity                 = nil;
+    dialer_tls_config.entropy                         = ?dialer_entropy;
+    dialer_tls_config.entropy_context_size            = 1;
+    dialer_tls_config.limits                          = config.production_limits();
     dialer_tls_config.limits.max_peer_handshake_bytes = 8192;
-    dialer_tls_config.limits.max_client_hello_bytes = 8192;
-    dialer_tls_config.limits.max_client_flight_bytes = 8192;
-    dialer_tls_config.limits.max_chain_bytes = 4096;
-    dialer_tls_config.limits.max_ticket_bytes = 4096;
+    dialer_tls_config.limits.max_client_hello_bytes   = 8192;
+    dialer_tls_config.limits.max_client_flight_bytes  = 8192;
+    dialer_tls_config.limits.max_chain_bytes          = 4096;
+    dialer_tls_config.limits.max_ticket_bytes         = 4096;
     if (!client.init(?dialer_tls, ?dialer_tls_config, client.Storage{
-            input: ?dialer_input[0], input_capacity: 8192,
-            output: ?dialer_output[0], output_capacity: 8192,
-            hello: ?dialer_hello[0], hello_capacity: 8192,
-            certificates: ?dialer_certificates[0], certificate_capacity: 4,
-            peer_parameters: ?dialer_peer_parameters[0],
-            peer_parameters_capacity: 512},
+        input:                    ?dialer_input[0], input_capacity: 8192,
+        output:                   ?dialer_output[0], output_capacity: 8192,
+        hello:                    ?dialer_hello[0], hello_capacity: 8192,
+        certificates:             ?dialer_certificates[0], certificate_capacity: 4,
+        peer_parameters:          ?dialer_peer_parameters[0],
+        peer_parameters_capacity: 512
+    },
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
-            data: contracts.Bytes{data: ?dialer_parameters[0],
-                len: dialer_encoded}},
+        data: contracts.Bytes{data: ?dialer_parameters[0],
+        len:  dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS)) { ret 6; }
 
-    if (!cancel.make_root(?listener_scope, false, time.Time{sec: 0, nsec: 0}) ||
-        !cancel.make_root(?dialer_scope, false, time.Time{sec: 0, nsec: 0})) {
+    if (!operation_ok(cancel.make_root(?listener_scope, false, time.Time{sec: 0, nsec: 0})) ||
+        !operation_ok(cancel.make_root(?dialer_scope, false, time.Time{sec: 0, nsec: 0}))) {
         ret 7;
     }
     val core_scope: *cancel.Scope = embedded_scope(
@@ -471,12 +505,12 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
         ?dialer_tls, ?dialer_scope, 1000);
-    if (!dialed.ok) { ret 170 + dialed.stage::i32; }
+    if (!dialed.ok)                         { ret 170 + dialed.stage::i32; }
     if (dialed.core.reason != core.INIT_OK) { ret 180 + dialed.core.reason::i32; }
     val dialer_storage_generation: u64 = dialer_storage.generation;
-    val dialer_secret_generation: u64 = dialer_secret_storage.generation;
+    val dialer_secret_generation:  u64 = dialer_secret_storage.generation;
     copied_storage = dialer_storage;
-    var competing: assembly.Connection;
+    var competing:     assembly.Connection;
     val public_reused: assembly.InitResult = assembly.init_client(?competing,
         ?dialer_config, ?dialer_storage, ?listener_secret_storage,
         ?dialer_tls, ?dialer_scope, 1000);
@@ -505,34 +539,35 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
 
     # state of the dialer's adapter the instant after init, before any exchange
     val started: handshake.Snapshot = handshake.snapshot(?dialer.handshake);
-    if (!started.initialized) { ret 210; }
-    if (!started.started) { ret 211; }
-    if (started.closing) { ret 212; }
-    if (started.destroyed) { ret 213; }
-    if (started.terminal_alert != 0) { ret 214; }
-    if (started.event_active) { ret 215; }
+    if (!started.initialized)             { ret 210; }
+    if (!started.started)                 { ret 211; }
+    if (started.closing)                  { ret 212; }
+    if (started.destroyed)                { ret 213; }
+    if (started.terminal_alert != 0)      { ret 214; }
+    if (started.event_active)             { ret 215; }
     if (started.role != handshake.CLIENT) { ret 216; }
-    var clock: u64 = 1000;
-    var peer_slots: [2]admission.PeerSlot;
-    var charges: [2]admission.ChargeSlot;
+    var clock:             u64 = 1000;
+    var peer_slots:        [2]admission.PeerSlot;
+    var charges:           [2]admission.ChargeSlot;
     var admission_manager: admission.Manager;
     if (!admission.initialize(?admission_manager, admission.Config{
-        source: 911, max_connections: 2, max_connections_per_peer: 2},
+        source: 911, max_connections: 2, max_connections_per_peer: 2
+    },
         admission.Storage{peers: ?peer_slots[0], peer_capacity: 2,
-            charges: ?charges[0], charge_capacity: 2})) { ret 8; }
-    var replay: [2]token.ReplaySlot;
-    var token_key: [32]^u8;
+        charges: ?charges[0], charge_capacity: 2})) { ret 8; }
+    var replay:        [2]token.ReplaySlot;
+    var token_key:     [32]^u8;
     var token_manager: token.Manager;
     if (!token.initialize(?token_manager, token.Config{source: 912,
-            retry_max_age_ns: 1000000000, address_max_age_ns: 1000000000},
+        retry_max_age_ns: 1000000000, address_max_age_ns: 1000000000},
         token.Storage{replay: ?replay[0], replay_capacity: 2}, 1,
         contracts.SecretBytes{data: ?token_key[0], len: 32})) { ret 9; }
-    var pending: [2]listener_api.Pending;
+    var pending:       [2]listener_api.Pending;
     var quic_versions: [1]u32 = [1]u32{packet_api.VERSION_1};
-    var front: listener_api.Listener;
+    var front:         listener_api.Listener;
     if (!listener_api.initialize(?front, listener_api.Config{source: 913,
-            supported_versions: ?quic_versions[0], supported_version_count: 1,
-            minimum_initial_size: 1200, require_retry: true},
+        supported_versions:   ?quic_versions[0], supported_version_count: 1,
+        minimum_initial_size: 1200, require_retry: true},
         listener_api.Storage{pending: ?pending[0], pending_capacity: 2},
         ?admission_manager, ?token_manager)) { ret 10; }
     var retry_bytes: [512]u8;
@@ -540,15 +575,15 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val first: transport.Generated = transport.generate[binding.Binding](
         ?dialer.driver, ?dialer_scope, ?wire[0], 1500, clock, 0);
     var request: listener_api.Request;
-    request.peer = dialer_endpoint();
-    request.data = ?wire[0];
+    request.peer   = dialer_endpoint();
+    request.data   = ?wire[0];
     request.length = first.count;
     request.now_ns = clock;
     if (!listener_api.set_retry_source(?request, ?listener_source[0], 8)) {
         ret 11;
     }
-    request.retry_nonce = 41;
-    request.output = ?retry_bytes[0];
+    request.retry_nonce     = 41;
+    request.output          = ?retry_bytes[0];
     request.output_capacity = 512;
     val challenged: listener_api.Result = listener_api.preflight(?front,
         ?request);
@@ -556,14 +591,14 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (first.status != transport.STATUS_OK || first.count < 1200 ||
         challenged.action != listener_api.ACTION_RETRY ||
         transport.complete_send[binding.Binding](?dialer.driver, first.token,
-            transport.SEND_SENT, first.count, clock).status !=
-            transport.STATUS_OK) { ret 11; }
+        transport.SEND_SENT, first.count, clock).status !=
+        transport.STATUS_OK) { ret 11; }
     var retry_datagram: transport.Datagram;
-    retry_datagram.local = dialer_endpoint();
-    retry_datagram.peer = listener_endpoint();
-    retry_datagram.data = ?retry_bytes[0];
-    retry_datagram.length = challenged.output_count;
-    clock = clock + 1000;
+    retry_datagram.local          = dialer_endpoint();
+    retry_datagram.peer           = listener_endpoint();
+    retry_datagram.data           = ?retry_bytes[0];
+    retry_datagram.length         = challenged.output_count;
+    clock                         = clock + 1000;
     retry_datagram.received_at_ns = clock;
     if (transport.receive_datagram[binding.Binding](?dialer.driver,
         ?retry_datagram).status != transport.STATUS_OK) { ret 12; }
@@ -577,7 +612,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         listener_api.classify_datagram(?wire[0], second.count, 8);
     if (routed_initial.class != listener_api.DATAGRAM_INITIAL ||
         routed_initial.destination.length != 8) { ret 221; }
-    request.data = ?wire[0];
+    request.data   = ?wire[0];
     request.length = second.count;
     request.now_ns = clock;
     val reserved: listener_api.Result = listener_api.preflight(?front,
@@ -588,58 +623,59 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (second.status != transport.STATUS_OK) {
         ret (20 + second.status::i32);
     }
-    if (second.count < 1200) { ret 13; }
-    if (reserved.action != listener_api.ACTION_ACCEPT) { ret 16; }
-    if (accepted.action != listener_api.ACTION_ACCEPT) { ret 17; }
+    if (second.count < 1200)                                        { ret 13; }
+    if (reserved.action != listener_api.ACTION_ACCEPT)              { ret 16; }
+    if (accepted.action != listener_api.ACTION_ACCEPT)              { ret 17; }
     if (!accepted.retry_source_present || !accepted.peer_validated) { ret 18; }
     if (transport.complete_send[binding.Binding](?dialer.driver, second.token,
-            transport.SEND_SENT, second.count, clock).status !=
+        transport.SEND_SENT, second.count, clock).status !=
         transport.STATUS_OK) { ret 19; }
     if (!assembly.apply_server_acceptance(?listener_config, ?accepted)) { ret 20; }
     val listener_encoded: usize = assembly.encode_parameters(?listener_config,
         transport.SERVER, ?listener_parameters[0], 512).count;
     if (listener_encoded == 0 || !server.init(?listener_tls,
-            ?listener_tls_config, server.Storage{
-                input: ?listener_input[0], input_capacity: 8192,
-                output: ?listener_output[0], output_capacity: 8192,
-                hello: ?listener_hello[0], hello_capacity: 8192,
-                certificates: ?listener_certificates[0],
-                certificate_capacity: 4,
-                peer_parameters: ?listener_peer_parameters[0],
-                peer_parameters_capacity: 512},
-            server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
-                data: contracts.Bytes{data: ?listener_parameters[0],
-                    len: listener_encoded}},
-            server.QUIC_TRANSPORT_PARAMETERS)) { ret 14; }
+        ?listener_tls_config, server.Storage{
+        input:                    ?listener_input[0], input_capacity: 8192,
+        output:                   ?listener_output[0], output_capacity: 8192,
+        hello:                    ?listener_hello[0], hello_capacity: 8192,
+        certificates:             ?listener_certificates[0],
+        certificate_capacity:     4,
+        peer_parameters:          ?listener_peer_parameters[0],
+        peer_parameters_capacity: 512
+    },
+        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+        data: contracts.Bytes{data: ?listener_parameters[0],
+        len:  listener_encoded}},
+        server.QUIC_TRANSPORT_PARAMETERS)) { ret 14; }
     val served: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config, ?listener_storage, ?listener_secret_storage,
         ?listener_tls, ?listener_scope,
         clock);
-    if (!served.ok) { ret 140 + served.stage::i32; }
+    if (!served.ok)                         { ret 140 + served.stage::i32; }
     if (served.core.reason != core.INIT_OK) { ret 150 + served.core.reason::i32; }
     var retried_datagram: transport.Datagram;
-    retried_datagram.local = listener_endpoint();
-    retried_datagram.peer = dialer_endpoint();
-    retried_datagram.data = ?wire[0];
-    retried_datagram.length = second.count;
-    clock = clock + 1000;
+    retried_datagram.local          = listener_endpoint();
+    retried_datagram.peer           = dialer_endpoint();
+    retried_datagram.data           = ?wire[0];
+    retried_datagram.length         = second.count;
+    clock                           = clock + 1000;
     retried_datagram.received_at_ns = clock;
     if (transport.receive_datagram[binding.Binding](?listener.driver,
         ?retried_datagram).status != transport.STATUS_OK) { ret 15; }
     var moved: usize = 2;
-    val ran: i64 = exchange(?clock, ?moved, 24);
+    val ran:   i64   = exchange(?clock, ?moved, 24);
     # never zero, so a refusal can never be mistaken for a pass
-    if (ran != 0) { ret refusal(); }
+    if (ran != 0)   { ret refusal(); }
     if (moved == 0) { ret 200; }
     if (transport.snapshot[binding.Binding](?dialer.driver).state !=
-            transport.ACTIVE ||
+        transport.ACTIVE ||
         transport.snapshot[binding.Binding](?listener.driver).state !=
-            transport.ACTIVE) { ret 201; }
+        transport.ACTIVE) { ret 201; }
     if (!core.snapshot(?dialer.core).peer_parameters_ready ||
         !core.snapshot(?listener.core).peer_parameters_ready) { ret 202; }
 
     val routes: assembly.RoutingSnapshot = assembly.routing_snapshot(?listener);
-    val route: assembly.Route = assembly.route_at(?listener, 0);
+    val route:  assembly.Route           = assembly.route_at(?listener, 0);
     if (!routes.initialized || routes.capacity != 1 || routes.active != 1 ||
         !route.active || route.sequence != 0 || route.id.length != 8 ||
         route.id.length != routed_initial.destination.length ||
@@ -662,27 +698,27 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         ret 222;
     }
 
-    var dialer_critical: [3]transport.Stream;
+    var dialer_critical:   [3]transport.Stream;
     var listener_critical: [3]transport.Stream;
-    var requests: [10]transport.Stream;
-    var stream_byte: [1]u8;
+    var requests:          [10]transport.Stream;
+    var stream_byte:       [1]u8;
     i = 0;
     for (i < 3) {
         val dialer_opened: transport.OpenResult =
             transport.open_stream[binding.Binding](?dialer.driver,
-                transport.UNIDIRECTIONAL);
+            transport.UNIDIRECTIONAL);
         val listener_opened: transport.OpenResult =
             transport.open_stream[binding.Binding](?listener.driver,
-                transport.UNIDIRECTIONAL);
+            transport.UNIDIRECTIONAL);
         if (dialer_opened.status != transport.STATUS_OK ||
             listener_opened.status != transport.STATUS_OK) { ret 206; }
-        dialer_critical[i] = dialer_opened.stream;
+        dialer_critical[i]   = dialer_opened.stream;
         listener_critical[i] = listener_opened.stream;
-        stream_byte[0] = i::u8;
+        stream_byte[0]       = i::u8;
         if (transport.write_stream[binding.Binding](?dialer.driver,
-                dialer_critical[i], ?stream_byte[0], 1).count != 1 ||
+            dialer_critical[i], ?stream_byte[0], 1).count != 1 ||
             transport.write_stream[binding.Binding](?listener.driver,
-                listener_critical[i], ?stream_byte[0], 1).count != 1) {
+            listener_critical[i], ?stream_byte[0], 1).count != 1) {
             ret 207;
         }
         i = i + 1;
@@ -691,14 +727,14 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     for (i < 10) {
         val opened: transport.OpenResult =
             transport.open_stream[binding.Binding](?dialer.driver,
-                transport.BIDIRECTIONAL);
+            transport.BIDIRECTIONAL);
         if (opened.status != transport.STATUS_OK) { ret 208; }
-        requests[i] = opened.stream;
+        requests[i]    = opened.stream;
         stream_byte[0] = (0x80 + i)::u8;
         if (transport.write_stream[binding.Binding](?dialer.driver,
-                requests[i], ?stream_byte[0], 1).count != 1 ||
+            requests[i], ?stream_byte[0], 1).count != 1 ||
             transport.finish_stream[binding.Binding](?dialer.driver,
-                requests[i]).status != transport.STATUS_OK) { ret 209; }
+            requests[i]).status != transport.STATUS_OK) { ret 209; }
         i = i + 1;
     }
     if (pump(?clock, ?moved, 16) != 0) { ret refusal(); }
@@ -709,7 +745,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
             transport.accept_stream[binding.Binding](?listener.driver);
         if (accepted_stream.status != transport.STATUS_OK) { ret 210; }
         accepted_streams[i] = accepted_stream.stream;
-        i = i + 1;
+        i                   = i + 1;
     }
     i = 0;
     for (i < 3) {
@@ -724,7 +760,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     # one ack-eliciting listener packet leaves the dialer holding a delayed ack
     stream_byte[0] = 0xC0;
     if (transport.write_stream[binding.Binding](?listener.driver,
-            listener_critical[0], ?stream_byte[0], 1).count != 1) { ret 214; }
+        listener_critical[0], ?stream_byte[0], 1).count != 1) { ret 214; }
     if (carry(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
         listener_endpoint(), ?clock, ?moved) != 0) { ret refusal(); }
     # two dialer packets make the listener's next ack immediate
@@ -732,7 +768,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     for (i < 2) {
         stream_byte[0] = (0xA0 + i)::u8;
         if (transport.write_stream[binding.Binding](?dialer.driver,
-                dialer_critical[i], ?stream_byte[0], 1).count != 1) { ret 214; }
+            dialer_critical[i], ?stream_byte[0], 1).count != 1) { ret 214; }
         if (carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
             dialer_endpoint(), ?clock, ?moved) != 0) { ret refusal(); }
         i = i + 1;
@@ -744,37 +780,37 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     clock = clock + 1000;
     val ack_only: transport.Generated =
         transport.generate[binding.Binding](?listener.driver, ?listener_scope,
-            ?ack_wire[0], 1500, clock, 0);
+        ?ack_wire[0], 1500, clock, 0);
     if (ack_only.status != transport.STATUS_OK || ack_only.count == 0) { ret 215; }
     stream_byte[0] = 0xA2;
     if (transport.write_stream[binding.Binding](?dialer.driver,
-            dialer_critical[2], ?stream_byte[0], 1).count != 1) { ret 216; }
+        dialer_critical[2], ?stream_byte[0], 1).count != 1) { ret 216; }
     if (carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
         dialer_endpoint(), ?clock, ?moved) != 0) { ret refusal(); }
     clock = clock + 1000;
     val superseded: transport.Completion =
         transport.complete_send[binding.Binding](?listener.driver,
-            ack_only.token, transport.SEND_SENT, ack_only.count, clock);
+        ack_only.token, transport.SEND_SENT, ack_only.count, clock);
     if (superseded.status != transport.STATUS_OK ||
         transport.snapshot[binding.Binding](?listener.driver).state !=
-            transport.ACTIVE) { ret 217; }
+        transport.ACTIVE) { ret 217; }
     # the ack-only packet is now the largest the dialer has received; when its
     # delayed ack fires it acknowledges that number, which the listener never
     # tracked for loss, and the listener must accept it
     var ack_datagram: transport.Datagram;
-    ack_datagram.local = dialer_endpoint();
-    ack_datagram.peer = listener_endpoint();
-    ack_datagram.data = ?ack_wire[0];
-    ack_datagram.length = ack_only.count;
+    ack_datagram.local          = dialer_endpoint();
+    ack_datagram.peer           = listener_endpoint();
+    ack_datagram.data           = ?ack_wire[0];
+    ack_datagram.length         = ack_only.count;
     ack_datagram.received_at_ns = clock;
-    ack_datagram.ecn = 0;
+    ack_datagram.ecn            = 0;
     if (transport.receive_datagram[binding.Binding](?dialer.driver,
         ?ack_datagram).status != transport.STATUS_OK) { ret 218; }
     clock = clock + 100000000;
     var reply_wire: [1500]u8;
-    val reply: transport.Generated =
+    val reply:      transport.Generated =
         transport.generate[binding.Binding](?dialer.driver, ?dialer_scope,
-            ?reply_wire[0], 1500, clock, 0);
+        ?reply_wire[0], 1500, clock, 0);
     if (reply.status != transport.STATUS_OK || reply.count == 0) { ret 219; }
     clock = clock + 1000;
     if (transport.complete_send[binding.Binding](?dialer.driver, reply.token,
@@ -782,16 +818,16 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         ret 219;
     }
     var reply_datagram: transport.Datagram;
-    reply_datagram.local = listener_endpoint();
-    reply_datagram.peer = dialer_endpoint();
-    reply_datagram.data = ?reply_wire[0];
-    reply_datagram.length = reply.count;
+    reply_datagram.local          = listener_endpoint();
+    reply_datagram.peer           = dialer_endpoint();
+    reply_datagram.data           = ?reply_wire[0];
+    reply_datagram.length         = reply.count;
     reply_datagram.received_at_ns = clock;
-    reply_datagram.ecn = 0;
+    reply_datagram.ecn            = 0;
     if (transport.receive_datagram[binding.Binding](?listener.driver,
-            ?reply_datagram).status != transport.STATUS_OK ||
+        ?reply_datagram).status != transport.STATUS_OK ||
         transport.snapshot[binding.Binding](?listener.driver).state !=
-            transport.ACTIVE) { ret 220; }
+        transport.ACTIVE) { ret 220; }
     if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
     if (!transport.cancel_connection[binding.Binding](?dialer.driver) ||
         !transport.cancel_connection[binding.Binding](?listener.driver)) { ret 213; }
@@ -819,7 +855,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (assembly.routing_snapshot(?listener).active != 0 ||
         assembly.route_valid(?listener, ?route) ||
         listener_api.release_connection(?front, accepted.charge).action !=
-            listener_api.ACTION_ACCEPT || !listener_api.begin_close(?front) ||
+        listener_api.ACTION_ACCEPT || !listener_api.begin_close(?front) ||
         !listener_api.finish_close(?front)) {
         ret 215;
     }
@@ -828,26 +864,27 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         listener.initialized || !dialer.released || !listener.released ||
         !assembly.release_closed(?dialer) ||
         !assembly.release_closed(?listener) ||
-        !cancel.destroy(?dialer_scope) || !cancel.destroy(?listener_scope)) {
+        !operation_ok(cancel.destroy(?dialer_scope)) || !operation_ok(cancel.destroy(?listener_scope))) {
         ret 223;
     }
 
     # the same stable records now serve a second real client/server generation
     if (!client.init(?dialer_tls_two, ?dialer_tls_config, client.Storage{
-            input: ?dialer_input[0], input_capacity: 8192,
-            output: ?dialer_output[0], output_capacity: 8192,
-            hello: ?dialer_hello[0], hello_capacity: 8192,
-            certificates: ?dialer_certificates[0], certificate_capacity: 4,
-            peer_parameters: ?dialer_peer_parameters[0],
-            peer_parameters_capacity: 512},
+        input:                    ?dialer_input[0], input_capacity: 8192,
+        output:                   ?dialer_output[0], output_capacity: 8192,
+        hello:                    ?dialer_hello[0], hello_capacity: 8192,
+        certificates:             ?dialer_certificates[0], certificate_capacity: 4,
+        peer_parameters:          ?dialer_peer_parameters[0],
+        peer_parameters_capacity: 512
+    },
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
-            data: contracts.Bytes{data: ?dialer_parameters[0],
-                len: dialer_encoded}},
+        data: contracts.Bytes{data: ?dialer_parameters[0],
+        len:  dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS) ||
-        !cancel.make_root(?dialer_scope, false,
-            time.Time{sec: 0, nsec: 0}) ||
-        !cancel.make_root(?listener_scope, false,
-            time.Time{sec: 0, nsec: 0})) { ret 224; }
+        !operation_ok(cancel.make_root(?dialer_scope, false,
+        time.Time{sec: 0, nsec: 0})) ||
+        !operation_ok(cancel.make_root(?listener_scope, false,
+        time.Time{sec: 0, nsec: 0}))) { ret 224; }
     val redialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
         ?dialer_tls_two, ?dialer_scope,
@@ -860,20 +897,20 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         third.token.index != first.token.index ||
         third.token.generation == first.token.generation ||
         transport.complete_send[binding.Binding](?dialer.driver, first.token,
-            transport.SEND_SENT, first.count, clock + 1000).status !=
-            transport.STATUS_STALE ||
+        transport.SEND_SENT, first.count, clock + 1000).status !=
+        transport.STATUS_STALE ||
         transport.complete_send[binding.Binding](?dialer.driver, third.token,
-            transport.SEND_SENT, third.count, clock + 2000).status !=
-            transport.STATUS_OK) { ret 226; }
+        transport.SEND_SENT, third.count, clock + 2000).status !=
+        transport.STATUS_OK) { ret 226; }
 
     var direct: listener_api.Accepted;
-    direct.action = listener_api.ACTION_ACCEPT;
+    direct.action               = listener_api.ACTION_ACCEPT;
     direct.original_destination = connection_id(?initial_destination[0], 8);
-    direct.initial_destination = connection_id(?initial_destination[0], 8);
-    direct.initial_source = connection_id(?dialer_source[0], 8);
-    direct.peer = dialer_endpoint();
-    direct.version = packet_api.VERSION_1;
-    direct.peer_validated = true;
+    direct.initial_destination  = connection_id(?initial_destination[0], 8);
+    direct.initial_source       = connection_id(?dialer_source[0], 8);
+    direct.peer                 = dialer_endpoint();
+    direct.version              = packet_api.VERSION_1;
+    direct.peer_validated       = true;
     var listener_config_two: assembly.Config = connection_config(
         transport.SERVER);
     if (!assembly.apply_server_acceptance(?listener_config_two, ?direct)) {
@@ -882,18 +919,19 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val listener_encoded_two: usize = assembly.encode_parameters(
         ?listener_config_two, transport.SERVER, ?listener_parameters[0], 512).count;
     if (listener_encoded_two == 0 || !server.init(?listener_tls_two,
-            ?listener_tls_config, server.Storage{
-                input: ?listener_input[0], input_capacity: 8192,
-                output: ?listener_output[0], output_capacity: 8192,
-                hello: ?listener_hello[0], hello_capacity: 8192,
-                certificates: ?listener_certificates[0],
-                certificate_capacity: 4,
-                peer_parameters: ?listener_peer_parameters[0],
-                peer_parameters_capacity: 512},
-            server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
-                data: contracts.Bytes{data: ?listener_parameters[0],
-                    len: listener_encoded_two}},
-            server.QUIC_TRANSPORT_PARAMETERS)) { ret 228; }
+        ?listener_tls_config, server.Storage{
+        input:                    ?listener_input[0], input_capacity: 8192,
+        output:                   ?listener_output[0], output_capacity: 8192,
+        hello:                    ?listener_hello[0], hello_capacity: 8192,
+        certificates:             ?listener_certificates[0],
+        certificate_capacity:     4,
+        peer_parameters:          ?listener_peer_parameters[0],
+        peer_parameters_capacity: 512
+    },
+        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+        data: contracts.Bytes{data: ?listener_parameters[0],
+        len:  listener_encoded_two}},
+        server.QUIC_TRANSPORT_PARAMETERS)) { ret 228; }
     cancel.cancel(?listener_scope);
     val refused_two: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config_two, ?listener_storage, ?listener_secret_storage,
@@ -904,22 +942,23 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !assembly.reusable(?listener) ||
         assembly.routing_snapshot(?listener).initialized ||
         !server.destroy(?listener_tls_two) ||
-        !cancel.destroy(?listener_scope) ||
+        !operation_ok(cancel.destroy(?listener_scope)) ||
         !server.init(?listener_tls_two,
-            ?listener_tls_config, server.Storage{
-                input: ?listener_input[0], input_capacity: 8192,
-                output: ?listener_output[0], output_capacity: 8192,
-                hello: ?listener_hello[0], hello_capacity: 8192,
-                certificates: ?listener_certificates[0],
-                certificate_capacity: 4,
-                peer_parameters: ?listener_peer_parameters[0],
-                peer_parameters_capacity: 512},
-            server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
-                data: contracts.Bytes{data: ?listener_parameters[0],
-                    len: listener_encoded_two}},
-            server.QUIC_TRANSPORT_PARAMETERS) ||
-        !cancel.make_root(?listener_scope, false,
-            time.Time{sec: 0, nsec: 0})) { ret 235; }
+        ?listener_tls_config, server.Storage{
+        input:                    ?listener_input[0], input_capacity: 8192,
+        output:                   ?listener_output[0], output_capacity: 8192,
+        hello:                    ?listener_hello[0], hello_capacity: 8192,
+        certificates:             ?listener_certificates[0],
+        certificate_capacity:     4,
+        peer_parameters:          ?listener_peer_parameters[0],
+        peer_parameters_capacity: 512
+    },
+        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+        data: contracts.Bytes{data: ?listener_parameters[0],
+        len:  listener_encoded_two}},
+        server.QUIC_TRANSPORT_PARAMETERS) ||
+        !operation_ok(cancel.make_root(?listener_scope, false,
+        time.Time{sec: 0, nsec: 0}))) { ret 235; }
     val reserved_two: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config_two, ?listener_storage, ?listener_secret_storage,
         ?listener_tls_two,
@@ -929,30 +968,30 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (!route_two.active || route_two.generation == route.generation ||
         assembly.route_valid(?listener, ?route)) { ret 230; }
     var direct_datagram: transport.Datagram;
-    direct_datagram.local = listener_endpoint();
-    direct_datagram.peer = dialer_endpoint();
-    direct_datagram.data = ?wire[0];
-    direct_datagram.length = third.count;
-    clock = clock + 3000;
+    direct_datagram.local          = listener_endpoint();
+    direct_datagram.peer           = dialer_endpoint();
+    direct_datagram.data           = ?wire[0];
+    direct_datagram.length         = third.count;
+    clock                          = clock + 3000;
     direct_datagram.received_at_ns = clock;
     val received_initial_two: transport.OperationResult =
         transport.receive_datagram[binding.Binding](?listener.driver,
-            ?direct_datagram);
+        ?direct_datagram);
     if (received_initial_two.status != transport.STATUS_OK) { ret 234; }
-    if (exchange(?clock, ?moved, 24) != 0) { ret refusal(); }
+    if (exchange(?clock, ?moved, 24) != 0)                  { ret refusal(); }
     val reused: transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
     var reused_bytes: [4]u8 = [4]u8{'n', 'e', 'x', 't'};
     if (reused.status != transport.STATUS_OK ||
         transport.write_stream[binding.Binding](?dialer.driver, reused.stream,
-            ?reused_bytes[0], 4).count != 4 ||
+        ?reused_bytes[0], 4).count != 4 ||
         transport.finish_stream[binding.Binding](?dialer.driver,
-            reused.stream).status != transport.STATUS_OK ||
+        reused.stream).status != transport.STATUS_OK ||
         pump(?clock, ?moved, 12) != 0) { ret 231; }
     val received_two: transport.OpenResult =
         transport.accept_stream[binding.Binding](?listener.driver);
     var received_bytes: [4]u8;
-    val read_two: transport.ReadResult = transport.read_stream[binding.Binding](
+    val read_two:       transport.ReadResult = transport.read_stream[binding.Binding](
         ?listener.driver, received_two.stream, ?received_bytes[0], 4);
     if (received_two.status != transport.STATUS_OK ||
         read_two.status != transport.STATUS_OK || read_two.count != 4 ||
@@ -961,43 +1000,45 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (!transport.cancel_connection[binding.Binding](?dialer.driver) ||
         !transport.cancel_connection[binding.Binding](?listener.driver) ||
         transport.finish_close[binding.Binding](?dialer.driver).status !=
-            transport.STATUS_OK ||
+        transport.STATUS_OK ||
         transport.finish_close[binding.Binding](?listener.driver).status !=
-            transport.STATUS_OK || !assembly.release_closed(?dialer) ||
+        transport.STATUS_OK || !assembly.release_closed(?dialer) ||
         !assembly.release_closed(?listener) ||
-        !cancel.destroy(?dialer_scope) || !cancel.destroy(?listener_scope)) {
+        !operation_ok(cancel.destroy(?dialer_scope)) || !operation_ok(cancel.destroy(?listener_scope))) {
         ret 233;
     }
 
     var rollback_probe: RollbackProbe;
     rollback_probe.attempt_state = ?dialer_storage.stream_attempts[0].state;
-    rollback_probe.armed = true;
+    rollback_probe.armed         = true;
     var rollback_entropy_source: secret.Entropy = secret.Entropy{
         context: (?rollback_probe)::ptr, secret_context: nil,
-        fill_fn: rollback_entropy, initialized: true};
+        fill_fn:                                         rollback_entropy, initialized: true
+    };
     var rollback_tls_config: config.ClientConfig = dialer_tls_config;
-    rollback_tls_config.entropy = ?rollback_entropy_source;
+    rollback_tls_config.entropy              = ?rollback_entropy_source;
     rollback_tls_config.entropy_context_size = $size_of(RollbackProbe);
     var rollback_config: assembly.Config = connection_config(transport.CLIENT);
     rollback_config.entropy_context_size = $size_of(RollbackProbe);
     if (!client.init(?rollback_tls, ?rollback_tls_config, client.Storage{
-            input: ?dialer_input[0], input_capacity: 8192,
-            output: ?dialer_output[0], output_capacity: 8192,
-            hello: ?dialer_hello[0], hello_capacity: 8192,
-            certificates: ?dialer_certificates[0], certificate_capacity: 4,
-            peer_parameters: ?dialer_peer_parameters[0],
-            peer_parameters_capacity: 512},
+        input:                    ?dialer_input[0], input_capacity: 8192,
+        output:                   ?dialer_output[0], output_capacity: 8192,
+        hello:                    ?dialer_hello[0], hello_capacity: 8192,
+        certificates:             ?dialer_certificates[0], certificate_capacity: 4,
+        peer_parameters:          ?dialer_peer_parameters[0],
+        peer_parameters_capacity: 512
+    },
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
-            data: contracts.Bytes{data: ?dialer_parameters[0],
-                len: dialer_encoded}},
+        data: contracts.Bytes{data: ?dialer_parameters[0],
+        len:  dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS) ||
-        !cancel.make_root(?dialer_scope, false,
-            time.Time{sec: 0, nsec: 0})) { ret 239; }
+        !operation_ok(cancel.make_root(?dialer_scope, false,
+        time.Time{sec: 0, nsec: 0}))) { ret 239; }
     val retained: assembly.InitResult = assembly.init_client(?dialer,
         ?rollback_config, ?dialer_storage, ?dialer_secret_storage,
         ?rollback_tls, ?dialer_scope, clock + 1000);
     val retained_storage_generation: u64 = dialer_storage.generation;
-    val retained_secret_generation: u64 = dialer_secret_storage.generation;
+    val retained_secret_generation:  u64 = dialer_secret_storage.generation;
     if (retained.ok || retained.stage != assembly.STAGE_CORE ||
         retained.core.reason != core.INIT_PROVIDER_START ||
         !retained.cleanup_retained || rollback_probe.calls != 1 ||
@@ -1040,7 +1081,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (!assembly.release_closed(?dialer) ||
         dialer_storage.generation != retained_storage_generation ||
         dialer_secret_storage.generation != retained_secret_generation ||
-        !client.destroy(?rollback_tls) || !cancel.destroy(?dialer_scope)) {
+        !client.destroy(?rollback_tls) || !operation_ok(cancel.destroy(?dialer_scope))) {
         ret 243;
     }
     ct.zeroize(?token_key[0], 32);
@@ -1048,15 +1089,15 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
 }
 
 test "quic.connection.assembly: public storage supports ordinary dynamic pools" {
-    val count: usize = 2;
-    val bytes: usize = $size_of(assembly.Storage) * count;
+    val count:   usize             = 2;
+    val bytes:   usize             = $size_of(assembly.Storage) * count;
     val storage: *assembly.Storage = os.allocate(bytes)::*assembly.Storage;
     if (storage == nil || storage::usize % $align_of(assembly.Storage) != 0) {
         ret 1;
     }
-    storage[0].source = 71;
-    storage[1].source = 72;
-    storage[0].receive_header[0] = 0xA5;
+    storage[0].source                                       = 71;
+    storage[1].source                                       = 72;
+    storage[0].receive_header[0]                            = 0xA5;
     storage[1].receive_header[assembly.MAX_UDP_PAYLOAD - 1] = 0x5A;
     if (storage[0].source != 71 || storage[1].source != 72 ||
         ?storage[0] == ?storage[1] ||
@@ -1070,40 +1111,40 @@ test "quic.connection.assembly: typed secret pools retain wiped deallocation for
         secret.system_array_allocator[assembly.Connection]();
     secret_storage_delegate =
         secret.system_array_allocator[assembly.SecretStorage]();
-    secret_storage_deallocations = 0;
-    secret_storage_zeroed_releases = 0;
+    secret_storage_deallocations    = 0;
+    secret_storage_zeroed_releases  = 0;
     secret_storage_nonzero_releases = 0;
     var storage_owner: secret.ArrayAllocator[assembly.SecretStorage] =
         secret.ArrayAllocator[assembly.SecretStorage]{context: nil,
-            secret_context: nil, allocate_fn: secret_storage_allocate,
-            deallocate_fn: secret_storage_deallocate, initialized: true};
+        secret_context: nil, allocate_fn: secret_storage_allocate,
+        deallocate_fn:  secret_storage_deallocate, initialized: true};
     var controls: secret.SecretArray[assembly.Connection] =
         secret.empty_array[assembly.Connection]();
     var storage: secret.SecretArray[assembly.SecretStorage] =
         secret.empty_array[assembly.SecretStorage]();
     if (secret.init_array[assembly.Connection](?controls, ?control_owner, 2) !=
-            contracts.OK ||
+        contracts.OK ||
         secret.init_array[assembly.SecretStorage](?storage, ?storage_owner, 2) !=
-            contracts.OK) { ret 1; }
+        contracts.OK) { ret 1; }
     val control_data: *assembly.Connection =
         secret.array_data[assembly.Connection](?controls);
     val storage_data: *assembly.SecretStorage =
         secret.array_data[assembly.SecretStorage](?storage);
     if (control_data == nil || storage_data == nil) { ret 2; }
-    control_data[0].local_parameter_length = 77;
-    control_data[0].secrets.initial_keys.client.secret[0] = 0xA5;
-    storage_data[0].source = 41;
-    storage_data[0].generation = 9;
-    storage_data[0].leased = true;
-    storage_data[0].receive_plaintext[0] = 0x5A;
+    control_data[0].local_parameter_length                       = 77;
+    control_data[0].secrets.initial_keys.client.secret[0]        = 0xA5;
+    storage_data[0].source                                       = 41;
+    storage_data[0].generation                                   = 9;
+    storage_data[0].leased                                       = true;
+    storage_data[0].receive_plaintext[0]                         = 0x5A;
     storage_data[1].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1] = 0xC3;
     if (secret.destroy_array[assembly.Connection](?controls) != contracts.OK ||
         secret.destroy_array[assembly.SecretStorage](?storage) !=
-            contracts.DEALLOCATION_FAILED ||
+        contracts.DEALLOCATION_FAILED ||
         !secret.array_cleanup_pending[assembly.SecretStorage](?storage) ||
         secret.array_active[assembly.SecretStorage](?storage) ||
         secret.array_data[assembly.SecretStorage](?storage) != nil ||
-        storage.data == nil || storage.data[0].receive_plaintext[0]:^ != 0 ||
+        storage.data == nil || storage.data[0].receive_plaintext[0]:>u8 != 0 ||
         secret_storage_deallocations != 1 ||
         secret_storage_zeroed_releases != 1 ||
         secret_storage_nonzero_releases != 0) { ret 3; }

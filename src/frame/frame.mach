@@ -6,118 +6,130 @@ use std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
-use std.types.result;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
-pub val PADDING: u64 = 0x00;
-pub val PING: u64 = 0x01;
-pub val ACK: u64 = 0x02;
-pub val ACK_ECN: u64 = 0x03;
-pub val RESET_STREAM: u64 = 0x04;
-pub val STOP_SENDING: u64 = 0x05;
-pub val CRYPTO: u64 = 0x06;
-pub val NEW_TOKEN: u64 = 0x07;
-pub val STREAM_BASE: u64 = 0x08;
-pub val STREAM_MAX: u64 = 0x0f;
-pub val MAX_DATA: u64 = 0x10;
-pub val MAX_STREAM_DATA: u64 = 0x11;
-pub val MAX_STREAMS_BIDI: u64 = 0x12;
-pub val MAX_STREAMS_UNI: u64 = 0x13;
-pub val DATA_BLOCKED: u64 = 0x14;
-pub val STREAM_DATA_BLOCKED: u64 = 0x15;
-pub val STREAMS_BLOCKED_BIDI: u64 = 0x16;
-pub val STREAMS_BLOCKED_UNI: u64 = 0x17;
-pub val NEW_CONNECTION_ID: u64 = 0x18;
-pub val RETIRE_CONNECTION_ID: u64 = 0x19;
-pub val PATH_CHALLENGE: u64 = 0x1a;
-pub val PATH_RESPONSE: u64 = 0x1b;
-pub val CONNECTION_CLOSE_TRANSPORT: u64 = 0x1c;
-pub val CONNECTION_CLOSE_APPLICATION: u64 = 0x1d;
-pub val HANDSHAKE_DONE: u64 = 0x1e;
-pub val DATAGRAM: u64 = 0x30;
-pub val DATAGRAM_LEN: u64 = 0x31;
+fun is_err_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
+    ret sel outcome.err;
+}
 
-pub val STATUS_DONE: u8 = 1;
-pub val STATUS_MORE: u8 = 2;
+fun is_ok_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
+    ret sel outcome.ok;
+}
+
+fun is_ok_usize_u8(outcome: res[usize, u8]) bool {
+    ret sel outcome.ok;
+}
+
+pub val PADDING:                      u64 = 0x00;
+pub val PING:                         u64 = 0x01;
+pub val ACK:                          u64 = 0x02;
+pub val ACK_ECN:                      u64 = 0x03;
+pub val RESET_STREAM:                 u64 = 0x04;
+pub val STOP_SENDING:                 u64 = 0x05;
+pub val CRYPTO:                       u64 = 0x06;
+pub val NEW_TOKEN:                    u64 = 0x07;
+pub val STREAM_BASE:                  u64 = 0x08;
+pub val STREAM_MAX:                   u64 = 0x0f;
+pub val MAX_DATA:                     u64 = 0x10;
+pub val MAX_STREAM_DATA:              u64 = 0x11;
+pub val MAX_STREAMS_BIDI:             u64 = 0x12;
+pub val MAX_STREAMS_UNI:              u64 = 0x13;
+pub val DATA_BLOCKED:                 u64 = 0x14;
+pub val STREAM_DATA_BLOCKED:          u64 = 0x15;
+pub val STREAMS_BLOCKED_BIDI:         u64 = 0x16;
+pub val STREAMS_BLOCKED_UNI:          u64 = 0x17;
+pub val NEW_CONNECTION_ID:            u64 = 0x18;
+pub val RETIRE_CONNECTION_ID:         u64 = 0x19;
+pub val PATH_CHALLENGE:               u64 = 0x1a;
+pub val PATH_RESPONSE:                u64 = 0x1b;
+pub val CONNECTION_CLOSE_TRANSPORT:   u64 = 0x1c;
+pub val CONNECTION_CLOSE_APPLICATION: u64 = 0x1d;
+pub val HANDSHAKE_DONE:               u64 = 0x1e;
+pub val DATAGRAM:                     u64 = 0x30;
+pub val DATAGRAM_LEN:                 u64 = 0x31;
+
+pub val STATUS_DONE:  u8 = 1;
+pub val STATUS_MORE:  u8 = 2;
 pub val STATUS_ERROR: u8 = 3;
 
-pub val ERROR_NONE: u8 = 0;
-pub val ERROR_TRUNCATED: u8 = 1;
-pub val ERROR_UNKNOWN_TYPE: u8 = 2;
-pub val ERROR_ENCODING: u8 = 3;
-pub val ERROR_LIMIT: u8 = 4;
-pub val ERROR_ACK_RANGE: u8 = 5;
+pub val ERROR_NONE:          u8 = 0;
+pub val ERROR_TRUNCATED:     u8 = 1;
+pub val ERROR_UNKNOWN_TYPE:  u8 = 2;
+pub val ERROR_ENCODING:      u8 = 3;
+pub val ERROR_LIMIT:         u8 = 4;
+pub val ERROR_ACK_RANGE:     u8 = 5;
 pub val ERROR_CONNECTION_ID: u8 = 6;
-pub val ERROR_STREAM_LIMIT: u8 = 7;
-pub val ERROR_OUTPUT: u8 = 8;
+pub val ERROR_STREAM_LIMIT:  u8 = 7;
+pub val ERROR_OUTPUT:        u8 = 8;
 
 pub rec AckRange {
-    gap: u64;
+    gap:   u64;
     range: u64;
 }
 
 pub rec Storage {
-    ack_ranges: *AckRange;
+    ack_ranges:   *AckRange;
     ack_capacity: usize;
 }
 
 # fields are interpreted by kind, keeping dispatch allocation-free
 pub rec Frame {
-    kind: u64;
-    padding_count: usize;
-    stream_id: u64;
-    error_code: u64;
-    final_size: u64;
-    offset: u64;
-    maximum: u64;
-    sequence: u64;
-    retire_prior_to: u64;
-    frame_type: u64;
-    data: packet.Span;
-    fin: bool;
-    bidirectional: bool;
-    largest_acknowledged: u64;
-    ack_delay: u64;
-    first_ack_range: u64;
-    ack_ranges: *AckRange;
-    ack_range_count: usize;
-    ect0: u64;
-    ect1: u64;
-    ecn_ce: u64;
-    connection_id: packet.ConnectionId;
+    kind:                  u64;
+    padding_count:         usize;
+    stream_id:             u64;
+    error_code:            u64;
+    final_size:            u64;
+    offset:                u64;
+    maximum:               u64;
+    sequence:              u64;
+    retire_prior_to:       u64;
+    frame_type:            u64;
+    data:                  packet.Span;
+    fin:                   bool;
+    bidirectional:         bool;
+    largest_acknowledged:  u64;
+    ack_delay:             u64;
+    first_ack_range:       u64;
+    ack_ranges:            *AckRange;
+    ack_range_count:       usize;
+    ect0:                  u64;
+    ect1:                  u64;
+    ecn_ce:                u64;
+    connection_id:         packet.ConnectionId;
     stateless_reset_token: [16]u8;
-    path_data: [8]u8;
+    path_data:             [8]u8;
 }
 
 pub rec Limits {
-    max_frame_size: usize;
+    max_frame_size:   usize;
     max_payload_size: usize;
-    max_ack_ranges: usize;
-    max_token_size: usize;
-    max_reason_size: usize;
+    max_ack_ranges:   usize;
+    max_token_size:   usize;
+    max_reason_size:  usize;
 }
 
 pub rec DecodeResult {
-    status: u8;
-    error: u8;
+    status:   u8;
+    error:    u8;
     consumed: usize;
-    needed: usize;
+    needed:   usize;
 }
 
 pub rec EncodeResult {
-    ok: bool;
+    ok:    bool;
     error: u8;
     count: usize;
 }
 
 pub fun default_limits() Limits {
     var limits: Limits;
-    limits.max_frame_size = 65527;
+    limits.max_frame_size   = 65527;
     limits.max_payload_size = 65527;
-    limits.max_ack_ranges = 256;
-    limits.max_token_size = 16384;
-    limits.max_reason_size = 4096;
+    limits.max_ack_ranges   = 256;
+    limits.max_token_size   = 16384;
+    limits.max_reason_size  = 4096;
     ret limits;
 }
 
@@ -131,7 +143,7 @@ pub fun ack_eliciting(kind: u64) bool {
 
 fun done(count: usize) DecodeResult {
     var r: DecodeResult;
-    r.status = STATUS_DONE;
+    r.status   = STATUS_DONE;
     r.consumed = count;
     ret r;
 }
@@ -139,7 +151,7 @@ fun done(count: usize) DecodeResult {
 fun failed(code: u8) DecodeResult {
     var r: DecodeResult;
     r.status = STATUS_ERROR;
-    r.error = code;
+    r.error  = code;
     ret r;
 }
 
@@ -167,14 +179,14 @@ fun take_data(d: *binary.Decoder, width: usize) packet.Span {
     data.len = width;
     if (width > 0) {
         data.data = ?d.data[d.pos];
-        d.pos = d.pos + width;
+        d.pos     = d.pos + width;
     }
     ret data;
 }
 
 fun valid_type(kind: u64) bool {
     if (kind <= NEW_TOKEN) { ret true; }
-    if (is_stream(kind)) { ret true; }
+    if (is_stream(kind))   { ret true; }
     ret (kind >= MAX_DATA && kind <= HANDSHAKE_DONE) || kind == DATAGRAM || kind == DATAGRAM_LEN;
 }
 
@@ -186,17 +198,20 @@ fun value_or_missing(d: *binary.Decoder, final: bool, value: *u64) DecodeResult 
 }
 
 fun copy_ack_ranges(frame: *Frame, encoded: binary.Decoder, storage: Storage) bool {
-    if (frame.ack_range_count == 0) { frame.ack_ranges = nil; ret true; }
+    if (frame.ack_range_count == 0) {
+        frame.ack_ranges = nil;
+        ret true;
+    }
     if (storage.ack_ranges == nil || storage.ack_capacity < frame.ack_range_count) { ret false; }
     var d: binary.Decoder = encoded;
-    var i: usize = 0;
+    var i: usize          = 0;
     for (i < frame.ack_range_count) {
-        var gap: u64 = 0;
+        var gap:   u64 = 0;
         var range: u64 = 0;
         if (read_value(?d, ?gap) != varint.STATUS_DONE || read_value(?d, ?range) != varint.STATUS_DONE) { ret false; }
-        storage.ack_ranges[i].gap = gap;
+        storage.ack_ranges[i].gap   = gap;
         storage.ack_ranges[i].range = range;
-        i = i + 1;
+        i                           = i + 1;
     }
     frame.ack_ranges = storage.ack_ranges;
     ret true;
@@ -205,11 +220,11 @@ fun copy_ack_ranges(frame: *Frame, encoded: binary.Decoder, storage: Storage) bo
 # decodes one frame and commits output, ack storage, and cursor together
 pub fun decode(d: *binary.Decoder, final: bool, limits: Limits, storage: Storage, out: *Frame) DecodeResult {
     if (d == nil || out == nil || d.pos > d.len) { ret failed(ERROR_OUTPUT); }
-    val start: usize = d.pos;
-    var cursor: binary.Decoder = @d;
-    var frame: Frame;
-    var ack_encoded: binary.Decoder;
-    var ack_pending: bool = false;
+    val start:        usize          = d.pos;
+    var cursor:       binary.Decoder = @d;
+    var frame:        Frame;
+    var ack_encoded:  binary.Decoder;
+    var ack_pending:  bool           = false;
     val decoded_type: varint.Decoded = varint.read(?cursor, true);
     if (decoded_type.status == varint.STATUS_MORE) { ret missing(final, 1); }
     if (decoded_type.status != varint.STATUS_DONE) { ret failed(ERROR_ENCODING); }
@@ -220,11 +235,12 @@ pub fun decode(d: *binary.Decoder, final: bool, limits: Limits, storage: Storage
     if (kind == PADDING) {
         frame.padding_count = 1;
         for (cursor.pos < cursor.len && cursor.data[cursor.pos] == 0) {
-            cursor.pos = cursor.pos + 1;
+            cursor.pos          = cursor.pos + 1;
             frame.padding_count = frame.padding_count + 1;
         }
-    } or (kind == PING || kind == HANDSHAKE_DONE) {
-    } or (kind == ACK || kind == ACK_ECN) {
+    }
+    or (kind == PING || kind == HANDSHAKE_DONE) {}
+    or (kind == ACK || kind == ACK_ECN) {
         var range_count: u64 = 0;
         if (value_or_missing(?cursor, final, ?frame.largest_acknowledged).status != STATUS_DONE ||
             value_or_missing(?cursor, final, ?frame.ack_delay).status != STATUS_DONE ||
@@ -233,14 +249,14 @@ pub fun decode(d: *binary.Decoder, final: bool, limits: Limits, storage: Storage
             ret missing(final, 1);
         }
         if (range_count > limits.max_ack_ranges::u64 || range_count > storage.ack_capacity::u64) { ret failed(ERROR_LIMIT); }
-        if (frame.first_ack_range > frame.largest_acknowledged) { ret failed(ERROR_ACK_RANGE); }
+        if (frame.first_ack_range > frame.largest_acknowledged)                                  { ret failed(ERROR_ACK_RANGE); }
         frame.ack_range_count = range_count::usize;
-        ack_encoded = cursor;
-        ack_pending = true;
-        var smallest: u64 = frame.largest_acknowledged - frame.first_ack_range;
-        var i: usize = 0;
+        ack_encoded           = cursor;
+        ack_pending           = true;
+        var smallest: u64   = frame.largest_acknowledged - frame.first_ack_range;
+        var i:        usize = 0;
         for (i < frame.ack_range_count) {
-            var gap: u64 = 0;
+            var gap:   u64 = 0;
             var range: u64 = 0;
             if (value_or_missing(?cursor, final, ?gap).status != STATUS_DONE ||
                 value_or_missing(?cursor, final, ?range).status != STATUS_DONE) {
@@ -250,7 +266,7 @@ pub fun decode(d: *binary.Decoder, final: bool, limits: Limits, storage: Storage
             val next_largest: u64 = smallest - gap - 2;
             if (range > next_largest) { ret failed(ERROR_ACK_RANGE); }
             smallest = next_largest - range;
-            i = i + 1;
+            i        = i + 1;
         }
         if (kind == ACK_ECN) {
             if (value_or_missing(?cursor, final, ?frame.ect0).status != STATUS_DONE ||
@@ -259,100 +275,115 @@ pub fun decode(d: *binary.Decoder, final: bool, limits: Limits, storage: Storage
                 ret missing(final, 1);
             }
         }
-    } or (kind == RESET_STREAM) {
+    }
+    or (kind == RESET_STREAM) {
         if (value_or_missing(?cursor, final, ?frame.stream_id).status != STATUS_DONE ||
             value_or_missing(?cursor, final, ?frame.error_code).status != STATUS_DONE ||
             value_or_missing(?cursor, final, ?frame.final_size).status != STATUS_DONE) {
             ret missing(final, 1);
         }
-    } or (kind == STOP_SENDING) {
+    }
+    or (kind == STOP_SENDING) {
         if (value_or_missing(?cursor, final, ?frame.stream_id).status != STATUS_DONE ||
             value_or_missing(?cursor, final, ?frame.error_code).status != STATUS_DONE) {
             ret missing(final, 1);
         }
-    } or (kind == CRYPTO) {
+    }
+    or (kind == CRYPTO) {
         var length: u64 = 0;
         if (value_or_missing(?cursor, final, ?frame.offset).status != STATUS_DONE ||
             value_or_missing(?cursor, final, ?length).status != STATUS_DONE) {
             ret missing(final, 1);
         }
         if (length > limits.max_payload_size::u64) { ret failed(ERROR_LIMIT); }
-        if (length > varint.MAX - frame.offset) { ret failed(ERROR_ENCODING); }
-        if (!fits(?cursor, length::usize)) { ret missing(final, length::usize); }
+        if (length > varint.MAX - frame.offset)    { ret failed(ERROR_ENCODING); }
+        if (!fits(?cursor, length::usize))         { ret missing(final, length::usize); }
         frame.data = take_data(?cursor, length::usize);
-    } or (kind == NEW_TOKEN) {
+    }
+    or (kind == NEW_TOKEN) {
         var length: u64 = 0;
         if (value_or_missing(?cursor, final, ?length).status != STATUS_DONE) { ret missing(final, 1); }
-        if (length == 0 || length > limits.max_token_size::u64) { ret failed(ERROR_LIMIT); }
-        if (!fits(?cursor, length::usize)) { ret missing(final, length::usize); }
+        if (length == 0 || length > limits.max_token_size::u64)              { ret failed(ERROR_LIMIT); }
+        if (!fits(?cursor, length::usize))                                   { ret missing(final, length::usize); }
         frame.data = take_data(?cursor, length::usize);
-    } or (is_stream(kind)) {
+    }
+    or (is_stream(kind)) {
         frame.fin = (kind & 0x01) != 0;
-        if (value_or_missing(?cursor, final, ?frame.stream_id).status != STATUS_DONE) { ret missing(final, 1); }
+        if (value_or_missing(?cursor, final, ?frame.stream_id).status != STATUS_DONE)                    { ret missing(final, 1); }
         if ((kind & 0x04) != 0 && value_or_missing(?cursor, final, ?frame.offset).status != STATUS_DONE) { ret missing(final, 1); }
         var length: usize = 0;
         if ((kind & 0x02) != 0) {
             var encoded_length: u64 = 0;
             if (value_or_missing(?cursor, final, ?encoded_length).status != STATUS_DONE) { ret missing(final, 1); }
-            if (encoded_length > limits.max_payload_size::u64) { ret failed(ERROR_LIMIT); }
-            if (encoded_length > varint.MAX - frame.offset) { ret failed(ERROR_ENCODING); }
+            if (encoded_length > limits.max_payload_size::u64)                           { ret failed(ERROR_LIMIT); }
+            if (encoded_length > varint.MAX - frame.offset)                              { ret failed(ERROR_ENCODING); }
             length = encoded_length::usize;
             if (!fits(?cursor, length)) { ret missing(final, length); }
-        } or {
+        }
+        or {
             if (!final) { ret missing(false, 1); }
             length = cursor.len - cursor.pos;
-            if (length > limits.max_payload_size) { ret failed(ERROR_LIMIT); }
+            if (length > limits.max_payload_size)        { ret failed(ERROR_LIMIT); }
             if (length::u64 > varint.MAX - frame.offset) { ret failed(ERROR_ENCODING); }
         }
         frame.data = take_data(?cursor, length);
-    } or (kind == DATAGRAM || kind == DATAGRAM_LEN) {
+    }
+    or (kind == DATAGRAM || kind == DATAGRAM_LEN) {
         var length: usize = 0;
         if (kind == DATAGRAM_LEN) {
             var encoded_length: u64 = 0;
             if (value_or_missing(?cursor, final, ?encoded_length).status != STATUS_DONE) { ret missing(final, 1); }
-            if (encoded_length > limits.max_payload_size::u64) { ret failed(ERROR_LIMIT); }
+            if (encoded_length > limits.max_payload_size::u64)                           { ret failed(ERROR_LIMIT); }
             length = encoded_length::usize;
             if (!fits(?cursor, length)) { ret missing(final, length); }
-        } or {
+        }
+        or {
             if (!final) { ret missing(false, 1); }
             length = cursor.len - cursor.pos;
             if (length > limits.max_payload_size) { ret failed(ERROR_LIMIT); }
         }
         frame.data = take_data(?cursor, length);
-    } or (kind == MAX_DATA || kind == DATA_BLOCKED) {
+    }
+    or (kind == MAX_DATA || kind == DATA_BLOCKED) {
         if (value_or_missing(?cursor, final, ?frame.maximum).status != STATUS_DONE) { ret missing(final, 1); }
-    } or (kind == MAX_STREAM_DATA || kind == STREAM_DATA_BLOCKED) {
+    }
+    or (kind == MAX_STREAM_DATA || kind == STREAM_DATA_BLOCKED) {
         if (value_or_missing(?cursor, final, ?frame.stream_id).status != STATUS_DONE ||
             value_or_missing(?cursor, final, ?frame.maximum).status != STATUS_DONE) {
             ret missing(final, 1);
         }
-    } or (kind == MAX_STREAMS_BIDI || kind == MAX_STREAMS_UNI || kind == STREAMS_BLOCKED_BIDI || kind == STREAMS_BLOCKED_UNI) {
+    }
+    or (kind == MAX_STREAMS_BIDI || kind == MAX_STREAMS_UNI || kind == STREAMS_BLOCKED_BIDI || kind == STREAMS_BLOCKED_UNI) {
         if (value_or_missing(?cursor, final, ?frame.maximum).status != STATUS_DONE) { ret missing(final, 1); }
-        if (frame.maximum > (1 << 60)) { ret failed(ERROR_STREAM_LIMIT); }
+        if (frame.maximum > (1 << 60))                                              { ret failed(ERROR_STREAM_LIMIT); }
         frame.bidirectional = kind == MAX_STREAMS_BIDI || kind == STREAMS_BLOCKED_BIDI;
-    } or (kind == NEW_CONNECTION_ID) {
+    }
+    or (kind == NEW_CONNECTION_ID) {
         var connection_len: usize = 0;
         if (value_or_missing(?cursor, final, ?frame.sequence).status != STATUS_DONE ||
             value_or_missing(?cursor, final, ?frame.retire_prior_to).status != STATUS_DONE) {
             ret missing(final, 1);
         }
         if (frame.retire_prior_to > frame.sequence) { ret failed(ERROR_CONNECTION_ID); }
-        if (!fits(?cursor, 1)) { ret missing(final, 1); }
+        if (!fits(?cursor, 1))                      { ret missing(final, 1); }
         connection_len = cursor.data[cursor.pos]::usize;
-        cursor.pos = cursor.pos + 1;
-        if (connection_len == 0 || connection_len > packet.MAX_CONNECTION_ID) { ret failed(ERROR_CONNECTION_ID); }
-        if (!fits(?cursor, connection_len + 16)) { ret missing(final, connection_len + 16); }
+        cursor.pos     = cursor.pos + 1;
+        if (connection_len == 0 || connection_len > packet.MAX_CONNECTION_ID)                          { ret failed(ERROR_CONNECTION_ID); }
+        if (!fits(?cursor, connection_len + 16))                                                       { ret missing(final, connection_len + 16); }
         if (!packet.set_connection_id(?frame.connection_id, ?cursor.data[cursor.pos], connection_len)) { ret failed(ERROR_CONNECTION_ID); }
         cursor.pos = cursor.pos + connection_len;
         memory.copy[u8](?frame.stateless_reset_token[0], ?cursor.data[cursor.pos], 16);
         cursor.pos = cursor.pos + 16;
-    } or (kind == RETIRE_CONNECTION_ID) {
+    }
+    or (kind == RETIRE_CONNECTION_ID) {
         if (value_or_missing(?cursor, final, ?frame.sequence).status != STATUS_DONE) { ret missing(final, 1); }
-    } or (kind == PATH_CHALLENGE || kind == PATH_RESPONSE) {
+    }
+    or (kind == PATH_CHALLENGE || kind == PATH_RESPONSE) {
         if (!fits(?cursor, 8)) { ret missing(final, 8); }
         memory.copy[u8](?frame.path_data[0], ?cursor.data[cursor.pos], 8);
         cursor.pos = cursor.pos + 8;
-    } or (kind == CONNECTION_CLOSE_TRANSPORT || kind == CONNECTION_CLOSE_APPLICATION) {
+    }
+    or (kind == CONNECTION_CLOSE_TRANSPORT || kind == CONNECTION_CLOSE_APPLICATION) {
         if (value_or_missing(?cursor, final, ?frame.error_code).status != STATUS_DONE) { ret missing(final, 1); }
         if (kind == CONNECTION_CLOSE_TRANSPORT &&
             value_or_missing(?cursor, final, ?frame.frame_type).status != STATUS_DONE) {
@@ -360,14 +391,14 @@ pub fun decode(d: *binary.Decoder, final: bool, limits: Limits, storage: Storage
         }
         var reason_length: u64 = 0;
         if (value_or_missing(?cursor, final, ?reason_length).status != STATUS_DONE) { ret missing(final, 1); }
-        if (reason_length > limits.max_reason_size::u64) { ret failed(ERROR_LIMIT); }
-        if (!fits(?cursor, reason_length::usize)) { ret missing(final, reason_length::usize); }
+        if (reason_length > limits.max_reason_size::u64)                            { ret failed(ERROR_LIMIT); }
+        if (!fits(?cursor, reason_length::usize))                                   { ret missing(final, reason_length::usize); }
         frame.data = take_data(?cursor, reason_length::usize);
     }
 
-    if (cursor.pos - start > limits.max_frame_size) { ret failed(ERROR_LIMIT); }
+    if (cursor.pos - start > limits.max_frame_size)                    { ret failed(ERROR_LIMIT); }
     if (ack_pending && !copy_ack_ranges(?frame, ack_encoded, storage)) { ret failed(ERROR_OUTPUT); }
-    @out = frame;
+    @out  = frame;
     d.pos = cursor.pos;
     ret done(cursor.pos - start);
 }
@@ -395,18 +426,18 @@ fun valid_data(data: packet.Span, limit: usize) bool {
 }
 
 fun validate_ack(frame: *Frame, limits: Limits) bool {
-    if (frame.ack_range_count > limits.max_ack_ranges) { ret false; }
+    if (frame.ack_range_count > limits.max_ack_ranges)        { ret false; }
     if (frame.ack_range_count > 0 && frame.ack_ranges == nil) { ret false; }
-    if (frame.first_ack_range > frame.largest_acknowledged) { ret false; }
-    var smallest: u64 = frame.largest_acknowledged - frame.first_ack_range;
-    var i: usize = 0;
+    if (frame.first_ack_range > frame.largest_acknowledged)   { ret false; }
+    var smallest: u64   = frame.largest_acknowledged - frame.first_ack_range;
+    var i:        usize = 0;
     for (i < frame.ack_range_count) {
         val range: AckRange = frame.ack_ranges[i];
         if (smallest < 2 || range.gap > smallest - 2) { ret false; }
         val next_largest: u64 = smallest - range.gap - 2;
         if (range.range > next_largest) { ret false; }
         smallest = next_largest - range.range;
-        i = i + 1;
+        i        = i + 1;
     }
     ret true;
 }
@@ -416,12 +447,13 @@ pub fun encoded_size(frame: *Frame, limits: Limits) EncodeResult {
     var count: usize = 0;
     if (frame.kind == PADDING) {
         if (frame.padding_count == 0 || !add_size(?count, frame.padding_count, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or {
+    }
+    or {
         if (!add_value(?count, frame.kind, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
     }
 
-    if (frame.kind == PING || frame.kind == PADDING || frame.kind == HANDSHAKE_DONE) {
-    } or (frame.kind == ACK || frame.kind == ACK_ECN) {
+    if (frame.kind == PING || frame.kind == PADDING || frame.kind == HANDSHAKE_DONE) {}
+    or (frame.kind == ACK || frame.kind == ACK_ECN) {
         if (!validate_ack(frame, limits) ||
             !add_value(?count, frame.largest_acknowledged, limits.max_frame_size) ||
             !add_value(?count, frame.ack_delay, limits.max_frame_size) ||
@@ -439,53 +471,62 @@ pub fun encoded_size(frame: *Frame, limits: Limits) EncodeResult {
         }
         if (frame.kind == ACK_ECN &&
             (!add_value(?count, frame.ect0, limits.max_frame_size) ||
-             !add_value(?count, frame.ect1, limits.max_frame_size) ||
-             !add_value(?count, frame.ecn_ce, limits.max_frame_size))) {
+            !add_value(?count, frame.ect1, limits.max_frame_size) ||
+            !add_value(?count, frame.ecn_ce, limits.max_frame_size))) {
             ret encode_error(ERROR_LIMIT);
         }
-    } or (frame.kind == RESET_STREAM) {
+    }
+    or (frame.kind == RESET_STREAM) {
         if (!add_value(?count, frame.stream_id, limits.max_frame_size) ||
             !add_value(?count, frame.error_code, limits.max_frame_size) ||
             !add_value(?count, frame.final_size, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or (frame.kind == STOP_SENDING) {
+    }
+    or (frame.kind == STOP_SENDING) {
         if (!add_value(?count, frame.stream_id, limits.max_frame_size) ||
             !add_value(?count, frame.error_code, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or (frame.kind == CRYPTO || frame.kind == NEW_TOKEN || is_stream(frame.kind) ||
-          frame.kind == DATAGRAM || frame.kind == DATAGRAM_LEN) {
-        if (!valid_data(frame.data, limits.max_payload_size)) { ret encode_error(ERROR_LIMIT); }
+    }
+    or (frame.kind == CRYPTO || frame.kind == NEW_TOKEN || is_stream(frame.kind) ||
+        frame.kind == DATAGRAM || frame.kind == DATAGRAM_LEN) {
+        if (!valid_data(frame.data, limits.max_payload_size))                                                   { ret encode_error(ERROR_LIMIT); }
         if ((frame.kind == CRYPTO || is_stream(frame.kind)) && frame.data.len::u64 > varint.MAX - frame.offset) { ret encode_error(ERROR_ENCODING); }
-        if (frame.kind == NEW_TOKEN && (frame.data.len == 0 || frame.data.len > limits.max_token_size)) { ret encode_error(ERROR_LIMIT); }
+        if (frame.kind == NEW_TOKEN && (frame.data.len == 0 || frame.data.len > limits.max_token_size))         { ret encode_error(ERROR_LIMIT); }
         if (frame.kind == CRYPTO &&
             (!add_value(?count, frame.offset, limits.max_frame_size) ||
-             !add_value(?count, frame.data.len::u64, limits.max_frame_size))) { ret encode_error(ERROR_LIMIT); }
-        if (frame.kind == NEW_TOKEN && !add_value(?count, frame.data.len::u64, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
+            !add_value(?count, frame.data.len::u64, limits.max_frame_size))) { ret encode_error(ERROR_LIMIT); }
+        if (frame.kind == NEW_TOKEN && !add_value(?count, frame.data.len::u64, limits.max_frame_size))    { ret encode_error(ERROR_LIMIT); }
         if (frame.kind == DATAGRAM_LEN && !add_value(?count, frame.data.len::u64, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
         if (is_stream(frame.kind)) {
-            if (!add_value(?count, frame.stream_id, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-            if ((frame.kind & 0x04) != 0 && !add_value(?count, frame.offset, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
+            if (!add_value(?count, frame.stream_id, limits.max_frame_size))                                 { ret encode_error(ERROR_LIMIT); }
+            if ((frame.kind & 0x04) != 0 && !add_value(?count, frame.offset, limits.max_frame_size))        { ret encode_error(ERROR_LIMIT); }
             if ((frame.kind & 0x02) != 0 && !add_value(?count, frame.data.len::u64, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
         }
         if (!add_size(?count, frame.data.len, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or (frame.kind == MAX_DATA || frame.kind == DATA_BLOCKED || frame.kind == MAX_STREAMS_BIDI || frame.kind == MAX_STREAMS_UNI || frame.kind == STREAMS_BLOCKED_BIDI || frame.kind == STREAMS_BLOCKED_UNI) {
+    }
+    or (frame.kind == MAX_DATA || frame.kind == DATA_BLOCKED || frame.kind == MAX_STREAMS_BIDI || frame.kind == MAX_STREAMS_UNI || frame.kind == STREAMS_BLOCKED_BIDI || frame.kind == STREAMS_BLOCKED_UNI) {
         if ((frame.kind == MAX_STREAMS_BIDI || frame.kind == MAX_STREAMS_UNI || frame.kind == STREAMS_BLOCKED_BIDI || frame.kind == STREAMS_BLOCKED_UNI) && frame.maximum > (1 << 60)) {
             ret encode_error(ERROR_STREAM_LIMIT);
         }
         if (!add_value(?count, frame.maximum, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or (frame.kind == MAX_STREAM_DATA || frame.kind == STREAM_DATA_BLOCKED) {
+    }
+    or (frame.kind == MAX_STREAM_DATA || frame.kind == STREAM_DATA_BLOCKED) {
         if (!add_value(?count, frame.stream_id, limits.max_frame_size) ||
             !add_value(?count, frame.maximum, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or (frame.kind == NEW_CONNECTION_ID) {
+    }
+    or (frame.kind == NEW_CONNECTION_ID) {
         if (frame.connection_id.len == 0 || frame.connection_id.len::usize > packet.MAX_CONNECTION_ID || frame.retire_prior_to > frame.sequence) {
             ret encode_error(ERROR_CONNECTION_ID);
         }
         if (!add_value(?count, frame.sequence, limits.max_frame_size) ||
             !add_value(?count, frame.retire_prior_to, limits.max_frame_size) ||
             !add_size(?count, 1 + frame.connection_id.len::usize + 16, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or (frame.kind == RETIRE_CONNECTION_ID) {
+    }
+    or (frame.kind == RETIRE_CONNECTION_ID) {
         if (!add_value(?count, frame.sequence, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or (frame.kind == PATH_CHALLENGE || frame.kind == PATH_RESPONSE) {
+    }
+    or (frame.kind == PATH_CHALLENGE || frame.kind == PATH_RESPONSE) {
         if (!add_size(?count, 8, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
-    } or (frame.kind == CONNECTION_CLOSE_TRANSPORT || frame.kind == CONNECTION_CLOSE_APPLICATION) {
+    }
+    or (frame.kind == CONNECTION_CLOSE_TRANSPORT || frame.kind == CONNECTION_CLOSE_APPLICATION) {
         if (!valid_data(frame.data, limits.max_reason_size) ||
             !add_value(?count, frame.error_code, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
         if (frame.kind == CONNECTION_CLOSE_TRANSPORT && !add_value(?count, frame.frame_type, limits.max_frame_size)) { ret encode_error(ERROR_LIMIT); }
@@ -494,21 +535,21 @@ pub fun encoded_size(frame: *Frame, limits: Limits) EncodeResult {
     }
 
     var r: EncodeResult;
-    r.ok = true;
+    r.ok    = true;
     r.count = count;
     ret r;
 }
 
 fun write_v(b: *binary.Builder, value: u64) bool {
-    ret result.is_ok[usize, u8](varint.write(b, value, 0));
+    ret is_ok_usize_u8(varint.write(b, value, 0));
 }
 
 fun write_b(b: *binary.Builder, value: u8) bool {
-    ret result.is_ok[usize, str](binary.builder_write_u8(b, value));
+    ret is_ok_usize_encode(binary.builder_write_u8(b, value));
 }
 
 fun write_bytes(b: *binary.Builder, data: *u8, len: usize) bool {
-    ret result.is_ok[usize, str](binary.builder_write_bytes(b, data, len));
+    ret is_ok_usize_encode(binary.builder_write_bytes(b, data, len));
 }
 
 # encodes one complete frame as a builder transaction
@@ -516,16 +557,20 @@ pub fun encode(b: *binary.Builder, frame: *Frame, limits: Limits) EncodeResult {
     if (b == nil || b.order != binary.BIG) { ret encode_error(ERROR_OUTPUT); }
     val measured: EncodeResult = encoded_size(frame, limits);
     if (!measured.ok) { ret measured; }
-    val reserved: result.Result[binary.Reservation, str] = binary.builder_reserve(b, measured.count);
-    if (result.is_err[binary.Reservation, str](reserved)) { ret encode_error(ERROR_OUTPUT); }
-    var reservation: binary.Reservation = result.unwrap_ok[binary.Reservation, str](reserved);
-    val body: *binary.Builder = ?reservation.body;
-    var ok: bool = true;
+    val reserved: res[binary.Reservation, binary.EncodeError] = binary.builder_reserve(b, measured.count);
+    if (sel reserved.err) { ret encode_error(ERROR_OUTPUT); }
+    var reservation: binary.Reservation = reserved.ok;
+    val body:        *binary.Builder    = ?reservation.body;
+    var ok:          bool               = true;
 
     if (frame.kind == PADDING) {
         var i: usize = 0;
-        for (i < frame.padding_count) { ok = ok && write_b(body, 0); i = i + 1; }
-    } or {
+        for (i < frame.padding_count) {
+            ok = ok && write_b(body, 0);
+            i  = i + 1;
+        }
+    }
+    or {
         ok = write_v(body, frame.kind);
     }
 
@@ -535,49 +580,61 @@ pub fun encode(b: *binary.Builder, frame: *Frame, limits: Limits) EncodeResult {
         var i: usize = 0;
         for (ok && i < frame.ack_range_count) {
             ok = write_v(body, frame.ack_ranges[i].gap) && write_v(body, frame.ack_ranges[i].range);
-            i = i + 1;
+            i  = i + 1;
         }
         if (ok && frame.kind == ACK_ECN) { ok = write_v(body, frame.ect0) && write_v(body, frame.ect1) && write_v(body, frame.ecn_ce); }
-    } or (ok && frame.kind == RESET_STREAM) {
+    }
+    or (ok && frame.kind == RESET_STREAM) {
         ok = write_v(body, frame.stream_id) && write_v(body, frame.error_code) && write_v(body, frame.final_size);
-    } or (ok && frame.kind == STOP_SENDING) {
+    }
+    or (ok && frame.kind == STOP_SENDING) {
         ok = write_v(body, frame.stream_id) && write_v(body, frame.error_code);
-    } or (ok && frame.kind == CRYPTO) {
+    }
+    or (ok && frame.kind == CRYPTO) {
         ok = write_v(body, frame.offset) && write_v(body, frame.data.len::u64) && write_bytes(body, frame.data.data, frame.data.len);
-    } or (ok && frame.kind == NEW_TOKEN) {
+    }
+    or (ok && frame.kind == NEW_TOKEN) {
         ok = write_v(body, frame.data.len::u64) && write_bytes(body, frame.data.data, frame.data.len);
-    } or (ok && is_stream(frame.kind)) {
+    }
+    or (ok && is_stream(frame.kind)) {
         ok = write_v(body, frame.stream_id);
         if (ok && (frame.kind & 0x04) != 0) { ok = write_v(body, frame.offset); }
         if (ok && (frame.kind & 0x02) != 0) { ok = write_v(body, frame.data.len::u64); }
-        if (ok) { ok = write_bytes(body, frame.data.data, frame.data.len); }
-    } or (ok && (frame.kind == DATAGRAM || frame.kind == DATAGRAM_LEN)) {
+        if (ok)                             { ok = write_bytes(body, frame.data.data, frame.data.len); }
+    }
+    or (ok && (frame.kind == DATAGRAM || frame.kind == DATAGRAM_LEN)) {
         if (frame.kind == DATAGRAM_LEN) { ok = write_v(body, frame.data.len::u64); }
-        if (ok) { ok = write_bytes(body, frame.data.data, frame.data.len); }
-    } or (ok && (frame.kind == MAX_DATA || frame.kind == DATA_BLOCKED || frame.kind == MAX_STREAMS_BIDI || frame.kind == MAX_STREAMS_UNI || frame.kind == STREAMS_BLOCKED_BIDI || frame.kind == STREAMS_BLOCKED_UNI)) {
+        if (ok)                         { ok = write_bytes(body, frame.data.data, frame.data.len); }
+    }
+    or (ok && (frame.kind == MAX_DATA || frame.kind == DATA_BLOCKED || frame.kind == MAX_STREAMS_BIDI || frame.kind == MAX_STREAMS_UNI || frame.kind == STREAMS_BLOCKED_BIDI || frame.kind == STREAMS_BLOCKED_UNI)) {
         ok = write_v(body, frame.maximum);
-    } or (ok && (frame.kind == MAX_STREAM_DATA || frame.kind == STREAM_DATA_BLOCKED)) {
+    }
+    or (ok && (frame.kind == MAX_STREAM_DATA || frame.kind == STREAM_DATA_BLOCKED)) {
         ok = write_v(body, frame.stream_id) && write_v(body, frame.maximum);
-    } or (ok && frame.kind == NEW_CONNECTION_ID) {
+    }
+    or (ok && frame.kind == NEW_CONNECTION_ID) {
         ok = write_v(body, frame.sequence) && write_v(body, frame.retire_prior_to) &&
             write_b(body, frame.connection_id.len) &&
             write_bytes(body, ?frame.connection_id.data[0], frame.connection_id.len::usize) &&
             write_bytes(body, ?frame.stateless_reset_token[0], 16);
-    } or (ok && frame.kind == RETIRE_CONNECTION_ID) {
+    }
+    or (ok && frame.kind == RETIRE_CONNECTION_ID) {
         ok = write_v(body, frame.sequence);
-    } or (ok && (frame.kind == PATH_CHALLENGE || frame.kind == PATH_RESPONSE)) {
+    }
+    or (ok && (frame.kind == PATH_CHALLENGE || frame.kind == PATH_RESPONSE)) {
         ok = write_bytes(body, ?frame.path_data[0], 8);
-    } or (ok && (frame.kind == CONNECTION_CLOSE_TRANSPORT || frame.kind == CONNECTION_CLOSE_APPLICATION)) {
+    }
+    or (ok && (frame.kind == CONNECTION_CLOSE_TRANSPORT || frame.kind == CONNECTION_CLOSE_APPLICATION)) {
         ok = write_v(body, frame.error_code);
         if (ok && frame.kind == CONNECTION_CLOSE_TRANSPORT) { ok = write_v(body, frame.frame_type); }
-        if (ok) { ok = write_v(body, frame.data.len::u64) && write_bytes(body, frame.data.data, frame.data.len); }
+        if (ok)                                             { ok = write_v(body, frame.data.len::u64) && write_bytes(body, frame.data.data, frame.data.len); }
     }
 
     if (!ok || body.len != measured.count) {
         binary.reservation_rollback(?reservation);
         ret encode_error(ERROR_OUTPUT);
     }
-    if (result.is_err[usize, str](binary.builder_commit(?reservation))) {
+    if (is_err_usize_encode(binary.builder_commit(?reservation))) {
         ret encode_error(ERROR_OUTPUT);
     }
     ret measured;
@@ -585,70 +642,98 @@ pub fun encode(b: *binary.Builder, frame: *Frame, limits: Limits) EncodeResult {
 
 fun fragmented_round_trip(frame: *Frame) bool {
     var bytes: [256]u8;
-    var b: binary.Builder = binary.builder(?bytes[0], 256, binary.BIG);
+    var b:     binary.Builder = binary.builder(?bytes[0], 256, binary.BIG);
     if (!encode(?b, frame, default_limits()).ok) { ret false; }
-    var ranges: [8]AckRange;
+    var ranges:  [8]AckRange;
     var storage: Storage;
-    storage.ack_ranges = ?ranges[0];
+    storage.ack_ranges   = ?ranges[0];
     storage.ack_capacity = 8;
     var prefix: usize = 0;
     for (prefix < b.len) {
-        var d: binary.Decoder = binary.decoder(?bytes[0], prefix, binary.BIG);
+        var d:   binary.Decoder = binary.decoder(?bytes[0], prefix, binary.BIG);
         var out: Frame;
         out.kind = 0xff;
         val r: DecodeResult = decode(?d, false, default_limits(), storage, ?out);
         if (r.status != STATUS_MORE || d.pos != 0 || out.kind != 0xff) { ret false; }
         prefix = prefix + 1;
     }
-    var d: binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
+    var d:   binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
     var out: Frame;
-    val r: DecodeResult = decode(?d, true, default_limits(), storage, ?out);
+    val r:   DecodeResult   = decode(?d, true, default_limits(), storage, ?out);
     ret r.status == STATUS_DONE && d.pos == b.len && out.kind == frame.kind;
 }
 
 test "quic.frame.frame: every registered frame family round trips" {
-    var frames: [22]Frame;
+    var frames:        [22]Frame;
     var datagram_data: [4]u8 = [4]u8{9, 8, 7, 6};
-    frames[0].kind = PADDING; frames[0].padding_count = 1;
-    frames[1].kind = PING;
-    frames[2].kind = RESET_STREAM; frames[2].stream_id = 1; frames[2].error_code = 2; frames[2].final_size = 3;
-    frames[3].kind = STOP_SENDING; frames[3].stream_id = 4; frames[3].error_code = 5;
-    frames[4].kind = MAX_DATA; frames[4].maximum = 100;
-    frames[5].kind = MAX_STREAM_DATA; frames[5].stream_id = 1; frames[5].maximum = 100;
-    frames[6].kind = MAX_STREAMS_BIDI; frames[6].maximum = 10;
-    frames[7].kind = MAX_STREAMS_UNI; frames[7].maximum = 11;
-    frames[8].kind = DATA_BLOCKED; frames[8].maximum = 12;
-    frames[9].kind = STREAM_DATA_BLOCKED; frames[9].stream_id = 2; frames[9].maximum = 13;
-    frames[10].kind = STREAMS_BLOCKED_BIDI; frames[10].maximum = 14;
-    frames[11].kind = STREAMS_BLOCKED_UNI; frames[11].maximum = 15;
-    frames[12].kind = RETIRE_CONNECTION_ID; frames[12].sequence = 2;
-    frames[13].kind = PATH_CHALLENGE;
-    frames[14].kind = PATH_RESPONSE;
-    frames[15].kind = HANDSHAKE_DONE;
-    frames[16].kind = CONNECTION_CLOSE_TRANSPORT; frames[16].error_code = 1; frames[16].frame_type = PING;
-    frames[17].kind = CONNECTION_CLOSE_APPLICATION; frames[17].error_code = 2;
-    frames[18].kind = STREAM_BASE | 0x07; frames[18].stream_id = 4; frames[18].offset = 5; frames[18].fin = true;
-    frames[19].kind = CRYPTO; frames[19].offset = 3;
-    frames[20].kind = DATAGRAM_LEN; frames[20].data.data = ?datagram_data[0]; frames[20].data.len = 4;
-    frames[21].kind = DATAGRAM; frames[21].data.data = ?datagram_data[0]; frames[21].data.len = 4;
+    frames[0].kind          = PADDING;
+    frames[0].padding_count = 1;
+    frames[1].kind          = PING;
+    frames[2].kind          = RESET_STREAM;
+    frames[2].stream_id     = 1;
+    frames[2].error_code    = 2;
+    frames[2].final_size    = 3;
+    frames[3].kind          = STOP_SENDING;
+    frames[3].stream_id     = 4;
+    frames[3].error_code    = 5;
+    frames[4].kind          = MAX_DATA;
+    frames[4].maximum       = 100;
+    frames[5].kind          = MAX_STREAM_DATA;
+    frames[5].stream_id     = 1;
+    frames[5].maximum       = 100;
+    frames[6].kind          = MAX_STREAMS_BIDI;
+    frames[6].maximum       = 10;
+    frames[7].kind          = MAX_STREAMS_UNI;
+    frames[7].maximum       = 11;
+    frames[8].kind          = DATA_BLOCKED;
+    frames[8].maximum       = 12;
+    frames[9].kind          = STREAM_DATA_BLOCKED;
+    frames[9].stream_id     = 2;
+    frames[9].maximum       = 13;
+    frames[10].kind         = STREAMS_BLOCKED_BIDI;
+    frames[10].maximum      = 14;
+    frames[11].kind         = STREAMS_BLOCKED_UNI;
+    frames[11].maximum      = 15;
+    frames[12].kind         = RETIRE_CONNECTION_ID;
+    frames[12].sequence     = 2;
+    frames[13].kind         = PATH_CHALLENGE;
+    frames[14].kind         = PATH_RESPONSE;
+    frames[15].kind         = HANDSHAKE_DONE;
+    frames[16].kind         = CONNECTION_CLOSE_TRANSPORT;
+    frames[16].error_code   = 1;
+    frames[16].frame_type   = PING;
+    frames[17].kind         = CONNECTION_CLOSE_APPLICATION;
+    frames[17].error_code   = 2;
+    frames[18].kind         = STREAM_BASE | 0x07;
+    frames[18].stream_id    = 4;
+    frames[18].offset       = 5;
+    frames[18].fin          = true;
+    frames[19].kind         = CRYPTO;
+    frames[19].offset       = 3;
+    frames[20].kind         = DATAGRAM_LEN;
+    frames[20].data.data    = ?datagram_data[0];
+    frames[20].data.len     = 4;
+    frames[21].kind         = DATAGRAM;
+    frames[21].data.data    = ?datagram_data[0];
+    frames[21].data.len     = 4;
 
     var bytes: [1024]u8;
-    var b: binary.Builder = binary.builder(?bytes[0], 1024, binary.BIG);
-    var i: usize = 0;
+    var b:     binary.Builder = binary.builder(?bytes[0], 1024, binary.BIG);
+    var i:     usize          = 0;
     for (i < 22) {
-        if (!fragmented_round_trip(?frames[i])) { ret 1; }
+        if (!fragmented_round_trip(?frames[i]))           { ret 1; }
         if (!encode(?b, ?frames[i], default_limits()).ok) { ret 1; }
         i = i + 1;
     }
-    var ranges: [4]AckRange;
+    var ranges:  [4]AckRange;
     var storage: Storage;
-    storage.ack_ranges = ?ranges[0];
+    storage.ack_ranges   = ?ranges[0];
     storage.ack_capacity = 4;
     var d: binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
     i = 0;
     for (i < 22) {
         var decoded: Frame;
-        val r: DecodeResult = decode(?d, true, default_limits(), storage, ?decoded);
+        val r:       DecodeResult = decode(?d, true, default_limits(), storage, ?decoded);
         if (r.status != STATUS_DONE || decoded.kind != frames[i].kind || decoded.data.len != frames[i].data.len) { ret 1; }
         i = i + 1;
     }
@@ -657,10 +742,10 @@ test "quic.frame.frame: every registered frame family round trips" {
 }
 
 test "quic.frame.frame: DATAGRAM length and payload failures are transactional" {
-    val truncated: [3]u8 = [3]u8{0x31, 3, 1};
-    var d: binary.Decoder = binary.decoder(?truncated[0], 3, binary.BIG);
-    var storage: Storage;
-    var out: Frame;
+    val truncated: [3]u8          = [3]u8{0x31, 3, 1};
+    var d:         binary.Decoder = binary.decoder(?truncated[0], 3, binary.BIG);
+    var storage:   Storage;
+    var out:       Frame;
     out.kind = 0xff;
     val failed: DecodeResult = decode(?d, true, default_limits(), storage, ?out);
     if (failed.error != ERROR_TRUNCATED || d.pos != 0 || out.kind != 0xff) { ret 1; }
@@ -682,48 +767,64 @@ test "quic.frame.frame: DATAGRAM length and payload failures are transactional" 
 
 test "quic.frame.frame: ACK ECN ranges validate and round trip" {
     var ranges: [2]AckRange;
-    ranges[0].gap = 1; ranges[0].range = 2;
-    ranges[1].gap = 0; ranges[1].range = 1;
+    ranges[0].gap   = 1;
+    ranges[0].range = 2;
+    ranges[1].gap   = 0;
+    ranges[1].range = 1;
     var frame: Frame;
-    frame.kind = ACK_ECN;
+    frame.kind                 = ACK_ECN;
     frame.largest_acknowledged = 20;
-    frame.ack_delay = 5;
-    frame.first_ack_range = 3;
-    frame.ack_ranges = ?ranges[0];
-    frame.ack_range_count = 2;
-    frame.ect0 = 7; frame.ect1 = 8; frame.ecn_ce = 9;
+    frame.ack_delay            = 5;
+    frame.first_ack_range      = 3;
+    frame.ack_ranges           = ?ranges[0];
+    frame.ack_range_count      = 2;
+    frame.ect0                 = 7;
+    frame.ect1                 = 8;
+    frame.ecn_ce               = 9;
     if (!fragmented_round_trip(?frame)) { ret 1; }
     var bytes: [64]u8;
-    var b: binary.Builder = binary.builder(?bytes[0], 64, binary.BIG);
+    var b:     binary.Builder = binary.builder(?bytes[0], 64, binary.BIG);
     if (!encode(?b, ?frame, default_limits()).ok) { ret 1; }
     var decoded_ranges: [2]AckRange;
-    var storage: Storage;
-    storage.ack_ranges = ?decoded_ranges[0]; storage.ack_capacity = 2;
+    var storage:        Storage;
+    storage.ack_ranges   = ?decoded_ranges[0];
+    storage.ack_capacity = 2;
     var out: Frame;
-    var d: binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
-    if (decode(?d, true, default_limits(), storage, ?out).status != STATUS_DONE) { ret 1; }
+    var d:   binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
+    if (decode(?d, true, default_limits(), storage, ?out).status != STATUS_DONE)     { ret 1; }
     if (out.ack_range_count != 2 || out.ecn_ce != 9 || decoded_ranges[1].range != 1) { ret 1; }
     ret 0;
 }
 
 test "quic.frame.frame: payload frames and connection IDs round trip" {
-    var data: [4]u8 = [4]u8{1, 2, 3, 4};
-    var cid: [4]u8 = [4]u8{5, 6, 7, 8};
+    var data:   [4]u8 = [4]u8{1, 2, 3, 4};
+    var cid:    [4]u8 = [4]u8{5, 6, 7, 8};
     var frames: [4]Frame;
-    frames[0].kind = CRYPTO; frames[0].offset = 9; frames[0].data.data = ?data[0]; frames[0].data.len = 4;
-    frames[1].kind = NEW_TOKEN; frames[1].data.data = ?data[0]; frames[1].data.len = 4;
-    frames[2].kind = STREAM_BASE | 0x07; frames[2].stream_id = 3; frames[2].offset = 7; frames[2].data.data = ?data[0]; frames[2].data.len = 4;
-    frames[3].kind = NEW_CONNECTION_ID; frames[3].sequence = 2; frames[3].retire_prior_to = 1;
+    frames[0].kind            = CRYPTO;
+    frames[0].offset          = 9;
+    frames[0].data.data       = ?data[0];
+    frames[0].data.len        = 4;
+    frames[1].kind            = NEW_TOKEN;
+    frames[1].data.data       = ?data[0];
+    frames[1].data.len        = 4;
+    frames[2].kind            = STREAM_BASE | 0x07;
+    frames[2].stream_id       = 3;
+    frames[2].offset          = 7;
+    frames[2].data.data       = ?data[0];
+    frames[2].data.len        = 4;
+    frames[3].kind            = NEW_CONNECTION_ID;
+    frames[3].sequence        = 2;
+    frames[3].retire_prior_to = 1;
     if (!packet.set_connection_id(?frames[3].connection_id, ?cid[0], 4)) { ret 1; }
     var bytes: [128]u8;
-    var b: binary.Builder = binary.builder(?bytes[0], 128, binary.BIG);
-    var i: usize = 0;
+    var b:     binary.Builder = binary.builder(?bytes[0], 128, binary.BIG);
+    var i:     usize          = 0;
     for (i < 4) {
         if (!fragmented_round_trip(?frames[i]) || !encode(?b, ?frames[i], default_limits()).ok) { ret 1; }
         i = i + 1;
     }
     var storage: Storage;
-    var d: binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
+    var d:       binary.Decoder = binary.decoder(?bytes[0], b.len, binary.BIG);
     i = 0;
     for (i < 4) {
         var out: Frame;
@@ -734,27 +835,27 @@ test "quic.frame.frame: payload frames and connection IDs round trip" {
 }
 
 test "quic.frame.frame: fragmentation and failures never publish" {
-    var data: [5]u8 = [5]u8{1, 2, 3, 4, 5};
+    var data:  [5]u8 = [5]u8{1, 2, 3, 4, 5};
     var frame: Frame;
-    frame.kind = CRYPTO;
-    frame.offset = 64;
+    frame.kind      = CRYPTO;
+    frame.offset    = 64;
     frame.data.data = ?data[0];
-    frame.data.len = 5;
+    frame.data.len  = 5;
     var bytes: [32]u8;
-    var b: binary.Builder = binary.builder(?bytes[0], 32, binary.BIG);
+    var b:     binary.Builder = binary.builder(?bytes[0], 32, binary.BIG);
     if (!encode(?b, ?frame, default_limits()).ok) { ret 1; }
     var storage: Storage;
-    var out: Frame;
+    var out:     Frame;
     out.kind = 0xff;
     var prefix: usize = 0;
     for (prefix < b.len) {
         var d: binary.Decoder = binary.decoder(?bytes[0], prefix, binary.BIG);
-        val r: DecodeResult = decode(?d, false, default_limits(), storage, ?out);
+        val r: DecodeResult   = decode(?d, false, default_limits(), storage, ?out);
         if (r.status != STATUS_MORE || d.pos != 0 || out.kind != 0xff) { ret 1; }
         prefix = prefix + 1;
     }
-    val unknown: [1]u8 = [1]u8{0x1f};
-    var d: binary.Decoder = binary.decoder(?unknown[0], 1, binary.BIG);
+    val unknown: [1]u8          = [1]u8{0x1f};
+    var d:       binary.Decoder = binary.decoder(?unknown[0], 1, binary.BIG);
     if (decode(?d, true, default_limits(), storage, ?out).error != ERROR_UNKNOWN_TYPE || d.pos != 0 || out.kind != 0xff) { ret 1; }
     var tiny: [1]u8;
     b = binary.builder(?tiny[0], 1, binary.BIG);
@@ -763,15 +864,15 @@ test "quic.frame.frame: fragmentation and failures never publish" {
     d = binary.decoder(?bad_ack[0], 5, binary.BIG);
     if (decode(?d, true, default_limits(), storage, ?out).error != ERROR_ACK_RANGE || d.pos != 0 || out.kind != 0xff) { ret 1; }
     val nonminimal_ping: [2]u8 = [2]u8{0x40, 0x01};
-    d = binary.decoder(?nonminimal_ping[0], 2, binary.BIG);
+    d        = binary.decoder(?nonminimal_ping[0], 2, binary.BIG);
     out.kind = 0xff;
     if (decode(?d, true, default_limits(), storage, ?out).error != ERROR_ENCODING || d.pos != 0 || out.kind != 0xff) { ret 1; }
     var overflow: Frame;
-    overflow.kind = CRYPTO;
-    overflow.offset = varint.MAX;
+    overflow.kind      = CRYPTO;
+    overflow.offset    = varint.MAX;
     overflow.data.data = ?data[0];
-    overflow.data.len = 1;
-    b = binary.builder(?bytes[0], 32, binary.BIG);
+    overflow.data.len  = 1;
+    b                  = binary.builder(?bytes[0], 32, binary.BIG);
     if (encode(?b, ?overflow, default_limits()).error != ERROR_ENCODING || b.len != 0) { ret 1; }
     ret 0;
 }

@@ -1,6 +1,13 @@
 # Changelog
 
-## [0.5.9] - 2026-09-05
+## [0.6.0] - 2026-09-13
+
+### Changed
+
+- Migrated to mach 5.0 and std 2.0.0 (#95): every fallible or absent outcome is a `res`, `opt` or `err` tag, `:^` is the typed `:>T` strip, the manifest is on the 5.0 schema and the dependency pins are the committed gitlinks under `dep/`.
+- Dependencies: mach-crypto v0.9.0, mach-tls v0.3.0.
+- The cancel reason the cancellation callback publishes atomically is mapped to an integer explicitly, since a tag cannot be cast.
+
 
 ### Changed
 
