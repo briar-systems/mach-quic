@@ -1775,6 +1775,42 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
     ret true;
 }
 
+fun terminal_discarded_owner(core: *Core, secrets: *Secrets,
+    owner: *Owner, now_ns: u64) bool {
+    if (owner.kind == OWNER_CRYPTO &&
+        handshake_api.on_terminal_scoped(secrets.handshake, core.config.source,
+        owner.handshake, handshake_api.TERMINAL_LOST).status !=
+        handshake_api.STATUS_OK) { ret false; }
+    if (owner.kind == OWNER_STREAM &&
+        stream_api.on_terminal_scoped(core.streams, core.config.source,
+        owner.stream, stream_api.TERMINAL_LOST).status !=
+        stream_api.STATUS_OK) { ret false; }
+    if (owner.kind == OWNER_CID_RETIREMENT &&
+        cid_api.retirement_terminal_scoped(core.cids, core.config.source,
+        owner.cid_retirement, false).status != cid_api.STATUS_OK) {
+        ret false;
+    }
+    if (owner.kind == OWNER_NEW_CID &&
+        cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
+        owner.cid_retirement, false).status != cid_api.STATUS_OK) {
+        ret false;
+    }
+    if (owner.kind == OWNER_HANDSHAKE_DONE) {
+        core.handshake_done_queued = true;
+    }
+    if (owner.kind == OWNER_NEW_TOKEN) {
+        core.send_token_prepared = false;
+        core.send_token_queued   = true;
+    }
+    if (core.role == transport_api.SERVER &&
+        owner.level == handshake_api.HANDSHAKE &&
+        !discard_initial_keys(core, secrets)) {
+        ret false;
+    }
+    free_owner(owner);
+    ret true;
+}
+
 fun apply_recovery_events(core: *Core, secrets: *Secrets, count: usize, now_ns: u64,
     persistent: bool, retry_event: bool,
     bytes_before: u64) bool {
@@ -3473,10 +3509,17 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
         core.last_received_ns >= core.last_activity_ns) {
         core.last_activity_ns = now_ns;
     }
-    if (!owner.ack_eliciting) {
-        if (owner.kind == OWNER_CLOSE) {
-            core.close_transmissions = core.close_transmissions + 1;
+    if (!owner.ack_eliciting && owner.kind == OWNER_CLOSE) {
+        core.close_transmissions = core.close_transmissions + 1;
+    }
+    val space_idx: usize = space_index(owner.space);
+    if (!core.recovery_state.spaces[space_idx].active) {
+        if (!terminal_discarded_owner(core, secrets, owner, now_ns)) {
+            ret fail(core, INTERNAL_ERROR, now_ns);
         }
+        ret core_result(core, transport_api.STATUS_OK, 0);
+    }
+    if (!owner.ack_eliciting) {
         # the peer may acknowledge this number, so recovery must know it was sent
         if (!recovery.on_untracked_sent(?core.recovery_state, owner.space,
             owner.packet_number, now_ns).ok) {
