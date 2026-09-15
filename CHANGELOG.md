@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.1] - 2026-09-15
+
+### Fixed
+
+- `complete_send` accepts the completion of a datagram the operating system sent whole even when the recovery space it was built for has since been discarded, rather than reporting `ERROR_PROTOCOL` and failing the connection (#93).
+
+### Changed
+
+- Dependencies: mach-crypto v0.9.1, mach-tls v0.3.1.
+
 ## [0.6.0] - 2026-09-13
 
 ### Changed

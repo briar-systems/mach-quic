@@ -960,3 +960,25 @@ test "quic.connection.core: a refusal reports every field it did not set" {
         closed.provider_error != 0) { ret 6; }
     ret 0;
 }
+
+test "quic.connection.core: send completion after space discard does not fail protocol" {
+    var fixture: Fixture;
+    if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
+    var output:    [1200]u8;
+    val generated: transport.CoreDatagram = core.generate(?fixture.engine,
+        ?fixture.secrets, ?output[0], 1200, 2);
+    if (generated.status != transport.STATUS_OK || generated.count == 0) { ret 2; }
+    val discarded: recovery.DiscardResult = recovery.discard_space(
+        ?fixture.engine.recovery_state, packet.SPACE_INITIAL, 3,
+        ?fixture.recovery_events[0], 8);
+    if (!discarded.ok || fixture.engine.recovery_state.spaces[0].active) { ret 3; }
+    val completed: transport.CoreResult = core.complete_send(?fixture.engine,
+        ?fixture.secrets, generated.owner, transport.SEND_SENT,
+        generated.count, 4);
+    if (completed.status != transport.STATUS_OK ||
+        core.snapshot(?fixture.engine).active_owners != 0 ||
+        fixture.path_values[0].recovery_bytes_in_flight != 0 ||
+        fixture.path_values[0].recovery_owners != 0 ||
+        fixture.adapter_attempts[0].state != handshake.ATTEMPT_FREE) { ret 4; }
+    ret 0;
+}
