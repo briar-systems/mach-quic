@@ -1,10 +1,19 @@
-# authenticated address and retry tokens with bounded replay ownership
+# authenticated address and retry tokens with owned replay protection
+#
+# consumed retry nonces are remembered until their token could no longer
+# authenticate, in storage that grows with what is remembered
 
 use quic.connection.ownership;
 use quic.packet.packet;
+use quic.storage.hash;
+use quic.storage.heap;
+use quic.storage.index;
+use quic.storage.limited;
+use quic.storage.slots;
 
 use crypto.contracts;
 use crypto.hmac;
+use std.allocator;
 use std.crypto.ct;
 use std.encoding.binary;
 use std.memory;
@@ -12,6 +21,7 @@ use std.net.ip;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.size.usize;
 
 pub val PURPOSE_RETRY:   u8 = 1;
@@ -42,42 +52,65 @@ pub val ERROR_REPLAY:   Error = 9;
 pub val ERROR_CAPACITY: Error = 10;
 pub val ERROR_TOKEN:    Error = 11;
 pub val ERROR_TIME:     Error = 12;
+pub val ERROR_MEMORY:   Error = 13;
 
 pub def ReplayState: u8;
 pub val REPLAY_FREE:     ReplayState = 0;
 pub val REPLAY_RESERVED: ReplayState = 1;
 pub val REPLAY_CONSUMED: ReplayState = 2;
 
+# how many ranges `ranges` writes
+pub val RANGE_COUNT: usize = 4;
+
+# an entry leaves the expiry heap and the index once its token has expired,
+# but a reservation's owner still holds it until commit or cancel
 pub rec ReplaySlot {
     nonce:          u64;
     key_generation: u64;
     expires_at_ns:  u64;
     generation:     u64;
+    hash:           u64;
+    heap_position:  usize;
     state:          ReplayState;
 }
 
-pub rec Storage {
-    replay:          *ReplaySlot;
-    replay_capacity: usize;
+rec ReplayKey {
+    nonce:          u64;
+    key_generation: u64;
 }
 
+# max_replay caps remembered nonces by count, and none is unbounded
 pub rec Config {
     source:             u64;
     retry_max_age_ns:   u64;
     address_max_age_ns: u64;
+    max_replay:         opt[usize];
 }
 
 pub rec Manager {
     config:              Config;
-    storage:             Storage;
+    backing:             *allocator.Allocator;
+    replay:              slots.Slots[ReplaySlot];
+    replay_index:        index.Index;
+    expiry:              heap.Heap;
+    hash_key:            hash.Key;
     current:             [32]^u8;
     previous:            [32]^u8;
     current_generation:  u64;
     previous_generation: u64;
-    next_replay:         usize;
+    reserved:            usize;
+    generation:          u64;
     listener_lease:      u64;
     initialized:         bool;
     closing:             bool;
+}
+
+pub rec Snapshot {
+    remembered:  usize;
+    reserved:    usize;
+    bytes:       usize;
+    initialized: bool;
+    closing:     bool;
 }
 
 pub rec Reservation {
@@ -133,46 +166,69 @@ fun key_aliases_manager(manager: *Manager, key: contracts.SecretBytes) bool {
         ?manager.previous[0], KEY_SIZE);
 }
 
-fun physical(manager: *Manager) bool {
-    if (manager == nil) { ret false; }
-    val manager_range: ownership.Range = ownership.anchored_record[
-        Manager, Config](?manager.config, $offset_of(Manager, config));
-    if (!manager_range.valid) { ret false; }
-    val replay_range: ownership.Range = ownership.array(manager.storage.replay::*u8,
-        manager.storage.replay_capacity, $size_of(ReplaySlot),
-        ownership.ZERO_FORBIDDEN);
-    ret replay_range.valid && ownership.disjoint(replay_range, manager_range);
+fun manager_range(manager: *Manager) ownership.Range {
+    ret ownership.anchored_record[Manager, Config](?manager.config,
+        $offset_of(Manager, config));
 }
 
-pub fun initialize(manager: *Manager, config: Config, storage: Storage,
-    generation: u64, key: contracts.SecretBytes) bool {
+# writes the manager and every directory it owns. directories move as they
+# grow, so the ranges hold only until the next retry token is opened
+pub fun ranges(manager: *Manager, output: *ownership.Range) {
+    output[0] = manager_range(manager);
+    output[1] = slots.range[ReplaySlot](?manager.replay);
+    output[2] = index.range(?manager.replay_index);
+    output[3] = heap.range(?manager.expiry);
+}
+
+fun physical(manager: *Manager) bool {
+    if (manager == nil || !manager_range(manager).valid) { ret false; }
+    if (!slots.sound[ReplaySlot](?manager.replay) ||
+        !index.sound(?manager.replay_index) || !heap.sound(?manager.expiry) ||
+        manager.replay_index.count > manager.replay.live ||
+        manager.expiry.count != manager.replay_index.count ||
+        manager.reserved > manager.replay.live) { ret false; }
+    var owned: [4]ownership.Range;
+    ranges(manager, ?owned[0]);
+    ret ownership.all_disjoint(?owned[0], RANGE_COUNT);
+}
+
+fun config_valid(config: Config) bool {
     if (config.source == 0 || config.retry_max_age_ns == 0 ||
-        config.address_max_age_ns == 0 || generation == 0 ||
-        storage.replay == nil || storage.replay_capacity == 0 || key.data == nil ||
-        key.len != KEY_SIZE) { ret false; }
+        config.address_max_age_ns == 0) { ret false; }
+    if (sel config.max_replay.some && config.max_replay.some == 0) { ret false; }
+    ret true;
+}
+
+# replay storage draws on `backing` for the manager's whole life and is
+# released to it by finish_close
+pub fun initialize(manager: *Manager, config: Config,
+    backing: *allocator.Allocator, generation: u64,
+    key: contracts.SecretBytes) bool {
+    if (!config_valid(config) || backing == nil || generation == 0 ||
+        key.data == nil || key.len != KEY_SIZE) { ret false; }
     if (manager == nil) { ret false; }
-    val manager_range: ownership.Range = ownership.anchored_record[
-        Manager, Config](?manager.config, $offset_of(Manager, config));
-    val replay_range: ownership.Range = ownership.array(storage.replay::*u8,
-        storage.replay_capacity, $size_of(ReplaySlot), ownership.ZERO_FORBIDDEN);
-    if (!manager_range.valid || !replay_range.valid ||
-        !ownership.disjoint(replay_range, manager_range) ||
-        key_aliases_manager(manager, key) || manager.initialized) {
+    if (!manager_range(manager).valid || key_aliases_manager(manager, key) ||
+        manager.initialized) {
         ret false;
     }
+    val hash_key: opt[hash.Key] = hash.random_key();
+    if (!sel hash_key.some) { ret false; }
     var next: Manager;
     if (!copy_key(?next.current[0], key)) { ret false; }
-    var i: usize = 0;
-    for (i < storage.replay_capacity) {
-        storage.replay[i].state      = REPLAY_FREE;
-        storage.replay[i].generation = next_generation(storage.replay[i].generation);
-        i                            = i + 1;
-    }
-    next.config             = config;
-    next.storage            = storage;
-    next.current_generation = generation;
-    next.initialized        = true;
-    @manager                = next;
+    next.config              = config;
+    next.backing             = backing;
+    next.replay              = slots.empty[ReplaySlot]();
+    next.replay_index        = index.empty();
+    next.expiry              = heap.empty();
+    next.hash_key            = hash_key.some;
+    next.current_generation  = generation;
+    next.previous_generation = 0;
+    next.reserved            = 0;
+    next.generation          = manager.generation;
+    next.listener_lease      = 0;
+    next.closing             = false;
+    next.initialized         = true;
+    @manager                 = next;
     ret true;
 }
 
@@ -216,6 +272,13 @@ pub fun rotate_scoped(manager: *Manager, listener_source: u64, generation: u64,
     manager.previous_generation = manager.current_generation;
     manager.current_generation  = generation;
     ret true;
+}
+
+fun disjoint_from_owned(manager: *Manager, value: ownership.Range) bool {
+    var owned: [4]ownership.Range;
+    ranges(manager, ?owned[0]);
+    ret ownership.disjoint_from(value, RANGE_COUNT, ?owned[0], 0,
+        RANGE_COUNT).kind == ownership.OVERLAP_NONE;
 }
 
 fun write_endpoint(output: *u8, endpoint: ip.Endpoint) {
@@ -309,14 +372,7 @@ pub fun seal_scoped(manager: *Manager, listener_source: u64, purpose: u8,
     }
     val output_range: ownership.Range = ownership.bytes(output, capacity,
         ownership.ZERO_FORBIDDEN);
-    val manager_range: ownership.Range = ownership.anchored_record[
-        Manager, Config](?manager.config, $offset_of(Manager, config));
-    val replay_range: ownership.Range = ownership.array(manager.storage.replay::*u8,
-        manager.storage.replay_capacity, $size_of(ReplaySlot),
-        ownership.ZERO_FORBIDDEN);
-    if (capacity < TOKEN_SIZE || !output_range.valid ||
-        !ownership.disjoint(output_range, manager_range) ||
-        !ownership.disjoint(output_range, replay_range)) {
+    if (capacity < TOKEN_SIZE || !disjoint_from_owned(manager, output_range)) {
         result.status = STATUS_ERROR;
         result.error  = ERROR_BUFFER;
         ret result;
@@ -366,45 +422,86 @@ fun valid_tag(manager: *Manager, generation: u64, input: *u8) bool {
     ret difference == 0;
 }
 
+fun replay_position(slot: *ReplaySlot) *usize {
+    ret ?slot.heap_position;
+}
+
+fun replay_matches(slot: *ReplaySlot, key: *ReplayKey) bool {
+    ret slot.nonce == key.nonce && slot.key_generation == key.key_generation;
+}
+
+fun replay_hash(manager: *Manager, key: *ReplayKey) u64 {
+    ret hash.bytes(manager.hash_key, key::*u8, $size_of(ReplayKey));
+}
+
+fun free_replay(manager: *Manager, index_value: usize) {
+    val slot: *ReplaySlot = ?manager.replay.items[index_value].value;
+    if (slot.state == REPLAY_RESERVED) { manager.reserved = manager.reserved - 1; }
+    slot.state = REPLAY_FREE;
+    slots.release[ReplaySlot](?manager.replay, index_value);
+}
+
+# an expired token can no longer authenticate, so its nonce need not be
+# remembered. a reservation keeps its slot until its owner finishes it
+fun forget(manager: *Manager, index_value: usize) {
+    val slot: *ReplaySlot = ?manager.replay.items[index_value].value;
+    index.remove(?manager.replay_index, slot.hash, index_value);
+    heap.remove[ReplaySlot](?manager.expiry, ?manager.replay, slot.heap_position,
+        replay_position);
+    if (slot.state != REPLAY_RESERVED) { free_replay(manager, index_value); }
+}
+
+fun expire(manager: *Manager, now_ns: u64) {
+    for (manager.expiry.count > 0 && now_ns > manager.expiry.nodes[0].key) {
+        forget(manager, manager.expiry.nodes[0].slot);
+    }
+}
+
 fun reserve_replay(manager: *Manager, generation: u64, nonce: u64,
     expires_at_ns: u64, now_ns: u64) Result {
     var result: Result;
-    var i:      usize = 0;
-    for (i < manager.storage.replay_capacity) {
-        val slot: *ReplaySlot = ?manager.storage.replay[i];
-        if (slot.state != REPLAY_FREE && now_ns > slot.expires_at_ns) {
-            slot.state      = REPLAY_FREE;
-            slot.generation = next_generation(slot.generation);
-        }
-        if (slot.state != REPLAY_FREE && slot.nonce == nonce &&
-            slot.key_generation == generation) {
-            result.status = STATUS_ERROR;
-            result.error  = ERROR_REPLAY;
-            ret result;
-        }
-        i = i + 1;
+    expire(manager, now_ns);
+    var key: ReplayKey;
+    key.nonce          = nonce;
+    key.key_generation = generation;
+    val key_hash: u64 = replay_hash(manager, ?key);
+    if (index.find[ReplaySlot, ReplayKey](?manager.replay_index, ?manager.replay,
+        key_hash, ?key, replay_matches) != slots.NONE) {
+        result.status = STATUS_ERROR;
+        result.error  = ERROR_REPLAY;
+        ret result;
     }
-    var offset: usize = 0;
-    for (offset < manager.storage.replay_capacity) {
-        i = (manager.next_replay + offset) % manager.storage.replay_capacity;
-        val slot: *ReplaySlot = ?manager.storage.replay[i];
-        if (slot.state == REPLAY_FREE) {
-            slot.nonce                = nonce;
-            slot.key_generation       = generation;
-            slot.expires_at_ns        = expires_at_ns;
-            slot.generation           = next_generation(slot.generation);
-            slot.state                = REPLAY_RESERVED;
-            manager.next_replay       = (i + 1) % manager.storage.replay_capacity;
-            result.status             = STATUS_OK;
-            result.claims.reservation = Reservation{source: manager.config.source,
-                index:          i, generation: slot.generation, nonce: nonce,
-                key_generation: generation};
-            ret result;
-        }
-        offset = offset + 1;
+    if (sel manager.config.max_replay.some &&
+        manager.replay.live >= manager.config.max_replay.some) {
+        result.status = STATUS_BLOCKED;
+        result.error  = ERROR_CAPACITY;
+        ret result;
     }
-    result.status = STATUS_BLOCKED;
-    result.error  = ERROR_CAPACITY;
+    if (!slots.reserve[ReplaySlot](?manager.replay, manager.backing, 1) ||
+        !index.reserve(?manager.replay_index, manager.backing,
+        manager.replay_index.count + 1) ||
+        !heap.reserve(?manager.expiry, manager.backing, manager.expiry.count + 1)) {
+        result.status = STATUS_BLOCKED;
+        result.error  = ERROR_MEMORY;
+        ret result;
+    }
+    val claimed: usize       = slots.claim[ReplaySlot](?manager.replay);
+    val slot:    *ReplaySlot = ?manager.replay.items[claimed].value;
+    manager.generation  = next_generation(manager.generation);
+    slot.nonce          = nonce;
+    slot.key_generation = generation;
+    slot.expires_at_ns  = expires_at_ns;
+    slot.generation     = manager.generation;
+    slot.hash           = key_hash;
+    slot.state          = REPLAY_RESERVED;
+    manager.reserved    = manager.reserved + 1;
+    index.insert(?manager.replay_index, key_hash, claimed);
+    heap.push[ReplaySlot](?manager.expiry, ?manager.replay, expires_at_ns, claimed,
+        replay_position);
+    result.status             = STATUS_OK;
+    result.claims.reservation = Reservation{source: manager.config.source,
+        index:          claimed, generation: slot.generation, nonce: nonce,
+        key_generation: generation};
     ret result;
 }
 
@@ -424,13 +521,7 @@ pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
     }
     val input_range: ownership.Range = ownership.bytes(input, length,
         ownership.ZERO_FORBIDDEN);
-    val manager_range: ownership.Range = ownership.anchored_record[
-        Manager, Config](?manager.config, $offset_of(Manager, config));
-    val replay_range: ownership.Range = ownership.array(manager.storage.replay::*u8,
-        manager.storage.replay_capacity, $size_of(ReplaySlot),
-        ownership.ZERO_FORBIDDEN);
-    if (!input_range.valid || !ownership.disjoint(input_range, manager_range) ||
-        !ownership.disjoint(input_range, replay_range) || length != TOKEN_SIZE ||
+    if (!disjoint_from_owned(manager, input_range) || length != TOKEN_SIZE ||
         input[0] != 'M' || input[1] != 'Q' ||
         input[2] != 'T' || input[3] != '1' || !valid_purpose(input[4]) || input[29] > 1 ||
         input[52]::usize > packet.MAX_CONNECTION_ID ||
@@ -516,10 +607,9 @@ pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
 
 fun replay_slot(manager: *Manager, reservation: Reservation) *ReplaySlot {
     if (!physical(manager) || !manager.initialized ||
-        reservation.source != manager.config.source ||
-        reservation.index >= manager.storage.replay_capacity) { ret nil; }
-    val slot: *ReplaySlot = ?manager.storage.replay[reservation.index];
-    if (slot.state == REPLAY_FREE || slot.generation != reservation.generation ||
+        reservation.source != manager.config.source) { ret nil; }
+    val slot: *ReplaySlot = slots.at[ReplaySlot](?manager.replay, reservation.index);
+    if (slot == nil || slot.state == REPLAY_FREE || slot.generation != reservation.generation ||
         slot.nonce != reservation.nonce ||
         slot.key_generation != reservation.key_generation) { ret nil; }
     ret slot;
@@ -544,7 +634,11 @@ pub fun commit_scoped(manager: *Manager, listener_source: u64,
         result.error  = ERROR_TOKEN;
         ret result;
     }
-    slot.state    = REPLAY_CONSUMED;
+    manager.reserved = manager.reserved - 1;
+    slot.state       = REPLAY_CONSUMED;
+    # expired while reserved: the token cannot authenticate again, so nothing
+    # is left to remember
+    if (slot.heap_position == slots.NONE) { free_replay(manager, reservation.index); }
     result.status = STATUS_OK;
     ret result;
 }
@@ -568,9 +662,9 @@ pub fun cancel_scoped(manager: *Manager, listener_source: u64,
         result.error  = ERROR_TOKEN;
         ret result;
     }
-    slot.state      = REPLAY_FREE;
-    slot.generation = next_generation(slot.generation);
-    result.status   = STATUS_OK;
+    if (slot.heap_position != slots.NONE) { forget(manager, reservation.index); }
+    free_replay(manager, reservation.index);
+    result.status = STATUS_OK;
     ret result;
 }
 
@@ -584,22 +678,28 @@ pub fun begin_close(manager: *Manager) bool {
 pub fun finish_close(manager: *Manager) bool {
     if (!physical(manager) || !manager.initialized || !manager.closing ||
         manager.listener_lease != 0) { ret false; }
-    var i: usize = 0;
-    for (i < manager.storage.replay_capacity) {
-        if (manager.storage.replay[i].state == REPLAY_RESERVED) { ret false; }
-        i = i + 1;
-    }
+    if (manager.reserved != 0) { ret false; }
     ct.zeroize(?manager.current[0], KEY_SIZE);
     ct.zeroize(?manager.previous[0], KEY_SIZE);
-    i = 0;
-    for (i < manager.storage.replay_capacity) {
-        manager.storage.replay[i].state      = REPLAY_FREE;
-        manager.storage.replay[i].generation =
-            next_generation(manager.storage.replay[i].generation);
-        i = i + 1;
-    }
+    # a refused release keeps the manager closing with what it still holds
+    val replay:       bool = slots.destroy[ReplaySlot](?manager.replay, manager.backing);
+    val replay_index: bool = index.destroy(?manager.replay_index, manager.backing);
+    val expiry:       bool = heap.destroy(?manager.expiry, manager.backing);
+    if (!replay || !replay_index || !expiry) { ret false; }
     manager.initialized = false;
     ret true;
+}
+
+pub fun snapshot(manager: *Manager) Snapshot {
+    var value: Snapshot;
+    if (!physical(manager) || !manager.initialized) { ret value; }
+    value.remembered = manager.replay.live;
+    value.reserved   = manager.reserved;
+    value.bytes      = slots.bytes[ReplaySlot](?manager.replay) +
+        index.bytes(?manager.replay_index) + heap.bytes(?manager.expiry);
+    value.initialized = manager.initialized;
+    value.closing     = manager.closing;
+    ret value;
 }
 
 #[oblivious]
@@ -624,12 +724,31 @@ fun test_id(value: u8) packet.ConnectionId {
     ret id;
 }
 
+fun test_config(source: u64, max_replay: usize) Config {
+    var config: Config;
+    config.source             = source;
+    config.retry_max_age_ns   = 100;
+    config.address_max_age_ns = 1000;
+    config.max_replay         = opt[usize].none{};
+    if (max_replay != 0) { config.max_replay = opt[usize].some{max_replay}; }
+    ret config;
+}
+
+fun test_retry(manager: *Manager, output: *u8, issued_at_ns: u64, nonce: u64) bool {
+    ret seal(manager, PURPOSE_RETRY, ip.endpoint(192, 0, 2, 44, 4433), test_id(9),
+        test_id(19), issued_at_ns, nonce, output, TOKEN_SIZE).status == STATUS_OK;
+}
+
+fun test_open(manager: *Manager, input: *u8, now_ns: u64) Result {
+    ret open(manager, input, TOKEN_SIZE, ip.endpoint(192, 0, 2, 44, 4433), now_ns);
+}
+
 test "quic.connection.token: retry tokens bind address and are single use" {
-    var replay:  [4]ReplaySlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
     var key:     [32]^u8 = test_key(1);
     var manager: Manager;
-    if (!initialize(?manager, Config{source: 301, retry_max_age_ns: 100,
-        address_max_age_ns: 1000}, Storage{replay: ?replay[0], replay_capacity: 4},
+    if (!initialize(?manager, test_config(301, 0), limited.allocator_of(?memory_state),
         1, contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
     val peer:    ip.Endpoint = ip.endpoint(192, 0, 2, 10, 4433);
     var encoded: [TOKEN_SIZE]u8;
@@ -644,17 +763,20 @@ test "quic.connection.token: retry tokens bind address and are single use" {
         ip.endpoint(192, 0, 2, 10, 4434), 52).error != ERROR_ADDRESS) { ret 2; }
     encoded[60] = encoded[60] ^ 1;
     if (open(?manager, ?encoded[0], TOKEN_SIZE, peer, 53).error != ERROR_AUTH) { ret 3; }
+    if (!begin_close(?manager) || !finish_close(?manager) ||
+        !limited.clean(?memory_state)) { ret 4; }
     ct.zeroize(?key[0], 32);
+    limited.dnit(?memory_state);
     ret 0;
 }
 
 test "quic.connection.token: reservation cancellation, expiry, and key rotation are bounded" {
-    var replay:  [1]ReplaySlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
     var key_one: [32]^u8 = test_key(2);
     var key_two: [32]^u8 = test_key(3);
     var manager: Manager;
-    if (!initialize(?manager, Config{source: 302, retry_max_age_ns: 100,
-        address_max_age_ns: 1000}, Storage{replay: ?replay[0], replay_capacity: 1},
+    if (!initialize(?manager, test_config(302, 0), limited.allocator_of(?memory_state),
         4, contracts.SecretBytes{data: ?key_one[0], len: 32})) { ret 1; }
     val peer:   ip.Endpoint = ip.endpoint(203, 0, 113, 2, 8443);
     var first:  [TOKEN_SIZE]u8;
@@ -679,31 +801,174 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
     ret 0;
 }
 
-test "quic.connection.token: hostile ranges and aliases never expose or mutate key state" {
-    val maximum: usize = ~(0::usize);
-    var replay:  [1]ReplaySlot;
-    replay[0].state = REPLAY_CONSUMED;
-    var key:             [32]^u8 = test_key(7);
-    var manager:         Manager;
-    val replay_overflow: usize   = maximum / $size_of(ReplaySlot) + 1;
-    if (initialize(?manager, Config{source: 303, retry_max_age_ns: 100,
-        address_max_age_ns: 1000}, Storage{replay: (1::usize)::*ReplaySlot,
-        replay_capacity:    replay_overflow}, 1,
-        contracts.SecretBytes{data: ?key[0], len: 32}) ||
-        initialize(?manager, Config{source: 303, retry_max_age_ns: 100,
-        address_max_age_ns: 1000}, Storage{replay: maximum::*ReplaySlot,
-        replay_capacity:    1}, 1,
-        contracts.SecretBytes{data: ?key[0], len: 32}) ||
-        manager.initialized || replay[0].state != REPLAY_CONSUMED) { ret 1; }
-    if (!initialize(?manager, Config{source: 303, retry_max_age_ns: 100,
-        address_max_age_ns: 1000}, Storage{replay: ?replay[0],
-        replay_capacity:    1}, 1,
-        contracts.SecretBytes{data: ?key[0], len: 32})) { ret 2; }
-    if (initialize(?manager, Config{source: 304, retry_max_age_ns: 100,
-        address_max_age_ns: 1000}, Storage{replay: ?replay[0],
-        replay_capacity:    1}, 2,
-        contracts.SecretBytes{data: ?key[0], len: 32}) ||
-        manager.current_generation != 1) { ret 3; }
+test "quic.connection.token: invalid configuration and aliases never publish key state" {
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
+    val backing:     *allocator.Allocator  = limited.allocator_of(?memory_state);
+    var key:         [32]^u8               = test_key(7);
+    var manager:     Manager;
+    val secret:      contracts.SecretBytes = contracts.SecretBytes{data: ?key[0], len: 32};
+    var zero_replay: Config                = test_config(303, 0);
+    zero_replay.max_replay = opt[usize].some{0};
+    if (initialize(?manager, zero_replay, backing, 1, secret) ||
+        initialize(?manager, test_config(0, 0), backing, 1, secret) ||
+        initialize(?manager, test_config(303, 0), nil, 1, secret) ||
+        initialize(?manager, test_config(303, 0), backing, 0, secret) ||
+        initialize(?manager, test_config(303, 0), backing, 1,
+        contracts.SecretBytes{data: ?manager.current[0], len: 32}) ||
+        manager.initialized) { ret 1; }
+    if (!initialize(?manager, test_config(303, 0), backing, 1, secret)) { ret 2; }
+    if (initialize(?manager, test_config(304, 0), backing, 2, secret) ||
+        manager.current_generation != 1 || manager.config.source != 303) { ret 3; }
     ct.zeroize(?key[0], 32);
+    ret 0;
+}
+
+test "quic.connection.token: replay storage grows and lookups survive rehash" {
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 24)) { ret 1; }
+    var key:     [32]^u8 = test_key(8);
+    var manager: Manager;
+    if (!initialize(?manager, test_config(305, 0), limited.allocator_of(?memory_state),
+        1, contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
+    var encoded: [TOKEN_SIZE]u8;
+    var nonce:   u64 = 1;
+    for (nonce <= 300) {
+        if (!test_retry(?manager, ?encoded[0], 10, nonce)) { ret 2; }
+        val opened: Result = test_open(?manager, ?encoded[0], 20);
+        if (opened.status != STATUS_OK) { ret 3; }
+        # alternate owners finish by commit and by cancel, then re-reserve
+        if (nonce % 2 == 0 &&
+            commit(?manager, opened.claims.reservation).status != STATUS_OK) { ret 4; }
+        if (nonce % 2 == 1) {
+            if (cancel(?manager, opened.claims.reservation).status != STATUS_OK) { ret 5; }
+            val again: Result = test_open(?manager, ?encoded[0], 20);
+            if (again.status != STATUS_OK ||
+                commit(?manager, again.claims.reservation).status != STATUS_OK) { ret 6; }
+        }
+        nonce = nonce + 1;
+    }
+    val loaded: Snapshot = snapshot(?manager);
+    if (loaded.remembered != 300 || loaded.reserved != 0 ||
+        manager.replay.capacity < 300 || manager.replay_index.capacity < 600 ||
+        manager.expiry.capacity < 300) { ret 7; }
+    nonce = 1;
+    for (nonce <= 300) {
+        if (!test_retry(?manager, ?encoded[0], 10, nonce) ||
+            test_open(?manager, ?encoded[0], 30).error != ERROR_REPLAY) { ret 8; }
+        nonce = nonce + 1;
+    }
+    if (snapshot(?manager).remembered != 300) { ret 9; }
+    if (!begin_close(?manager) || !finish_close(?manager) ||
+        !limited.clean(?memory_state)) { ret 10; }
+    ct.zeroize(?key[0], 32);
+    limited.dnit(?memory_state);
+    ret 0;
+}
+
+test "quic.connection.token: expired nonces are forgotten and the replay limit is a count" {
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
+    var key:     [32]^u8 = test_key(9);
+    var manager: Manager;
+    if (!initialize(?manager, test_config(306, 3), limited.allocator_of(?memory_state),
+        1, contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
+    var encoded: [TOKEN_SIZE]u8;
+    var nonce:   u64 = 1;
+    for (nonce <= 3) {
+        if (!test_retry(?manager, ?encoded[0], 10 * nonce, nonce)) { ret 2; }
+        val opened: Result = test_open(?manager, ?encoded[0], 40);
+        if (opened.status != STATUS_OK ||
+            commit(?manager, opened.claims.reservation).status != STATUS_OK) { ret 3; }
+        nonce = nonce + 1;
+    }
+    # the directory has spare slots, so only the count refuses
+    if (!test_retry(?manager, ?encoded[0], 40, 4)) { ret 4; }
+    val refused: Result = test_open(?manager, ?encoded[0], 41);
+    if (manager.replay.capacity <= 3 || refused.status != STATUS_BLOCKED ||
+        refused.error != ERROR_CAPACITY) { ret 5; }
+    # nonce 1 expires after 110 and nonce 2 after 120
+    val admitted: Result = test_open(?manager, ?encoded[0], 115);
+    if (admitted.status != STATUS_OK || snapshot(?manager).remembered != 3) { ret 6; }
+    if (!test_retry(?manager, ?encoded[0], 10, 1) ||
+        test_open(?manager, ?encoded[0], 115).error != ERROR_EXPIRED) { ret 7; }
+    if (cancel(?manager, admitted.claims.reservation).status != STATUS_OK ||
+        !test_retry(?manager, ?encoded[0], 125, 5)) { ret 8; }
+    val late: Result = test_open(?manager, ?encoded[0], 135);
+    if (late.status != STATUS_OK || snapshot(?manager).remembered != 1 ||
+        manager.expiry.count != 1) { ret 9; }
+    ct.zeroize(?key[0], 32);
+    ret 0;
+}
+
+test "quic.connection.token: a reservation that expires before its owner finishes is still owned" {
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
+    var key:     [32]^u8 = test_key(10);
+    var manager: Manager;
+    if (!initialize(?manager, test_config(307, 0), limited.allocator_of(?memory_state),
+        1, contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
+    var encoded: [TOKEN_SIZE]u8;
+    if (!test_retry(?manager, ?encoded[0], 10, 1)) { ret 2; }
+    val committed: Result = test_open(?manager, ?encoded[0], 20);
+    if (!test_retry(?manager, ?encoded[0], 10, 2)) { ret 2; }
+    val cancelled: Result = test_open(?manager, ?encoded[0], 20);
+    if (committed.status != STATUS_OK || cancelled.status != STATUS_OK) { ret 3; }
+    # a later open sweeps both expired reservations out of replay tracking
+    if (!test_retry(?manager, ?encoded[0], 150, 3)) { ret 4; }
+    val later: Result = test_open(?manager, ?encoded[0], 160);
+    if (later.status != STATUS_OK || manager.replay_index.count != 1 ||
+        snapshot(?manager).reserved != 3) { ret 5; }
+    if (commit(?manager, committed.claims.reservation).status != STATUS_OK ||
+        cancel(?manager, cancelled.claims.reservation).status != STATUS_OK ||
+        commit(?manager, committed.claims.reservation).status != STATUS_STALE ||
+        cancel(?manager, cancelled.claims.reservation).status != STATUS_STALE) { ret 6; }
+    if (snapshot(?manager).remembered != 1 || snapshot(?manager).reserved != 1 ||
+        cancel(?manager, later.claims.reservation).status != STATUS_OK ||
+        !begin_close(?manager) || !finish_close(?manager) ||
+        !limited.clean(?memory_state)) { ret 7; }
+    ct.zeroize(?key[0], 32);
+    limited.dnit(?memory_state);
+    ret 0;
+}
+
+test "quic.connection.token: a refused growth refuses one token and remembers nothing" {
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
+    var key:     [32]^u8 = test_key(11);
+    var manager: Manager;
+    if (!initialize(?manager, test_config(308, 0), limited.allocator_of(?memory_state),
+        1, contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
+    var encoded: [TOKEN_SIZE]u8;
+    var nonce:   u64 = 1;
+    for (nonce <= 8) {
+        if (!test_retry(?manager, ?encoded[0], 10, nonce)) { ret 2; }
+        val opened: Result = test_open(?manager, ?encoded[0], 20);
+        if (opened.status != STATUS_OK ||
+            commit(?manager, opened.claims.reservation).status != STATUS_OK) { ret 2; }
+        nonce = nonce + 1;
+    }
+    memory_state.budget = memory_state.live_bytes;
+    val before: Snapshot = snapshot(?manager);
+    if (!test_retry(?manager, ?encoded[0], 10, 9)) { ret 3; }
+    val refused: Result   = test_open(?manager, ?encoded[0], 20);
+    val after:   Snapshot = snapshot(?manager);
+    if (refused.status != STATUS_BLOCKED || refused.error != ERROR_MEMORY ||
+        after.remembered != before.remembered || after.reserved != before.reserved ||
+        manager.replay_index.count != 8 || manager.expiry.count != 8) { ret 4; }
+    # the refused nonce was never remembered, so the same token opens once there is room
+    memory_state.budget = 1 << 20;
+    val retried: Result = test_open(?manager, ?encoded[0], 21);
+    if (retried.status != STATUS_OK ||
+        commit(?manager, retried.claims.reservation).status != STATUS_OK ||
+        test_open(?manager, ?encoded[0], 22).error != ERROR_REPLAY) { ret 5; }
+    memory_state.refuse_release = true;
+    if (!begin_close(?manager) || finish_close(?manager) || !manager.initialized ||
+        manager.replay.items == nil) { ret 6; }
+    memory_state.refuse_release = false;
+    if (!finish_close(?manager) || manager.initialized ||
+        !limited.clean(?memory_state)) { ret 7; }
+    ct.zeroize(?key[0], 32);
+    limited.dnit(?memory_state);
     ret 0;
 }

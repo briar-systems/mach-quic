@@ -1,0 +1,115 @@
+# a strict test allocator with a live-byte budget and refusable releases
+#
+# it wraps std's testing allocator, so overruns fault and fresh memory is
+# poisoned, and adds the two refusals growth code has to survive: running out
+# part way through a real flow, and a backend that will not take memory back
+
+use std.allocator;
+use std.allocator.testing;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+
+pub rec Limited {
+    a:              allocator.Allocator;
+    inner:          testing.Testing;
+    budget:         usize;
+    live_bytes:     usize;
+    refusals:       usize;
+    refuse_release: bool;
+}
+
+fun do_allocate(ctx: ptr, size: usize, align: usize) opt[ptr] {
+    val state: *Limited = ctx::*Limited;
+    if (size > state.budget || state.live_bytes > state.budget - size) {
+        state.refusals = state.refusals + 1;
+        ret opt[ptr].none{};
+    }
+    val got: res[ptr, allocator.Error] = allocator.allocate_raw(?state.inner.a, size,
+        align);
+    if (sel got.err) { ret opt[ptr].none{}; }
+    state.live_bytes = state.live_bytes + size;
+    ret opt[ptr].some{got.ok};
+}
+
+fun do_reallocate(ctx: ptr, p: ptr, old_size: usize, new_size: usize,
+    align: usize) opt[ptr] {
+    val state: *Limited = ctx::*Limited;
+    val after: usize    = state.live_bytes - old_size;
+    if (new_size > state.budget || after > state.budget - new_size) {
+        state.refusals = state.refusals + 1;
+        ret opt[ptr].none{};
+    }
+    val got: res[ptr, allocator.Error] = allocator.reallocate_raw(?state.inner.a, p,
+        old_size, new_size, align);
+    if (sel got.err) { ret opt[ptr].none{}; }
+    state.live_bytes = after + new_size;
+    ret opt[ptr].some{got.ok};
+}
+
+fun do_deallocate(ctx: ptr, p: ptr, size: usize, align: usize) i64 {
+    val state: *Limited = ctx::*Limited;
+    if (state.refuse_release) { ret -16; }
+    val released: err[allocator.Error] = allocator.deallocate_raw(?state.inner.a, p,
+        size, align);
+    if (sel released.err) { ret -22; }
+    state.live_bytes = state.live_bytes - size;
+    ret 0;
+}
+
+# the instance must not move after this, and must outlive what it hands out
+pub fun make(state: *Limited, budget: usize) bool {
+    if (state == nil) { ret false; }
+    val made: err[allocator.Error] = testing.make(?state.inner);
+    if (sel made.err) { ret false; }
+    state.budget          = budget;
+    state.live_bytes      = 0;
+    state.refusals        = 0;
+    state.refuse_release  = false;
+    state.a.ctx           = state::ptr;
+    state.a.fn_allocate   = do_allocate;
+    state.a.fn_reallocate = do_reallocate;
+    state.a.fn_deallocate = do_deallocate;
+    ret true;
+}
+
+pub fun allocator_of(state: *Limited) *allocator.Allocator {
+    ret ?state.a;
+}
+
+# true when every byte handed out came back and nothing was freed twice
+pub fun clean(state: *Limited) bool {
+    ret state.live_bytes == 0 && !testing.leaked(?state.inner) &&
+        testing.double_free_count(?state.inner) == 0;
+}
+
+pub fun dnit(state: *Limited) {
+    testing.dnit(?state.inner);
+}
+
+test "quic.storage.limited: the budget refuses growth and releases can be refused" {
+    var state: Limited;
+    if (!make(?state, 64)) { ret 1; }
+    val backing: *allocator.Allocator       = allocator_of(?state);
+    val first:   res[*u64, allocator.Error] = allocator.allocate[u64](backing, 4);
+    if (sel first.err) { ret 2; }
+    val refused: res[*u64, allocator.Error] = allocator.allocate[u64](backing, 5);
+    if (!sel refused.err || state.refusals != 1) { ret 3; }
+    val grown: res[*u64, allocator.Error] = allocator.reallocate[u64](backing, first.ok,
+        4, 8);
+    if (sel grown.err) { ret 4; }
+    val held: *u64 = grown.ok;
+    if (state.live_bytes != 64) { ret 4; }
+    state.refuse_release = true;
+    val kept: err[allocator.Error] = allocator.deallocate[u64](backing, held, 8);
+    if (!sel kept.err || state.live_bytes != 64) { ret 5; }
+    state.refuse_release = false;
+    val freed: err[allocator.Error] = allocator.deallocate[u64](backing, held, 8);
+    if (sel freed.err || !clean(?state)) { ret 6; }
+    dnit(?state);
+    ret 0;
+}

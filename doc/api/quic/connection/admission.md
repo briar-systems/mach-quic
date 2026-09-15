@@ -9,7 +9,7 @@ pub def Status: u8
 ## val STATUS_OK
 
 ```mach
-pub val STATUS_OK: Status = 1
+pub val STATUS_OK:      Status = 1
 ```
 
 ## val STATUS_BLOCKED
@@ -21,13 +21,13 @@ pub val STATUS_BLOCKED: Status = 2
 ## val STATUS_STALE
 
 ```mach
-pub val STATUS_STALE: Status = 3
+pub val STATUS_STALE:   Status = 3
 ```
 
 ## val STATUS_ERROR
 
 ```mach
-pub val STATUS_ERROR: Status = 4
+pub val STATUS_ERROR:   Status = 4
 ```
 
 ## def Error
@@ -39,19 +39,19 @@ pub def Error: u8
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: Error = 0
+pub val ERROR_NONE:         Error = 0
 ```
 
 ## val ERROR_STATE
 
 ```mach
-pub val ERROR_STATE: Error = 1
+pub val ERROR_STATE:        Error = 1
 ```
 
 ## val ERROR_CONFIG
 
 ```mach
-pub val ERROR_CONFIG: Error = 2
+pub val ERROR_CONFIG:       Error = 2
 ```
 
 ## val ERROR_GLOBAL_LIMIT
@@ -63,31 +63,25 @@ pub val ERROR_GLOBAL_LIMIT: Error = 3
 ## val ERROR_PEER_LIMIT
 
 ```mach
-pub val ERROR_PEER_LIMIT: Error = 4
+pub val ERROR_PEER_LIMIT:   Error = 4
 ```
 
-## val ERROR_PEER_CAPACITY
+## val ERROR_MEMORY
 
 ```mach
-pub val ERROR_PEER_CAPACITY: Error = 5
-```
-
-## val ERROR_CHARGE_CAPACITY
-
-```mach
-pub val ERROR_CHARGE_CAPACITY: Error = 6
+pub val ERROR_MEMORY:       Error = 5
 ```
 
 ## val ERROR_TOKEN
 
 ```mach
-pub val ERROR_TOKEN: Error = 7
+pub val ERROR_TOKEN:        Error = 6
 ```
 
 ## val ERROR_OVERFLOW
 
 ```mach
-pub val ERROR_OVERFLOW: Error = 8
+pub val ERROR_OVERFLOW:     Error = 7
 ```
 
 ## def ChargeState
@@ -99,13 +93,13 @@ pub def ChargeState: u8
 ## val CHARGE_FREE
 
 ```mach
-pub val CHARGE_FREE: ChargeState = 0
+pub val CHARGE_FREE:      ChargeState = 0
 ```
 
 ## val CHARGE_RESERVED
 
 ```mach
-pub val CHARGE_RESERVED: ChargeState = 1
+pub val CHARGE_RESERVED:  ChargeState = 1
 ```
 
 ## val CHARGE_COMMITTED
@@ -113,6 +107,14 @@ pub val CHARGE_RESERVED: ChargeState = 1
 ```mach
 pub val CHARGE_COMMITTED: ChargeState = 2
 ```
+
+## val RANGE_COUNT
+
+```mach
+pub val RANGE_COUNT: usize = 4
+```
+
+how many ranges `ranges` writes
 
 ## rec Config
 
@@ -138,12 +140,6 @@ pub rec PeerSlot;
 
 ```mach
 pub rec ChargeSlot;
-```
-
-## rec Storage
-
-```mach
-pub rec Storage;
 ```
 
 ## rec Manager
@@ -182,11 +178,24 @@ pub fun peer_key(endpoint: ip.Endpoint) PeerKey;
 pub fun peer_equal(left: PeerKey, right: PeerKey) bool;
 ```
 
+## fun ranges
+
+```mach
+pub fun ranges(manager: *Manager, output: *ownership.Range);
+```
+
+writes the manager and every directory it owns. directories move as they
+grow, so the ranges hold only until the next admission
+
 ## fun initialize
 
 ```mach
-pub fun initialize(manager: *Manager, config: Config, storage: Storage) bool;
+pub fun initialize(manager: *Manager, config: Config,
+backing: *allocator.Allocator) bool;
 ```
+
+growth draws on `backing` for the manager's whole life, and storage is
+released to it by finish_close
 
 ## fun lease_listener
 
@@ -250,6 +259,9 @@ pub fun begin_close(manager: *Manager) bool;
 ```mach
 pub fun finish_close(manager: *Manager) bool;
 ```
+
+releases every directory. a refused release keeps the manager closing with
+what it still holds, and a later call retries only that
 
 ## fun snapshot
 

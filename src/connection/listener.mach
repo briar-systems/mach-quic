@@ -1,13 +1,19 @@
 # stateless server preflight and pre-allocation admission
+#
+# pending initials live in a directory that grows with what is in flight and
+# is released with the listener
 
 use quic.connection.admission;
 use quic.connection.ownership;
 use quic.connection.token;
 use quic.crypto.protection;
 use quic.packet.packet;
+use quic.storage.limited;
+use quic.storage.slots;
 use quic.wire.varint;
 
 use crypto.contracts;
+use std.allocator;
 use std.crypto.ct;
 use std.encoding.binary;
 use std.memory;
@@ -15,6 +21,7 @@ use std.net.ip;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
@@ -45,7 +52,7 @@ pub val ERROR_VERSION:      Error = 5;
 pub val ERROR_TOKEN:        Error = 6;
 pub val ERROR_IDENTITY:     Error = 7;
 pub val ERROR_ADMISSION:    Error = 8;
-pub val ERROR_CAPACITY:     Error = 9;
+pub val ERROR_MEMORY:       Error = 9;
 pub val ERROR_CRYPTO:       Error = 10;
 pub val ERROR_OUTPUT:       Error = 11;
 pub val ERROR_TOKEN_HANDLE: Error = 12;
@@ -100,8 +107,6 @@ pub rec Pending {
     peer:                 ip.Endpoint;
     version:              u32;
     generation:           u64;
-    listener_source:      u64;
-    listener_generation:  u64;
     state:                u8;
     owns_admission:       bool;
     owns_replay:          bool;
@@ -109,17 +114,13 @@ pub rec Pending {
     retry_source_present: bool;
 }
 
-pub rec Storage {
-    pending:          *Pending;
-    pending_capacity: usize;
-}
-
 pub rec Listener {
     config:               Config;
-    storage:              Storage;
+    backing:              *allocator.Allocator;
+    pending:              slots.Slots[Pending];
     admission_manager:    *admission.Manager;
     token_manager:        *token.Manager;
-    next_pending:         usize;
+    pending_generation:   u64;
     lease_generation:     u64;
     owns_storage:         bool;
     owns_admission_lease: bool;
@@ -291,11 +292,33 @@ fun version_supported(listener: *Listener, version: u32) bool {
     ret false;
 }
 
+val OWNED_RANGES: usize = 3 + admission.RANGE_COUNT + token.RANGE_COUNT;
+
+fun collect_ranges(listener_range: ownership.Range, versions: *u32,
+    version_count: usize, pending: ownership.Range,
+    admissions: *admission.Manager, tokens: *token.Manager,
+    output: *ownership.Range) {
+    output[0] = listener_range;
+    output[1] = ownership.array(versions::*u8, version_count, $size_of(u32),
+        ownership.ZERO_FORBIDDEN);
+    output[2] = pending;
+    admission.ranges(admissions, ?output[3]);
+    token.ranges(tokens, ?output[3 + admission.RANGE_COUNT]);
+}
+
+fun owned_ranges(listener: *Listener, output: *ownership.Range) {
+    collect_ranges(ownership.anchored_record[Listener, Config](?listener.config,
+        $offset_of(Listener, config)), listener.config.supported_versions,
+        listener.config.supported_version_count,
+        slots.range[Pending](?listener.pending), listener.admission_manager,
+        listener.token_manager, output);
+}
+
 fun physical(listener: *Listener) bool {
     if (listener == nil) { ret false; }
     val listener_range: ownership.Range = ownership.anchored_record[
         Listener, Config](?listener.config, $offset_of(Listener, config));
-    if (!listener_range.valid) { ret false; }
+    if (!listener_range.valid || !slots.sound[Pending](?listener.pending)) { ret false; }
     val admissions: *admission.Manager = listener.admission_manager;
     val tokens:     *token.Manager     = listener.token_manager;
     if (admissions == nil || tokens == nil ||
@@ -303,37 +326,23 @@ fun physical(listener: *Listener) bool {
         ownership.ZERO_FORBIDDEN).valid ||
         !ownership.anchored_record[token.Manager, token.Config](?tokens.config,
         $offset_of(token.Manager, config)).valid) { ret false; }
-    val token_range: ownership.Range =
-        ownership.anchored_record[token.Manager, token.Config](?tokens.config,
-        $offset_of(token.Manager, config));
-    var ranges: [8]ownership.Range;
-    ranges[0] = listener_range;
-    ranges[1] = ownership.array(listener.config.supported_versions::*u8,
-        listener.config.supported_version_count, $size_of(u32),
-        ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(listener.storage.pending::*u8,
-        listener.storage.pending_capacity, $size_of(Pending),
-        ownership.ZERO_FORBIDDEN);
-    ranges[3] = ownership.bytes(admissions::*u8, $size_of(admission.Manager),
-        ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(admissions.storage.peers::*u8,
-        admissions.storage.peer_capacity, $size_of(admission.PeerSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.array(admissions.storage.charges::*u8,
-        admissions.storage.charge_capacity, $size_of(admission.ChargeSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[6] = token_range;
-    ranges[7] = ownership.array(tokens.storage.replay::*u8,
-        tokens.storage.replay_capacity, $size_of(token.ReplaySlot),
-        ownership.ZERO_FORBIDDEN);
-    ret ownership.all_disjoint(?ranges[0], 8);
+    var ranges: [OWNED_RANGES]ownership.Range;
+    owned_ranges(listener, ?ranges[0]);
+    ret ownership.all_disjoint(?ranges[0], OWNED_RANGES);
 }
 
+# generations survive so no handle from before can name what comes after
 fun reset_unpublished(listener: *Listener) {
-    val generation: u64 = listener.lease_generation;
-    var empty:      Listener;
-    empty.lease_generation = generation;
-    @listener              = empty;
+    val lease_generation:   u64 = listener.lease_generation;
+    val pending_generation: u64 = listener.pending_generation;
+    var empty:              Listener;
+    empty.pending            = slots.empty[Pending]();
+    empty.backing            = nil;
+    empty.admission_manager  = nil;
+    empty.token_manager      = nil;
+    empty.lease_generation   = lease_generation;
+    empty.pending_generation = pending_generation;
+    @listener                = empty;
 }
 
 fun lease_handle_valid(listener: *Listener, value: LeaseHandle) bool {
@@ -342,38 +351,11 @@ fun lease_handle_valid(listener: *Listener, value: LeaseHandle) bool {
         value.generation != 0 && value.generation == listener.lease_generation;
 }
 
-fun claim_listener_storage(listener: *Listener) bool {
-    var i: usize = 0;
-    for (i < listener.storage.pending_capacity) {
-        if (listener.storage.pending[i].listener_source != 0 ||
-            listener.storage.pending[i].listener_generation != 0) { ret false; }
-        i = i + 1;
-    }
-    i = 0;
-    for (i < listener.storage.pending_capacity) {
-        listener.storage.pending[i].listener_source     = listener.config.source;
-        listener.storage.pending[i].listener_generation =
-            listener.lease_generation;
-        i = i + 1;
-    }
-    listener.owns_storage = true;
-    ret true;
-}
-
+# the pending directory is the storage leg. every slot is free by the time it
+# is released, and a refused release is retained for a later retry
 fun release_listener_storage(listener: *Listener) bool {
-    var i: usize = 0;
-    for (i < listener.storage.pending_capacity) {
-        if (listener.storage.pending[i].listener_source != listener.config.source ||
-            listener.storage.pending[i].listener_generation !=
-            listener.lease_generation) { ret false; }
-        i = i + 1;
-    }
-    i = 0;
-    for (i < listener.storage.pending_capacity) {
-        listener.storage.pending[i].listener_source     = 0;
-        listener.storage.pending[i].listener_generation = 0;
-        i                                               = i + 1;
-    }
+    if (listener.pending.live != 0 ||
+        !slots.destroy[Pending](?listener.pending, listener.backing)) { ret false; }
     listener.owns_storage = false;
     ret true;
 }
@@ -422,14 +404,14 @@ fun cleanup_listener_leases(listener: *Listener,
     ret result;
 }
 
-pub fun initialize_result(listener: *Listener, config: Config, storage: Storage,
-    admission_manager: *admission.Manager,
+# pending initials draw on `backing` until the listener's storage leg is released
+pub fun initialize_result(listener: *Listener, config: Config,
+    backing: *allocator.Allocator, admission_manager: *admission.Manager,
     token_manager: *token.Manager) InitializeResult {
     var result: InitializeResult;
     if (config.source == 0 || config.supported_versions == nil ||
         config.supported_version_count == 0 || config.supported_version_count > 16 ||
-        config.minimum_initial_size < 1200 || storage.pending == nil ||
-        storage.pending_capacity == 0) {
+        config.minimum_initial_size < 1200 || backing == nil) {
         result.error = ERROR_CONFIG;
         ret result;
     }
@@ -445,30 +427,12 @@ pub fun initialize_result(listener: *Listener, config: Config, storage: Storage,
         result.error = ERROR_CONFIG;
         ret result;
     }
-    val listener_range: ownership.Range = ownership.anchored_record[
-        Listener, Config](?listener.config, $offset_of(Listener, config));
-    val token_range: ownership.Range =
-        ownership.anchored_record[token.Manager, token.Config](
-        ?token_manager.config, $offset_of(token.Manager, config));
-    var ranges: [8]ownership.Range;
-    ranges[0] = listener_range;
-    ranges[1] = ownership.array(config.supported_versions::*u8,
-        config.supported_version_count, $size_of(u32), ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(storage.pending::*u8, storage.pending_capacity,
-        $size_of(Pending), ownership.ZERO_FORBIDDEN);
-    ranges[3] = ownership.bytes(admission_manager::*u8,
-        $size_of(admission.Manager), ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(admission_manager.storage.peers::*u8,
-        admission_manager.storage.peer_capacity, $size_of(admission.PeerSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.array(admission_manager.storage.charges::*u8,
-        admission_manager.storage.charge_capacity, $size_of(admission.ChargeSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[6] = token_range;
-    ranges[7] = ownership.array(token_manager.storage.replay::*u8,
-        token_manager.storage.replay_capacity, $size_of(token.ReplaySlot),
-        ownership.ZERO_FORBIDDEN);
-    if (!ownership.all_disjoint(?ranges[0], 8)) {
+    var ranges: [OWNED_RANGES]ownership.Range;
+    collect_ranges(ownership.anchored_record[Listener, Config](?listener.config,
+        $offset_of(Listener, config)), config.supported_versions,
+        config.supported_version_count, slots.range[Pending](?listener.pending),
+        admission_manager, token_manager, ?ranges[0]);
+    if (!ownership.all_disjoint(?ranges[0], OWNED_RANGES)) {
         result.error = ERROR_CONFIG;
         ret result;
     }
@@ -496,10 +460,10 @@ pub fun initialize_result(listener: *Listener, config: Config, storage: Storage,
         i = i + 1;
     }
     listener.config               = config;
-    listener.storage              = storage;
+    listener.backing              = backing;
+    listener.pending              = slots.empty[Pending]();
     listener.admission_manager    = admission_manager;
     listener.token_manager        = token_manager;
-    listener.next_pending         = 0;
     listener.lease_generation     = next_generation(listener.lease_generation);
     listener.owns_storage         = false;
     listener.owns_admission_lease = false;
@@ -509,11 +473,7 @@ pub fun initialize_result(listener: *Listener, config: Config, storage: Storage,
     listener.initialized          = false;
     result.handle                 = LeaseHandle{source: config.source,
         generation: listener.lease_generation};
-    if (!claim_listener_storage(listener)) {
-        result.error = ERROR_CAPACITY;
-        reset_unpublished(listener);
-        ret result;
-    }
+    listener.owns_storage = true;
     if (!admission.lease_listener(admission_manager, config.source)) {
         result.error   = ERROR_ADMISSION;
         result.cleanup = cleanup_listener_leases(listener, result.handle);
@@ -532,23 +492,15 @@ pub fun initialize_result(listener: *Listener, config: Config, storage: Storage,
         ret result;
     }
     listener.owns_token_lease = true;
-    i                         = 0;
-    for (i < storage.pending_capacity) {
-        storage.pending[i].state          = PENDING_FREE;
-        storage.pending[i].owns_admission = false;
-        storage.pending[i].owns_replay    = false;
-        storage.pending[i].generation     = next_generation(storage.pending[i].generation);
-        i                                 = i + 1;
-    }
-    listener.initialized = true;
-    result.ok            = true;
+    listener.initialized      = true;
+    result.ok                 = true;
     ret result;
 }
 
-pub fun initialize(listener: *Listener, config: Config, storage: Storage,
-    admission_manager: *admission.Manager,
+pub fun initialize(listener: *Listener, config: Config,
+    backing: *allocator.Allocator, admission_manager: *admission.Manager,
     token_manager: *token.Manager) bool {
-    ret initialize_result(listener, config, storage, admission_manager,
+    ret initialize_result(listener, config, backing, admission_manager,
         token_manager).ok;
 }
 
@@ -808,60 +760,27 @@ fun retry(listener: *Listener, request: *Request, initial: *Initial) Result {
     ret result;
 }
 
+# the only growth preflight performs, before any charge or reservation exists
 fun claim_pending(listener: *Listener) usize {
-    var offset: usize = 0;
-    for (offset < listener.storage.pending_capacity) {
-        val i: usize = (listener.next_pending + offset) %
-            listener.storage.pending_capacity;
-        if (listener.storage.pending[i].state == PENDING_FREE &&
-            listener.storage.pending[i].listener_source ==
-            listener.config.source &&
-            listener.storage.pending[i].listener_generation ==
-            listener.lease_generation) {
-            val pending: *Pending = ?listener.storage.pending[i];
-            pending.generation     = next_generation(pending.generation);
-            pending.state          = PENDING_RESERVED;
-            pending.owns_admission = false;
-            pending.owns_replay    = false;
-            listener.next_pending  = (i + 1) % listener.storage.pending_capacity;
-            ret i;
-        }
-        offset = offset + 1;
+    if (!slots.reserve[Pending](?listener.pending, listener.backing, 1)) {
+        ret slots.NONE;
     }
-    ret listener.storage.pending_capacity;
+    val index:   usize    = slots.claim[Pending](?listener.pending);
+    val pending: *Pending = ?listener.pending.items[index].value;
+    listener.pending_generation = next_generation(listener.pending_generation);
+    pending.generation          = listener.pending_generation;
+    pending.state               = PENDING_RESERVED;
+    pending.owns_admission      = false;
+    pending.owns_replay         = false;
+    ret index;
 }
 
 fun external_disjoint(listener: *Listener, value: ownership.Range) bool {
     if (!value.valid) { ret false; }
-    val admissions:     *admission.Manager = listener.admission_manager;
-    val tokens:         *token.Manager     = listener.token_manager;
-    val listener_range: ownership.Range    = ownership.anchored_record[
-        Listener, Config](?listener.config, $offset_of(Listener, config));
-    val token_range: ownership.Range =
-        ownership.anchored_record[token.Manager, token.Config](?tokens.config,
-        $offset_of(token.Manager, config));
-    var ranges: [8]ownership.Range;
-    ranges[0] = listener_range;
-    ranges[1] = ownership.array(listener.config.supported_versions::*u8,
-        listener.config.supported_version_count, $size_of(u32),
-        ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(listener.storage.pending::*u8,
-        listener.storage.pending_capacity, $size_of(Pending),
-        ownership.ZERO_FORBIDDEN);
-    ranges[3] = ownership.bytes(admissions::*u8, $size_of(admission.Manager),
-        ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(admissions.storage.peers::*u8,
-        admissions.storage.peer_capacity, $size_of(admission.PeerSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.array(admissions.storage.charges::*u8,
-        admissions.storage.charge_capacity, $size_of(admission.ChargeSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[6] = token_range;
-    ranges[7] = ownership.array(tokens.storage.replay::*u8,
-        tokens.storage.replay_capacity, $size_of(token.ReplaySlot),
-        ownership.ZERO_FORBIDDEN);
+    var ranges: [OWNED_RANGES]ownership.Range;
+    owned_ranges(listener, ?ranges[0]);
     var i: usize = 0;
-    for (i < 8) {
+    for (i < OWNED_RANGES) {
         if (!ownership.disjoint(value, ranges[i])) { ret false; }
         i = i + 1;
     }
@@ -937,18 +856,19 @@ pub fun preflight(listener: *Listener, request: *Request) Result {
         ret result;
     }
     val index: usize = claim_pending(listener);
-    if (index == listener.storage.pending_capacity) {
+    if (index == slots.NONE) {
         result.action = ACTION_BLOCKED;
-        result.error  = ERROR_CAPACITY;
+        result.error  = ERROR_MEMORY;
         ret result;
     }
-    val pending:    *Pending   = ?listener.storage.pending[index];
+    # nothing below grows the pending directory, so this address holds
+    val pending:    *Pending   = ?listener.pending.items[index].value;
     val acceptance: Acceptance = Acceptance{source: listener.config.source,
         index: index, generation: pending.generation};
     val admitted: admission.Result = admission.reserve_scoped(
         listener.admission_manager, listener.config.source, request.peer);
     if (admitted.status != admission.STATUS_OK) {
-        release_pending(pending);
+        release_pending(listener, index);
         result.action = ACTION_BLOCKED;
         result.error  = ERROR_ADMISSION;
         result.detail = admitted.error::u64;
@@ -975,7 +895,9 @@ pub fun preflight(listener: *Listener, request: *Request) Result {
         opened = token.open_scoped(listener.token_manager, listener.config.source,
             initial.token_data, initial.token_length, request.peer, request.now_ns);
         if (opened.status != token.STATUS_OK) {
-            result.action  = ACTION_DROP;
+            result.action = ACTION_DROP;
+            # a refusal to remember a valid token is load, not a bad packet
+            if (opened.status == token.STATUS_BLOCKED) { result.action = ACTION_BLOCKED; }
             result.error   = ERROR_TOKEN;
             result.detail  = opened.error::u64;
             result.cleanup = cleanup_owned(listener, pending, acceptance);
@@ -1023,21 +945,23 @@ fun pending_for(listener: *Listener, value: Acceptance, state: u8) *Pending {
     if (!physical(listener) || !listener.initialized ||
         listener.admission_manager.listener_lease != listener.config.source ||
         listener.token_manager.listener_lease != listener.config.source ||
-        value.source != listener.config.source ||
-        value.index >= listener.storage.pending_capacity) { ret nil; }
-    val pending: *Pending = ?listener.storage.pending[value.index];
-    if (pending.state != state || pending.generation != value.generation) {
+        value.source != listener.config.source) { ret nil; }
+    val pending: *Pending = slots.at[Pending](?listener.pending, value.index);
+    if (pending == nil || pending.state != state ||
+        pending.generation != value.generation) {
         ret nil;
     }
     ret pending;
 }
 
-fun release_pending(pending: *Pending) bool {
-    if (pending == nil || pending.owns_admission || pending.owns_replay) {
+fun release_pending(listener: *Listener, index: usize) bool {
+    val pending: *Pending = slots.at[Pending](?listener.pending, index);
+    if (pending == nil || pending.state == PENDING_FREE || pending.owns_admission ||
+        pending.owns_replay) {
         ret false;
     }
-    pending.state      = PENDING_FREE;
-    pending.generation = next_generation(pending.generation);
+    pending.state = PENDING_FREE;
+    slots.release[Pending](?listener.pending, index);
     ret true;
 }
 
@@ -1074,7 +998,7 @@ fun cleanup_owned(listener: *Listener, pending: *Pending,
         result.status = CLEANUP_RETAINED;
         ret result;
     }
-    if (!release_pending(pending)) {
+    if (!release_pending(listener, value.index)) {
         result.status = CLEANUP_INVALID;
         ret result;
     }
@@ -1128,7 +1052,7 @@ pub fun commit(listener: *Listener, value: Acceptance) Accepted {
     result.peer_validated       = pending.peer_validated;
     result.retry_source_present = pending.retry_source_present;
     pending.owns_admission      = false;
-    release_pending(pending);
+    release_pending(listener, value.index);
     ret result;
 }
 
@@ -1194,12 +1118,7 @@ pub fun begin_close(listener: *Listener) bool {
 }
 
 fun cleanup_ready(listener: *Listener) bool {
-    if (!physical(listener)) { ret false; }
-    var i: usize = 0;
-    for (i < listener.storage.pending_capacity) {
-        if (listener.storage.pending[i].state != PENDING_FREE) { ret false; }
-        i = i + 1;
-    }
+    if (!physical(listener) || listener.pending.live != 0) { ret false; }
     val admissions: admission.Snapshot = admission.snapshot(
         listener.admission_manager);
     ret admissions.active == 0 && admissions.reserved == 0;
@@ -1266,6 +1185,28 @@ pub fun finish_close_result(listener: *Listener) LeaseCleanupResult {
 
 pub fun finish_close(listener: *Listener) bool {
     ret finish_close_result(listener).status == CLEANUP_COMPLETE;
+}
+
+fun test_admission_config(source: u64, max_connections: usize,
+    per_peer: usize) admission.Config {
+    var config: admission.Config;
+    config.source                   = source;
+    config.max_connections          = opt[usize].some{max_connections};
+    config.max_connections_per_peer = opt[usize].some{per_peer};
+    ret config;
+}
+
+fun pending_of(listener: *Listener, value: Acceptance) *Pending {
+    ret slots.at[Pending](?listener.pending, value.index);
+}
+
+fun test_token_config(source: u64) token.Config {
+    var config: token.Config;
+    config.source             = source;
+    config.retry_max_age_ns   = 100;
+    config.address_max_age_ns = 1000;
+    config.max_replay         = opt[usize].none{};
+    ret config;
 }
 
 fun test_id(value: u8) packet.ConnectionId {
@@ -1505,28 +1446,22 @@ test "quic.connection.listener: Retry source setter copies transactionally" {
 }
 
 test "quic.connection.listener: unsupported versions produce bounded negotiation" {
-    var peer_slots:        [2]admission.PeerSlot;
-    var charges:           [2]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 501, max_connections: 2, max_connections_per_peer: 2
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 2,
-        charges: ?charges[0], charge_capacity: 2})) { ret 1; }
-    var replay:        [2]token.ReplaySlot;
+    if (!admission.initialize(?admission_manager, test_admission_config(501,
+        2, 2), limited.allocator_of(?memory_state))) { ret 1; }
     var key:           [32]^u8;
     var token_manager: token.Manager;
-    if (!token.initialize(?token_manager, token.Config{source: 502,
-        retry_max_age_ns: 100, address_max_age_ns: 1000},
-        token.Storage{replay: ?replay[0], replay_capacity: 2}, 1,
+    if (!token.initialize(?token_manager, test_token_config(502),
+        limited.allocator_of(?memory_state), 1,
         contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
-    var pending:  [2]Pending;
     var versions: [2]u32 = [2]u32{packet.VERSION_2, packet.VERSION_1};
     var listener: Listener;
     if (!initialize(?listener, Config{source: 503,
         supported_versions:   ?versions[0], supported_version_count: 2,
-        minimum_initial_size: 1200, require_retry: false}, Storage{pending: ?pending[0],
-        pending_capacity:     2}, ?admission_manager, ?token_manager)) { ret 1; }
+        minimum_initial_size: 1200, require_retry: false},
+        limited.allocator_of(?memory_state), ?admission_manager, ?token_manager)) { ret 1; }
     var input: [32]u8;
     input[0] = 0xc0;
     binary.put_uint(?input[1], 0xfaceb00c, 4, binary.BIG);
@@ -1588,28 +1523,22 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
 }
 
 test "quic.connection.listener: retry identity, replay, cancellation, and admission are atomic" {
-    var peer_slots:        [2]admission.PeerSlot;
-    var charges:           [2]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 511, max_connections: 2, max_connections_per_peer: 2
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 2,
-        charges: ?charges[0], charge_capacity: 2})) { ret 1; }
-    var replay:        [2]token.ReplaySlot;
+    if (!admission.initialize(?admission_manager, test_admission_config(511,
+        2, 2), limited.allocator_of(?memory_state))) { ret 1; }
     var key:           [32]^u8;
     var token_manager: token.Manager;
-    if (!token.initialize(?token_manager, token.Config{source: 512,
-        retry_max_age_ns: 100, address_max_age_ns: 1000},
-        token.Storage{replay: ?replay[0], replay_capacity: 2}, 1,
+    if (!token.initialize(?token_manager, test_token_config(512),
+        limited.allocator_of(?memory_state), 1,
         contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
-    var pending:  [2]Pending;
     var versions: [1]u32 = [1]u32{packet.VERSION_1};
     var listener: Listener;
     if (!initialize(?listener, Config{source: 513,
         supported_versions:   ?versions[0], supported_version_count: 1,
         minimum_initial_size: 1200, require_retry: true},
-        Storage{pending: ?pending[0], pending_capacity: 2},
+        limited.allocator_of(?memory_state),
         ?admission_manager, ?token_manager)) { ret 1; }
     val original:      packet.ConnectionId = test_id(1);
     val client_source: packet.ConnectionId = test_id(21);
@@ -1681,28 +1610,22 @@ test "quic.connection.listener: retry identity, replay, cancellation, and admiss
 }
 
 test "quic.connection.listener: saturated admission precedes token authentication" {
-    var peer_slots:        [1]admission.PeerSlot;
-    var charges:           [1]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 521, max_connections: 1, max_connections_per_peer: 1
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 1,
-        charges: ?charges[0], charge_capacity: 1})) { ret 1; }
-    var replay:        [1]token.ReplaySlot;
+    if (!admission.initialize(?admission_manager, test_admission_config(521,
+        1, 1), limited.allocator_of(?memory_state))) { ret 1; }
     var key:           [32]^u8;
     var token_manager: token.Manager;
-    if (!token.initialize(?token_manager, token.Config{source: 522,
-        retry_max_age_ns: 100, address_max_age_ns: 1000},
-        token.Storage{replay: ?replay[0], replay_capacity: 1}, 1,
+    if (!token.initialize(?token_manager, test_token_config(522),
+        limited.allocator_of(?memory_state), 1,
         contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
-    var pending:  [1]Pending;
     var versions: [1]u32 = [1]u32{packet.VERSION_1};
     var listener: Listener;
     if (!initialize(?listener, Config{source: 523,
         supported_versions:   ?versions[0], supported_version_count: 1,
-        minimum_initial_size: 1200, require_retry: false}, Storage{pending: ?pending[0],
-        pending_capacity:     1}, ?admission_manager, ?token_manager)) { ret 1; }
+        minimum_initial_size: 1200, require_retry: false},
+        limited.allocator_of(?memory_state), ?admission_manager, ?token_manager)) { ret 1; }
     val peer:          ip.Endpoint         = ip.endpoint(203, 0, 113, 9, 44000);
     val original:      packet.ConnectionId = test_id(1);
     val retry_source:  packet.ConnectionId = test_id(41);
@@ -1721,59 +1644,60 @@ test "quic.connection.listener: saturated admission precedes token authenticatio
         admission.commit_scoped(?admission_manager, listener.config.source,
         occupied.charge).status !=
         admission.STATUS_OK) { ret 4; }
-    val replay_generation: u64     = replay[0].generation;
-    val replay_cursor:     usize   = token_manager.next_replay;
+    val replay_generation: u64     = token_manager.generation;
     var request:           Request = Request{peer: peer, data: ?input[0], length: 1200,
         now_ns:                   20, output: nil, output_capacity: 0,
         retry_source:             no_connection_id(), retry_nonce: 0,
         version_negotiation_bits: 0};
     val blocked: Result = preflight(?listener, ?request);
     if (blocked.action != ACTION_BLOCKED) { ret 5; }
-    if (replay[0].state != token.REPLAY_FREE ||
-        replay[0].generation != replay_generation ||
-        token_manager.next_replay != replay_cursor) { ret 6; }
+    if (token.snapshot(?token_manager).remembered != 0 ||
+        token_manager.generation != replay_generation ||
+        listener.pending.live != 0) { ret 6; }
     if (admission.release_scoped(?admission_manager, listener.config.source,
         occupied.charge).status != admission.STATUS_OK) { ret 7; }
     val accepted: Result = preflight(?listener, ?request);
     if (accepted.action != ACTION_ACCEPT ||
         cancel(?listener, accepted.acceptance).action != ACTION_ACCEPT ||
         admission.snapshot(?admission_manager).reserved != 0 ||
-        replay[0].state != token.REPLAY_FREE) { ret 8; }
+        token.snapshot(?token_manager).remembered != 0) { ret 8; }
     ct.zeroize(?key[0], 32);
     ret 0;
 }
 
 test "quic.connection.listener: hostile configuration aliases acquire no leases" {
-    val maximum:           usize = ~(0::usize);
-    var peer_slots:        [1]admission.PeerSlot;
-    var charges:           [1]admission.ChargeSlot;
+    val maximum:      usize = ~(0::usize);
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 531, max_connections: 1, max_connections_per_peer: 1
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 1,
-        charges: ?charges[0], charge_capacity: 1})) { ret 1; }
-    var replay:        [1]token.ReplaySlot;
+    if (!admission.initialize(?admission_manager, test_admission_config(531,
+        1, 1), limited.allocator_of(?memory_state))) { ret 1; }
     var key:           [32]^u8;
     var token_manager: token.Manager;
-    if (!token.initialize(?token_manager, token.Config{source: 532,
-        retry_max_age_ns: 100, address_max_age_ns: 1000},
-        token.Storage{replay: ?replay[0], replay_capacity: 1}, 1,
+    if (!token.initialize(?token_manager, test_token_config(532),
+        limited.allocator_of(?memory_state), 1,
         contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
-    var pending: [1]Pending;
-    pending[0].state = PENDING_RESERVED;
     var versions: [1]u32 = [1]u32{packet.VERSION_1};
     var listener: Listener;
     if (initialize(?listener, Config{source: 533,
         supported_versions:   maximum::*u32, supported_version_count: 1,
-        minimum_initial_size: 1200, require_retry: false}, Storage{pending: ?pending[0],
-        pending_capacity:     1}, ?admission_manager, ?token_manager) ||
+        minimum_initial_size: 1200, require_retry: false},
+        limited.allocator_of(?memory_state), ?admission_manager, ?token_manager) ||
         initialize(?listener, Config{source: 533,
         supported_versions:   ?versions[0], supported_version_count: 1,
-        minimum_initial_size: 1200, require_retry: false}, Storage{pending: (?versions[0])::*Pending,
-        pending_capacity:     1}, ?admission_manager, ?token_manager) ||
+        minimum_initial_size: 1200, require_retry: false}, nil, ?admission_manager,
+        ?token_manager) ||
+        initialize(?listener, Config{source: 533,
+        supported_versions: (?admission_manager)::*u32, supported_version_count: 1,
+        minimum_initial_size:                                                    1200, require_retry: false},
+        limited.allocator_of(?memory_state), ?admission_manager, ?token_manager) ||
+        initialize_result(?listener, Config{source: 533,
+        supported_versions: (?admission_manager.peers)::*u32, supported_version_count: 1,
+        minimum_initial_size:                                                          1200, require_retry: false},
+        limited.allocator_of(?memory_state), ?admission_manager,
+        ?token_manager).error != ERROR_CONFIG ||
         listener.initialized || admission_manager.listener_lease != 0 ||
-        token_manager.listener_lease != 0 || pending[0].state != PENDING_RESERVED) {
+        token_manager.listener_lease != 0) {
         ret 2;
     }
     ct.zeroize(?key[0], 32);
@@ -1781,28 +1705,22 @@ test "quic.connection.listener: hostile configuration aliases acquire no leases"
 }
 
 test "quic.connection.listener: failed Acceptance cleanup retains each owned leg" {
-    var peer_slots:        [1]admission.PeerSlot;
-    var charges:           [1]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 541, max_connections: 1, max_connections_per_peer: 1
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 1,
-        charges: ?charges[0], charge_capacity: 1})) { ret 1; }
-    var replay:        [1]token.ReplaySlot;
+    if (!admission.initialize(?admission_manager, test_admission_config(541,
+        1, 1), limited.allocator_of(?memory_state))) { ret 1; }
     var key:           [32]^u8;
     var token_manager: token.Manager;
-    if (!token.initialize(?token_manager, token.Config{source: 542,
-        retry_max_age_ns: 100, address_max_age_ns: 1000},
-        token.Storage{replay: ?replay[0], replay_capacity: 1}, 1,
+    if (!token.initialize(?token_manager, test_token_config(542),
+        limited.allocator_of(?memory_state), 1,
         contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
-    var pending:  [1]Pending;
     var versions: [1]u32 = [1]u32{packet.VERSION_1};
     var listener: Listener;
     if (!initialize(?listener, Config{source: 543,
         supported_versions:   ?versions[0], supported_version_count: 1,
         minimum_initial_size: 1200, require_retry: false},
-        Storage{pending: ?pending[0], pending_capacity: 1},
+        limited.allocator_of(?memory_state),
         ?admission_manager, ?token_manager)) { ret 1; }
     val peer:          ip.Endpoint         = ip.endpoint(198, 51, 100, 41, 55000);
     val original:      packet.ConnectionId = test_id(1);
@@ -1820,8 +1738,8 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
         retry_source:             no_connection_id(), retry_nonce: 0,
         version_negotiation_bits: 0};
     val reserved: Result = preflight(?listener, ?request);
-    if (reserved.action != ACTION_ACCEPT || !pending[0].owns_admission ||
-        !pending[0].owns_replay) { ret 3; }
+    if (reserved.action != ACTION_ACCEPT || !pending_of(?listener, reserved.acceptance).owns_admission ||
+        !pending_of(?listener, reserved.acceptance).owns_replay) { ret 3; }
     admission_manager.initialized = false;
     token_manager.initialized     = false;
     val failed_cancel: Result = cancel(?listener, reserved.acceptance);
@@ -1834,7 +1752,7 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
         !failed_cancel.cleanup.replay_attempted ||
         failed_cancel.cleanup.admission_status != admission.STATUS_ERROR ||
         failed_cancel.cleanup.replay_status != token.STATUS_ERROR ||
-        pending[0].state != PENDING_CLEANUP) { ret 4; }
+        pending_of(?listener, reserved.acceptance).state != PENDING_CLEANUP) { ret 4; }
     admission_manager.initialized = true;
     val admission_only: CleanupResult = retry_cleanup(?listener,
         failed_cancel.cleanup.acceptance);
@@ -1844,22 +1762,25 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
         !admission_only.replay_attempted ||
         admission_only.admission_status != admission.STATUS_OK ||
         admission_only.replay_status != token.STATUS_ERROR ||
-        pending[0].state != PENDING_CLEANUP) { ret 5; }
+        pending_of(?listener, reserved.acceptance).state != PENDING_CLEANUP) { ret 5; }
     token_manager.initialized = true;
+    # a retained slot is never reused: a second attempt takes a fresh slot and
+    # meets the replay reservation the retained slot still owns
     val blocked: Result = preflight(?listener, ?request);
-    if (blocked.action != ACTION_BLOCKED || blocked.error != ERROR_CAPACITY ||
-        pending[0].state != PENDING_CLEANUP) { ret 6; }
+    if (blocked.action != ACTION_DROP || blocked.error != ERROR_TOKEN ||
+        blocked.detail != token.ERROR_REPLAY::u64 || listener.pending.live != 1 ||
+        pending_of(?listener, reserved.acceptance).state != PENDING_CLEANUP) { ret 6; }
     val completed: CleanupResult = retry_cleanup(?listener,
         admission_only.acceptance);
     if (completed.status != CLEANUP_COMPLETE ||
         completed.admission_retained || completed.replay_retained ||
-        pending[0].state != PENDING_FREE || replay[0].state != token.REPLAY_FREE ||
+        pending_of(?listener, reserved.acceptance).state != PENDING_FREE || token.snapshot(?token_manager).remembered != 0 ||
         retry_cleanup(?listener, completed.acceptance).status != CLEANUP_INVALID) {
         ret 7;
     }
     val reverse: Result = preflight(?listener, ?request);
-    if (reverse.action != ACTION_ACCEPT || !pending[0].owns_admission ||
-        !pending[0].owns_replay) { ret 8; }
+    if (reverse.action != ACTION_ACCEPT || !pending_of(?listener, reverse.acceptance).owns_admission ||
+        !pending_of(?listener, reverse.acceptance).owns_replay) { ret 8; }
     admission_manager.initialized = false;
     val failed_reverse: Result = cancel(?listener, reverse.acceptance);
     if (failed_reverse.action != ACTION_ERROR ||
@@ -1871,26 +1792,26 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
         !failed_reverse.cleanup.replay_attempted ||
         failed_reverse.cleanup.admission_status != admission.STATUS_ERROR ||
         failed_reverse.cleanup.replay_status != token.STATUS_OK ||
-        pending[0].state != PENDING_CLEANUP ||
-        replay[0].state != token.REPLAY_FREE) { ret 9; }
+        pending_of(?listener, reverse.acceptance).state != PENDING_CLEANUP ||
+        token.snapshot(?token_manager).remembered != 0) { ret 9; }
     val admission_retry: CleanupResult = retry_cleanup(?listener,
         failed_reverse.cleanup.acceptance);
     if (admission_retry.status != CLEANUP_RETAINED ||
         !admission_retry.admission_retained || admission_retry.replay_retained ||
         !admission_retry.admission_attempted || admission_retry.replay_attempted ||
         admission_retry.admission_status != admission.STATUS_ERROR ||
-        pending[0].state != PENDING_CLEANUP ||
-        replay[0].state != token.REPLAY_FREE) { ret 10; }
+        pending_of(?listener, reverse.acceptance).state != PENDING_CLEANUP ||
+        token.snapshot(?token_manager).remembered != 0) { ret 10; }
     admission_manager.initialized = true;
     val reverse_complete: CleanupResult = retry_cleanup(?listener,
         admission_retry.acceptance);
     if (reverse_complete.status != CLEANUP_COMPLETE ||
         !reverse_complete.admission_attempted ||
-        reverse_complete.replay_attempted || pending[0].state != PENDING_FREE ||
-        replay[0].state != token.REPLAY_FREE) { ret 11; }
+        reverse_complete.replay_attempted || pending_of(?listener, reverse.acceptance).state != PENDING_FREE ||
+        token.snapshot(?token_manager).remembered != 0) { ret 11; }
     val retried: Result = preflight(?listener, ?request);
-    if (retried.action != ACTION_ACCEPT || !pending[0].owns_admission ||
-        !pending[0].owns_replay) { ret 12; }
+    if (retried.action != ACTION_ACCEPT || !pending_of(?listener, retried.acceptance).owns_admission ||
+        !pending_of(?listener, retried.acceptance).owns_replay) { ret 12; }
     token_manager.initialized = false;
     val failed_commit: Accepted = commit(?listener, retried.acceptance);
     if (failed_commit.action != ACTION_ERROR ||
@@ -1904,41 +1825,35 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
         failed_commit.cleanup.replay_status != token.STATUS_ERROR ||
         admission.snapshot(?admission_manager).active != 0 ||
         admission.snapshot(?admission_manager).reserved != 0 ||
-        pending[0].state != PENDING_CLEANUP) { ret 13; }
+        pending_of(?listener, retried.acceptance).state != PENDING_CLEANUP) { ret 13; }
     token_manager.initialized = true;
     val commit_cleanup: CleanupResult = retry_cleanup(?listener,
         failed_commit.cleanup.acceptance);
     if (commit_cleanup.status != CLEANUP_COMPLETE ||
-        pending[0].state != PENDING_FREE || replay[0].state != token.REPLAY_FREE ||
+        pending_of(?listener, retried.acceptance).state != PENDING_FREE || token.snapshot(?token_manager).remembered != 0 ||
         !begin_close(?listener) || !finish_close(?listener)) { ret 14; }
     ct.zeroize(?key[0], 32);
     ret 0;
 }
 
 test "quic.connection.listener: unpublished lease cleanup retains each manager leg" {
-    var peer_slots:        [1]admission.PeerSlot;
-    var charges:           [1]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 551, max_connections: 1, max_connections_per_peer: 1
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 1,
-        charges: ?charges[0], charge_capacity: 1})) { ret 1; }
-    var replay:        [1]token.ReplaySlot;
+    if (!admission.initialize(?admission_manager, test_admission_config(551,
+        1, 1), limited.allocator_of(?memory_state))) { ret 1; }
     var key:           [32]^u8;
     var token_manager: token.Manager;
-    if (!token.initialize(?token_manager, token.Config{source: 552,
-        retry_max_age_ns: 100, address_max_age_ns: 1000},
-        token.Storage{replay: ?replay[0], replay_capacity: 1}, 1,
+    if (!token.initialize(?token_manager, test_token_config(552),
+        limited.allocator_of(?memory_state), 1,
         contracts.SecretBytes{data: ?key[0], len: 32})) { ret 1; }
-    var pending:  [1]Pending;
     var versions: [1]u32 = [1]u32{packet.VERSION_1};
     val config:   Config = Config{source: 553,
         supported_versions:   ?versions[0], supported_version_count: 1,
         minimum_initial_size: 1200, require_retry: false};
-    val storage:  Storage          = Storage{pending: ?pending[0], pending_capacity: 1};
+    val backing:  *allocator.Allocator = limited.allocator_of(?memory_state);
     var listener: Listener;
-    val first:    InitializeResult = initialize_result(?listener, config, storage,
+    val first:    InitializeResult     = initialize_result(?listener, config, backing,
         ?admission_manager, ?token_manager);
     if (!first.ok || first.error != ERROR_NONE ||
         first.handle.source != config.source || first.handle.generation == 0 ||
@@ -1968,13 +1883,14 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         ret 4;
     }
     admission_manager.initialized = true;
-    if (initialize(?listener, config, storage, ?admission_manager,
+    if (initialize(?listener, config, backing, ?admission_manager,
         ?token_manager) ||
         initialization_cleanup(?listener).status != CLEANUP_RETAINED) { ret 5; }
     var blocked_listener: Listener;
     val blocked:          InitializeResult = initialize_result(?blocked_listener, config,
-        storage, ?admission_manager, ?token_manager);
-    if (blocked.ok || blocked.error != ERROR_CAPACITY ||
+        backing, ?admission_manager, ?token_manager);
+    # the retained leases still belong to the first listener
+    if (blocked.ok || blocked.error != ERROR_ADMISSION ||
         blocked_listener.initialized ||
         initialization_cleanup(?listener).status != CLEANUP_RETAINED) { ret 5; }
     val admission_complete: LeaseCleanupResult = retry_initialization_cleanup(
@@ -1986,10 +1902,10 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         listener.token_manager != nil || admission_manager.listener_lease != 0 ||
         retry_initialization_cleanup(?listener, admission_complete.handle).status !=
         CLEANUP_INVALID) { ret 6; }
-    val second: InitializeResult = initialize_result(?listener, config, storage,
+    val second: InitializeResult = initialize_result(?listener, config, backing,
         ?admission_manager, ?token_manager);
     if (!second.ok || second.handle.generation == first.handle.generation ||
-        pending[0].state != PENDING_FREE ||
+        listener.pending.live != 0 ||
         abort_initialize(?listener, first.handle).status != CLEANUP_INVALID) {
         ret 7;
     }
@@ -2011,7 +1927,7 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
     token_manager.initialized = true;
     if (retry_initialization_cleanup(?listener, token_only.handle).status !=
         CLEANUP_COMPLETE) { ret 10; }
-    val third: InitializeResult = initialize_result(?listener, config, storage,
+    val third: InitializeResult = initialize_result(?listener, config, backing,
         ?admission_manager, ?token_manager);
     if (!third.ok || !begin_close(?listener)) { ret 11; }
     admission_manager.initialized = false;
@@ -2035,10 +1951,11 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         !closed.storage_attempted || closed.storage_retained ||
         admission_manager.listener_lease != 0 ||
         token_manager.listener_lease != 0) { ret 14; }
-    val fourth: InitializeResult = initialize_result(?listener, config, storage,
+    val fourth: InitializeResult = initialize_result(?listener, config, backing,
         ?admission_manager, ?token_manager);
-    if (!fourth.ok) { ret 15; }
-    pending[0].listener_generation = fourth.handle.generation + 1;
+    if (!fourth.ok)                                                      { ret 15; }
+    if (!slots.reserve[Pending](?listener.pending, listener.backing, 1)) { ret 15; }
+    memory_state.refuse_release = true;
     val storage_retained: LeaseCleanupResult = abort_initialize(?listener,
         fourth.handle);
     if (storage_retained.status != CLEANUP_RETAINED ||
@@ -2050,7 +1967,7 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         !listener.owns_storage || listener.owns_admission_lease ||
         listener.owns_token_lease || admission_manager.listener_lease != 0 ||
         token_manager.listener_lease != 0) { ret 16; }
-    pending[0].listener_generation = fourth.handle.generation;
+    memory_state.refuse_release = false;
     val storage_complete: LeaseCleanupResult = retry_initialization_cleanup(
         ?listener, storage_retained.handle);
     if (storage_complete.status != CLEANUP_COMPLETE ||
@@ -2059,7 +1976,7 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         listener.cleanup_pending || listener.owns_storage) { ret 17; }
     if (!token.lease_listener(?token_manager, 554)) { ret 18; }
     val token_busy: InitializeResult = initialize_result(?listener, config,
-        storage, ?admission_manager, ?token_manager);
+        backing, ?admission_manager, ?token_manager);
     if (token_busy.ok || token_busy.error != ERROR_TOKEN ||
         token_busy.cleanup.status != CLEANUP_COMPLETE ||
         !token_busy.cleanup.admission_attempted ||
@@ -2071,7 +1988,7 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         !token.release_listener(?token_manager, 554)) { ret 19; }
     if (!admission.lease_listener(?admission_manager, 555)) { ret 20; }
     val admission_busy: InitializeResult = initialize_result(?listener, config,
-        storage, ?admission_manager, ?token_manager);
+        backing, ?admission_manager, ?token_manager);
     if (admission_busy.ok || admission_busy.error != ERROR_ADMISSION ||
         admission_busy.cleanup.status != CLEANUP_COMPLETE ||
         admission_busy.cleanup.admission_attempted ||
@@ -2081,5 +1998,224 @@ test "quic.connection.listener: unpublished lease cleanup retains each manager l
         admission_manager.listener_lease != 555 ||
         !admission.release_listener(?admission_manager, 555)) { ret 21; }
     ct.zeroize(?key[0], 32);
+    ret 0;
+}
+
+rec Harness {
+    admission_memory:  limited.Limited;
+    token_memory:      limited.Limited;
+    listener_memory:   limited.Limited;
+    admission_manager: admission.Manager;
+    token_manager:     token.Manager;
+    versions:          [1]u32;
+    listener:          Listener;
+}
+
+var harness: Harness;
+
+fun harness_open(admission_source: u64, require_retry: bool) bool {
+    if (!limited.make(?harness.admission_memory, 1 << 24) ||
+        !limited.make(?harness.token_memory, 1 << 24) ||
+        !limited.make(?harness.listener_memory, 1 << 24)) { ret false; }
+    var admission_config: admission.Config;
+    admission_config.source                   = admission_source;
+    admission_config.max_connections          = opt[usize].none{};
+    admission_config.max_connections_per_peer = opt[usize].none{};
+    var key: [32]^u8;
+    if (!admission.initialize(?harness.admission_manager, admission_config,
+        limited.allocator_of(?harness.admission_memory)) ||
+        !token.initialize(?harness.token_manager,
+        test_token_config(admission_source + 1),
+        limited.allocator_of(?harness.token_memory), 1,
+        contracts.SecretBytes{data: ?key[0], len: 32})) { ret false; }
+    harness.versions[0] = packet.VERSION_1;
+    ret initialize(?harness.listener, Config{source: admission_source + 2,
+        supported_versions:   ?harness.versions[0], supported_version_count: 1,
+        minimum_initial_size: 1200, require_retry: require_retry},
+        limited.allocator_of(?harness.listener_memory), ?harness.admission_manager,
+        ?harness.token_manager);
+}
+
+fun harness_request(input: *u8, peer: u8, now_ns: u64) Request {
+    var request: Request;
+    request.peer                     = ip.endpoint(198, 18, 0, peer, 443);
+    request.data                     = input;
+    request.length                   = 1200;
+    request.now_ns                   = now_ns;
+    request.retry_source             = no_connection_id();
+    request.retry_nonce              = 0;
+    request.version_negotiation_bits = 0;
+    request.output                   = nil;
+    request.output_capacity          = 0;
+    ret request;
+}
+
+fun harness_close() bool {
+    ret begin_close(?harness.listener) && finish_close(?harness.listener) &&
+        admission.begin_close(?harness.admission_manager) &&
+        admission.finish_close(?harness.admission_manager) &&
+        token.begin_close(?harness.token_manager) &&
+        token.finish_close(?harness.token_manager) &&
+        limited.clean(?harness.admission_memory) &&
+        limited.clean(?harness.token_memory) &&
+        limited.clean(?harness.listener_memory);
+}
+
+test "quic.connection.listener: pending storage grows and acceptances survive growth" {
+    if (!harness_open(561, false)) { ret 1; }
+    var input: [1200]u8;
+    if (!test_initial(?input[0], test_id(3), test_id(23), nil, 0)) { ret 2; }
+    var held: [40]Acceptance;
+    var i:    usize = 0;
+    for (i < 40) {
+        var request: Request = harness_request(?input[0], (i % 200)::u8, 10);
+        val result:  Result  = preflight(?harness.listener, ?request);
+        if (result.action != ACTION_ACCEPT) { ret 3; }
+        held[i] = result.acceptance;
+        i       = i + 1;
+    }
+    if (harness.listener.pending.live != 40 || harness.listener.pending.capacity < 40 ||
+        admission.snapshot(?harness.admission_manager).reserved != 40) { ret 4; }
+    # every acceptance issued before a growth still names its own pending initial
+    var charges: [40]admission.Charge;
+    i = 0;
+    for (i < 40) {
+        val accepted: Accepted = commit(?harness.listener, held[i]);
+        if (accepted.action != ACTION_ACCEPT ||
+            accepted.peer.addr.v4.octets[3] != (i % 200)::u8 ||
+            commit(?harness.listener, held[i]).error != ERROR_TOKEN_HANDLE) { ret 5; }
+        charges[i] = accepted.charge;
+        i          = i + 1;
+    }
+    i = 0;
+    for (i < 40) {
+        if (release_connection(?harness.listener, charges[i]).action != ACTION_ACCEPT) {
+            ret 6;
+        }
+        i = i + 1;
+    }
+    if (!harness_close()) { ret 7; }
+    ret 0;
+}
+
+test "quic.connection.listener: a refused growth blocks one Initial and holds nothing" {
+    if (!harness_open(571, false)) { ret 1; }
+    var input: [1200]u8;
+    if (!test_initial(?input[0], test_id(5), test_id(25), nil, 0)) { ret 2; }
+    var held: [8]Acceptance;
+    var i:    usize = 0;
+    for (i < 8) {
+        var request: Request = harness_request(?input[0], i::u8, 10);
+        val result:  Result  = preflight(?harness.listener, ?request);
+        if (result.action != ACTION_ACCEPT) { ret 3; }
+        held[i] = result.acceptance;
+        i       = i + 1;
+    }
+    if (harness.listener.pending.live != harness.listener.pending.capacity) { ret 4; }
+    # pending directory: refused before any admission charge exists
+    harness.listener_memory.budget = harness.listener_memory.live_bytes;
+    var request:         Request = harness_request(?input[0], 9, 11);
+    val pending_refused: Result  = preflight(?harness.listener, ?request);
+    if (pending_refused.action != ACTION_BLOCKED ||
+        pending_refused.error != ERROR_MEMORY ||
+        admission.snapshot(?harness.admission_manager).reserved != 8 ||
+        harness.listener.pending.live != 8) { ret 5; }
+    if (cancel(?harness.listener, held[0]).action != ACTION_ACCEPT) { ret 6; }
+    val reused: Result = preflight(?harness.listener, ?request);
+    if (reused.action != ACTION_ACCEPT) { ret 7; }
+    held[0]                        = reused.acceptance;
+    harness.listener_memory.budget = 1 << 24;
+    # admission directory: the pending initial it claimed is released again
+    harness.admission_memory.budget = harness.admission_memory.live_bytes;
+    request                         = harness_request(?input[0], 10, 12);
+    val admission_refused: Result = preflight(?harness.listener, ?request);
+    if (admission_refused.action != ACTION_BLOCKED ||
+        admission_refused.error != ERROR_ADMISSION ||
+        admission_refused.detail != admission.ERROR_MEMORY::u64 ||
+        harness.listener.pending.live != 8 ||
+        admission.snapshot(?harness.admission_manager).reserved != 8) { ret 8; }
+    harness.admission_memory.budget = 1 << 24;
+    i                               = 0;
+    for (i < 8) {
+        if (cancel(?harness.listener, held[i]).action != ACTION_ACCEPT) { ret 9; }
+        i = i + 1;
+    }
+    if (!harness_close()) { ret 10; }
+    ret 0;
+}
+
+test "quic.connection.listener: a refused replay growth blocks and releases the admission charge" {
+    if (!harness_open(581, false)) { ret 1; }
+    val peer:   ip.Endpoint = ip.endpoint(198, 18, 0, 1, 443);
+    var tokens: [9][token.TOKEN_SIZE]u8;
+    var inputs: [9][1200]u8;
+    var held:   [8]Acceptance;
+    var i:      usize       = 0;
+    for (i < 9) {
+        if (token.seal_scoped(?harness.token_manager, harness.listener.config.source,
+            token.PURPOSE_RETRY, peer, test_id(1), test_id(41), 10, (i + 1)::u64,
+            ?tokens[i][0], token.TOKEN_SIZE).status != token.STATUS_OK ||
+            !test_initial(?inputs[i][0], test_id(41), test_id(21), ?tokens[i][0],
+            token.TOKEN_SIZE)) { ret 2; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < 8) {
+        var request: Request = harness_request(?inputs[i][0], 1, 20);
+        val result:  Result  = preflight(?harness.listener, ?request);
+        if (result.action != ACTION_ACCEPT) { ret 3; }
+        held[i] = result.acceptance;
+        i       = i + 1;
+    }
+    harness.token_memory.budget = harness.token_memory.live_bytes;
+    var request: Request = harness_request(?inputs[8][0], 1, 21);
+    val refused: Result  = preflight(?harness.listener, ?request);
+    if (refused.action != ACTION_BLOCKED || refused.error != ERROR_TOKEN ||
+        refused.detail != token.ERROR_MEMORY::u64 ||
+        refused.cleanup.status != CLEANUP_COMPLETE ||
+        admission.snapshot(?harness.admission_manager).reserved != 8 ||
+        token.snapshot(?harness.token_manager).reserved != 8 ||
+        harness.listener.pending.live != 8) { ret 4; }
+    harness.token_memory.budget = 1 << 24;
+    val admitted: Result = preflight(?harness.listener, ?request);
+    if (admitted.action != ACTION_ACCEPT ||
+        cancel(?harness.listener, admitted.acceptance).action != ACTION_ACCEPT) { ret 5; }
+    i = 0;
+    for (i < 8) {
+        if (cancel(?harness.listener, held[i]).action != ACTION_ACCEPT) { ret 6; }
+        i = i + 1;
+    }
+    if (!harness_close()) { ret 7; }
+    ret 0;
+}
+
+test "quic.connection.listener: an acceptance whose retry token expires before commit still closes" {
+    if (!harness_open(591, false)) { ret 1; }
+    val peer:  ip.Endpoint = ip.endpoint(198, 18, 0, 1, 443);
+    var first: [token.TOKEN_SIZE]u8;
+    var later: [token.TOKEN_SIZE]u8;
+    if (token.seal_scoped(?harness.token_manager, harness.listener.config.source,
+        token.PURPOSE_RETRY, peer, test_id(1), test_id(41), 10, 1, ?first[0],
+        token.TOKEN_SIZE).status != token.STATUS_OK ||
+        token.seal_scoped(?harness.token_manager, harness.listener.config.source,
+        token.PURPOSE_RETRY, peer, test_id(1), test_id(41), 150, 2, ?later[0],
+        token.TOKEN_SIZE).status != token.STATUS_OK) { ret 2; }
+    var first_input: [1200]u8;
+    var later_input: [1200]u8;
+    if (!test_initial(?first_input[0], test_id(41), test_id(21), ?first[0],
+        token.TOKEN_SIZE) || !test_initial(?later_input[0], test_id(41), test_id(21),
+        ?later[0], token.TOKEN_SIZE)) { ret 3; }
+    var request: Request = harness_request(?first_input[0], 1, 20);
+    val queued:  Result  = preflight(?harness.listener, ?request);
+    # the first reservation expires at 110 and this open sweeps it
+    request = harness_request(?later_input[0], 1, 160);
+    val swept: Result = preflight(?harness.listener, ?request);
+    if (queued.action != ACTION_ACCEPT || swept.action != ACTION_ACCEPT) { ret 4; }
+    val accepted: Accepted = commit(?harness.listener, queued.acceptance);
+    if (accepted.action != ACTION_ACCEPT || !accepted.retry_source_present ||
+        cancel(?harness.listener, swept.acceptance).action != ACTION_ACCEPT ||
+        release_connection(?harness.listener, accepted.charge).action != ACTION_ACCEPT ||
+        token.snapshot(?harness.token_manager).reserved != 0) { ret 5; }
+    if (!harness_close()) { ret 6; }
     ret 0;
 }
