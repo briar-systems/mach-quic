@@ -5,6 +5,7 @@ use quic.connection.ownership;
 use quic.connection.token;
 use quic.crypto.protection;
 use quic.packet.packet;
+use quic.storage.limited;
 use quic.wire.varint;
 
 use crypto.contracts;
@@ -15,6 +16,7 @@ use std.net.ip;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
@@ -291,6 +293,35 @@ fun version_supported(listener: *Listener, version: u32) bool {
     ret false;
 }
 
+val OWNED_RANGES: usize = 3 + admission.RANGE_COUNT + 2;
+
+fun collect_ranges(listener_range: ownership.Range, versions: *u32,
+    version_count: usize, pending: ownership.Range,
+    admissions: *admission.Manager, tokens: *token.Manager,
+    output: *ownership.Range) {
+    output[0] = listener_range;
+    output[1] = ownership.array(versions::*u8, version_count, $size_of(u32),
+        ownership.ZERO_FORBIDDEN);
+    output[2] = pending;
+    admission.ranges(admissions, ?output[3]);
+    val tokens_at: usize = 3 + admission.RANGE_COUNT;
+    output[tokens_at] = ownership.anchored_record[token.Manager, token.Config](
+        ?tokens.config, $offset_of(token.Manager, config));
+    output[tokens_at + 1] = ownership.array(tokens.storage.replay::*u8,
+        tokens.storage.replay_capacity, $size_of(token.ReplaySlot),
+        ownership.ZERO_FORBIDDEN);
+}
+
+fun owned_ranges(listener: *Listener, output: *ownership.Range) {
+    collect_ranges(ownership.anchored_record[Listener, Config](?listener.config,
+        $offset_of(Listener, config)), listener.config.supported_versions,
+        listener.config.supported_version_count,
+        ownership.array(listener.storage.pending::*u8,
+        listener.storage.pending_capacity, $size_of(Pending),
+        ownership.ZERO_FORBIDDEN), listener.admission_manager,
+        listener.token_manager, output);
+}
+
 fun physical(listener: *Listener) bool {
     if (listener == nil) { ret false; }
     val listener_range: ownership.Range = ownership.anchored_record[
@@ -303,30 +334,9 @@ fun physical(listener: *Listener) bool {
         ownership.ZERO_FORBIDDEN).valid ||
         !ownership.anchored_record[token.Manager, token.Config](?tokens.config,
         $offset_of(token.Manager, config)).valid) { ret false; }
-    val token_range: ownership.Range =
-        ownership.anchored_record[token.Manager, token.Config](?tokens.config,
-        $offset_of(token.Manager, config));
-    var ranges: [8]ownership.Range;
-    ranges[0] = listener_range;
-    ranges[1] = ownership.array(listener.config.supported_versions::*u8,
-        listener.config.supported_version_count, $size_of(u32),
-        ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(listener.storage.pending::*u8,
-        listener.storage.pending_capacity, $size_of(Pending),
-        ownership.ZERO_FORBIDDEN);
-    ranges[3] = ownership.bytes(admissions::*u8, $size_of(admission.Manager),
-        ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(admissions.storage.peers::*u8,
-        admissions.storage.peer_capacity, $size_of(admission.PeerSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.array(admissions.storage.charges::*u8,
-        admissions.storage.charge_capacity, $size_of(admission.ChargeSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[6] = token_range;
-    ranges[7] = ownership.array(tokens.storage.replay::*u8,
-        tokens.storage.replay_capacity, $size_of(token.ReplaySlot),
-        ownership.ZERO_FORBIDDEN);
-    ret ownership.all_disjoint(?ranges[0], 8);
+    var ranges: [OWNED_RANGES]ownership.Range;
+    owned_ranges(listener, ?ranges[0]);
+    ret ownership.all_disjoint(?ranges[0], OWNED_RANGES);
 }
 
 fun reset_unpublished(listener: *Listener) {
@@ -445,30 +455,13 @@ pub fun initialize_result(listener: *Listener, config: Config, storage: Storage,
         result.error = ERROR_CONFIG;
         ret result;
     }
-    val listener_range: ownership.Range = ownership.anchored_record[
-        Listener, Config](?listener.config, $offset_of(Listener, config));
-    val token_range: ownership.Range =
-        ownership.anchored_record[token.Manager, token.Config](
-        ?token_manager.config, $offset_of(token.Manager, config));
-    var ranges: [8]ownership.Range;
-    ranges[0] = listener_range;
-    ranges[1] = ownership.array(config.supported_versions::*u8,
-        config.supported_version_count, $size_of(u32), ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(storage.pending::*u8, storage.pending_capacity,
-        $size_of(Pending), ownership.ZERO_FORBIDDEN);
-    ranges[3] = ownership.bytes(admission_manager::*u8,
-        $size_of(admission.Manager), ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(admission_manager.storage.peers::*u8,
-        admission_manager.storage.peer_capacity, $size_of(admission.PeerSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.array(admission_manager.storage.charges::*u8,
-        admission_manager.storage.charge_capacity, $size_of(admission.ChargeSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[6] = token_range;
-    ranges[7] = ownership.array(token_manager.storage.replay::*u8,
-        token_manager.storage.replay_capacity, $size_of(token.ReplaySlot),
-        ownership.ZERO_FORBIDDEN);
-    if (!ownership.all_disjoint(?ranges[0], 8)) {
+    var ranges: [OWNED_RANGES]ownership.Range;
+    collect_ranges(ownership.anchored_record[Listener, Config](?listener.config,
+        $offset_of(Listener, config)), config.supported_versions,
+        config.supported_version_count, ownership.array(storage.pending::*u8,
+        storage.pending_capacity, $size_of(Pending), ownership.ZERO_FORBIDDEN),
+        admission_manager, token_manager, ?ranges[0]);
+    if (!ownership.all_disjoint(?ranges[0], OWNED_RANGES)) {
         result.error = ERROR_CONFIG;
         ret result;
     }
@@ -833,35 +826,10 @@ fun claim_pending(listener: *Listener) usize {
 
 fun external_disjoint(listener: *Listener, value: ownership.Range) bool {
     if (!value.valid) { ret false; }
-    val admissions:     *admission.Manager = listener.admission_manager;
-    val tokens:         *token.Manager     = listener.token_manager;
-    val listener_range: ownership.Range    = ownership.anchored_record[
-        Listener, Config](?listener.config, $offset_of(Listener, config));
-    val token_range: ownership.Range =
-        ownership.anchored_record[token.Manager, token.Config](?tokens.config,
-        $offset_of(token.Manager, config));
-    var ranges: [8]ownership.Range;
-    ranges[0] = listener_range;
-    ranges[1] = ownership.array(listener.config.supported_versions::*u8,
-        listener.config.supported_version_count, $size_of(u32),
-        ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(listener.storage.pending::*u8,
-        listener.storage.pending_capacity, $size_of(Pending),
-        ownership.ZERO_FORBIDDEN);
-    ranges[3] = ownership.bytes(admissions::*u8, $size_of(admission.Manager),
-        ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(admissions.storage.peers::*u8,
-        admissions.storage.peer_capacity, $size_of(admission.PeerSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.array(admissions.storage.charges::*u8,
-        admissions.storage.charge_capacity, $size_of(admission.ChargeSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[6] = token_range;
-    ranges[7] = ownership.array(tokens.storage.replay::*u8,
-        tokens.storage.replay_capacity, $size_of(token.ReplaySlot),
-        ownership.ZERO_FORBIDDEN);
+    var ranges: [OWNED_RANGES]ownership.Range;
+    owned_ranges(listener, ?ranges[0]);
     var i: usize = 0;
-    for (i < 8) {
+    for (i < OWNED_RANGES) {
         if (!ownership.disjoint(value, ranges[i])) { ret false; }
         i = i + 1;
     }
@@ -1268,6 +1236,15 @@ pub fun finish_close(listener: *Listener) bool {
     ret finish_close_result(listener).status == CLEANUP_COMPLETE;
 }
 
+fun test_admission_config(source: u64, max_connections: usize,
+    per_peer: usize) admission.Config {
+    var config: admission.Config;
+    config.source                   = source;
+    config.max_connections          = opt[usize].some{max_connections};
+    config.max_connections_per_peer = opt[usize].some{per_peer};
+    ret config;
+}
+
 fun test_id(value: u8) packet.ConnectionId {
     var id: packet.ConnectionId;
     id.len = 8;
@@ -1505,14 +1482,11 @@ test "quic.connection.listener: Retry source setter copies transactionally" {
 }
 
 test "quic.connection.listener: unsupported versions produce bounded negotiation" {
-    var peer_slots:        [2]admission.PeerSlot;
-    var charges:           [2]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 501, max_connections: 2, max_connections_per_peer: 2
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 2,
-        charges: ?charges[0], charge_capacity: 2})) { ret 1; }
+    if (!admission.initialize(?admission_manager, test_admission_config(501,
+        2, 2), limited.allocator_of(?memory_state))) { ret 1; }
     var replay:        [2]token.ReplaySlot;
     var key:           [32]^u8;
     var token_manager: token.Manager;
@@ -1588,14 +1562,11 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
 }
 
 test "quic.connection.listener: retry identity, replay, cancellation, and admission are atomic" {
-    var peer_slots:        [2]admission.PeerSlot;
-    var charges:           [2]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 511, max_connections: 2, max_connections_per_peer: 2
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 2,
-        charges: ?charges[0], charge_capacity: 2})) { ret 1; }
+    if (!admission.initialize(?admission_manager, test_admission_config(511,
+        2, 2), limited.allocator_of(?memory_state))) { ret 1; }
     var replay:        [2]token.ReplaySlot;
     var key:           [32]^u8;
     var token_manager: token.Manager;
@@ -1681,14 +1652,11 @@ test "quic.connection.listener: retry identity, replay, cancellation, and admiss
 }
 
 test "quic.connection.listener: saturated admission precedes token authentication" {
-    var peer_slots:        [1]admission.PeerSlot;
-    var charges:           [1]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 521, max_connections: 1, max_connections_per_peer: 1
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 1,
-        charges: ?charges[0], charge_capacity: 1})) { ret 1; }
+    if (!admission.initialize(?admission_manager, test_admission_config(521,
+        1, 1), limited.allocator_of(?memory_state))) { ret 1; }
     var replay:        [1]token.ReplaySlot;
     var key:           [32]^u8;
     var token_manager: token.Manager;
@@ -1744,15 +1712,12 @@ test "quic.connection.listener: saturated admission precedes token authenticatio
 }
 
 test "quic.connection.listener: hostile configuration aliases acquire no leases" {
-    val maximum:           usize = ~(0::usize);
-    var peer_slots:        [1]admission.PeerSlot;
-    var charges:           [1]admission.ChargeSlot;
+    val maximum:      usize = ~(0::usize);
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 531, max_connections: 1, max_connections_per_peer: 1
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 1,
-        charges: ?charges[0], charge_capacity: 1})) { ret 1; }
+    if (!admission.initialize(?admission_manager, test_admission_config(531,
+        1, 1), limited.allocator_of(?memory_state))) { ret 1; }
     var replay:        [1]token.ReplaySlot;
     var key:           [32]^u8;
     var token_manager: token.Manager;
@@ -1781,14 +1746,11 @@ test "quic.connection.listener: hostile configuration aliases acquire no leases"
 }
 
 test "quic.connection.listener: failed Acceptance cleanup retains each owned leg" {
-    var peer_slots:        [1]admission.PeerSlot;
-    var charges:           [1]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 541, max_connections: 1, max_connections_per_peer: 1
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 1,
-        charges: ?charges[0], charge_capacity: 1})) { ret 1; }
+    if (!admission.initialize(?admission_manager, test_admission_config(541,
+        1, 1), limited.allocator_of(?memory_state))) { ret 1; }
     var replay:        [1]token.ReplaySlot;
     var key:           [32]^u8;
     var token_manager: token.Manager;
@@ -1916,14 +1878,11 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
 }
 
 test "quic.connection.listener: unpublished lease cleanup retains each manager leg" {
-    var peer_slots:        [1]admission.PeerSlot;
-    var charges:           [1]admission.ChargeSlot;
+    var memory_state: limited.Limited;
+    if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 551, max_connections: 1, max_connections_per_peer: 1
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 1,
-        charges: ?charges[0], charge_capacity: 1})) { ret 1; }
+    if (!admission.initialize(?admission_manager, test_admission_config(551,
+        1, 1), limited.allocator_of(?memory_state))) { ret 1; }
     var replay:        [1]token.ReplaySlot;
     var key:           [32]^u8;
     var token_manager: token.Manager;

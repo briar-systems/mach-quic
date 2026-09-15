@@ -17,6 +17,8 @@ use quic.transport.binding;
 use crypto.contracts;
 use crypto.encoding.keys;
 use crypto.secret;
+use std.allocator;
+use allocator_testing: std.allocator.testing;
 use std.chrono.time;
 use std.crypto.ct;
 use std.net.ip;
@@ -25,6 +27,8 @@ use std.system.os;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
 use std.types.size.usize;
 use tls.cert;
 use tls.cert.credentials;
@@ -39,6 +43,7 @@ fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+var front_memory:            allocator_testing.Testing;
 var dialer:                  assembly.Connection;
 var listener:                assembly.Connection;
 var dialer_storage:          assembly.Storage;
@@ -546,15 +551,16 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (started.terminal_alert != 0)      { ret 214; }
     if (started.event_active)             { ret 215; }
     if (started.role != handshake.CLIENT) { ret 216; }
-    var clock:             u64 = 1000;
-    var peer_slots:        [2]admission.PeerSlot;
-    var charges:           [2]admission.ChargeSlot;
+    var clock:            u64 = 1000;
+    var admission_config: admission.Config;
+    admission_config.source                   = 911;
+    admission_config.max_connections          = opt[usize].some{2};
+    admission_config.max_connections_per_peer = opt[usize].some{2};
+    val admission_made: err[allocator.Error] = allocator_testing.make(?front_memory);
+    if (sel admission_made.err) { ret 8; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 911, max_connections: 2, max_connections_per_peer: 2
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 2,
-        charges: ?charges[0], charge_capacity: 2})) { ret 8; }
+    if (!admission.initialize(?admission_manager, admission_config,
+        allocator_testing.allocator_of(?front_memory))) { ret 8; }
     var replay:        [2]token.ReplaySlot;
     var token_key:     [32]^u8;
     var token_manager: token.Manager;
