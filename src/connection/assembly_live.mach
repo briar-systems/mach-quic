@@ -561,20 +561,22 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     var admission_manager: admission.Manager;
     if (!admission.initialize(?admission_manager, admission_config,
         allocator_testing.allocator_of(?front_memory))) { ret 8; }
-    var replay:        [2]token.ReplaySlot;
+    var token_config: token.Config;
+    token_config.source             = 912;
+    token_config.retry_max_age_ns   = 1000000000;
+    token_config.address_max_age_ns = 1000000000;
+    token_config.max_replay         = opt[usize].none{};
     var token_key:     [32]^u8;
     var token_manager: token.Manager;
-    if (!token.initialize(?token_manager, token.Config{source: 912,
-        retry_max_age_ns: 1000000000, address_max_age_ns: 1000000000},
-        token.Storage{replay: ?replay[0], replay_capacity: 2}, 1,
+    if (!token.initialize(?token_manager, token_config,
+        allocator_testing.allocator_of(?front_memory), 1,
         contracts.SecretBytes{data: ?token_key[0], len: 32})) { ret 9; }
-    var pending:       [2]listener_api.Pending;
     var quic_versions: [1]u32 = [1]u32{packet_api.VERSION_1};
     var front:         listener_api.Listener;
     if (!listener_api.initialize(?front, listener_api.Config{source: 913,
         supported_versions:   ?quic_versions[0], supported_version_count: 1,
         minimum_initial_size: 1200, require_retry: true},
-        listener_api.Storage{pending: ?pending[0], pending_capacity: 2},
+        allocator_testing.allocator_of(?front_memory),
         ?admission_manager, ?token_manager)) { ret 10; }
     var retry_bytes: [512]u8;
     clock = clock + 1000;
