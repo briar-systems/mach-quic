@@ -1,0 +1,263 @@
+# open-addressed hash index from a keyed hash to a slot index
+#
+# entries hold indices, never addresses, so growth rebuilds the index in a
+# fresh allocation. load stays at or below one half and deletion shifts the
+# cluster back, so a probe always ends at an empty entry and no tombstones
+# accumulate
+
+use quic.connection.ownership;
+use quic.storage.slots;
+
+use std.allocator;
+use std.allocator.testing;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+
+val MINIMUM: usize = 16;
+
+pub rec Entry {
+    hash: u64;
+    slot: usize;
+}
+
+pub rec Index {
+    entries:  *Entry;
+    capacity: usize;
+    count:    usize;
+}
+
+rec Probe {
+    key:   u64;
+    value: u64;
+}
+
+pub fun empty() Index {
+    var value: Index;
+    value.entries  = nil;
+    value.capacity = 0;
+    value.count    = 0;
+    ret value;
+}
+
+# the capacity is a power of two above twice the count, so every probe ends
+pub fun sound(index: *Index) bool {
+    if (index.capacity == 0) { ret index.entries == nil && index.count == 0; }
+    ret index.entries != nil && (index.capacity & (index.capacity - 1)) == 0 &&
+        index.count <= index.capacity / 2;
+}
+
+fun home(index: *Index, hash: u64) usize {
+    ret hash::usize & (index.capacity - 1);
+}
+
+fun place(index: *Index, hash: u64, slot: usize) {
+    var position: usize = home(index, hash);
+    for (index.entries[position].slot != slots.NONE) {
+        position = (position + 1) & (index.capacity - 1);
+    }
+    index.entries[position].hash = hash;
+    index.entries[position].slot = slot;
+}
+
+# makes room for `count` entries in total. a refusal leaves the index as it was
+pub fun reserve(index: *Index, backing: *allocator.Allocator, count: usize) bool {
+    if (count <= index.capacity / 2) { ret true; }
+    if (backing == nil)              { ret false; }
+    var next: usize = MINIMUM;
+    if (index.capacity > next) { next = index.capacity; }
+    for (next / 2 < count) {
+        if (next > slots.NONE / 4) { ret false; }
+        next = next * 2;
+    }
+    val grown: res[*Entry, allocator.Error] = allocator.allocate[Entry](backing, next);
+    if (sel grown.err) { ret false; }
+    val old:          *Entry = index.entries;
+    val old_capacity: usize  = index.capacity;
+    index.entries  = grown.ok;
+    index.capacity = next;
+    var i: usize = 0;
+    for (i < next) {
+        index.entries[i].hash = 0;
+        index.entries[i].slot = slots.NONE;
+        i                     = i + 1;
+    }
+    i = 0;
+    for (i < old_capacity) {
+        if (old[i].slot != slots.NONE) { place(index, old[i].hash, old[i].slot); }
+        i = i + 1;
+    }
+    if (old != nil) {
+        # the rebuilt index is already live, so a refused release of the old one
+        # has nothing left to undo
+        allocator.deallocate[Entry](backing, old, old_capacity);
+    }
+    ret true;
+}
+
+pub fun find[T, K](index: *Index, table: *slots.Slots[T], hash: u64, key: *K,
+    equal: fun(*T, *K) bool) usize {
+    if (index.capacity == 0) { ret slots.NONE; }
+    var position: usize = home(index, hash);
+    for {
+        val entry: *Entry = ?index.entries[position];
+        if (entry.slot == slots.NONE) { ret slots.NONE; }
+        if (entry.hash == hash && entry.slot < table.capacity &&
+            equal(?table.items[entry.slot].value, key)) { ret entry.slot; }
+        position = (position + 1) & (index.capacity - 1);
+    }
+    ret slots.NONE;
+}
+
+# requires a reserve for count + 1 since the last growth
+pub fun insert(index: *Index, hash: u64, slot: usize) {
+    place(index, hash, slot);
+    index.count = index.count + 1;
+}
+
+pub fun remove(index: *Index, hash: u64, slot: usize) bool {
+    if (index.capacity == 0) { ret false; }
+    val mask: usize = index.capacity - 1;
+    var hole: usize = home(index, hash);
+    for (index.entries[hole].slot != slot) {
+        if (index.entries[hole].slot == slots.NONE) { ret false; }
+        hole = (hole + 1) & mask;
+    }
+    var next: usize = (hole + 1) & mask;
+    for (index.entries[next].slot != slots.NONE) {
+        val wanted: usize = home(index, index.entries[next].hash);
+        # an entry may fill the hole only if its home is not between them
+        if (((next - wanted) & mask) >= ((next - hole) & mask)) {
+            index.entries[hole] = index.entries[next];
+            hole                = next;
+        }
+        next = (next + 1) & mask;
+    }
+    index.entries[hole].hash = 0;
+    index.entries[hole].slot = slots.NONE;
+    index.count              = index.count - 1;
+    ret true;
+}
+
+pub fun bytes(index: *Index) usize {
+    ret index.capacity * $size_of(Entry);
+}
+
+pub fun range(index: *Index) ownership.Range {
+    ret ownership.array(index.entries::*u8, index.capacity, $size_of(Entry),
+        ownership.ZERO_ALLOWED);
+}
+
+# releases the index. a refusal keeps it, so the caller can try again
+pub fun destroy(index: *Index, backing: *allocator.Allocator) bool {
+    if (index.entries != nil) {
+        if (backing == nil) { ret false; }
+        val released: err[allocator.Error] = allocator.deallocate[Entry](backing,
+            index.entries, index.capacity);
+        if (sel released.err) { ret false; }
+    }
+    index.entries  = nil;
+    index.capacity = 0;
+    index.count    = 0;
+    ret true;
+}
+
+fun probe_equal(value: *Probe, key: *u64) bool {
+    ret value.key == @key;
+}
+
+# five homes straddling the end of every capacity force long clusters that wrap
+fun probe_hash(key: u64) u64 {
+    ret 0xfffffffffffffffc + key % 5;
+}
+
+fun probe_insert(index: *Index, table: *slots.Slots[Probe],
+    backing: *allocator.Allocator, key: u64) bool {
+    if (!slots.reserve[Probe](table, backing, 1) ||
+        !reserve(index, backing, index.count + 1)) { ret false; }
+    val slot: usize = slots.claim[Probe](table);
+    table.items[slot].value.key   = key;
+    table.items[slot].value.value = key * 3;
+    insert(index, probe_hash(key), slot);
+    ret true;
+}
+
+fun probe_find(index: *Index, table: *slots.Slots[Probe], key: u64) usize {
+    var wanted: u64 = key;
+    ret find[Probe, u64](index, table, probe_hash(key), ?wanted, probe_equal);
+}
+
+test "quic.storage.index: lookups stay exact across rehash and backward-shift deletion" {
+    var state: testing.Testing;
+    val made:  err[allocator.Error] = testing.make(?state);
+    if (sel made.err) { ret 1; }
+    val backing: *allocator.Allocator = testing.allocator_of(?state);
+    var table:   slots.Slots[Probe]   = slots.empty[Probe]();
+    var lookup:  Index                = empty();
+    var key:     u64                  = 0;
+    for (key < 100) {
+        if (!probe_insert(?lookup, ?table, backing, key)) { ret 2; }
+        key = key + 1;
+    }
+    if (lookup.capacity < 200 || !sound(?lookup)) { ret 3; }
+    key = 0;
+    for (key < 100) {
+        val slot: usize = probe_find(?lookup, ?table, key);
+        if (slot == slots.NONE || table.items[slot].value.value != key * 3) { ret 4; }
+        key = key + 1;
+    }
+    key = 0;
+    for (key < 100) {
+        if ((key & 1) == 0) {
+            val slot: usize = probe_find(?lookup, ?table, key);
+            if (!remove(?lookup, probe_hash(key), slot)) { ret 5; }
+            slots.release[Probe](?table, slot);
+        }
+        key = key + 1;
+    }
+    key = 0;
+    for (key < 100) {
+        val found: usize = probe_find(?lookup, ?table, key);
+        if ((key & 1) == 0 && found != slots.NONE) { ret 6; }
+        if ((key & 1) == 1 &&
+            (found == slots.NONE || table.items[found].value.key != key)) { ret 7; }
+        key = key + 1;
+    }
+    if (lookup.count != 50 || remove(?lookup, probe_hash(0), 0)) { ret 8; }
+    if (!destroy(?lookup, backing) || !slots.destroy[Probe](?table, backing) ||
+        testing.leaked(?state)) { ret 9; }
+    testing.dnit(?state);
+    ret 0;
+}
+
+test "quic.storage.index: a refused rehash keeps every entry reachable" {
+    var state: testing.Testing;
+    val made:  err[allocator.Error] = testing.make(?state);
+    if (sel made.err) { ret 1; }
+    val backing: *allocator.Allocator = testing.allocator_of(?state);
+    var table:   slots.Slots[Probe]   = slots.empty[Probe]();
+    var lookup:  Index                = empty();
+    var key:     u64                  = 0;
+    for (key < MINIMUM / 2) {
+        if (!probe_insert(?lookup, ?table, backing, key)) { ret 2; }
+        key = key + 1;
+    }
+    if (!slots.reserve[Probe](?table, backing, 1)) { ret 3; }
+    val entries: *Entry = lookup.entries;
+    testing.fail_at_ordinal(?state, testing.attempt_count(?state) + 1);
+    if (reserve(?lookup, backing, lookup.count + 1) || lookup.entries != entries ||
+        lookup.capacity != MINIMUM) { ret 4; }
+    testing.clear_failure(?state);
+    key = 0;
+    for (key < MINIMUM / 2) {
+        if (probe_find(?lookup, ?table, key) == slots.NONE) { ret 5; }
+        key = key + 1;
+    }
+    if (!destroy(?lookup, backing) || !slots.destroy[Probe](?table, backing) ||
+        testing.leaked(?state)) { ret 6; }
+    testing.dnit(?state);
+    ret 0;
+}
