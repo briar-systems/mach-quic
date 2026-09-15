@@ -61,7 +61,7 @@ pub fun reserve[T](slots: *Slots[T], backing: *allocator.Allocator,
     if (backing == nil || additional > NONE - 1 - slots.live) { ret false; }
     val needed: usize = slots.live + additional;
     var next:   usize = MINIMUM;
-    if (slots.capacity > MINIMUM) {
+    if (slots.capacity >= MINIMUM) {
         next = slots.capacity * 2;
         if (slots.capacity > (NONE - 1) / 2) { next = NONE - 1; }
     }
@@ -149,7 +149,8 @@ test "quic.storage.slots: growth keeps records and hands out every index once" {
         table.items[index].value.value = 1000 + index::u64;
         i                              = i + 1;
     }
-    if (table.capacity < 40 || table.live != 40 || !sound[Probe](?table)) { ret 4; }
+    # doubling, so forty claims cost four allocations rather than thirty-three
+    if (table.capacity != 64 || table.live != 40 || !sound[Probe](?table)) { ret 4; }
     i = 0;
     for (i < 40) {
         if (table.items[i].value.value != 1000 + i::u64) { ret 5; }
