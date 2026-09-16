@@ -1658,6 +1658,42 @@ pub fun on_timeout(manager: *Manager, now_ns: u64) TimeoutResult {
     ret result;
 }
 
+# lowers the send ceiling once the peer's limit is known. every path's search
+# ceiling follows it, so no probe is ever prepared above the peer's limit
+pub fun limit_mtu(manager: *Manager, maximum: u16) OperationResult {
+    if (!manager_record_valid(manager) || !manager.valid || manager.core_lease != 0) {
+        ret operation_error(ERROR_STATE);
+    }
+    if (maximum < manager.config.base_mtu) { ret operation_error(ERROR_MTU); }
+    if (maximum >= manager.config.maximum_mtu) {
+        var unchanged: OperationResult;
+        unchanged.status = STATUS_OK;
+        ret unchanged;
+    }
+    var i: usize = 0;
+    for (i < manager.storage.path_capacity) {
+        val path: *Path = ?manager.storage.paths[i];
+        if (path.valid && (path.current_mtu > maximum ||
+            ((path.mtu_probe_prepared || path.mtu_probe_active) &&
+            path.mtu_probe_size > maximum))) {
+            ret operation_error(ERROR_MTU);
+        }
+        i = i + 1;
+    }
+    manager.config.maximum_mtu = maximum;
+    i                          = 0;
+    for (i < manager.storage.path_capacity) {
+        val path: *Path = ?manager.storage.paths[i];
+        if (path.valid && path.search_upper_mtu > maximum) {
+            path.search_upper_mtu = maximum;
+        }
+        i = i + 1;
+    }
+    var result: OperationResult;
+    result.status = STATUS_OK;
+    ret result;
+}
+
 fun next_probe(path: *Path, config: Config) u16 {
     if (path == nil || path.current_mtu >= path.search_upper_mtu) { ret 0; }
     var candidate: u64 = path.current_mtu::u64 + config.mtu_probe_step::u64;
@@ -2163,6 +2199,14 @@ fun leave_core_scope(manager: *Manager, source: u64) {
     if (manager_record_valid(manager) && manager.valid) {
         manager.core_lease = source;
     }
+}
+
+pub fun limit_mtu_scoped(manager: *Manager, source: u64,
+    maximum: u16) OperationResult {
+    if (!enter_core_scope(manager, source)) { ret operation_error(ERROR_STATE); }
+    val result: OperationResult = limit_mtu(manager, maximum);
+    leave_core_scope(manager, source);
+    ret result;
 }
 
 pub fun confirm_handshake_scoped(manager: *Manager,
