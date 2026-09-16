@@ -10,6 +10,7 @@ use test_credentials: quic.connection.credentials_simulated;
 use quic.connection.handshake;
 use listener_api: quic.connection.listener;
 use quic.connection.token;
+use quic.crypto.protection;
 use packet_api: quic.packet.packet;
 use path_api:   quic.path.path;
 use quic.transport;
@@ -1506,5 +1507,68 @@ test "quic.connection.assembly: a pacing delay arms the connection timer" {
         listener.core.pace_deadline_ns != 0) { ret 24; }
     if (hop(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
         listener_endpoint(), paced) != transport.STATUS_OK) { ret 25; }
+    ret 0;
+}
+
+# one stream byte from the source, carried at the current instant
+fun send_byte(source: *assembly.Connection, sink: *assembly.Connection,
+    source_scope: *cancel.Scope, sink_local: ip.Endpoint, sink_peer: ip.Endpoint,
+    value: transport.Stream, clock: *u64) u8 {
+    var byte: [1]u8 = [1]u8{0x5A};
+    if (transport.write_stream[binding.Binding](?source.driver, value,
+        ?byte[0], 1).count != 1) { ret transport.STATUS_ERROR; }
+    clock[0] = clock[0] + 1000;
+    ret hop(source, sink, source_scope, sink_local, sink_peer, clock[0]);
+}
+
+test "quic.connection.assembly: a peer key update moves our send keys before we acknowledge it" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val dialer_stream: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    if (dialer_stream.status != transport.STATUS_OK) { ret 20; }
+    # a second update before the first is acknowledged is refused
+    if (protection.initiate_update(?dialer.secrets.application_send) != protection.OK ||
+        protection.initiate_update(?dialer.secrets.application_send) !=
+        protection.KEY_UPDATE_ERROR || !dialer.secrets.application_send.phase) { ret 21; }
+    if (send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        dialer_endpoint(), dialer_stream.stream, ?clock) != transport.STATUS_OK) { ret 22; }
+    # the listener switched its send keys on opening the update packet, so the
+    # ack it builds next is already protected with the new phase
+    if (listener.secrets.application_receive.generation != 2 ||
+        listener.secrets.application_send.generation != 2 ||
+        !listener.secrets.application_send.phase) { ret 23; }
+    val accepted: transport.OpenResult = transport.accept_stream[binding.Binding](
+        ?listener.driver);
+    if (accepted.status != transport.STATUS_OK) { ret 24; }
+    if (send_byte(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+        listener_endpoint(), accepted.stream, ?clock) != transport.STATUS_OK) { ret 25; }
+    if (pump(?clock, ?moved, 6) != 0) { ret refusal(); }
+    if (transport.snapshot[binding.Binding](?dialer.driver).state != transport.ACTIVE ||
+        transport.snapshot[binding.Binding](?listener.driver).state != transport.ACTIVE ||
+        !listener.secrets.application_receive.update_response_confirmed) { ret 26; }
+
+    # once acknowledged, the peer may update again and we follow
+    if (protection.initiate_update(?dialer.secrets.application_send) != protection.OK) {
+        ret 27;
+    }
+    if (send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        dialer_endpoint(), dialer_stream.stream, ?clock) != transport.STATUS_OK) { ret 28; }
+    if (listener.secrets.application_send.generation != 3 ||
+        listener.secrets.application_send.phase) { ret 29; }
+    if (send_byte(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+        listener_endpoint(), accepted.stream, ?clock) != transport.STATUS_OK) { ret 30; }
+    if (pump(?clock, ?moved, 6) != 0) { ret refusal(); }
+    if (transport.snapshot[binding.Binding](?dialer.driver).state != transport.ACTIVE ||
+        transport.snapshot[binding.Binding](?listener.driver).state != transport.ACTIVE ||
+        dialer.secrets.application_receive.generation != 3) { ret 31; }
+    var received: [8]u8;
+    var fin:      bool = false;
+    if (drain_stream(?listener.driver, accepted.stream, ?received[0], 8, ?fin) != 2 ||
+        drain_stream(?dialer.driver, dialer_stream.stream, ?received[0], 8,
+        ?fin) != 2) { ret 32; }
     ret 0;
 }
