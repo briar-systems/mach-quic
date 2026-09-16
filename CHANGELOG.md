@@ -10,12 +10,16 @@
 - `receive_datagram` drops a datagram above `max_udp_payload` and reports `STATUS_OK`, as RFC 9000 18.2 allows, instead of failing with `ERROR_BUFFER` (#109).
 - `receive` advances the handshake after each packet, so keys its crypto data unlocks are installed before the next coalesced packet or batched datagram is opened (#110). The server no longer drops a client request coalesced with its Finished, and connections no longer start with a collapsed congestion window.
 
+- A client Initial with a zero-length source connection ID is accepted (#111). quic-go uses one by default, and the listener dropped it. A peer addressed by a zero-length ID is reached by its path alone, and a NEW_CONNECTION_ID from it is refused as RFC 9000 19.15 requires.
+
 ### Changed
 
+- A client may choose a zero-length local connection ID (#111). It cannot issue another (`cid.ERROR_ZERO_LENGTH`), and its route carries an empty key, so the owner finds the connection by address. A server still needs a non-empty ID, because it is routed by its IDs.
 - **Breaking.** Core initialization refuses a path manager whose `maximum_mtu` exceeds the send storage (`INIT_PRECONDITION`), and the send storage only needs 1200 bytes rather than `max_udp_payload`.
 
 ### Added
 
+- `cid.local_zero_length`, `cid.peer_zero_length` and `cid.ERROR_ZERO_LENGTH`.
 - `path.limit_mtu` and `path.limit_mtu_scoped`, which lower the send ceiling and every path's MTU search ceiling together.
 
 ## [0.7.0] - 2026-09-15

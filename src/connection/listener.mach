@@ -850,7 +850,7 @@ pub fun preflight(listener: *Listener, request: *Request) Result {
     }
     val initial: Initial = parse_initial(request.data, request.length);
     if (!initial.valid || request.length < listener.config.minimum_initial_size ||
-        initial.destination.len < 8 || initial.source.len == 0) {
+        initial.destination.len < 8) {
         result.action = ACTION_DROP;
         result.error  = ERROR_PACKET;
         ret result;
@@ -2217,5 +2217,43 @@ test "quic.connection.listener: an acceptance whose retry token expires before c
         release_connection(?harness.listener, accepted.charge).action != ACTION_ACCEPT ||
         token.snapshot(?harness.token_manager).reserved != 0) { ret 5; }
     if (!harness_close()) { ret 6; }
+    ret 0;
+}
+
+test "quic.connection.listener: an Initial with a zero-length source id is accepted" {
+    if (!harness_open(591, false)) { ret 1; }
+    var input: [1200]u8;
+    var empty: packet.ConnectionId;
+    empty.len = 0;
+    if (!test_initial(?input[0], test_id(3), empty, nil, 0)) { ret 2; }
+    var request: Request = harness_request(?input[0], 7, 10);
+    val result:  Result  = preflight(?harness.listener, ?request);
+    if (result.action != ACTION_ACCEPT) { ret 3; }
+    val accepted: Accepted = commit(?harness.listener, result.acceptance);
+    if (accepted.action != ACTION_ACCEPT || accepted.initial_source.len != 0 ||
+        release_connection(?harness.listener, accepted.charge).action !=
+        ACTION_ACCEPT) { ret 4; }
+    if (!harness_close()) { ret 5; }
+    ret 0;
+}
+
+test "quic.connection.listener: a Retry answers a zero-length source id with an empty destination" {
+    if (!harness_open(594, true)) { ret 1; }
+    var input: [1200]u8;
+    var empty: packet.ConnectionId;
+    empty.len = 0;
+    if (!test_initial(?input[0], test_id(3), empty, nil, 0)) { ret 2; }
+    var retry_id: packet.ConnectionId = test_id(41);
+    var output:   [512]u8;
+    var request:  Request             = harness_request(?input[0], 7, 10);
+    request.output          = ?output[0];
+    request.output_capacity = 512;
+    if (!set_retry_source(?request, ?retry_id.data[0], 8)) { ret 3; }
+    request.retry_nonce = 5;
+    val result: Result = preflight(?harness.listener, ?request);
+    # long header: first byte, version, then the empty destination length
+    if (result.action != ACTION_RETRY || result.output_count < 7 ||
+        output[5] != 0 || output[6] != 8) { ret 4; }
+    if (!harness_close()) { ret 5; }
     ret 0;
 }

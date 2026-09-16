@@ -117,7 +117,7 @@ pub fun initialize(client: *Client, config: Config, storage: Storage, version: u
         config.supported_version_count > 16 ||
         storage.retry_token == nil || storage.retry_token_capacity == 0 ||
         storage.retry_pseudo == nil || storage.retry_pseudo_capacity < 64 ||
-        original_destination.len == 0 || initial_local_source.len == 0 ||
+        original_destination.len == 0 ||
         original_destination.len::usize > packet.MAX_CONNECTION_ID ||
         initial_local_source.len::usize > packet.MAX_CONNECTION_ID) { ret false; }
     var ranges: [4]ownership.Range;
