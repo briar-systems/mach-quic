@@ -20,6 +20,7 @@ pub val ERROR_EVENTS:   u8 = 4;
 pub val ERROR_OVERFLOW: u8 = 5;
 
 val MAX_EXACT_WINDOW: u64 = 9007199254740992;
+val MAX_UDP_PAYLOAD:  u64 = 65527;
 
 pub rec Config {
     algorithm:              u8;
@@ -425,7 +426,8 @@ pub fun on_recovery(state: *State, signals: Signals) UpdateResult {
     var i:                   usize = 0;
     for (i < signals.event_count) {
         val event: recovery.Event = signals.events[i];
-        if (event.sent_at_ns > signals.now_ns || event.bytes::u64 > state.config.max_datagram_size) {
+        # probes and packets sent before an mtu reduction exceed the current size
+        if (event.sent_at_ns > signals.now_ns || event.bytes::u64 > MAX_UDP_PAYLOAD) {
             ret update_error(ERROR_EVENTS, state);
         }
         var next: u64 = 0;

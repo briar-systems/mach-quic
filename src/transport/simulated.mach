@@ -711,3 +711,19 @@ test "quic.transport.simulated: a cancelled scope closes on the owner's next cal
         transport_api.STATUS_OK || !operation_ok(cancel.destroy(?fixture.scope))) { ret 5; }
     ret 0;
 }
+
+test "quic.transport.simulated: a datagram above max_udp_payload is dropped without failing" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 110, stream_api.ROLE_CLIENT)) { ret 1; }
+    var oversized: [1501]u8;
+    oversized[0] = 1;
+    val dropped: transport_api.OperationResult = input(?fixture.driver,
+        ?oversized[0], 1501, 1);
+    if (dropped.status != transport_api.STATUS_OK ||
+        dropped.error != transport_api.ERROR_NONE || fixture.core.received != 0) { ret 2; }
+    val accepted: transport_api.OperationResult = input(?fixture.driver,
+        ?oversized[0], 1500, 2);
+    if (accepted.status != transport_api.STATUS_OK || fixture.core.received != 1 ||
+        !close_fixture(?fixture, 3)) { ret 3; }
+    ret 0;
+}

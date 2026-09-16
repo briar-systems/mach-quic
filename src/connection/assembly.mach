@@ -142,7 +142,7 @@ pub fun default_config(source: u64, local: ip.Endpoint,
     value.version                     = packet.VERSION_1;
     value.local                       = local;
     value.peer                        = peer;
-    value.max_udp_payload             = 1200;
+    value.max_udp_payload             = MAX_UDP_PAYLOAD;
     value.max_idle_timeout_ms         = 30000;
     value.drain_timeout_ns            = 3000000000;
     value.peer_bidirectional_streams  = H3_REQUEST_STREAMS::u64;
@@ -799,7 +799,8 @@ fun build_managers(c: *Connection, config: *Config,
     if (role == transport_api.SERVER) { path_role = path_api.ROLE_SERVER; }
     var path_config: path_api.Config = path_api.default_config(config.source,
         path_role, config.peer_validated);
-    path_config.maximum_mtu = config.max_udp_payload::u16;
+    # the send ceiling is the send storage; max_udp_payload bounds receipt only
+    path_config.maximum_mtu = MAX_UDP_PAYLOAD::u16;
     if (!path_api.initialize(?c.paths, path_config,
         public_path_storage(c.storage),
         path_api.Endpoint{local: path_address(config.local),
