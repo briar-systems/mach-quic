@@ -1,6 +1,7 @@
 # a real client and a real server, assembled from configuration and driven to a
 # completed handshake and an exchanged stream over real packet protection
 
+use pacer_api: quic.congestion.pacer;
 use quic.connection.admission;
 use quic.connection.assembly;
 use cid_api: quic.connection.cid;
@@ -1164,5 +1165,346 @@ test "quic.connection.assembly: typed secret pools retain wiped deallocation for
         secret.destroy_array[assembly.SecretStorage](?storage) != contracts.OK) {
         ret 4;
     }
+    ret 0;
+}
+
+var response_bytes: [1400]u8;
+var reply_bytes:    [1400]u8;
+
+# a direct server acceptance with no retry, so the test drives only the path
+# under scrutiny
+fun establish_direct(dialer_payload: usize, listener_payload: usize,
+    dialer_cid: usize, clock: *u64, moved: *usize) i32 {
+    var owner:         secret.Allocator = secret.system_allocator();
+    var chain_storage: [1]cert.Certificate;
+    var key:           keys.PrivateKey;
+    var identity:      credentials.Identity;
+    if (!test_credentials.load_credentials(?identity, ?chain_storage[0], ?key,
+        ?owner)) { ret 1; }
+    var generation: credentials.Generation = credentials.empty_generation();
+    if (credentials.initialize(?generation, ?identity, 1, 0, nil,
+        false) != contracts.OK) { ret 2; }
+    var store: credentials.Store = credentials.empty_store();
+    if (credentials.initialize_store(?store, ?generation) != contracts.OK) {
+        ret 3;
+    }
+    var versions: [1]u16               = [1]u16{tls13.VERSION};
+    var suites:   [1]tls13.CipherSuite =
+        [1]tls13.CipherSuite{tls13.AES_128_GCM_SHA256};
+    var groups:     [1]tls13.NamedGroup      = [1]tls13.NamedGroup{tls13.X25519};
+    var signatures: [1]tls13.SignatureScheme =
+        [1]tls13.SignatureScheme{tls13.ED25519};
+    var protocols: [1]config.ProtocolName = [1]config.ProtocolName{
+        config.ProtocolName{data: ?alpn[0], len: 2}
+    };
+
+    var dialer_config: assembly.Config = connection_config(transport.CLIENT);
+    dialer_config.max_udp_payload     = dialer_payload;
+    dialer_config.local_source_length = dialer_cid;
+    val dialer_encoded: usize = assembly.encode_parameters(?dialer_config,
+        transport.CLIENT, ?dialer_parameters[0], 512).count;
+    if (dialer_encoded == 0) { ret 4; }
+
+    var listener_counter: u8             = 3;
+    var listener_entropy: secret.Entropy = secret.Entropy{
+        context: ?listener_counter, secret_context: nil,
+        fill_fn: test_credentials.deterministic_entropy, initialized: true
+    };
+    var listener_tls_config: config.ServerConfig;
+    listener_tls_config.credentials                     = ?store;
+    listener_tls_config.alpn                            = ?protocols[0];
+    listener_tls_config.alpn_len                        = 1;
+    listener_tls_config.require_alpn                    = true;
+    listener_tls_config.versions                        = ?versions[0];
+    listener_tls_config.version_len                     = 1;
+    listener_tls_config.suites                          = ?suites[0];
+    listener_tls_config.suite_len                       = 1;
+    listener_tls_config.groups                          = ?groups[0];
+    listener_tls_config.group_len                       = 1;
+    listener_tls_config.signatures                      = ?signatures[0];
+    listener_tls_config.signature_len                   = 1;
+    listener_tls_config.entropy                         = ?listener_entropy;
+    listener_tls_config.entropy_context_size            = 1;
+    listener_tls_config.limits                          = config.production_limits();
+    listener_tls_config.limits.max_peer_handshake_bytes = 8192;
+    listener_tls_config.limits.max_client_hello_bytes   = 8192;
+    listener_tls_config.limits.max_client_flight_bytes  = 8192;
+    listener_tls_config.limits.max_server_flight_bytes  = 8192;
+    listener_tls_config.limits.max_chain_bytes          = 4096;
+    listener_tls_config.limits.max_ticket_bytes         = 4096;
+    var anchor:         cert.Certificate = test_credentials.anchor();
+    var trust:          cert.TrustStore  = cert.TrustStore{anchors: ?anchor, len: 1};
+    var dialer_counter: u8               = 91;
+    var dialer_entropy: secret.Entropy   = secret.Entropy{
+        context: ?dialer_counter, secret_context: nil,
+        fill_fn: test_credentials.deterministic_entropy, initialized: true
+    };
+    var dialer_tls_config: config.ClientConfig;
+    dialer_tls_config.server_name = contracts.Bytes{data: ?server_name[0],
+        len: 15};
+    dialer_tls_config.alpn                            = ?protocols[0];
+    dialer_tls_config.alpn_len                        = 1;
+    dialer_tls_config.trust                           = ?trust;
+    dialer_tls_config.versions                        = ?versions[0];
+    dialer_tls_config.version_len                     = 1;
+    dialer_tls_config.suites                          = ?suites[0];
+    dialer_tls_config.suite_len                       = 1;
+    dialer_tls_config.groups                          = ?groups[0];
+    dialer_tls_config.group_len                       = 1;
+    dialer_tls_config.signatures                      = ?signatures[0];
+    dialer_tls_config.signature_len                   = 1;
+    dialer_tls_config.client_identity                 = nil;
+    dialer_tls_config.entropy                         = ?dialer_entropy;
+    dialer_tls_config.entropy_context_size            = 1;
+    dialer_tls_config.limits                          = config.production_limits();
+    dialer_tls_config.limits.max_peer_handshake_bytes = 8192;
+    dialer_tls_config.limits.max_client_hello_bytes   = 8192;
+    dialer_tls_config.limits.max_client_flight_bytes  = 8192;
+    dialer_tls_config.limits.max_chain_bytes          = 4096;
+    dialer_tls_config.limits.max_ticket_bytes         = 4096;
+    if (!client.init(?dialer_tls, ?dialer_tls_config, client.Storage{
+        input:                    ?dialer_input[0], input_capacity: 8192,
+        output:                   ?dialer_output[0], output_capacity: 8192,
+        hello:                    ?dialer_hello[0], hello_capacity: 8192,
+        certificates:             ?dialer_certificates[0], certificate_capacity: 4,
+        peer_parameters:          ?dialer_peer_parameters[0],
+        peer_parameters_capacity: 512
+    },
+        client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
+        data: contracts.Bytes{data: ?dialer_parameters[0],
+        len:  dialer_encoded}},
+        client.QUIC_TRANSPORT_PARAMETERS)) { ret 5; }
+    if (!operation_ok(cancel.make_root(?listener_scope, false, time.Time{sec: 0, nsec: 0})) ||
+        !operation_ok(cancel.make_root(?dialer_scope, false, time.Time{sec: 0, nsec: 0}))) {
+        ret 6;
+    }
+    val dialed: assembly.InitResult = assembly.init_client(?dialer,
+        ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
+        ?dialer_tls, ?dialer_scope, clock[0]);
+    if (!dialed.ok || dialed.core.reason != core.INIT_OK) { ret 7; }
+
+    clock[0] = clock[0] + 1000;
+    val first: transport.Generated = transport.generate[binding.Binding](
+        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, clock[0], 0);
+    clock[0] = clock[0] + 1000;
+    if (first.status != transport.STATUS_OK || first.count < 1200 ||
+        transport.complete_send[binding.Binding](?dialer.driver, first.token,
+        transport.SEND_SENT, first.count, clock[0]).status !=
+        transport.STATUS_OK) { ret 8; }
+
+    var direct: listener_api.Accepted;
+    direct.action               = listener_api.ACTION_ACCEPT;
+    direct.original_destination = connection_id(?initial_destination[0], 8);
+    direct.initial_destination  = connection_id(?initial_destination[0], 8);
+    direct.initial_source       = connection_id(?dialer_source[0], dialer_cid);
+    direct.peer                 = dialer_endpoint();
+    direct.version              = packet_api.VERSION_1;
+    direct.peer_validated       = true;
+    var listener_config: assembly.Config = connection_config(transport.SERVER);
+    listener_config.max_udp_payload = listener_payload;
+    if (!assembly.apply_server_acceptance(?listener_config, ?direct)) { ret 9; }
+    val listener_encoded: usize = assembly.encode_parameters(?listener_config,
+        transport.SERVER, ?listener_parameters[0], 512).count;
+    if (listener_encoded == 0 || !server.init(?listener_tls,
+        ?listener_tls_config, server.Storage{
+        input:                    ?listener_input[0], input_capacity: 8192,
+        output:                   ?listener_output[0], output_capacity: 8192,
+        hello:                    ?listener_hello[0], hello_capacity: 8192,
+        certificates:             ?listener_certificates[0],
+        certificate_capacity:     4,
+        peer_parameters:          ?listener_peer_parameters[0],
+        peer_parameters_capacity: 512
+    },
+        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+        data: contracts.Bytes{data: ?listener_parameters[0],
+        len:  listener_encoded}},
+        server.QUIC_TRANSPORT_PARAMETERS)) { ret 10; }
+    val served: assembly.InitResult = assembly.init_server(?listener,
+        ?listener_config, ?listener_storage, ?listener_secret_storage,
+        ?listener_tls, ?listener_scope, clock[0]);
+    if (!served.ok || served.core.reason != core.INIT_OK) { ret 11; }
+    var initial: transport.Datagram;
+    initial.local          = listener_endpoint();
+    initial.peer           = dialer_endpoint();
+    initial.data           = ?wire[0];
+    initial.length         = first.count;
+    clock[0]               = clock[0] + 1000;
+    initial.received_at_ns = clock[0];
+    if (transport.receive_datagram[binding.Binding](?listener.driver,
+        ?initial).status != transport.STATUS_OK) { ret 12; }
+    if (exchange(clock, moved, 24) != 0) { ret refusal(); }
+    ret 0;
+}
+
+fun drain_stream(driver: *transport.Driver[binding.Binding], value: transport.Stream,
+    output: *u8, capacity: usize, fin: *bool) usize {
+    var total: usize = 0;
+    for (total < capacity) {
+        val read: transport.ReadResult = transport.read_stream[binding.Binding](
+            driver, value, ?output[total], capacity - total);
+        if (read.status != transport.STATUS_OK) { ret total; }
+        total = total + read.count;
+        if (read.fin) {
+            @fin = true;
+            ret total;
+        }
+        if (read.count == 0) { ret total; }
+    }
+    ret total;
+}
+
+# the server's control and qpack streams open before the client has opened
+# anything, as an h3 server facing quic-go does, and the response is larger
+# than the base mtu
+fun stream_flow(dialer_payload: usize, listener_payload: usize,
+    dialer_cid: usize) i32 {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(dialer_payload, listener_payload,
+        dialer_cid, ?clock, ?moved);
+    if (established != 0) { ret established; }
+
+    var sizes:    [3]usize = [3]usize{11, 1, 1};
+    var critical: [3]transport.Stream;
+    var i:        usize    = 0;
+    for (i < 3) {
+        val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+            ?listener.driver, transport.UNIDIRECTIONAL);
+        if (opened.status != transport.STATUS_OK) { ret 20; }
+        critical[i] = opened.stream;
+        if (transport.write_stream[binding.Binding](?listener.driver,
+            critical[i], ?response_bytes[0], sizes[i]).count != sizes[i]) { ret 21; }
+        i = i + 1;
+    }
+    var request_byte: [1]u8                = [1]u8{'q'};
+    val request:      transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    if (request.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?dialer.driver, request.stream,
+        ?request_byte[0], 1).count != 1 ||
+        transport.finish_stream[binding.Binding](?dialer.driver,
+        request.stream).status != transport.STATUS_OK) { ret 22; }
+    if (pump(?clock, ?moved, 8) != 0) { ret refusal(); }
+
+    val accepted: transport.OpenResult =
+        transport.accept_stream[binding.Binding](?listener.driver);
+    if (accepted.status != transport.STATUS_OK) { ret 23; }
+    i = 0;
+    for (i < 1400) {
+        response_bytes[i] = (i % 251)::u8;
+        i                 = i + 1;
+    }
+    if (transport.write_stream[binding.Binding](?listener.driver,
+        accepted.stream, ?response_bytes[0], 1400).count != 1400 ||
+        transport.finish_stream[binding.Binding](?listener.driver,
+        accepted.stream).status != transport.STATUS_OK) { ret 24; }
+    if (pump(?clock, ?moved, 16) != 0) { ret refusal(); }
+
+    i = 0;
+    for (i < 3) {
+        val peer_stream: transport.OpenResult =
+            transport.accept_stream[binding.Binding](?dialer.driver);
+        if (peer_stream.status != transport.STATUS_OK) { ret 25; }
+        var fin: bool = false;
+        if (drain_stream(?dialer.driver, peer_stream.stream, ?reply_bytes[0],
+            1400, ?fin) != sizes[i]) { ret 26; }
+        i = i + 1;
+    }
+    var fin: bool = false;
+    if (drain_stream(?dialer.driver, request.stream, ?reply_bytes[0], 1400,
+        ?fin) != 1400 || !fin) { ret 27; }
+    i = 0;
+    for (i < 1400) {
+        if (reply_bytes[i] != response_bytes[i]) { ret 28; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "quic.connection.assembly: streams flow when both ends declare 1200" {
+    ret stream_flow(1200, 1200, 8);
+}
+
+test "quic.connection.assembly: streams flow when both ends declare 1280" {
+    ret stream_flow(1280, 1280, 8);
+}
+
+test "quic.connection.assembly: streams flow when both ends declare 1452" {
+    ret stream_flow(1452, 1452, 8);
+}
+
+test "quic.connection.assembly: streams flow when both ends declare 1500" {
+    ret stream_flow(1500, 1500, 8);
+}
+
+test "quic.connection.assembly: streams flow when only the client declares above 1200" {
+    ret stream_flow(1500, 1200, 8);
+}
+
+test "quic.connection.assembly: streams flow when only the server declares above 1200" {
+    ret stream_flow(1200, 1500, 8);
+}
+
+# rfc 9000 5.1: the server addresses such a client by its path alone
+test "quic.connection.assembly: a client with a zero-length connection id exchanges streams" {
+    val flowed: i32 = stream_flow(1500, 1500, 0);
+    if (flowed != 0) { ret flowed; }
+    val route: assembly.Route = assembly.route_at(?dialer, 0);
+    if (!route.active || route.id.length != 0) { ret 40; }
+    ret 0;
+}
+
+var bulk_bytes: [4096]u8;
+
+# one datagram moved at a frozen instant, so only the pacer's budget changes
+fun hop(source: *assembly.Connection, sink: *assembly.Connection,
+    source_scope: *cancel.Scope, sink_local: ip.Endpoint, sink_peer: ip.Endpoint,
+    now_ns: u64) u8 {
+    val generated: transport.Generated =
+        transport.generate[binding.Binding](?source.driver, source_scope,
+        ?wire[0], 1500, now_ns, 0);
+    if (generated.status != transport.STATUS_OK) { ret generated.status; }
+    if (transport.complete_send[binding.Binding](?source.driver,
+        generated.token, transport.SEND_SENT, generated.count,
+        now_ns).status != transport.STATUS_OK) { ret transport.STATUS_ERROR; }
+    var input: transport.Datagram;
+    input.local          = sink_local;
+    input.peer           = sink_peer;
+    input.data           = ?wire[0];
+    input.length         = generated.count;
+    input.received_at_ns = now_ns;
+    if (transport.receive_datagram[binding.Binding](?sink.driver,
+        ?input).status != transport.STATUS_OK) { ret transport.STATUS_ERROR; }
+    ret transport.STATUS_OK;
+}
+
+test "quic.connection.assembly: a pacing delay arms the connection timer" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(assembly.MAX_UDP_PAYLOAD,
+        assembly.MAX_UDP_PAYLOAD, 8, ?clock, ?moved);
+    if (established != 0) { ret established; }
+    val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?listener.driver, transport.UNIDIRECTIONAL);
+    if (opened.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?listener.driver,
+        opened.stream, ?bulk_bytes[0], 4096).count != 4096) { ret 20; }
+    # an exhausted budget at the current instant leaves the pacer alone
+    # holding the next packet
+    val now:   u64              = clock + 1000;
+    val pacer: *pacer_api.State = ?listener.storage.path_values[0].pacer;
+    pacer.budget         = 0.0;
+    pacer.last_update_ns = now;
+    if (hop(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+        listener_endpoint(), now) != transport.STATUS_BLOCKED) { ret 21; }
+    val paced: u64 = listener.core.pace_deadline_ns;
+    if (paced <= now) { ret 22; }
+    val timer: transport.Timer = transport.timer[binding.Binding](?listener.driver);
+    if (!timer.armed || timer.deadline_ns != paced) { ret 23; }
+    if (transport.on_timeout[binding.Binding](?listener.driver, timer,
+        paced).status != transport.STATUS_OK ||
+        listener.core.pace_deadline_ns != 0) { ret 24; }
+    if (hop(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+        listener_endpoint(), paced) != transport.STATUS_OK) { ret 25; }
     ret 0;
 }

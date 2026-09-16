@@ -72,6 +72,7 @@ val TIMER_DRAIN:    u8 = 3;
 val TIMER_RECOVERY: u8 = 4;
 val TIMER_PATH:     u8 = 5;
 val TIMER_ACK:      u8 = 6;
+val TIMER_PACE:     u8 = 7;
 
 pub val OWNER_FREE:     u8 = 0;
 pub val OWNER_PREPARED: u8 = 1;
@@ -300,6 +301,7 @@ pub rec Core {
     last_provider_error:        u64;
     timer_generation:           u64;
     timer_deadline_ns:          u64;
+    pace_deadline_ns:           u64;
     timer_recovery_generation:  u64;
     timer_kind:                 u8;
     state:                      transport_api.ConnectionState;
@@ -628,10 +630,10 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         secret_storage.send_plaintext == nil ||
         secret_storage.receive_plaintext == secret_storage.send_plaintext ||
         secret_storage.receive_plaintext_capacity < config.max_udp_payload ||
-        secret_storage.send_plaintext_capacity < config.max_udp_payload ||
+        secret_storage.send_plaintext_capacity < 1200 ||
         storage.receive_header_capacity < config.max_udp_payload ||
         storage.receive_decoded_capacity < config.max_udp_payload ||
-        storage.send_plaintext_capacity < config.max_udp_payload ||
+        storage.send_plaintext_capacity < 1200 ||
         storage.close_reason_capacity == 0 || storage.frame_ack_capacity == 0 ||
         storage.ack_initial.capacity == 0 ||
         storage.ack_handshake.capacity == 0 ||
@@ -743,6 +745,17 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
 fun local_parameter_role(role: transport_api.Role) u8 {
     if (role == transport_api.CLIENT) { ret transport_parameters.ROLE_CLIENT; }
     ret transport_parameters.ROLE_SERVER;
+}
+
+# the largest datagram the core can build, independent of the receive limit
+# it advertises
+fun send_capacity(storage: Storage, secret_storage: SecretStorage) usize {
+    var capacity: usize = storage.send_plaintext_capacity;
+    if (secret_storage.send_plaintext_capacity < capacity) {
+        capacity = secret_storage.send_plaintext_capacity;
+    }
+    if (capacity > 65527) { capacity = 65527; }
+    ret capacity;
 }
 
 fun validate_local_parameters(config: Config, parameters: *transport_parameters.Parameters,
@@ -991,8 +1004,9 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         !valid_role(config.role) || config.source == 0 ||
         (config.version != packet.VERSION_1 && config.version != packet.VERSION_2) ||
         config.max_udp_payload < 1200 || config.max_udp_payload > 65527 ||
-        config.drain_timeout_ns == 0 || config.local_source.len == 0 ||
-        config.peer_destination.len == 0 || config.initial_secret_destination.len == 0 ||
+        config.drain_timeout_ns == 0 ||
+        (config.local_source.len == 0 && config.role != transport_api.CLIENT) ||
+        config.initial_secret_destination.len == 0 ||
         config.original_destination.len == 0 || config.alpn.data == nil ||
         config.alpn.length == 0 || config.local_transport_parameters.data == nil ||
         config.local_transport_parameters.length == 0 ||
@@ -1021,7 +1035,8 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         config.supported_version_count == 0))) ||
         (config.role == transport_api.SERVER &&
         (paths.config.role != path_api.ROLE_SERVER ||
-        streams.config.role != stream_api.ROLE_SERVER))) {
+        streams.config.role != stream_api.ROLE_SERVER)) ||
+        paths.config.maximum_mtu::usize > send_capacity(storage, secret_storage)) {
         ret refuse(init_result, INIT_PRECONDITION);
     }
     val current_local: cid_api.Selected    = cid_api.current(cids, true);
@@ -1068,7 +1083,7 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     candidate.last_received_ns     = now_ns;
     candidate.last_now_ns          = now_ns;
     candidate.timer_generation     = 1;
-    candidate.send_max_udp_payload = config.max_udp_payload;
+    candidate.send_max_udp_payload = send_capacity(storage, secret_storage);
     candidate.idle_timeout_ns      = config.max_idle_timeout_ns;
     candidate.idle_timer_enabled   = config.max_idle_timeout_ns != 0;
 
@@ -1384,8 +1399,9 @@ fun accept_parameters(core: *Core, event: *handshake_api.Event) bool {
     if (parameters.max_udp_payload_size::usize < core.send_max_udp_payload) {
         core.send_max_udp_payload = parameters.max_udp_payload_size::usize;
     }
-    if (core.paths.config.maximum_mtu::usize > core.send_max_udp_payload) {
-        core.paths.config.maximum_mtu = core.send_max_udp_payload::u16;
+    if (path_api.limit_mtu_scoped(core.paths, core.config.source,
+        core.send_max_udp_payload::u16).status != path_api.STATUS_OK) {
+        ret false;
     }
     if (!recovery.set_max_ack_delay(?core.recovery_state,
         saturated_multiply(parameters.max_ack_delay, 1000000),
@@ -2381,7 +2397,7 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
     if (core.role == transport_api.CLIENT && core.authenticated_packets == 0 &&
-        value.source.len > 0 && !packet.connection_id_equal(?value.source,
+        !packet.connection_id_equal(?value.source,
         ?core.config.peer_destination)) {
         if (cid_api.replace_initial_peer_scoped(core.cids, core.config.source,
             value.source).status !=
@@ -2438,7 +2454,10 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
     if (core.closing) { ret core_result(core, transport_api.STATUS_OK, 0); }
-    val handshake_error: u64 = pump_handshake(core, secrets);
+    # keys this packet's crypto data unlocks must be installed before the next
+    # packet in the datagram, or in the caller's batch, is opened
+    val handshake_error: u64 = advance_handshake(core, secrets,
+        input.received_at_ns);
     if (handshake_error != NO_ERROR) {
         ret fail(core, handshake_error, input.received_at_ns);
     }
@@ -2637,14 +2656,18 @@ pub fun poll_handshake(core: *Core, secrets: *Secrets,
     }
     if (core.closing) { ret core_result(core, transport_api.STATUS_CLOSED, 0); }
     core.last_now_ns = now_ns;
+    val handshake_error: u64 = advance_handshake(core, secrets, now_ns);
+    if (handshake_error != NO_ERROR) { ret fail(core, handshake_error, now_ns); }
+    ret core_result(core, transport_api.STATUS_OK, 0);
+}
+
+fun advance_handshake(core: *Core, secrets: *Secrets, now_ns: u64) u64 {
     val polled: handshake_api.Result = handshake_api.poll_scoped(
         secrets.handshake, core.config.source, now_ns);
     if (polled.status == handshake_api.STATUS_ERROR) {
-        ret fail(core, handshake_failure(core, polled), now_ns);
+        ret handshake_failure(core, polled);
     }
-    val handshake_error: u64 = pump_handshake(core, secrets);
-    if (handshake_error != NO_ERROR) { ret fail(core, handshake_error, now_ns); }
-    ret core_result(core, transport_api.STATUS_OK, 0);
+    ret pump_handshake(core, secrets);
 }
 
 pub fun snapshot(core: *Core) Snapshot {
@@ -3179,10 +3202,24 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.status = transport_api.STATUS_BLOCKED;
         ret result;
     }
+    # the caller is generating now, so a pacing wake has served its purpose
+    core.pace_deadline_ns = 0;
     var available: usize = capacity;
     if (available > core.send_max_udp_payload) {
         available = core.send_max_udp_payload;
     }
+    # only an mtu probe may exceed the validated path mtu, and it is padded
+    # against `available` rather than sized by `maximum`
+    val selected: path_api.PathResult = selected_path(core);
+    if (selected.status != path_api.STATUS_OK ||
+        selected.handle.index >= core.paths.storage.path_capacity) {
+        result.status = transport_api.STATUS_ERROR;
+        result.error  = NO_VIABLE_PATH;
+        ret result;
+    }
+    var sized: usize =
+        core.paths.storage.paths[selected.handle.index].current_mtu::usize;
+    if (sized > available) { sized = available; }
     val owner: *Owner = claim_owner(core);
     if (owner == nil) {
         result.status = transport_api.STATUS_BLOCKED;
@@ -3191,7 +3228,7 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     var value: frame.Frame;
     var path:  path_api.Handle;
     if (!prepare_frame(core, secrets, owner, now_ns,
-        available - 96, ?value, ?path)) {
+        sized - 96, ?value, ?path)) {
         free_owner(owner);
         result.status = transport_api.STATUS_EMPTY;
         ret result;
@@ -3356,9 +3393,17 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         transport_path.congestion.congestion_window,
         core.recovery_state.rtt.smoothed_ns,
         packet_size::u64, !ack_eliciting);
-    if (!owner.pacer.ok || !owner.pacer.ready) {
+    if (!owner.pacer.ok) {
         cancel_payload(core, secrets, owner);
-        result.status = transport_api.STATUS_BLOCKED;
+        result.status = transport_api.STATUS_ERROR;
+        result.error  = INTERNAL_ERROR;
+        ret result;
+    }
+    if (!owner.pacer.ready) {
+        val ready_at_ns: u64 = owner.pacer.ready_at_ns;
+        cancel_payload(core, secrets, owner);
+        core.pace_deadline_ns = ready_at_ns;
+        result.status         = transport_api.STATUS_BLOCKED;
         ret result;
     }
     var reserved: path_api.SendResult;
@@ -3623,6 +3668,10 @@ pub fun timer(core: *Core) transport_api.CoreTimer {
             }
             space_index_value = space_index_value + 1;
         }
+        if (core.pace_deadline_ns != 0) {
+            timer_candidate(?armed, ?deadline, ?kind,
+                core.pace_deadline_ns, TIMER_PACE);
+        }
     }
     var recovery_generation: u64 = 0;
     if (kind == TIMER_RECOVERY) {
@@ -3747,6 +3796,9 @@ pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
         or {
             ret fail(core, INTERNAL_ERROR, now_ns);
         }
+    }
+    if (fired_kind == TIMER_PACE) {
+        core.pace_deadline_ns = 0;
     }
     if (fired_kind == TIMER_PATH && !apply_path_timeout(core,
         path_api.on_timeout_scoped(core.paths, core.config.source, now_ns), now_ns)) {

@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.0] - 2026-09-16
+
+### Fixed
+
+- A connection whose `max_udp_payload` is above 1200 no longer stops sending after the handshake (#108). `generate` sized packets by the negotiated payload instead of the path's validated MTU, so a full STREAM packet was refused by the pacer and the path on every attempt. MTU probes were refused the same way, and an acknowledged or lost probe would have failed the congestion controller. Packets are now sized to the path MTU, probes and packets sent before an MTU reduction are paced and accounted like any other, and every path's search ceiling follows the peer's limit.
+- A pacing delay arms the connection timer, so a paced sender wakes without waiting for another event (#108).
+- `max_udp_payload` is only the receive limit it advertises (#109). The send ceiling is the send storage capped by the peer's limit, and `transport.generate` no longer clamps sends by the receive limit. `assembly.default_config` advertises the full receive storage (`MAX_UDP_PAYLOAD`, 1500) instead of 1200, which refused quic-go's and browsers' Initials.
+- `receive_datagram` drops a datagram above `max_udp_payload` and reports `STATUS_OK`, as RFC 9000 18.2 allows, instead of failing with `ERROR_BUFFER` (#109).
+- `receive` advances the handshake after each packet, so keys its crypto data unlocks are installed before the next coalesced packet or batched datagram is opened (#110). The server no longer drops a client request coalesced with its Finished, and connections no longer start with a collapsed congestion window.
+
+- A client Initial with a zero-length source connection ID is accepted (#111). quic-go uses one by default, and the listener dropped it. A peer addressed by a zero-length ID is reached by its path alone, and a NEW_CONNECTION_ID from it is refused as RFC 9000 19.15 requires.
+
+### Changed
+
+- A client may choose a zero-length local connection ID (#111). It cannot issue another (`cid.ERROR_ZERO_LENGTH`), and its route carries an empty key, so the owner finds the connection by address. A server still needs a non-empty ID, because it is routed by its IDs.
+- **Breaking.** Core initialization refuses a path manager whose `maximum_mtu` exceeds the send storage (`INIT_PRECONDITION`), and the send storage only needs 1200 bytes rather than `max_udp_payload`.
+
+### Added
+
+- `cid.local_zero_length`, `cid.peer_zero_length` and `cid.ERROR_ZERO_LENGTH`.
+- `path.limit_mtu` and `path.limit_mtu_scoped`, which lower the send ceiling and every path's MTU search ceiling together.
+
 ## [0.7.0] - 2026-09-15
 
 ### Changed
