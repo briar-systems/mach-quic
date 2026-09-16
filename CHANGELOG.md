@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.0] - 2026-09-16
+
+### Changed
+
+- Dependencies: mach-std v3.2.0, mach-crypto v0.10.1, mach-tls v0.4.1. No mach-quic source changed. std 3.0 made the io runtime growable and 3.1 narrowed `io.runtime.wait`, but mach-quic never makes or waits on a runtime, and it settles each native completion on its own.
+
 ## [0.8.1] - 2026-09-16
 
 ### Fixed
