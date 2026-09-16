@@ -1070,3 +1070,27 @@ test "quic.connection.cid: hostile products and storage aliases are rejected ato
     }
     ret 0;
 }
+
+test "quic.connection.cid: zero-length ids issue nothing and refuse the peer's" {
+    var local_entries: [4]Entry;
+    var peer_entries:  [4]Entry;
+    var manager:       Manager;
+    var empty:         packet.ConnectionId;
+    var id:            packet.ConnectionId;
+    var token:         [16]u8;
+    empty.len  = 0;
+    id.len     = 8;
+    id.data[0] = 7;
+    if (!initialize(?manager, Config{source: 5, local_active_limit: 2,
+        peer_active_limit: 2}, Storage{local: ?local_entries[0], local_capacity: 4,
+        peer:              ?peer_entries[0], peer_capacity: 4}, empty, empty)) { ret 1; }
+    if (!local_zero_length(?manager) || !peer_zero_length(?manager) ||
+        peer_rotation_available(?manager)) { ret 2; }
+    val issued: Result = issue_local(?manager, 1, id, token);
+    if (issued.status != STATUS_ERROR || issued.error != ERROR_ZERO_LENGTH) { ret 3; }
+    token[0] = 1;
+    val received: Result = receive_new(?manager, 1, 0, id, token);
+    if (received.status != STATUS_ERROR || received.error != ERROR_ZERO_LENGTH ||
+        manager.peer_active != 1) { ret 4; }
+    ret 0;
+}

@@ -1174,7 +1174,7 @@ var reply_bytes:    [1400]u8;
 # a direct server acceptance with no retry, so the test drives only the path
 # under scrutiny
 fun establish_direct(dialer_payload: usize, listener_payload: usize,
-    clock: *u64, moved: *usize) i32 {
+    dialer_cid: usize, clock: *u64, moved: *usize) i32 {
     var owner:         secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
@@ -1199,7 +1199,8 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     };
 
     var dialer_config: assembly.Config = connection_config(transport.CLIENT);
-    dialer_config.max_udp_payload = dialer_payload;
+    dialer_config.max_udp_payload     = dialer_payload;
+    dialer_config.local_source_length = dialer_cid;
     val dialer_encoded: usize = assembly.encode_parameters(?dialer_config,
         transport.CLIENT, ?dialer_parameters[0], 512).count;
     if (dialer_encoded == 0) { ret 4; }
@@ -1295,7 +1296,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     direct.action               = listener_api.ACTION_ACCEPT;
     direct.original_destination = connection_id(?initial_destination[0], 8);
     direct.initial_destination  = connection_id(?initial_destination[0], 8);
-    direct.initial_source       = connection_id(?dialer_source[0], 8);
+    direct.initial_source       = connection_id(?dialer_source[0], dialer_cid);
     direct.peer                 = dialer_endpoint();
     direct.version              = packet_api.VERSION_1;
     direct.peer_validated       = true;
@@ -1355,11 +1356,12 @@ fun drain_stream(driver: *transport.Driver[binding.Binding], value: transport.St
 # the server's control and qpack streams open before the client has opened
 # anything, as an h3 server facing quic-go does, and the response is larger
 # than the base mtu
-fun stream_flow(dialer_payload: usize, listener_payload: usize) i32 {
+fun stream_flow(dialer_payload: usize, listener_payload: usize,
+    dialer_cid: usize) i32 {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(dialer_payload, listener_payload,
-        ?clock, ?moved);
+        dialer_cid, ?clock, ?moved);
     if (established != 0) { ret established; }
 
     var sizes:    [3]usize = [3]usize{11, 1, 1};
@@ -1420,27 +1422,36 @@ fun stream_flow(dialer_payload: usize, listener_payload: usize) i32 {
 }
 
 test "quic.connection.assembly: streams flow when both ends declare 1200" {
-    ret stream_flow(1200, 1200);
+    ret stream_flow(1200, 1200, 8);
 }
 
 test "quic.connection.assembly: streams flow when both ends declare 1280" {
-    ret stream_flow(1280, 1280);
+    ret stream_flow(1280, 1280, 8);
 }
 
 test "quic.connection.assembly: streams flow when both ends declare 1452" {
-    ret stream_flow(1452, 1452);
+    ret stream_flow(1452, 1452, 8);
 }
 
 test "quic.connection.assembly: streams flow when both ends declare 1500" {
-    ret stream_flow(1500, 1500);
+    ret stream_flow(1500, 1500, 8);
 }
 
 test "quic.connection.assembly: streams flow when only the client declares above 1200" {
-    ret stream_flow(1500, 1200);
+    ret stream_flow(1500, 1200, 8);
 }
 
 test "quic.connection.assembly: streams flow when only the server declares above 1200" {
-    ret stream_flow(1200, 1500);
+    ret stream_flow(1200, 1500, 8);
+}
+
+# rfc 9000 5.1: the server addresses such a client by its path alone
+test "quic.connection.assembly: a client with a zero-length connection id exchanges streams" {
+    val flowed: i32 = stream_flow(1500, 1500, 0);
+    if (flowed != 0) { ret flowed; }
+    val route: assembly.Route = assembly.route_at(?dialer, 0);
+    if (!route.active || route.id.length != 0) { ret 40; }
+    ret 0;
 }
 
 var bulk_bytes: [4096]u8;
@@ -1471,7 +1482,7 @@ test "quic.connection.assembly: a pacing delay arms the connection timer" {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(assembly.MAX_UDP_PAYLOAD,
-        assembly.MAX_UDP_PAYLOAD, ?clock, ?moved);
+        assembly.MAX_UDP_PAYLOAD, 8, ?clock, ?moved);
     if (established != 0) { ret established; }
     val opened: transport.OpenResult = transport.open_stream[binding.Binding](
         ?listener.driver, transport.UNIDIRECTIONAL);
