@@ -15,6 +15,7 @@ pub val PUBLISH_EARLY: u8 = 3;
 pub val PUBLISH_ERROR: u8 = 4;
 
 val MAX_EXACT_VALUE: u64 = 9007199254740992;
+val MAX_UDP_PAYLOAD: u64 = 65527;
 
 pub rec Config {
     max_datagram_size: u64;
@@ -185,7 +186,8 @@ pub fun schedule(state: *State, now_ns: u64, congestion_window: u64, smoothed_rt
     packet_bytes: u64, ack_only: bool) Schedule {
     if (state == nil || !state.valid) { ret schedule_error(ERROR_STATE); }
     if (state.outstanding)            { ret schedule_error(ERROR_STATE); }
-    if (packet_bytes == 0 || packet_bytes > state.config.max_datagram_size) {
+    # an mtu probe is larger than the current datagram size by design
+    if (packet_bytes == 0 || packet_bytes > MAX_UDP_PAYLOAD) {
         ret schedule_error(ERROR_PACKET);
     }
     var next:     State = state[0];
@@ -198,13 +200,17 @@ pub fun schedule(state: *State, now_ns: u64, congestion_window: u64, smoothed_rt
     result.congestion_window = congestion_window;
     result.smoothed_rtt_ns   = smoothed_rtt_ns;
     result.ready_at_ns       = now_ns;
-    if (ack_only || next.budget >= packet_bytes::f64) {
+    # the budget never exceeds its cap, so a packet larger than the cap is
+    # ready once the budget is full
+    val needed: f64 = minimum(packet_bytes,
+        minimum(next.config.maximum_burst, next.congestion_window))::f64;
+    if (ack_only || next.budget >= needed) {
         result.ready = true;
     }
     or {
         val pacing_rate: f64 = rate(?next);
         if (pacing_rate <= 0.0) { ret schedule_error(ERROR_CONFIG); }
-        val delay: f64 = (packet_bytes::f64 - next.budget) / pacing_rate;
+        val delay: f64 = (needed - next.budget) / pacing_rate;
         if (delay >= (0 - 1::u64)::f64) { ret schedule_error(ERROR_OVERFLOW); }
         var delay_ns: u64 = delay::u64;
         if (delay_ns::f64 < delay)            { delay_ns = delay_ns + 1; }
@@ -337,6 +343,19 @@ test "quic.congestion.pacer: one stable reservation and ACK-only sends cannot sp
     if (!ack_only.ready || publish(?state, ack_only, 0, 1200, 100000000).status != PUBLISH_OK) { ret 1; }
     val next: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
     if (next.ready) { ret 1; }
+    ret 0;
+}
+
+test "quic.congestion.pacer: a probe larger than the datagram size is paced, not refused" {
+    var state: State    = init(default_config(1200, 2400), 2400, 100000000, 0);
+    val probe: Schedule = schedule(?state, 0, 2400, 100000000, 1452, false);
+    if (!probe.ok || !probe.ready ||
+        publish(?state, probe, 0, 2400, 100000000).status != PUBLISH_OK) { ret 1; }
+    # a probe larger than the whole burst waits only for a full budget
+    val huge: Schedule = schedule(?state, 0, 2400, 100000000, 9000, false);
+    if (!huge.ok || huge.ready || huge.ready_at_ns == 0)                               { ret 2; }
+    if (publish(?state, huge, huge.ready_at_ns, 2400, 100000000).status != PUBLISH_OK) { ret 3; }
+    if (schedule(?state, 0, 2400, 100000000, 65528, false).ok)                         { ret 4; }
     ret 0;
 }
 
