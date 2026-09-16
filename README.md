@@ -367,7 +367,17 @@ owner, resets the required packet-number spaces, rotates the Retry destination
 connection ID, preserves the original destination identity, rederives Initial
 keys, and restarts TLS with an explicit reason. Stateless server preflight parses
 and validates Initial packets before connection allocation. Listener admission
-charges connection and peer capacity before token validation or state allocation.
+charges connection and peer limits before token validation or state allocation.
+Admission peers and charges, remembered Retry nonces, and pending Initials live in
+storage each manager draws from the allocator it was initialized with. It grows
+with what is admitted and is released at close, so nothing is sized for a maximum
+connection count. `max_connections`, `max_connections_per_peer` and `max_replay`
+are optional counts, and an absent limit is unbounded. Peers and nonces are found
+through a hash index under a random key, so lookups do not scan and a peer cannot
+choose colliding addresses. Handles carry indices and generations rather than
+addresses, because storage moves when it grows. A growth the allocator refuses
+blocks that one Initial with a memory error and leaves nothing charged, and a
+close whose release is refused keeps what it holds for a retried close.
 The listener exclusively leases its admission and token managers until close.
 `initialize_result` records those leases and its pending storage independently
 and returns a generation-tagged `LeaseHandle`. A caller whose enclosing server
@@ -375,8 +385,8 @@ transaction is not published can pass that handle to `abort_initialize`.
 Initialization abort and normal close attempt both manager lease legs, retain
 only refusals, and expose every attempted and retained leg.
 `retry_initialization_cleanup` accepts the same handle and touches only retained
-legs. Pending storage remains generation stamped until both manager leases have
-been released, so neither the Listener nor its storage can be reused early.
+legs. Pending storage is released only after both manager leases have been
+released, so neither the Listener nor its storage can be reused early.
 Every successful preflight returns an `Acceptance` that owns its admission charge
 and, for Retry, its replay reservation through one pending slot. `commit` and
 `cancel` attempt both cleanup legs even if one fails. Their cleanup result names

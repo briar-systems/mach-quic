@@ -3,7 +3,7 @@
 ## val PURPOSE_RETRY
 
 ```mach
-pub val PURPOSE_RETRY: u8 = 1
+pub val PURPOSE_RETRY:   u8 = 1
 ```
 
 ## val PURPOSE_ADDRESS
@@ -21,19 +21,19 @@ pub val TOKEN_SIZE: usize = 110
 ## val BODY_SIZE
 
 ```mach
-pub val BODY_SIZE: usize = 94
+pub val BODY_SIZE:  usize = 94
 ```
 
 ## val TAG_SIZE
 
 ```mach
-pub val TAG_SIZE: usize = 16
+pub val TAG_SIZE:   usize = 16
 ```
 
 ## val KEY_SIZE
 
 ```mach
-pub val KEY_SIZE: usize = 32
+pub val KEY_SIZE:   usize = 32
 ```
 
 ## def Status
@@ -45,13 +45,13 @@ pub def Status: u8
 ## val STATUS_OK
 
 ```mach
-pub val STATUS_OK: Status = 1
+pub val STATUS_OK:      Status = 1
 ```
 
 ## val STATUS_STALE
 
 ```mach
-pub val STATUS_STALE: Status = 2
+pub val STATUS_STALE:   Status = 2
 ```
 
 ## val STATUS_BLOCKED
@@ -63,7 +63,7 @@ pub val STATUS_BLOCKED: Status = 3
 ## val STATUS_ERROR
 
 ```mach
-pub val STATUS_ERROR: Status = 4
+pub val STATUS_ERROR:   Status = 4
 ```
 
 ## def Error
@@ -75,61 +75,61 @@ pub def Error: u8
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: Error = 0
+pub val ERROR_NONE:     Error = 0
 ```
 
 ## val ERROR_STATE
 
 ```mach
-pub val ERROR_STATE: Error = 1
+pub val ERROR_STATE:    Error = 1
 ```
 
 ## val ERROR_CONFIG
 
 ```mach
-pub val ERROR_CONFIG: Error = 2
+pub val ERROR_CONFIG:   Error = 2
 ```
 
 ## val ERROR_BUFFER
 
 ```mach
-pub val ERROR_BUFFER: Error = 3
+pub val ERROR_BUFFER:   Error = 3
 ```
 
 ## val ERROR_FORMAT
 
 ```mach
-pub val ERROR_FORMAT: Error = 4
+pub val ERROR_FORMAT:   Error = 4
 ```
 
 ## val ERROR_KEY
 
 ```mach
-pub val ERROR_KEY: Error = 5
+pub val ERROR_KEY:      Error = 5
 ```
 
 ## val ERROR_AUTH
 
 ```mach
-pub val ERROR_AUTH: Error = 6
+pub val ERROR_AUTH:     Error = 6
 ```
 
 ## val ERROR_EXPIRED
 
 ```mach
-pub val ERROR_EXPIRED: Error = 7
+pub val ERROR_EXPIRED:  Error = 7
 ```
 
 ## val ERROR_ADDRESS
 
 ```mach
-pub val ERROR_ADDRESS: Error = 8
+pub val ERROR_ADDRESS:  Error = 8
 ```
 
 ## val ERROR_REPLAY
 
 ```mach
-pub val ERROR_REPLAY: Error = 9
+pub val ERROR_REPLAY:   Error = 9
 ```
 
 ## val ERROR_CAPACITY
@@ -141,13 +141,19 @@ pub val ERROR_CAPACITY: Error = 10
 ## val ERROR_TOKEN
 
 ```mach
-pub val ERROR_TOKEN: Error = 11
+pub val ERROR_TOKEN:    Error = 11
 ```
 
 ## val ERROR_TIME
 
 ```mach
-pub val ERROR_TIME: Error = 12
+pub val ERROR_TIME:     Error = 12
+```
+
+## val ERROR_MEMORY
+
+```mach
+pub val ERROR_MEMORY:   Error = 13
 ```
 
 ## def ReplayState
@@ -159,7 +165,7 @@ pub def ReplayState: u8
 ## val REPLAY_FREE
 
 ```mach
-pub val REPLAY_FREE: ReplayState = 0
+pub val REPLAY_FREE:     ReplayState = 0
 ```
 
 ## val REPLAY_RESERVED
@@ -174,17 +180,22 @@ pub val REPLAY_RESERVED: ReplayState = 1
 pub val REPLAY_CONSUMED: ReplayState = 2
 ```
 
+## val RANGE_COUNT
+
+```mach
+pub val RANGE_COUNT: usize = 4
+```
+
+how many ranges `ranges` writes
+
 ## rec ReplaySlot
 
 ```mach
 pub rec ReplaySlot;
 ```
 
-## rec Storage
-
-```mach
-pub rec Storage;
-```
+an entry leaves the expiry heap and the index once its token has expired,
+but a reservation's owner still holds it until commit or cancel
 
 ## rec Config
 
@@ -192,10 +203,18 @@ pub rec Storage;
 pub rec Config;
 ```
 
+max_replay caps remembered nonces by count, and none is unbounded
+
 ## rec Manager
 
 ```mach
 pub rec Manager;
+```
+
+## rec Snapshot
+
+```mach
+pub rec Snapshot;
 ```
 
 ## rec Reservation
@@ -216,12 +235,25 @@ pub rec Claims;
 pub rec Result;
 ```
 
+## fun ranges
+
+```mach
+pub fun ranges(manager: *Manager, output: *ownership.Range);
+```
+
+writes the manager and every directory it owns. directories move as they
+grow, so the ranges hold only until the next retry token is opened
+
 ## fun initialize
 
 ```mach
-pub fun initialize(manager: *Manager, config: Config, storage: Storage,
-generation: u64, key: contracts.SecretBytes) bool;
+pub fun initialize(manager: *Manager, config: Config,
+backing: *allocator.Allocator, generation: u64,
+key: contracts.SecretBytes) bool;
 ```
+
+replay storage draws on `backing` for the manager's whole life and is
+released to it by finish_close
 
 ## fun lease_listener
 
@@ -316,5 +348,11 @@ pub fun begin_close(manager: *Manager) bool;
 
 ```mach
 pub fun finish_close(manager: *Manager) bool;
+```
+
+## fun snapshot
+
+```mach
+pub fun snapshot(manager: *Manager) Snapshot;
 ```
 

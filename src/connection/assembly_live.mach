@@ -17,6 +17,8 @@ use quic.transport.binding;
 use crypto.contracts;
 use crypto.encoding.keys;
 use crypto.secret;
+use std.allocator;
+use allocator_testing: std.allocator.testing;
 use std.chrono.time;
 use std.crypto.ct;
 use std.net.ip;
@@ -25,6 +27,8 @@ use std.system.os;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
 use std.types.size.usize;
 use tls.cert;
 use tls.cert.credentials;
@@ -39,6 +43,7 @@ fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+var front_memory:            allocator_testing.Testing;
 var dialer:                  assembly.Connection;
 var listener:                assembly.Connection;
 var dialer_storage:          assembly.Storage;
@@ -546,29 +551,32 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (started.terminal_alert != 0)      { ret 214; }
     if (started.event_active)             { ret 215; }
     if (started.role != handshake.CLIENT) { ret 216; }
-    var clock:             u64 = 1000;
-    var peer_slots:        [2]admission.PeerSlot;
-    var charges:           [2]admission.ChargeSlot;
+    var clock:            u64 = 1000;
+    var admission_config: admission.Config;
+    admission_config.source                   = 911;
+    admission_config.max_connections          = opt[usize].some{2};
+    admission_config.max_connections_per_peer = opt[usize].some{2};
+    val admission_made: err[allocator.Error] = allocator_testing.make(?front_memory);
+    if (sel admission_made.err) { ret 8; }
     var admission_manager: admission.Manager;
-    if (!admission.initialize(?admission_manager, admission.Config{
-        source: 911, max_connections: 2, max_connections_per_peer: 2
-    },
-        admission.Storage{peers: ?peer_slots[0], peer_capacity: 2,
-        charges: ?charges[0], charge_capacity: 2})) { ret 8; }
-    var replay:        [2]token.ReplaySlot;
+    if (!admission.initialize(?admission_manager, admission_config,
+        allocator_testing.allocator_of(?front_memory))) { ret 8; }
+    var token_config: token.Config;
+    token_config.source             = 912;
+    token_config.retry_max_age_ns   = 1000000000;
+    token_config.address_max_age_ns = 1000000000;
+    token_config.max_replay         = opt[usize].none{};
     var token_key:     [32]^u8;
     var token_manager: token.Manager;
-    if (!token.initialize(?token_manager, token.Config{source: 912,
-        retry_max_age_ns: 1000000000, address_max_age_ns: 1000000000},
-        token.Storage{replay: ?replay[0], replay_capacity: 2}, 1,
+    if (!token.initialize(?token_manager, token_config,
+        allocator_testing.allocator_of(?front_memory), 1,
         contracts.SecretBytes{data: ?token_key[0], len: 32})) { ret 9; }
-    var pending:       [2]listener_api.Pending;
     var quic_versions: [1]u32 = [1]u32{packet_api.VERSION_1};
     var front:         listener_api.Listener;
     if (!listener_api.initialize(?front, listener_api.Config{source: 913,
         supported_versions:   ?quic_versions[0], supported_version_count: 1,
         minimum_initial_size: 1200, require_retry: true},
-        listener_api.Storage{pending: ?pending[0], pending_capacity: 2},
+        allocator_testing.allocator_of(?front_memory),
         ?admission_manager, ?token_manager)) { ret 10; }
     var retry_bytes: [512]u8;
     clock = clock + 1000;
