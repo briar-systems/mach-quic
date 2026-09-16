@@ -980,7 +980,10 @@ fun tls_time(adapter: *Adapter, now_ns: u64) bool {
         ret false;
     }
     adapter.tls_last_now_ns = now_ns;
-    if (adapter.tls_deadline_ns != 0 && now_ns >= adapter.tls_deadline_ns) {
+    # the deadline bounds the handshake only. afterwards the idle timeout and
+    # loss recovery govern the connection
+    if (!adapter.handshake_complete && adapter.tls_deadline_ns != 0 &&
+        now_ns >= adapter.tls_deadline_ns) {
         adapter.tls_error = PROVIDER_BINDING_DEADLINE;
         ret false;
     }
