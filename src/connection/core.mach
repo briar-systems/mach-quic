@@ -125,6 +125,8 @@ pub rec Owner {
     cid_retirement:        cid_api.Handle;
     pacer:                 pacer_api.Schedule;
     ack_largest:           u64;
+    send_generation:       u64;
+    ack_update_generation: u64;
     ack_eliciting:         bool;
     in_flight:             bool;
     growth_permitted:      bool;
@@ -2369,8 +2371,18 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         }
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
+    if (opened.error == protection.KEY_UPDATE_ERROR) {
+        ret fail(core, KEY_UPDATE_ERROR, input.received_at_ns);
+    }
     if (opened.error != protection.OK) {
         ret fail(core, PROTOCOL_VIOLATION, input.received_at_ns);
+    }
+    # rfc 9001 6.2: the send keys follow a peer's update before anything,
+    # including the ack of this packet, is sent
+    if (level == handshake_api.APPLICATION && opened.key_updated &&
+        protection.respond_to_update(?secrets.application_send,
+        opened.generation) != protection.OK) {
+        ret fail(core, KEY_UPDATE_ERROR, input.received_at_ns);
     }
     var plaintext_index: usize = 0;
     for (plaintext_index < opened.written) {
@@ -2905,11 +2917,13 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                 space, now_ns, core.storage.frame_ack_ranges,
                 core.storage.frame_ack_capacity, output);
             if (!built.ok) { ret false; }
-            owner.kind               = OWNER_ACK;
-            owner.level              = level;
-            owner.space              = space;
-            owner.ack_generation     = built.generation;
-            owner.ack_largest        = built.largest_acknowledged;
+            owner.kind                  = OWNER_ACK;
+            owner.level                 = level;
+            owner.space                 = space;
+            owner.ack_generation        = built.generation;
+            owner.ack_largest           = built.largest_acknowledged;
+            owner.ack_update_generation = pending_update_generation(core,
+                secrets, space, built.largest_acknowledged);
             core.ack_prepared[index] = true;
             ret true;
         }
@@ -3425,7 +3439,8 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     owner.path_send = reserved.token;
     var sealed: protection.Result;
     if (owner.level == handshake_api.APPLICATION) {
-        sealed = protection.seal_send_packet(?secrets.application_send, number,
+        owner.send_generation = secrets.application_send.generation;
+        sealed                = protection.seal_send_packet(?secrets.application_send, number,
             contracts.Bytes{data: output, len: header.count},
             header.packet_number_offset,
             contracts.SecretBytes{data: secrets.storage.send_plaintext,
@@ -3473,10 +3488,37 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     ret result;
 }
 
+# the receive generation whose update this ack reports, or zero. rfc 9001 6.5:
+# a peer may update again only once we acknowledged its update from packets
+# protected with the keys it asked for
+fun pending_update_generation(core: *Core, secrets: *Secrets, space: u8,
+    largest: u64) u64 {
+    val receive: *protection.ReceiveKeys = ?secrets.application_receive;
+    if (space != packet.SPACE_APPLICATION ||
+        receive.state != protection.STATE_ACTIVE || receive.updates == 0 ||
+        receive.update_response_confirmed ||
+        largest < receive.update_packet_number ||
+        core.acknowledgements.spaces[space_index(space)].floor >
+        receive.update_packet_number) { ret 0; }
+    ret receive.generation;
+}
+
+fun confirm_update_response(secrets: *Secrets, owner: *Owner) bool {
+    val receive: *protection.ReceiveKeys = ?secrets.application_receive;
+    if (owner.ack_update_generation == 0 ||
+        owner.send_generation != owner.ack_update_generation ||
+        receive.state != protection.STATE_ACTIVE ||
+        receive.generation != owner.ack_update_generation ||
+        receive.update_response_confirmed) { ret true; }
+    ret protection.confirm_update_response(receive, receive.generation,
+        receive.update_packet_number) == protection.OK;
+}
+
 fun publish_payload(core: *Core, secrets: *Secrets, owner: *Owner,
     now_ns: u64) bool {
     if (owner.kind == OWNER_ACK) {
         core.ack_prepared[space_index(owner.space)] = false;
+        if (!confirm_update_response(secrets, owner)) { ret false; }
         # a packet received between preparing this ack and its completion
         # supersedes its generation; the sent ack stays valid and the newer
         # pending state must survive, so a stale publication is not a failure

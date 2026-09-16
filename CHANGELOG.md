@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1] - 2026-09-16
+
+### Fixed
+
+- A peer's 1-RTT key update now moves our send keys before anything else is sent, so its update packet is acknowledged under the new key phase, as RFC 9001 6.2 requires (#116). Before this, quic-go closed every such connection with KEY_UPDATE_ERROR.
+- A peer may update its keys again once we have acknowledged its previous update from new-phase packets (#116). The second update was refused.
+- A refused key update closes the connection with KEY_UPDATE_ERROR instead of PROTOCOL_VIOLATION.
+
 ## [0.8.0] - 2026-09-16
 
 ### Fixed
