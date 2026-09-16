@@ -184,9 +184,11 @@ pub fun bind(binding: *Binding, core: *core_api.Core,
 
 # stages the stable sequence-zero route while it is not externally visible.
 # assembly publishes it only after the transport driver is initialized
+# a zero-length id publishes a route with an empty key: the connection is
+# found by its address, never by a connection id
 pub fun prepare_initial_route(binding: *Binding, data: *u8,
     length: usize) bool {
-    if (!bound(binding) || data == nil || length == 0 ||
+    if (!bound(binding) || (data == nil && length != 0) ||
         length > ROUTING_ID_LENGTH) { ret false; }
     val entry: *RoutingEntry = ?binding.routing[0];
     if (entry.prepared || (atomic.load(?entry.epoch) & 1) == 1) { ret false; }

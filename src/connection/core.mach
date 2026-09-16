@@ -1004,8 +1004,9 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         !valid_role(config.role) || config.source == 0 ||
         (config.version != packet.VERSION_1 && config.version != packet.VERSION_2) ||
         config.max_udp_payload < 1200 || config.max_udp_payload > 65527 ||
-        config.drain_timeout_ns == 0 || config.local_source.len == 0 ||
-        config.peer_destination.len == 0 || config.initial_secret_destination.len == 0 ||
+        config.drain_timeout_ns == 0 ||
+        (config.local_source.len == 0 && config.role != transport_api.CLIENT) ||
+        config.initial_secret_destination.len == 0 ||
         config.original_destination.len == 0 || config.alpn.data == nil ||
         config.alpn.length == 0 || config.local_transport_parameters.data == nil ||
         config.local_transport_parameters.length == 0 ||
@@ -2396,7 +2397,7 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
     if (core.role == transport_api.CLIENT && core.authenticated_packets == 0 &&
-        value.source.len > 0 && !packet.connection_id_equal(?value.source,
+        !packet.connection_id_equal(?value.source,
         ?core.config.peer_destination)) {
         if (cid_api.replace_initial_peer_scoped(core.cids, core.config.source,
             value.source).status !=

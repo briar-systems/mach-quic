@@ -248,7 +248,7 @@ fun staged(stage: Stage) InitResult {
 
 fun connection_id(data: *u8, length: usize) packet.ConnectionId {
     var value: packet.ConnectionId;
-    if (data == nil || length == 0 || length > packet.MAX_CONNECTION_ID) {
+    if (data == nil || length > packet.MAX_CONNECTION_ID) {
         ret value;
     }
     value.len = length::u8;
@@ -265,6 +265,11 @@ fun accepted_id(value: *packet.ConnectionId) bool {
         value.len::usize <= packet.MAX_CONNECTION_ID;
 }
 
+# rfc 9000 5.1: a client may choose a zero-length connection id
+fun accepted_peer_id(value: *packet.ConnectionId) bool {
+    ret value != nil && value.len::usize <= packet.MAX_CONNECTION_ID;
+}
+
 # applies the listener's complete acceptance as one configuration transaction.
 # accepted must remain at a fixed address through parameter encoding and init
 pub fun apply_server_acceptance(config: *Config,
@@ -275,7 +280,7 @@ pub fun apply_server_acceptance(config: *Config,
         accepted.version != packet.VERSION_2) ||
         !accepted_id(?accepted.original_destination) ||
         !accepted_id(?accepted.initial_destination) ||
-        !accepted_id(?accepted.initial_source)) { ret false; }
+        !accepted_peer_id(?accepted.initial_source)) { ret false; }
     if (accepted.retry_source_present) {
         if (!accepted_id(?accepted.retry_source) ||
             !packet.connection_id_equal(?accepted.initial_destination,
@@ -327,9 +332,10 @@ fun config_valid(config: *Config, role: transport_api.Role) bool {
         config.max_udp_payload > MAX_UDP_PAYLOAD ||
         config.drain_timeout_ns == 0 || config.max_idle_timeout_ms == 0 ||
         config.alpn == nil || config.alpn_length == 0 ||
-        config.local_source == nil || config.local_source_length == 0 ||
+        (config.local_source == nil && config.local_source_length != 0) ||
+        (config.local_source_length == 0 && role != transport_api.CLIENT) ||
         config.local_source_length > packet.MAX_CONNECTION_ID ||
-        config.peer_destination == nil || config.peer_destination_length == 0 ||
+        (config.peer_destination == nil && config.peer_destination_length != 0) ||
         config.peer_destination_length > packet.MAX_CONNECTION_ID ||
         config.original_destination == nil ||
         config.original_destination_length == 0 ||
@@ -531,9 +537,9 @@ fun storage_ranges_valid(c: *Connection, config: *Config, storage: *Storage,
         MAX_UDP_PAYLOAD)) { ret false; }
     var borrowed: [7]ownership.Range;
     borrowed[0] = ownership.bytes(config.local_source,
-        config.local_source_length, ownership.ZERO_FORBIDDEN);
+        config.local_source_length, ownership.ZERO_ALLOWED);
     borrowed[1] = ownership.bytes(config.peer_destination,
-        config.peer_destination_length, ownership.ZERO_FORBIDDEN);
+        config.peer_destination_length, ownership.ZERO_ALLOWED);
     borrowed[2] = ownership.bytes(config.original_destination,
         config.original_destination_length, ownership.ZERO_FORBIDDEN);
     borrowed[3] = ownership.bytes(config.initial_destination,

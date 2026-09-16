@@ -26,6 +26,7 @@ pub val ERROR_DUPLICATE_ID:    Error = 6;
 pub val ERROR_DUPLICATE_TOKEN: Error = 7;
 pub val ERROR_RETIRE_CURRENT:  Error = 8;
 pub val ERROR_TOKEN:           Error = 9;
+pub val ERROR_ZERO_LENGTH:     Error = 10;
 
 pub def EntryState: u8;
 pub val ENTRY_FREE:          EntryState = 0;
@@ -169,8 +170,8 @@ pub fun initialize(manager: *Manager, config: Config, storage: Storage,
     if (config.source == 0 || config.local_active_limit < 2 ||
         config.peer_active_limit < 2 || storage.local == nil || storage.peer == nil ||
         storage.local_capacity < config.local_active_limit ||
-        config.peer_active_limit > storage.peer_capacity / 2 || initial_local.len == 0 ||
-        initial_peer.len == 0 || initial_local.len::usize > packet.MAX_CONNECTION_ID ||
+        config.peer_active_limit > storage.peer_capacity / 2 ||
+        initial_local.len::usize > packet.MAX_CONNECTION_ID ||
         initial_peer.len::usize > packet.MAX_CONNECTION_ID) { ret false; }
     var ranges: [3]ownership.Range;
     ranges[0] = ownership.bytes(manager::*u8, $size_of(Manager),
@@ -293,6 +294,12 @@ pub fun issue_local_scoped(manager: *Manager, core_source: u64, sequence: u64,
         result.error  = ERROR_STATE;
         ret result;
     }
+    # rfc 9000 5.1.1: an endpoint that chose a zero-length id cannot issue more
+    if (local_zero_length(manager)) {
+        result.status = STATUS_ERROR;
+        result.error  = ERROR_ZERO_LENGTH;
+        ret result;
+    }
     val existing: usize = find_sequence(manager.storage.local,
         manager.storage.local_capacity, sequence);
     if (existing != manager.storage.local_capacity) {
@@ -340,7 +347,7 @@ pub fun replace_initial_peer_scoped(manager: *Manager, core_source: u64,
     id: packet.ConnectionId) Result {
     var result: Result;
     if (!physical(manager) || !manager.initialized || manager.closing ||
-        !scope_allowed(manager, core_source) || id.len == 0 ||
+        !scope_allowed(manager, core_source) ||
         id.len::usize > packet.MAX_CONNECTION_ID || manager.peer_active != 1 ||
         manager.peer_retire_prior_to != 0 || manager.storage.peer[0].state != ENTRY_ACTIVE ||
         manager.storage.peer[0].sequence != 0 || !manager.storage.peer[0].current ||
@@ -443,6 +450,12 @@ pub fun receive_new_scoped(manager: *Manager, core_source: u64, sequence: u64,
         retire_prior_to < manager.peer_retire_prior_to) {
         result.status = STATUS_ERROR;
         result.error  = ERROR_SEQUENCE;
+        ret result;
+    }
+    # rfc 9000 19.15: a peer addressed by a zero-length id has none to issue
+    if (peer_zero_length(manager)) {
+        result.status = STATUS_ERROR;
+        result.error  = ERROR_ZERO_LENGTH;
         ret result;
     }
     val existing: usize = find_sequence(manager.storage.peer,
@@ -645,6 +658,22 @@ pub fun current(manager: *Manager, local: bool) Selected {
     result.status = STATUS_ERROR;
     result.error  = ERROR_STATE;
     ret result;
+}
+
+# a peer that chose a zero-length id is addressed by its path alone, so it
+# never issues or rotates to another id
+pub fun local_zero_length(manager: *Manager) bool {
+    ret physical(manager) && manager.initialized &&
+        manager.storage.local[0].state == ENTRY_ACTIVE &&
+        manager.storage.local[0].sequence == 0 &&
+        manager.storage.local[0].id.len == 0;
+}
+
+pub fun peer_zero_length(manager: *Manager) bool {
+    ret physical(manager) && manager.initialized &&
+        manager.storage.peer[0].state == ENTRY_ACTIVE &&
+        manager.storage.peer[0].sequence == 0 &&
+        manager.storage.peer[0].id.len == 0;
 }
 
 pub fun rotate_peer(manager: *Manager) Result {
