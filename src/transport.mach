@@ -966,8 +966,7 @@ pub fun receive_datagram[T](driver: *Driver[T], input: *Datagram) OperationResul
     val input_data: ownership.Range = ownership.bytes(input.data, input.length,
         ownership.ZERO_ALLOWED);
     if (!input_data.valid || !borrowed_disjoint[T](driver, input_data) ||
-        !ownership.disjoint(input_record, input_data) ||
-        input.length > driver.config.max_udp_payload) {
+        !ownership.disjoint(input_record, input_data)) {
         ret operation_error(ERROR_BUFFER);
     }
     mutex.lock(?driver.lock);
@@ -987,6 +986,13 @@ pub fun receive_datagram[T](driver: *Driver[T], input: *Datagram) OperationResul
     if (!update_now[T](driver, input.received_at_ns)) {
         mutex.unlock(?driver.lock);
         ret operation_error(ERROR_TIME);
+    }
+    # rfc 9000 18.2: a datagram above the advertised max_udp_payload_size may
+    # be dropped, and dropping it must not fail the connection
+    if (input.length > driver.config.max_udp_payload) {
+        val state: ConnectionState = driver.state;
+        mutex.unlock(?driver.lock);
+        ret operation_result(STATUS_OK, ERROR_NONE, 0, 0, state);
     }
     val core:   CoreResult      = callback_receive[T](driver, input);
     val result: OperationResult = normalize_core[T](driver, core);
@@ -1113,9 +1119,10 @@ pub fun generate[T](driver: *Driver[T], scope: *cancel.Scope, buffer: *u8,
         result.error  = ERROR_TIME;
         ret result;
     }
-    var available: usize = capacity;
-    if (available > driver.config.max_udp_payload) { available = driver.config.max_udp_payload; }
-    val slot: *SendSlot = claim_slot[T](driver, buffer, available, context);
+    # max_udp_payload bounds what this endpoint accepts, and the core bounds
+    # what it sends by its own storage and the peer's limit
+    val available: usize     = capacity;
+    val slot:      *SendSlot = claim_slot[T](driver, buffer, available, context);
     if (slot == nil) {
         mutex.unlock(?driver.lock);
         result.status = STATUS_BLOCKED;
