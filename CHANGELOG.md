@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- The TLS handshake deadline (`tls_deadline_ns`) now bounds only the handshake (#124). It still applied after completion, so every connection that outlived it failed on its next `generate` or `receive`. A slow 64 KiB transfer died at exactly the default 10 s. The idle timeout and loss recovery now govern an established connection.
+
 ## [0.9.0] - 2026-09-16
 
 ### Changed
