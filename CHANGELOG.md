@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.7.0] - 2026-09-15
+
+### Changed
+
+- **Breaking.** `admission.initialize`, `token.initialize` and `listener.initialize_result` take an allocator in place of caller-sized arrays, and the storage they own grows on demand (#100). A server no longer sizes its peer, charge, replay and pending-initial tables up front, and no lookup scans to capacity: peers and replay nonces are found through a keyed SipHash-2-4 index, charges and pending initials come from free lists, and replay entries expire through a deadline heap.
+- **Breaking.** `admission`'s `max_connections` and `max_connections_per_peer` are `opt[usize]` policy counts, where absent means unbounded.
+- A refused growth blocks exactly one Initial and nothing else: `ERROR_MEMORY` from the listener before any charge exists, or a token `ERROR_MEMORY` surfaced as `ACTION_BLOCKED` with the admission charge released.
+- Charge generations continue across reinitialization, so a handle from before cannot reach the new storage.
+- Dependencies: mach-std v2.1.0. The v0.6.1 manifest still named mach-crypto v0.9.0 and mach-tls v0.3.0 although its gitlinks were already the v0.9.1 and v0.3.1 commits; the manifest now names them.
+
+### Fixed
+
+- An expired retry reservation is no longer freed under its owner. The old sweep released the slot, so the listener's commit failed and its cleanup was retained forever, which also blocked `finish_close`. Expiry now only stops remembering the nonce and the owner's commit or cancel frees the slot.
+- A directory at exactly the minimum capacity grew by one slot per claim, so every admission past it reallocated. Directories double from the minimum.
+
+### Removed
+
+- **Breaking.** `admission.Storage`, `admission.ERROR_PEER_CAPACITY`, `admission.ERROR_CHARGE_CAPACITY` and the renumbering of the admission error values after `ERROR_PEER_LIMIT`.
+- **Breaking.** `token.Storage`, `listener.Storage`, `Pending.listener_source`, `Pending.listener_generation` and `listener.ERROR_CAPACITY`. `listener.ERROR_MEMORY` takes value 9.
+
+### Added
+
+- `token.Config.max_replay`, an optional count limit on remembered replay nonces.
+
 ## [0.6.1] - 2026-09-15
 
 ### Fixed
