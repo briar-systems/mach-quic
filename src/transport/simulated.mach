@@ -6,6 +6,7 @@ use transport_api: quic.transport;
 use std.chrono.time;
 use io_error:     std.io.error;
 use io_lifecycle: std.io.lifecycle;
+use io_runtime:   std.io.runtime;
 use net_types:    std.net.async.types;
 use std.net.ip;
 use std.net.udp;
@@ -725,5 +726,19 @@ test "quic.transport.simulated: a datagram above max_udp_payload is dropped with
         ?oversized[0], 1500, 2);
     if (accepted.status != transport_api.STATUS_OK || fixture.core.received != 1 ||
         !close_fixture(?fixture, 3)) { ret 3; }
+    ret 0;
+}
+
+test "quic.transport.simulated: native submission refusals name their kind" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 111, stream_api.ROLE_CLIENT)) { ret 1; }
+    var token:   transport_api.Token;
+    val refused: res[io_runtime.Token, io_error.Error] = transport_api.submit_native[Core](
+        ?fixture.driver, nil, nil, ?fixture.scope, token);
+    if (!(sel refused.err)) { ret 2; }
+    val failure: io_error.Error = refused.err;
+    if (failure.kind != io_error.INVALID || failure.code != 0 ||
+        failure.operation != io_error.OP_SEND) { ret 3; }
+    if (!close_fixture(?fixture, 2)) { ret 4; }
     ret 0;
 }
