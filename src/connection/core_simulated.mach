@@ -41,16 +41,10 @@ rec Provider {
 }
 
 rec Fixture {
-    provider:                Provider;
-    adapter_receive:         [256]u8;
-    adapter_receive_present: [256]bool;
-    adapter_send:            [256]u8;
-    adapter_send_pending:    [256]bool;
-    adapter_send_acked:      [256]bool;
-    adapter_send_inflight:   [256]u16;
-    adapter_attempts:        [8]handshake.Attempt;
-    adapter_secret:          [32]^u8;
-    adapter:                 handshake.Adapter;
+    provider:         Provider;
+    adapter_attempts: [8]handshake.Attempt;
+    adapter_secret:   [32]^u8;
+    adapter:          handshake.Adapter;
 
     local_cids: [4]cid.Entry;
     peer_cids:  [4]cid.Entry;
@@ -256,18 +250,17 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
         fixture.provider.hello[i] = 0x80 + i::u8;
         i                         = i + 1;
     }
+    if (!limited.make(?fixture.chunk_memory, 1 << 22) ||
+        !pool.make(?fixture.chunks, limited.allocator_of(?fixture.chunk_memory),
+        pool.default_config(64)) ||
+        !pool.open_account(?fixture.chunks, ?fixture.chunk_account, 901, 24, 24, 0)) {
+        ret false;
+    }
     if (!handshake.initialize(?fixture.adapter, handshake.Config{source: 901,
         max_crypto_per_level: 64, max_event_data: 64,
         max_peer_identity:    64}, handshake.Storage{
-        receive_data:         ?fixture.adapter_receive[0],
-        receive_present:      ?fixture.adapter_receive_present[0],
-        receive_length:       256, receive_stride: 64,
-        send_data:            ?fixture.adapter_send[0],
-        send_pending:         ?fixture.adapter_send_pending[0],
-        send_acked:           ?fixture.adapter_send_acked[0],
-        send_inflight:        ?fixture.adapter_send_inflight[0],
-        send_length:          256, send_stride: 64,
-        attempts:             ?fixture.adapter_attempts[0], attempt_capacity: 8
+        attempts:             ?fixture.adapter_attempts[0], attempt_capacity: 8,
+        chunks:               ?fixture.chunks, account: ?fixture.chunk_account
     },
         handshake.Protocol{context: (?fixture.provider)::ptr,
         context_size:   $size_of(Provider),
@@ -317,11 +310,7 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
     stream_config.receive_local_bidirectional_limit = 64;
     stream_config.receive_peer_bidirectional_limit  = 64;
     stream_config.receive_unidirectional_limit      = 64;
-    if (!limited.make(?fixture.chunk_memory, 1 << 22) ||
-        !pool.make(?fixture.chunks, limited.allocator_of(?fixture.chunk_memory),
-        pool.default_config(64)) ||
-        !pool.open_account(?fixture.chunks, ?fixture.chunk_account, 901, 16, 16, 0) ||
-        !stream.initialize(?fixture.streams, stream_config, stream.Storage{
+    if (!stream.initialize(?fixture.streams, stream_config, stream.Storage{
         streams:  ?fixture.streams_values[0], stream_capacity: 2,
         attempts: ?fixture.stream_attempts[0], attempt_capacity: 8,
         chunks:   ?fixture.chunks, account: ?fixture.chunk_account, send_buffer_limit: 64
@@ -756,7 +745,7 @@ test "quic.connection.core: initialization rejects cross-component ownership ove
     if (fixture.init_result.reason != core.INIT_COMPONENT_RANGES ||
         fixture.init_result.reason_kind != ownership.OVERLAP_PAIR ||
         fixture.init_result.reason_first != 2 ||
-        fixture.init_result.reason_second != 42) { ret 2; }
+        fixture.init_result.reason_second != 36) { ret 2; }
     ret 0;
 }
 
@@ -789,7 +778,7 @@ test "quic.connection.core: a refused initialization names the check that reject
         component_lent.init_result.reason != core.INIT_COMPONENT_BORROWED ||
         component_lent.init_result.reason_kind != ownership.OVERLAP_PAIR ||
         component_lent.init_result.reason_first != 0 ||
-        component_lent.init_result.reason_second != 42) { ret 4; }
+        component_lent.init_result.reason_second != 36) { ret 4; }
     var secrets: Fixture;
     if (initialize_with_fault(?secrets, transport.CLIENT, true, 1,
         FAULT_PROVIDER_SECRETS) ||

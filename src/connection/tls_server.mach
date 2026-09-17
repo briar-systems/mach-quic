@@ -8,6 +8,8 @@ use handshake_api:    quic.connection.handshake;
 use quic.connection.ownership;
 use quic.crypto.protection;
 use quic.packet.packet;
+use quic.storage.limited;
+use quic.storage.pool;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -49,20 +51,23 @@ var dialer_hello:          [8192]u8;
 var dialer_certificates:   [4]cert.Certificate;
 var dialer_parameters:     [256]u8;
 
-var listener_receive:         [16384]u8;
-var listener_receive_present: [16384]bool;
-var listener_send:            [16384]u8;
-var listener_send_pending:    [16384]bool;
-var listener_send_acked:      [16384]bool;
-var listener_send_inflight:   [16384]u16;
-var listener_attempts:        [8]handshake_api.Attempt;
-var dialer_receive:           [16384]u8;
-var dialer_receive_present:   [16384]bool;
-var dialer_send:              [16384]u8;
-var dialer_send_pending:      [16384]bool;
-var dialer_send_acked:        [16384]bool;
-var dialer_send_inflight:     [16384]u16;
-var dialer_attempts:          [8]handshake_api.Attempt;
+var adapter_chunk_memory:  limited.Limited;
+var adapter_chunk_pool:    pool.Pool;
+var adapter_chunk_account: pool.Account;
+
+# one pool for every adapter these tests build, which may outlive a test
+fun adapter_account() *pool.Account {
+    if (!adapter_chunk_pool.valid) {
+        limited.make(?adapter_chunk_memory, 1 << 22);
+        pool.make(?adapter_chunk_pool, limited.allocator_of(?adapter_chunk_memory),
+            pool.default_config(256));
+        pool.open_account(?adapter_chunk_pool, ?adapter_chunk_account, 1, 128, 128, 0);
+    }
+    ret ?adapter_chunk_account;
+}
+
+var listener_attempts: [8]handshake_api.Attempt;
+var dialer_attempts:   [8]handshake_api.Attempt;
 
 var listener_transport: [5]u8 = [5]u8{0x0a, 0x0b, 0x0c, 0x0d, 0x0e};
 var dialer_transport:   [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
@@ -92,25 +97,13 @@ fun adapter_config(source: u64) handshake_api.Config {
 }
 
 fun listener_storage() handshake_api.Storage {
-    ret handshake_api.Storage{receive_data: ?listener_receive[0],
-        receive_present:  ?listener_receive_present[0], receive_length: 16384,
-        receive_stride:   4096, send_data: ?listener_send[0],
-        send_pending:     ?listener_send_pending[0],
-        send_acked:       ?listener_send_acked[0],
-        send_inflight:    ?listener_send_inflight[0], send_length: 16384,
-        send_stride:      4096, attempts: ?listener_attempts[0],
-        attempt_capacity: 8};
+    ret handshake_api.Storage{attempts: ?listener_attempts[0], attempt_capacity: 8,
+        chunks: ?adapter_chunk_pool, account: adapter_account()};
 }
 
 fun dialer_storage() handshake_api.Storage {
-    ret handshake_api.Storage{receive_data: ?dialer_receive[0],
-        receive_present:  ?dialer_receive_present[0], receive_length: 16384,
-        receive_stride:   4096, send_data: ?dialer_send[0],
-        send_pending:     ?dialer_send_pending[0],
-        send_acked:       ?dialer_send_acked[0],
-        send_inflight:    ?dialer_send_inflight[0], send_length: 16384,
-        send_stride:      4096, attempts: ?dialer_attempts[0],
-        attempt_capacity: 8};
+    ret handshake_api.Storage{attempts: ?dialer_attempts[0], attempt_capacity: 8,
+        chunks: ?adapter_chunk_pool, account: adapter_account()};
 }
 
 # crypto leaves the sender the way a real driver takes it: prepared, published,
@@ -547,7 +540,7 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
     # adapter storage that aliases the listener's own handshake input is not a
     # binding the ownership check may accept
     var overlapping: handshake_api.Storage = listener_storage();
-    overlapping.receive_data = ?alert_input[0];
+    overlapping.attempts = (?alert_input[0])::*handshake_api.Attempt;
     var rejected: handshake_api.Adapter;
     if (initialize(?rejected, adapter_config(84), overlapping, ?listener_engine,
         binding) || rejected.initialized ||
@@ -714,8 +707,9 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
     # the adapter's own storage is disjoint from everything it reports
     i = 0;
     for (i < handshake_api.PROVIDER_RANGE_CAPACITY) {
-        if (!ownership.disjoint(reported[i], ownership.bytes(
-            ?listener_receive[0], 16384, ownership.ZERO_FORBIDDEN))) { ret 10; }
+        if (!ownership.disjoint(reported[i], ownership.array(
+            (?listener_attempts[0])::*u8, 8, $size_of(handshake_api.Attempt),
+            ownership.ZERO_FORBIDDEN))) { ret 10; }
         i = i + 1;
     }
 

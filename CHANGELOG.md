@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking.** Stream bytes live in pool chunks taken on demand, not in fixed per-stream rings (#137). `assembly.init_client` and `init_server` take a `*quic.storage.pool.Pool`, and each connection opens one account on it. Budgets come from the stream windows, and `Config.chunk_reserve` is held from init. `assembly.Storage` drops from 552,392 to 166,728 bytes.
+- **Breaking.** CRYPTO bytes live in the same chunks (#137). Initial and Handshake levels are released when their keys are discarded, even with retransmissions in flight, and 1-RTT CRYPTO is released once it is acknowledged. `handshake.Storage` is now its attempts plus the pool and account. `assembly.CRYPTO_LENGTH` and `CRYPTO_STRIDE` are replaced by `CRYPTO_PER_LEVEL`. `assembly.Storage` drops from 166,728 to 52,168 bytes, and an idle connection holds no chunks.
+- Per-byte send and receive state is replaced by bounded interval sets. A peer that fragments a stream or CRYPTO level past its interval cap, or whose data finds no storage, has its packet refused before it is acknowledged, so the data is sent again rather than lost (#137). `stream.Manager.receive_storage_refusals`, `handshake.Adapter.receive_storage_refusals` and `core.refused_packets` count these refusals.
+- CRYPTO output that finds no storage waits: `handshake.complete_event` returns `STATUS_BLOCKED` with `ERROR_STORAGE`, and `next_event` offers the same event again (#137).
+
+### Added
+
+- `transport.ready_stream`, which reports streams that became readable, writable or reset in O(1) per call, oldest first, and `transport.storage_ready` for when the pool wakes a connection (#137, mach-http#103).
+- `quic.storage.chunks`, the chunk lists shared by stream and CRYPTO buffers (#137).
+- `handshake.discard` releases a level once its keys are gone, and the core calls it at both RFC 9001 discard points (#137).
+
 ## [0.11.0] - 2026-09-17
 
 ### Security

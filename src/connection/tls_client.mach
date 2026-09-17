@@ -4,6 +4,8 @@ use crypto.contracts;
 use crypto.secret;
 use handshake_api: quic.connection.handshake;
 use quic.packet.packet;
+use quic.storage.limited;
+use quic.storage.pool;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.size.usize;
@@ -44,13 +46,22 @@ var integration_output:       [4096]u8;
 var integration_hello:        [4096]u8;
 var integration_certificates: [4]cert.Certificate;
 var integration_parameters:   [256]u8;
-var adapter_receive:          [16384]u8;
-var adapter_receive_present:  [16384]bool;
-var adapter_send:             [16384]u8;
-var adapter_send_pending:     [16384]bool;
-var adapter_send_acked:       [16384]bool;
-var adapter_send_inflight:    [16384]u16;
-var adapter_attempts:         [8]handshake_api.Attempt;
+var adapter_chunk_memory:     limited.Limited;
+var adapter_chunk_pool:       pool.Pool;
+var adapter_chunk_account:    pool.Account;
+
+# one pool for every adapter these tests build, which may outlive a test
+fun adapter_account() *pool.Account {
+    if (!adapter_chunk_pool.valid) {
+        limited.make(?adapter_chunk_memory, 1 << 22);
+        pool.make(?adapter_chunk_pool, limited.allocator_of(?adapter_chunk_memory),
+            pool.default_config(256));
+        pool.open_account(?adapter_chunk_pool, ?adapter_chunk_account, 1, 128, 128, 0);
+    }
+    ret ?adapter_chunk_account;
+}
+
+var adapter_attempts: [8]handshake_api.Attempt;
 
 #[oblivious]
 fun deterministic_entropy(context: ptr, secret_context: *^u8,
@@ -123,18 +134,10 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
     val adapter_config: handshake_api.Config = handshake_api.Config{source: 77,
         max_crypto_per_level: 4096, max_event_data: 4096,
         max_peer_identity:    4096};
-    val adapter_storage: handshake_api.Storage = handshake_api.Storage{
-        receive_data:     ?adapter_receive[0],
-        receive_present:  ?adapter_receive_present[0], receive_length: 16384,
-        receive_stride:   4096, send_data: ?adapter_send[0],
-        send_pending:     ?adapter_send_pending[0],
-        send_acked:       ?adapter_send_acked[0],
-        send_inflight:    ?adapter_send_inflight[0], send_length: 16384,
-        send_stride:      4096, attempts: ?adapter_attempts[0],
-        attempt_capacity: 8
-    };
+    val adapter_storage: handshake_api.Storage = handshake_api.Storage{attempts: ?adapter_attempts[0], attempt_capacity: 8,
+        chunks: ?adapter_chunk_pool, account: adapter_account()};
     var overlapping: handshake_api.Storage = adapter_storage;
-    overlapping.receive_data = ?integration_input[0];
+    overlapping.attempts = (?integration_input[0])::*handshake_api.Attempt;
     var rejected_adapter: handshake_api.Adapter;
     if (initialize(?rejected_adapter, adapter_config, overlapping, ?tls_value,
         Config{verification_time_unix: 1800000000, deadline_ns: 1000,
@@ -239,14 +242,8 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
     if (!initialize(?deadline_adapter,
         handshake_api.Config{source: 78, max_crypto_per_level: 4096,
         max_event_data: 4096, max_peer_identity: 4096},
-        handshake_api.Storage{receive_data: ?adapter_receive[0],
-        receive_present:  ?adapter_receive_present[0], receive_length: 16384,
-        receive_stride:   4096, send_data: ?adapter_send[0],
-        send_pending:     ?adapter_send_pending[0],
-        send_acked:       ?adapter_send_acked[0],
-        send_inflight:    ?adapter_send_inflight[0], send_length: 16384,
-        send_stride:      4096, attempts: ?adapter_attempts[0],
-        attempt_capacity: 8}, ?tls_value,
+        handshake_api.Storage{attempts: ?adapter_attempts[0], attempt_capacity: 8,
+        chunks: ?adapter_chunk_pool, account: adapter_account()}, ?tls_value,
         Config{verification_time_unix: 1800000000, deadline_ns: 10,
         entropy_context_size:        1,
         entropy_secret_context_size: 0})) { ret 14; }

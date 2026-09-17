@@ -3,6 +3,9 @@
 use quic.connection.ownership;
 use quic.crypto.protection;
 use quic.packet.packet;
+use quic.storage.chunks;
+use quic.storage.pool;
+use quic.storage.ranges;
 
 use crypto.contracts;
 use crypto.encoding.keys;
@@ -58,6 +61,12 @@ pub val ERROR_SECRET:     Error = 10;
 pub val ERROR_TRANSITION: Error = 11;
 pub val ERROR_REJECTED:   Error = 12;
 pub val ERROR_OVERFLOW:   Error = 13;
+# a crypto frame the adapter could not store, refused with nothing changed so
+# its packet goes unacknowledged and the peer sends it again
+pub val ERROR_STORAGE: Error = 14;
+
+# intervals a level may hold out of order before a fragmenting frame is refused
+pub val RECEIVE_RANGE_CAP: usize = 32;
 
 pub val PROVIDER_TLS_ERROR_BASE:   u64 = 0x10000;
 pub val PROVIDER_BINDING_CONFIG:   u64 = 0x20001;
@@ -155,34 +164,36 @@ pub rec Protocol {
     initialized:         bool;
 }
 
+# receive_contiguous: bytes handed to the provider, whose chunks are released
+# send_acked:         the acknowledged prefix, whose chunks are released
+# discarded:          keys are gone, so the level stores nothing more
 pub rec LevelState {
     receive_contiguous: u64;
-    receive_highest:    u64;
     send_length:        u64;
     send_acked:         u64;
+    discarded:          bool;
+    receive:            chunks.Chunks;
+    present:            ranges.RangeSet;
+    send:               chunks.Chunks;
+    acked:              ranges.RangeSet;
 }
 
 pub rec Attempt {
     offset:     u64;
     length:     usize;
     generation: u64;
+    chunk:      pool.Ref;
     level:      Level;
     state:      u8;
 }
 
+# chunks:  where every level's crypto bytes come from
+# account: whose budget they count against
 pub rec Storage {
-    receive_data:     *u8;
-    receive_present:  *bool;
-    receive_length:   usize;
-    receive_stride:   usize;
-    send_data:        *u8;
-    send_pending:     *bool;
-    send_acked:       *bool;
-    send_inflight:    *u16;
-    send_length:      usize;
-    send_stride:      usize;
     attempts:         *Attempt;
     attempt_capacity: usize;
+    chunks:           *pool.Pool;
+    account:          *pool.Account;
 }
 
 pub rec Config {
@@ -231,6 +242,10 @@ pub rec Adapter {
     # zero until a real mach-tls provider is bound, then CLIENT or SERVER
     tls_role:          Role;
     transition_active: bool;
+    # a crypto event whose bytes found no storage, offered again by next_event
+    event_deferred: bool;
+    # received crypto frames refused for storage before acknowledgement
+    receive_storage_refusals: u64;
 }
 
 pub rec EventToken {
@@ -318,25 +333,13 @@ fun provider_context_valid(adapter: *Adapter, storage: Storage,
     if (!protocol_valid(protocol)) { ret false; }
     val context: ownership.Range = ownership.bytes(protocol.context::*u8,
         protocol.context_size, ownership.ZERO_FORBIDDEN);
-    var ranges: [9]ownership.Range;
-    ranges[0] = ownership.anchored_record[Adapter, Config](?adapter.config,
+    var owned: [3]ownership.Range;
+    owned[0] = ownership.anchored_record[Adapter, Config](?adapter.config,
         $offset_of(Adapter, config));
-    ranges[1] = ownership.bytes(storage.receive_data, storage.receive_length,
-        ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(storage.receive_present::*u8,
-        storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    ranges[3] = ownership.bytes(storage.send_data, storage.send_length,
-        ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(storage.send_pending::*u8,
-        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.array(storage.send_acked::*u8,
-        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    ranges[6] = ownership.array(storage.send_inflight::*u8,
-        storage.send_length, $size_of(u16), ownership.ZERO_FORBIDDEN);
-    ranges[7] = ownership.array(storage.attempts::*u8,
+    owned[1] = ownership.array(storage.attempts::*u8,
         storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
-    ranges[8] = context;
-    ret ownership.all_disjoint(?ranges[0], 9);
+    owned[2] = context;
+    ret ownership.all_disjoint(?owned[0], 3);
 }
 
 fun tls_anchor_disjoint(anchor: ownership.Range, owned: *ownership.Range,
@@ -558,46 +561,34 @@ fun tls_client_context_valid(adapter: *Adapter, storage: Storage,
         (entropy.context != nil && context_size == 0)) { ret false; }
     var context_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (context_size == 0) { context_zero = ownership.ZERO_ALLOWED; }
-    var owned: [15]ownership.Range;
+    var owned: [9]ownership.Range;
     owned[0] = ownership.anchored_record[Adapter, Config](?adapter.config,
         $offset_of(Adapter, config));
-    owned[1] = ownership.bytes(storage.receive_data, storage.receive_length,
-        ownership.ZERO_FORBIDDEN);
-    owned[2] = ownership.array(storage.receive_present::*u8,
-        storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    owned[3] = ownership.bytes(storage.send_data, storage.send_length,
-        ownership.ZERO_FORBIDDEN);
-    owned[4] = ownership.array(storage.send_pending::*u8,
-        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    owned[5] = ownership.array(storage.send_acked::*u8,
-        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    owned[6] = ownership.array(storage.send_inflight::*u8,
-        storage.send_length, $size_of(u16), ownership.ZERO_FORBIDDEN);
-    owned[7] = ownership.array(storage.attempts::*u8,
+    owned[1] = ownership.array(storage.attempts::*u8,
         storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
-    owned[8] = tls_client_record(value);
-    owned[9] = ownership.bytes(value.storage.input,
+    owned[2] = tls_client_record(value);
+    owned[3] = ownership.bytes(value.storage.input,
         value.storage.input_capacity, ownership.ZERO_FORBIDDEN);
-    owned[10] = ownership.bytes(value.storage.output,
+    owned[4] = ownership.bytes(value.storage.output,
         value.storage.output_capacity, ownership.ZERO_FORBIDDEN);
-    owned[11] = ownership.bytes(value.storage.hello,
+    owned[5] = ownership.bytes(value.storage.hello,
         value.storage.hello_capacity, ownership.ZERO_FORBIDDEN);
-    owned[12] = ownership.array(value.storage.certificates::*u8,
+    owned[6] = ownership.array(value.storage.certificates::*u8,
         value.storage.certificate_capacity, $size_of(tls_cert.Certificate),
         ownership.ZERO_FORBIDDEN);
-    owned[13] = ownership.bytes(value.storage.peer_parameters,
+    owned[7] = ownership.bytes(value.storage.peer_parameters,
         value.storage.peer_parameters_capacity, ownership.ZERO_FORBIDDEN);
-    owned[14] = ownership.bytes(entropy.context::*u8, context_size,
+    owned[8] = ownership.bytes(entropy.context::*u8, context_size,
         context_zero);
-    if (!ownership.all_disjoint(?owned[0], 15) ||
+    if (!ownership.all_disjoint(?owned[0], 9) ||
         !tls_secret_context_valid(value, secret_context_size)) { ret false; }
 
     val identity: *tls_credentials.Identity = value.config.client_identity;
-    if (!ownership.contains(owned[8], tls_config_record(value.config)) ||
-        !ownership.contains(owned[8], entropy_record(entropy)) ||
-        !ownership.contains(owned[8], trust_record(value.config.trust)) ||
+    if (!ownership.contains(owned[2], tls_config_record(value.config)) ||
+        !ownership.contains(owned[2], entropy_record(entropy)) ||
+        !ownership.contains(owned[2], trust_record(value.config.trust)) ||
         (identity != nil &&
-        !ownership.contains(owned[8], identity_record(identity)))) {
+        !ownership.contains(owned[2], identity_record(identity)))) {
         ret false;
     }
 
@@ -605,34 +596,34 @@ fun tls_client_context_valid(adapter: *Adapter, storage: Storage,
     if (server_name_length == 0 ||
         !tls_anchor_disjoint(ownership.bytes(value.config.server_name.data,
         server_name_length, ownership.ZERO_FORBIDDEN),
-        ?owned[0], 15) ||
+        ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.alpn::*u8,
         value.config.alpn_len, $size_of(tls_config.ProtocolName),
-        ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.trust.anchors::*u8,
         value.config.trust.len, $size_of(tls_cert.Certificate),
-        ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.versions::*u8,
         value.config.version_len, $size_of(u16), ownership.ZERO_FORBIDDEN),
-        ?owned[0], 15) ||
+        ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.suites::*u8,
         value.config.suite_len, $size_of(tls13.CipherSuite),
-        ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.groups::*u8,
         value.config.group_len, $size_of(tls13.NamedGroup),
-        ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.signatures::*u8,
         value.config.signature_len, $size_of(tls13.SignatureScheme),
-        ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.bytes(value.extra.data.data,
-        value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 15)) {
+        value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 9)) {
         ret false;
     }
     var i: usize = 0;
     for (i < value.config.alpn_len) {
         if (!tls_anchor_disjoint(ownership.bytes(value.config.alpn[i].data,
             value.config.alpn[i].len, ownership.ZERO_FORBIDDEN),
-            ?owned[0], 15)) { ret false; }
+            ?owned[0], 9)) { ret false; }
         i = i + 1;
     }
     i = 0;
@@ -640,21 +631,21 @@ fun tls_client_context_valid(adapter: *Adapter, storage: Storage,
         if (!tls_anchor_disjoint(ownership.bytes(
             value.config.trust.anchors[i].der,
             value.config.trust.anchors[i].der_len,
-            ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+            ownership.ZERO_FORBIDDEN), ?owned[0], 9)) { ret false; }
         i = i + 1;
     }
     if (identity != nil) {
         if (!tls_anchor_disjoint(ownership.array(identity.chain.certificates::*u8,
             identity.chain.len, $size_of(tls_cert.Certificate),
-            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+            ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
             !tls_anchor_disjoint(private_key_record(identity.private_key),
-            ?owned[0], 15)) { ret false; }
+            ?owned[0], 9)) { ret false; }
         i = 0;
         for (i < identity.chain.len) {
             if (!tls_anchor_disjoint(ownership.bytes(
                 identity.chain.certificates[i].der,
                 identity.chain.certificates[i].der_len,
-                ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+                ownership.ZERO_FORBIDDEN), ?owned[0], 9)) { ret false; }
             i = i + 1;
         }
     }
@@ -673,77 +664,65 @@ fun tls_server_context_valid(adapter: *Adapter, storage: Storage,
         (entropy.context != nil && context_size == 0)) { ret false; }
     var context_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (context_size == 0) { context_zero = ownership.ZERO_ALLOWED; }
-    var owned: [15]ownership.Range;
+    var owned: [9]ownership.Range;
     owned[0] = ownership.anchored_record[Adapter, Config](?adapter.config,
         $offset_of(Adapter, config));
-    owned[1] = ownership.bytes(storage.receive_data, storage.receive_length,
-        ownership.ZERO_FORBIDDEN);
-    owned[2] = ownership.array(storage.receive_present::*u8,
-        storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    owned[3] = ownership.bytes(storage.send_data, storage.send_length,
-        ownership.ZERO_FORBIDDEN);
-    owned[4] = ownership.array(storage.send_pending::*u8,
-        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    owned[5] = ownership.array(storage.send_acked::*u8,
-        storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    owned[6] = ownership.array(storage.send_inflight::*u8,
-        storage.send_length, $size_of(u16), ownership.ZERO_FORBIDDEN);
-    owned[7] = ownership.array(storage.attempts::*u8,
+    owned[1] = ownership.array(storage.attempts::*u8,
         storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
-    owned[8] = tls_server_record(value);
-    owned[9] = ownership.bytes(value.storage.input,
+    owned[2] = tls_server_record(value);
+    owned[3] = ownership.bytes(value.storage.input,
         value.storage.input_capacity, ownership.ZERO_FORBIDDEN);
-    owned[10] = ownership.bytes(value.storage.output,
+    owned[4] = ownership.bytes(value.storage.output,
         value.storage.output_capacity, ownership.ZERO_FORBIDDEN);
-    owned[11] = ownership.bytes(value.storage.hello,
+    owned[5] = ownership.bytes(value.storage.hello,
         value.storage.hello_capacity, ownership.ZERO_FORBIDDEN);
-    owned[12] = ownership.array(value.storage.certificates::*u8,
+    owned[6] = ownership.array(value.storage.certificates::*u8,
         value.storage.certificate_capacity, $size_of(tls_cert.Certificate),
         ownership.ZERO_FORBIDDEN);
-    owned[13] = ownership.bytes(value.storage.peer_parameters,
+    owned[7] = ownership.bytes(value.storage.peer_parameters,
         value.storage.peer_parameters_capacity, ownership.ZERO_FORBIDDEN);
-    owned[14] = ownership.bytes(entropy.context::*u8, context_size,
+    owned[8] = ownership.bytes(entropy.context::*u8, context_size,
         context_zero);
-    if (!ownership.all_disjoint(?owned[0], 15) ||
+    if (!ownership.all_disjoint(?owned[0], 9) ||
         !tls_server_secret_context_valid(value, secret_context_size)) {
         ret false;
     }
 
     # server.init copies the configuration and entropy into the record and
     # repoints config at those copies; the credential store stays borrowed
-    if (!ownership.contains(owned[8], tls_server_config_record(value.config)) ||
-        !ownership.contains(owned[8], entropy_record(entropy))) { ret false; }
+    if (!ownership.contains(owned[2], tls_server_config_record(value.config)) ||
+        !ownership.contains(owned[2], entropy_record(entropy))) { ret false; }
 
     val generation: *tls_credentials.Generation = value.config.credentials.current;
     if (!tls_anchor_disjoint(store_record(value.config.credentials),
-        ?owned[0], 15) ||
-        !tls_anchor_disjoint(generation_record(generation), ?owned[0], 15) ||
+        ?owned[0], 9) ||
+        !tls_anchor_disjoint(generation_record(generation), ?owned[0], 9) ||
         !tls_anchor_disjoint(identity_array(generation.identities,
-        generation.identity_len), ?owned[0], 15) ||
+        generation.identity_len), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.alpn::*u8,
         value.config.alpn_len, $size_of(tls_config.ProtocolName),
-        ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.versions::*u8,
         value.config.version_len, $size_of(u16), ownership.ZERO_FORBIDDEN),
-        ?owned[0], 15) ||
+        ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.suites::*u8,
         value.config.suite_len, $size_of(tls13.CipherSuite),
-        ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.groups::*u8,
         value.config.group_len, $size_of(tls13.NamedGroup),
-        ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.array(value.config.signatures::*u8,
         value.config.signature_len, $size_of(tls13.SignatureScheme),
-        ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+        ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
         !tls_anchor_disjoint(ownership.bytes(value.extra.data.data,
-        value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 15)) {
+        value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 9)) {
         ret false;
     }
     var i: usize = 0;
     for (i < value.config.alpn_len) {
         if (!tls_anchor_disjoint(ownership.bytes(value.config.alpn[i].data,
             value.config.alpn[i].len, ownership.ZERO_FORBIDDEN),
-            ?owned[0], 15)) { ret false; }
+            ?owned[0], 9)) { ret false; }
         i = i + 1;
     }
     i = 0;
@@ -751,33 +730,33 @@ fun tls_server_context_valid(adapter: *Adapter, storage: Storage,
         val identity: *tls_credentials.Identity = ?generation.identities[i];
         if (!tls_anchor_disjoint(ownership.bytes(identity.server_name.data,
             identity.server_name.len, ownership.ZERO_ALLOWED),
-            ?owned[0], 15) ||
+            ?owned[0], 9) ||
             !tls_anchor_disjoint(ownership.array(identity.chain.certificates::*u8,
             identity.chain.len, $size_of(tls_cert.Certificate),
-            ownership.ZERO_FORBIDDEN), ?owned[0], 15) ||
+            ownership.ZERO_FORBIDDEN), ?owned[0], 9) ||
             !tls_anchor_disjoint(private_key_record(identity.private_key),
-            ?owned[0], 15)) { ret false; }
+            ?owned[0], 9)) { ret false; }
         var chain: usize = 0;
         for (chain < identity.chain.len) {
             if (!tls_anchor_disjoint(ownership.bytes(
                 identity.chain.certificates[chain].der,
                 identity.chain.certificates[chain].der_len,
-                ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+                ownership.ZERO_FORBIDDEN), ?owned[0], 9)) { ret false; }
             chain = chain + 1;
         }
         i = i + 1;
     }
     val client_trust: *tls_cert.TrustStore = generation.client_trust;
     if (client_trust != nil) {
-        if (!tls_anchor_disjoint(trust_record(client_trust), ?owned[0], 15) ||
+        if (!tls_anchor_disjoint(trust_record(client_trust), ?owned[0], 9) ||
             !tls_anchor_disjoint(ownership.array(client_trust.anchors::*u8,
             client_trust.len, $size_of(tls_cert.Certificate),
-            ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+            ownership.ZERO_FORBIDDEN), ?owned[0], 9)) { ret false; }
         i = 0;
         for (i < client_trust.len) {
             if (!tls_anchor_disjoint(ownership.bytes(
                 client_trust.anchors[i].der, client_trust.anchors[i].der_len,
-                ownership.ZERO_FORBIDDEN), ?owned[0], 15)) { ret false; }
+                ownership.ZERO_FORBIDDEN), ?owned[0], 9)) { ret false; }
             i = i + 1;
         }
     }
@@ -790,16 +769,8 @@ fun callback_intact(adapter: *Adapter, before: *Adapter) bool {
         adapter.config.max_crypto_per_level == before.config.max_crypto_per_level &&
         adapter.config.max_event_data == before.config.max_event_data &&
         adapter.config.max_peer_identity == before.config.max_peer_identity &&
-        adapter.storage.receive_data == before.storage.receive_data &&
-        adapter.storage.receive_present == before.storage.receive_present &&
-        adapter.storage.receive_length == before.storage.receive_length &&
-        adapter.storage.receive_stride == before.storage.receive_stride &&
-        adapter.storage.send_data == before.storage.send_data &&
-        adapter.storage.send_pending == before.storage.send_pending &&
-        adapter.storage.send_acked == before.storage.send_acked &&
-        adapter.storage.send_inflight == before.storage.send_inflight &&
-        adapter.storage.send_length == before.storage.send_length &&
-        adapter.storage.send_stride == before.storage.send_stride &&
+        adapter.storage.chunks == before.storage.chunks &&
+        adapter.storage.account == before.storage.account &&
         adapter.storage.attempts == before.storage.attempts &&
         adapter.storage.attempt_capacity == before.storage.attempt_capacity &&
         adapter.protocol.context == before.protocol.context &&
@@ -825,14 +796,13 @@ fun callback_intact(adapter: *Adapter, before: *Adapter) bool {
         adapter.core_lease == before.core_lease &&
         adapter.initialized == before.initialized &&
         adapter.started == before.started && adapter.closing == before.closing &&
-        adapter.destroyed == before.destroyed && adapter.transition_active;
+        adapter.destroyed == before.destroyed &&
+        adapter.event_deferred == before.event_deferred &&
+        adapter.transition_active;
     var i: usize = 0;
     for (intact && i < 4) {
-        intact = adapter.levels[i].receive_contiguous ==
-            before.levels[i].receive_contiguous &&
-            adapter.levels[i].receive_highest == before.levels[i].receive_highest &&
-            adapter.levels[i].send_length == before.levels[i].send_length &&
-            adapter.levels[i].send_acked == before.levels[i].send_acked;
+        intact = memory.equal[u8]((?adapter.levels[i])::*u8,
+            (?before.levels[i])::*u8, $size_of(LevelState));
         i = i + 1;
     }
     i = 0;
@@ -1350,48 +1320,73 @@ fun storage_valid(adapter: *Adapter, config: Config, storage: Storage) bool {
     if (!adapter_range.valid ||
         config.source == 0 || config.max_crypto_per_level == 0 ||
         config.max_event_data == 0 || config.max_peer_identity == 0 ||
-        storage.receive_stride < config.max_crypto_per_level ||
-        storage.send_stride < config.max_crypto_per_level ||
-        storage.receive_stride > storage.receive_length / 4 ||
-        storage.send_stride > storage.send_length / 4 ||
+        storage.chunks == nil || storage.account == nil ||
         storage.attempt_capacity == 0) { ret false; }
-    var ranges: [8]ownership.Range;
-    ranges[0] = adapter_range;
-    ranges[1] = ownership.bytes(storage.receive_data, storage.receive_length,
-        ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(storage.receive_present::*u8,
-        storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    ranges[3] = ownership.bytes(storage.send_data, storage.send_length,
-        ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(storage.send_pending::*u8, storage.send_length,
-        $size_of(bool), ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.array(storage.send_acked::*u8, storage.send_length,
-        $size_of(bool), ownership.ZERO_FORBIDDEN);
-    ranges[6] = ownership.array(storage.send_inflight::*u8, storage.send_length,
-        $size_of(u16), ownership.ZERO_FORBIDDEN);
-    ranges[7] = ownership.array(storage.attempts::*u8, storage.attempt_capacity,
+    var owned: [2]ownership.Range;
+    owned[0] = adapter_range;
+    owned[1] = ownership.array(storage.attempts::*u8, storage.attempt_capacity,
         $size_of(Attempt), ownership.ZERO_FORBIDDEN);
-    ret ownership.all_disjoint(?ranges[0], 8);
+    ret ownership.all_disjoint(?owned[0], 2);
+}
+
+fun source(adapter: *Adapter, direction: pool.Direction) ranges.Source {
+    ret ranges.Source{pool: adapter.storage.chunks, account: adapter.storage.account,
+        direction: direction};
+}
+
+fun send_range_cap(adapter: *Adapter) usize {
+    ret 2 * adapter.storage.attempt_capacity + 1;
+}
+
+fun reset_level(adapter: *Adapter, index: usize) {
+    var state: LevelState;
+    state.present         = ranges.make(RECEIVE_RANGE_CAP);
+    state.acked           = ranges.make(send_range_cap(adapter));
+    adapter.levels[index] = state;
+}
+
+fun reset_levels(adapter: *Adapter) {
+    var i: usize = 0;
+    for (i < 4) {
+        reset_level(adapter, i);
+        i = i + 1;
+    }
+}
+
+# gives a level's chunks and spills back. chunks still retained by a
+# published attempt are settled by the caller first
+fun release_level(adapter: *Adapter, index: usize) {
+    val state:   *LevelState   = ?adapter.levels[index];
+    var receive: ranges.Source = source(adapter, pool.RECEIVE);
+    var send:    ranges.Source = source(adapter, pool.SEND);
+    chunks.release_all(?state.receive, ?receive);
+    ranges.clear(?state.present, ?receive);
+    chunks.release_all(?state.send, ?send);
+    ranges.clear(?state.acked, ?send);
+    reset_level(adapter, index);
+}
+
+fun release_levels(adapter: *Adapter) {
+    var i: usize = 0;
+    for (i < 4) {
+        release_level(adapter, i);
+        i = i + 1;
+    }
 }
 
 fun init_base(adapter: *Adapter, config: Config, storage: Storage) bool {
     if (config.source == 0 || config.max_crypto_per_level == 0 ||
         config.max_event_data == 0 || config.max_peer_identity == 0 ||
         !storage_valid(adapter, config, storage) || adapter.initialized) { ret false; }
-    memory.raw_zero(storage.receive_data, storage.receive_length);
-    memory.raw_zero(storage.receive_present, storage.receive_length);
-    memory.raw_zero(storage.send_data, storage.send_length);
-    memory.raw_zero(storage.send_pending, storage.send_length);
-    memory.raw_zero(storage.send_acked, storage.send_length);
-    memory.raw_zero(storage.send_inflight, storage.send_length * 2);
     var i: usize = 0;
     for (i < storage.attempt_capacity) {
         storage.attempts[i].state      = ATTEMPT_FREE;
         storage.attempts[i].generation = next_generation(storage.attempts[i].generation);
         i                              = i + 1;
     }
-    adapter.config               = config;
-    adapter.storage              = storage;
+    adapter.config  = config;
+    adapter.storage = storage;
+    reset_levels(adapter);
     adapter.protocol.initialized = false;
     adapter.tls_client           = nil;
     adapter.tls_server           = nil;
@@ -1418,27 +1413,8 @@ fun borrowed_disjoint(adapter: *Adapter, borrowed: ownership.Range) bool {
     if (!ownership.disjoint(borrowed,
         ownership.anchored_record[Adapter, Config](?adapter.config,
         $offset_of(Adapter, config)))) { ret false; }
-    var owned: [7]ownership.Range;
-    owned[0] = ownership.bytes(adapter.storage.receive_data,
-        adapter.storage.receive_length, ownership.ZERO_FORBIDDEN);
-    owned[1] = ownership.array(adapter.storage.receive_present::*u8,
-        adapter.storage.receive_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    owned[2] = ownership.bytes(adapter.storage.send_data,
-        adapter.storage.send_length, ownership.ZERO_FORBIDDEN);
-    owned[3] = ownership.array(adapter.storage.send_pending::*u8,
-        adapter.storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    owned[4] = ownership.array(adapter.storage.send_acked::*u8,
-        adapter.storage.send_length, $size_of(bool), ownership.ZERO_FORBIDDEN);
-    owned[5] = ownership.array(adapter.storage.send_inflight::*u8,
-        adapter.storage.send_length, $size_of(u16), ownership.ZERO_FORBIDDEN);
-    owned[6] = ownership.array(adapter.storage.attempts::*u8,
-        adapter.storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
-    var i: usize = 0;
-    for (i < 7) {
-        if (!ownership.disjoint(borrowed, owned[i])) { ret false; }
-        i = i + 1;
-    }
-    ret true;
+    ret ownership.disjoint(borrowed, ownership.array(adapter.storage.attempts::*u8,
+        adapter.storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN));
 }
 
 pub fun initialize(adapter: *Adapter, config: Config, storage: Storage,
@@ -1488,12 +1464,7 @@ pub fun abandon_initialization(adapter: *Adapter) bool {
         if (adapter.storage.attempts[i].state != ATTEMPT_FREE) { ret false; }
         i = i + 1;
     }
-    memory.raw_zero(adapter.storage.receive_data, adapter.storage.receive_length);
-    memory.raw_zero(adapter.storage.receive_present, adapter.storage.receive_length);
-    memory.raw_zero(adapter.storage.send_data, adapter.storage.send_length);
-    memory.raw_zero(adapter.storage.send_pending, adapter.storage.send_length);
-    memory.raw_zero(adapter.storage.send_acked, adapter.storage.send_length);
-    memory.raw_zero(adapter.storage.send_inflight, adapter.storage.send_length * 2);
+    release_levels(adapter);
     val generation: u64 = adapter.event_generation;
     var empty:      Adapter;
     empty.event_generation = generation;
@@ -1733,57 +1704,68 @@ pub fun receive(adapter: *Adapter, level: Level, offset: u64, data: *u8,
         adapter.closing || adapter.event_active || !input.valid ||
         !borrowed_disjoint(adapter, input) ||
         !receive_bounds(adapter, level, offset, length)) { ret failed(ERROR_STATE); }
-    val index: usize = level_index(level);
-    val base:  usize = level_base(adapter.storage.receive_stride, level);
-    var i:     usize = 0;
-    for (i < length) {
-        val position: usize = offset::usize + i;
-        if (adapter.storage.receive_present[base + position] &&
-            adapter.storage.receive_data[base + position] != data[i]) {
+    val state: *LevelState = ?adapter.levels[level_index(level)];
+    if (state.discarded) { ret adapter_result(STATUS_OK, ERROR_NONE, 0, length); }
+    val begin: u64 = state.receive_contiguous;
+    val end:   u64 = offset + length::u64;
+    # bytes the provider already has were checked when they arrived
+    var start: u64 = offset;
+    if (start < begin) { start = begin; }
+    if (start < end) {
+        val skip:  usize         = (start - offset)::usize;
+        val count: usize         = length - skip;
+        var from:  ranges.Source = source(adapter, pool.RECEIVE);
+        if (chunks.conflicts(?state.receive, ?state.present, start, ?data[skip], count)) {
             ret failed(ERROR_CONFLICT);
         }
-        i = i + 1;
-    }
-    i = 0;
-    for (i < length) {
-        val position: usize = offset::usize + i;
-        adapter.storage.receive_data[base + position]    = data[i];
-        adapter.storage.receive_present[base + position] = true;
-        i                                                = i + 1;
-    }
-    val end: u64 = offset + length::u64;
-    if (end > adapter.levels[index].receive_highest) {
-        adapter.levels[index].receive_highest = end;
-    }
-    val begin:      u64 = adapter.levels[index].receive_contiguous;
-    var contiguous: u64 = begin;
-    for (contiguous < adapter.levels[index].receive_highest &&
-        adapter.storage.receive_present[base + contiguous::usize]) {
-        contiguous = contiguous + 1;
-    }
-    if (contiguous == begin) { ret adapter_result(STATUS_MORE, ERROR_NONE, 0, length); }
-    var provider: ProviderResult;
-    if (tls_bound(adapter)) {
-        provider = tls_ingest(adapter, level, begin,
-            ?adapter.storage.receive_data[base + begin::usize],
-            (contiguous - begin)::usize, now_ns);
-    }
-    or {
-        adapter.transition_active = true;
-        val before: Adapter = @adapter;
-        provider = adapter.protocol.ingest(adapter.protocol.context,
-            adapter.protocol.secret_context, level, begin,
-            ?adapter.storage.receive_data[base + begin::usize],
-            (contiguous - begin)::usize, now_ns);
-        if (!callback_intact(adapter, ?before)) {
-            ret provider_failed(PROVIDER_BINDING_STATE);
+        # a frame that would fragment the level past its cap, or that needs
+        # storage the pool refuses, changes nothing so the peer sends it again
+        var reserved: chunks.Reserved;
+        if (ranges.count_after_insert(?state.present, start, end) > state.present.cap ||
+            !chunks.reserve(?state.receive, ?from, start, count, ?reserved)) {
+            adapter.receive_storage_refusals = adapter.receive_storage_refusals + 1;
+            ret failed(ERROR_STORAGE);
         }
+        if (ranges.insert(?state.present, start, end, ?from) != ranges.STATUS_OK) {
+            chunks.cancel(?from, ?reserved);
+            adapter.receive_storage_refusals = adapter.receive_storage_refusals + 1;
+            ret failed(ERROR_STORAGE);
+        }
+        chunks.commit(?state.receive, ?reserved);
+        chunks.write(?state.receive, start, ?data[skip], count);
     }
-    if (provider.status != STATUS_OK) {
-        adapter.closing = true;
-        ret provider_failed(provider.error);
+    val contiguous: u64 = ranges.covered_from(?state.present, begin);
+    if (contiguous <= begin) { ret adapter_result(STATUS_MORE, ERROR_NONE, 0, length); }
+    # the provider takes the new prefix one chunk span at a time
+    var at: u64 = begin;
+    for (at < contiguous) {
+        var span: u64 = chunks.room(at);
+        if (span > contiguous - at) { span = contiguous - at; }
+        val bytes:    *u8 = chunks.address(?state.receive, at);
+        var provider: ProviderResult;
+        if (tls_bound(adapter)) {
+            provider = tls_ingest(adapter, level, at, bytes, span::usize, now_ns);
+        }
+        or {
+            adapter.transition_active = true;
+            val before: Adapter = @adapter;
+            provider = adapter.protocol.ingest(adapter.protocol.context,
+                adapter.protocol.secret_context, level, at, bytes, span::usize, now_ns);
+            if (!callback_intact(adapter, ?before)) {
+                ret provider_failed(PROVIDER_BINDING_STATE);
+            }
+        }
+        if (provider.status != STATUS_OK) {
+            adapter.closing = true;
+            ret provider_failed(provider.error);
+        }
+        at                       = at + span;
+        state.receive_contiguous = at;
     }
-    adapter.levels[index].receive_contiguous = contiguous;
+    var from: ranges.Source = source(adapter, pool.RECEIVE);
+    ranges.drop_prefix(?state.present, contiguous, ?from);
+    chunks.release_consumed(?state.receive, ?from, contiguous,
+        ranges.empty(?state.present));
     ret adapter_result(STATUS_OK, ERROR_NONE, 0, length);
 }
 
@@ -1864,6 +1846,9 @@ pub fun next_event(adapter: *Adapter) Event {
         result.error  = ERROR_STATE;
         ret result;
     }
+    if (adapter.event_active && adapter.event_deferred) {
+        ret offer_event(adapter);
+    }
     if (adapter.event_active) {
         result.status = STATUS_BLOCKED;
         result.error  = ERROR_STATE;
@@ -1918,8 +1903,15 @@ pub fun next_event(adapter: *Adapter) Event {
     adapter.event            = event;
     adapter.event_generation = next_generation(adapter.event_generation);
     adapter.event_active     = true;
-    result.status            = STATUS_OK;
-    result.token             = EventToken{source: adapter.config.source,
+    ret offer_event(adapter);
+}
+
+# the active event, under its current token
+fun offer_event(adapter: *Adapter) Event {
+    val event:  *ProviderEvent = ?adapter.event;
+    var result: Event;
+    result.status = STATUS_OK;
+    result.token  = EventToken{source: adapter.config.source,
         generation: adapter.event_generation, provider_token: event.token};
     result.kind        = event.kind;
     result.level       = event.level;
@@ -1942,41 +1934,39 @@ fun event_matches(adapter: *Adapter, token: EventToken) bool {
 }
 
 fun append_crypto(adapter: *Adapter, event: *ProviderEvent) bool {
-    val index:  usize = level_index(event.level);
-    val offset: usize = event.offset::usize;
-    val base:   usize = level_base(adapter.storage.send_stride, event.level);
-    var i:      usize = 0;
-    for (i < event.data.length) {
-        adapter.storage.send_data[base + offset + i]     = event.data.data[i];
-        adapter.storage.send_pending[base + offset + i]  = true;
-        adapter.storage.send_acked[base + offset + i]    = false;
-        adapter.storage.send_inflight[base + offset + i] = 0;
-        i                                                = i + 1;
+    val state: *LevelState   = ?adapter.levels[level_index(event.level)];
+    var from:  ranges.Source = source(adapter, pool.SEND);
+    if (state.discarded) {
+        state.send_length = event.offset + event.data.length::u64;
+        state.send_acked  = state.send_length;
+        ret true;
     }
-    adapter.levels[index].send_length = event.offset + event.data.length::u64;
+    if (!chunks.ensure_span(?state.send, ?from, event.offset, event.data.length)) {
+        ret false;
+    }
+    chunks.write(?state.send, event.offset, event.data.data, event.data.length);
+    state.send_length = event.offset + event.data.length::u64;
     ret true;
 }
 
 fun rollback_crypto(adapter: *Adapter, event: *ProviderEvent) {
-    val index:  usize = level_index(event.level);
-    val offset: usize = event.offset::usize;
-    val base:   usize = level_base(adapter.storage.send_stride, event.level);
-    var i:      usize = 0;
-    for (i < event.data.length) {
-        adapter.storage.send_data[base + offset + i]     = 0;
-        adapter.storage.send_pending[base + offset + i]  = false;
-        adapter.storage.send_acked[base + offset + i]    = false;
-        adapter.storage.send_inflight[base + offset + i] = 0;
-        i                                                = i + 1;
-    }
-    adapter.levels[index].send_length = event.offset;
+    val state: *LevelState   = ?adapter.levels[level_index(event.level)];
+    var from:  ranges.Source = source(adapter, pool.SEND);
+    # chunks that begin at or above the old end held only the rolled back bytes
+    chunks.release_from(?state.send, ?from,
+        chunks.number_of(event.offset + pool.CHUNK::u64 - 1));
+    state.send_length = event.offset;
 }
 
 pub fun complete_event(adapter: *Adapter, token: EventToken, accepted: bool) Result {
     if (!event_matches(adapter, token)) { ret failed(ERROR_TOKEN); }
     val event: ProviderEvent = adapter.event;
+    # bytes with no storage yet wait, and next_event offers the event again
     if (accepted && event.kind == EVENT_CRYPTO && !append_crypto(adapter, ?event)) {
-        ret failed(ERROR_BUFFER);
+        adapter.event_deferred = true;
+        var blocked: Result = failed(ERROR_STORAGE);
+        blocked.status = STATUS_BLOCKED;
+        ret blocked;
     }
     var completed: bool = false;
     if (tls_bound(adapter)) {
@@ -1997,6 +1987,7 @@ pub fun complete_event(adapter: *Adapter, token: EventToken, accepted: bool) Res
         ret provider_failed(PROVIDER_BINDING_EVENT);
     }
     adapter.event_active     = false;
+    adapter.event_deferred   = false;
     adapter.event_generation = next_generation(adapter.event_generation);
     if (!accepted) {
         adapter.closing = true;
@@ -2034,6 +2025,38 @@ fun claim_attempt(adapter: *Adapter) usize {
     ret adapter.storage.attempt_capacity;
 }
 
+# the end of the live attempt at `level` covering `offset`, or `offset`
+fun inflight_end(adapter: *Adapter, level: Level, offset: u64) u64 {
+    var i: usize = 0;
+    for (i < adapter.storage.attempt_capacity) {
+        val attempt: *Attempt = ?adapter.storage.attempts[i];
+        if (attempt.state != ATTEMPT_FREE && attempt.level == level &&
+            attempt.length > 0 && attempt.offset <= offset &&
+            offset < attempt.offset + attempt.length::u64) {
+            ret attempt.offset + attempt.length::u64;
+        }
+        i = i + 1;
+    }
+    ret offset;
+}
+
+# the nearest start of a live attempt at `level` after `offset`, capped at `limit`
+fun next_inflight_start(adapter: *Adapter, level: Level, offset: u64, limit: u64) u64 {
+    var nearest: u64   = limit;
+    var i:       usize = 0;
+    for (i < adapter.storage.attempt_capacity) {
+        val attempt: *Attempt = ?adapter.storage.attempts[i];
+        if (attempt.state != ATTEMPT_FREE && attempt.level == level &&
+            attempt.length > 0 && attempt.offset > offset && attempt.offset < nearest) {
+            nearest = attempt.offset;
+        }
+        i = i + 1;
+    }
+    ret nearest;
+}
+
+# a probe resends any unacknowledged bytes. otherwise only bytes that are
+# neither acknowledged nor in a live attempt are taken
 fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
     probe: bool) Prepared {
     var result: Prepared;
@@ -2044,29 +2067,31 @@ fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
         result.error  = ERROR_STATE;
         ret result;
     }
-    val index: usize = level_index(level);
-    val base:  usize = level_base(adapter.storage.send_stride, level);
-    var begin: usize = 0;
-    for (begin < adapter.levels[index].send_length::usize &&
-        ((!adapter.storage.send_pending[base + begin] &&
-        !(probe && !adapter.storage.send_acked[base + begin])) ||
-        adapter.storage.send_acked[base + begin] ||
-        (!probe && adapter.storage.send_inflight[base + begin] != 0) ||
-        adapter.storage.send_inflight[base + begin] == 0xffff)) {
-        begin = begin + 1;
+    val state:  *LevelState = ?adapter.levels[level_index(level)];
+    val length: u64         = state.send_length;
+    var cursor: u64         = ranges.gap_start(?state.acked, state.send_acked, length);
+    if (!probe) {
+        var hops: usize = 0;
+        for (cursor < length && hops <= adapter.storage.attempt_capacity) {
+            val covered: u64 = inflight_end(adapter, level, cursor);
+            if (covered == cursor) { brk; }
+            cursor = ranges.gap_start(?state.acked, covered, length);
+            hops   = hops + 1;
+        }
     }
-    if (begin == adapter.levels[index].send_length::usize) {
+    if (cursor >= length) {
         result.status = STATUS_EMPTY;
         ret result;
     }
-    var end: usize = begin;
-    for (end < adapter.levels[index].send_length::usize && end - begin < maximum &&
-        (adapter.storage.send_pending[base + end] ||
-        (probe && !adapter.storage.send_acked[base + end])) &&
-        !adapter.storage.send_acked[base + end] &&
-        (probe || adapter.storage.send_inflight[base + end] == 0) &&
-        adapter.storage.send_inflight[base + end] != 0xffff) {
-        end = end + 1;
+    var limit: u64 = ranges.gap_end(?state.acked, cursor, length);
+    if (!probe)                               { limit = next_inflight_start(adapter, level, cursor, limit); }
+    if (limit - cursor > chunks.room(cursor)) { limit = cursor + chunks.room(cursor); }
+    if (limit - cursor > maximum::u64)        { limit = cursor + maximum::u64; }
+    val slot: *chunks.Slot = chunks.find(?state.send, chunks.number_of(cursor));
+    if (slot == nil || limit <= cursor) {
+        result.status = STATUS_ERROR;
+        result.error  = ERROR_STATE;
+        ret result;
     }
     val attempt_index: usize = claim_attempt(adapter);
     if (attempt_index == adapter.storage.attempt_capacity) {
@@ -2076,23 +2101,18 @@ fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
     }
     val attempt: *Attempt = ?adapter.storage.attempts[attempt_index];
     attempt.generation = next_generation(attempt.generation);
-    attempt.offset     = begin::u64;
-    attempt.length     = end - begin;
+    attempt.offset     = cursor;
+    attempt.length     = (limit - cursor)::usize;
+    attempt.chunk      = slot.ref;
     attempt.level      = level;
     attempt.state      = ATTEMPT_PREPARED;
-    var i: usize = begin;
-    for (i < end) {
-        adapter.storage.send_inflight[base + i] =
-            adapter.storage.send_inflight[base + i] + 1;
-        i = i + 1;
-    }
-    result.status = STATUS_OK;
-    result.token  = AttemptToken{source: adapter.config.source, index: attempt_index,
+    result.status      = STATUS_OK;
+    result.token       = AttemptToken{source: adapter.config.source, index: attempt_index,
         generation: attempt.generation};
     result.level  = level;
-    result.offset = begin::u64;
-    result.data   = View{data: ?adapter.storage.send_data[base + begin],
-        length: end - begin};
+    result.offset = cursor;
+    result.data   = View{data: ?slot.data[(cursor % pool.CHUNK::u64)::usize],
+        length: attempt.length};
     ret result;
 }
 
@@ -2115,44 +2135,50 @@ fun attempt_for(adapter: *Adapter, token: AttemptToken) *Attempt {
     ret attempt;
 }
 
-fun release_attempt(adapter: *Adapter, attempt: *Attempt, pending: bool, acked: bool) {
-    val base: usize = level_base(adapter.storage.send_stride, attempt.level);
-    var i:    usize = attempt.offset::usize;
-    val end:  usize = i + attempt.length;
-    for (i < end) {
-        if (adapter.storage.send_inflight[base + i] > 0) {
-            adapter.storage.send_inflight[base + i] =
-                adapter.storage.send_inflight[base + i] - 1;
-        }
-        if (acked) {
-            adapter.storage.send_acked[base + i]   = true;
-            adapter.storage.send_pending[base + i] = false;
-        }
-        or (pending && !adapter.storage.send_acked[base + i]) {
-            adapter.storage.send_pending[base + i] = true;
-        }
-        i = i + 1;
+# frees an attempt, settling the chunk a published one retained. acknowledged
+# bytes above the acknowledged prefix are recorded, and a refused record only
+# means they are sent again
+fun release_attempt(adapter: *Adapter, attempt: *Attempt, acked: bool) {
+    val state: *LevelState = ?adapter.levels[level_index(attempt.level)];
+    if (attempt.state == ATTEMPT_PUBLISHED && attempt.length > 0) {
+        pool.settle(adapter.storage.chunks, attempt.chunk);
     }
+    var start: u64 = attempt.offset;
+    val end:   u64 = attempt.offset + attempt.length::u64;
+    if (start < state.send_acked) { start = state.send_acked; }
     attempt.state      = ATTEMPT_FREE;
     attempt.generation = next_generation(attempt.generation);
+    if (!acked || start >= end) { ret; }
+    var from: ranges.Source = source(adapter, pool.SEND);
+    ranges.insert(?state.acked, start, end, ?from);
+    var prefix: u64 = ranges.covered_from(?state.acked, state.send_acked);
+    if (prefix > state.send_length) { prefix = state.send_length; }
+    state.send_acked = prefix;
+    ranges.drop_prefix(?state.acked, prefix, ?from);
+    chunks.release_consumed(?state.send, ?from, prefix, prefix == state.send_length);
 }
 
 pub fun cancel_prepared(adapter: *Adapter, token: AttemptToken) Result {
     val attempt: *Attempt = attempt_for(adapter, token);
     if (attempt == nil || attempt.state != ATTEMPT_PREPARED) { ret failed(ERROR_TOKEN); }
-    release_attempt(adapter, attempt, true, false);
+    release_attempt(adapter, attempt, false);
     ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
 pub fun publish(adapter: *Adapter, token: AttemptToken) Result {
     val attempt: *Attempt = attempt_for(adapter, token);
     if (attempt == nil || attempt.state != ATTEMPT_PREPARED) { ret failed(ERROR_TOKEN); }
-    val base: usize = level_base(adapter.storage.send_stride, attempt.level);
-    var i:    usize = attempt.offset::usize;
-    val end:  usize = i + attempt.length;
-    for (i < end) {
-        adapter.storage.send_pending[base + i] = false;
-        i                                      = i + 1;
+    # bytes acknowledged since prepare are dropped. the rest keep their chunk,
+    # which is not released while any of its bytes lie above the prefix
+    val acked: u64 = adapter.levels[level_index(attempt.level)].send_acked;
+    if (attempt.offset < acked) {
+        var covered: u64 = acked - attempt.offset;
+        if (covered > attempt.length::u64) { covered = attempt.length::u64; }
+        attempt.offset = attempt.offset + covered;
+        attempt.length = attempt.length - covered::usize;
+    }
+    if (attempt.length > 0 && !pool.retain(adapter.storage.chunks, attempt.chunk)) {
+        attempt.length = 0;
     }
     attempt.state = ATTEMPT_PUBLISHED;
     ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
@@ -2164,39 +2190,43 @@ pub fun on_terminal(adapter: *Adapter, token: AttemptToken, terminal: u8) Result
         (terminal != TERMINAL_ACKED && terminal != TERMINAL_LOST)) {
         ret failed(ERROR_TOKEN);
     }
-    release_attempt(adapter, attempt, terminal == TERMINAL_LOST,
-        terminal == TERMINAL_ACKED);
+    release_attempt(adapter, attempt, terminal == TERMINAL_ACKED);
     ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
+# drops everything a level holds, settling what its live attempts retained
 fun clear_level(adapter: *Adapter, level: Level) {
-    val index:        usize = level_index(level);
-    val receive_base: usize = level_base(adapter.storage.receive_stride, level);
-    val send_base:    usize = level_base(adapter.storage.send_stride, level);
-    memory.raw_zero(?adapter.storage.receive_data[receive_base],
-        adapter.storage.receive_stride);
-    memory.raw_zero(?adapter.storage.receive_present[receive_base],
-        adapter.storage.receive_stride);
-    memory.raw_zero(?adapter.storage.send_data[send_base],
-        adapter.storage.send_stride);
-    memory.raw_zero(?adapter.storage.send_pending[send_base],
-        adapter.storage.send_stride);
-    memory.raw_zero(?adapter.storage.send_acked[send_base],
-        adapter.storage.send_stride);
-    memory.raw_zero(?adapter.storage.send_inflight[send_base],
-        adapter.storage.send_stride * 2);
-    var state: LevelState;
-    adapter.levels[index] = state;
     var i: usize = 0;
     for (i < adapter.storage.attempt_capacity) {
-        if (adapter.storage.attempts[i].state != ATTEMPT_FREE &&
-            adapter.storage.attempts[i].level == level) {
-            adapter.storage.attempts[i].state      = ATTEMPT_FREE;
-            adapter.storage.attempts[i].generation =
-                next_generation(adapter.storage.attempts[i].generation);
+        val attempt: *Attempt = ?adapter.storage.attempts[i];
+        if (attempt.state != ATTEMPT_FREE && attempt.level == level) {
+            if (attempt.state == ATTEMPT_PUBLISHED && attempt.length > 0) {
+                pool.settle(adapter.storage.chunks, attempt.chunk);
+            }
+            attempt.state      = ATTEMPT_FREE;
+            attempt.generation = next_generation(attempt.generation);
         }
         i = i + 1;
     }
+    release_level(adapter, level_index(level));
+}
+
+# releases a level's crypto storage once its keys are gone (rfc 9001 4.9).
+# its offsets stay, so nothing at the level can be taken again
+pub fun discard(adapter: *Adapter, level: Level) Result {
+    if (!adapter_valid(adapter) || adapter.transition_active ||
+        adapter.core_lease != 0 || (level != INITIAL && level != HANDSHAKE)) {
+        ret failed(ERROR_STATE);
+    }
+    val index:      usize = level_index(level);
+    val contiguous: u64   = adapter.levels[index].receive_contiguous;
+    val length:     u64   = adapter.levels[index].send_length;
+    clear_level(adapter, level);
+    adapter.levels[index].receive_contiguous = contiguous;
+    adapter.levels[index].send_length        = length;
+    adapter.levels[index].send_acked         = length;
+    adapter.levels[index].discarded          = true;
+    ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
 pub fun restart(adapter: *Adapter, reason: u8, version: u32, now_ns: u64) Result {
@@ -2331,12 +2361,7 @@ pub fun destroy(adapter: *Adapter) bool {
     adapter.tls_client = nil;
     adapter.tls_server = nil;
     adapter.tls_role   = 0;
-    memory.raw_zero(adapter.storage.receive_data, adapter.storage.receive_length);
-    memory.raw_zero(adapter.storage.receive_present, adapter.storage.receive_length);
-    memory.raw_zero(adapter.storage.send_data, adapter.storage.send_length);
-    memory.raw_zero(adapter.storage.send_pending, adapter.storage.send_length);
-    memory.raw_zero(adapter.storage.send_acked, adapter.storage.send_length);
-    memory.raw_zero(adapter.storage.send_inflight, adapter.storage.send_length * 2);
+    release_levels(adapter);
     adapter.initialized = false;
     adapter.destroyed   = true;
     adapter.core_lease  = 0;
@@ -2454,6 +2479,13 @@ pub fun on_version_negotiation_scoped(adapter: *Adapter, source: u64,
     version: u32, now_ns: u64) Result {
     if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
     val result: Result = on_version_negotiation(adapter, version, now_ns);
+    leave_core_scope(adapter, source);
+    ret result;
+}
+
+pub fun discard_scoped(adapter: *Adapter, source: u64, level: Level) Result {
+    if (!enter_core_scope(adapter, source)) { ret failed(ERROR_STATE); }
+    val result: Result = discard(adapter, level);
     leave_core_scope(adapter, source);
     ret result;
 }

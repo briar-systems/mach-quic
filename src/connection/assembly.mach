@@ -37,9 +37,9 @@ use std.types.bool.true;
 use std.types.size.usize;
 
 # the exact capacities required of caller-owned public and secret backing
-pub val MAX_UDP_PAYLOAD:              usize = 1500;
-pub val CRYPTO_LENGTH:                usize = 16384;
-pub val CRYPTO_STRIDE:                usize = 4096;
+pub val MAX_UDP_PAYLOAD: usize = 1500;
+# crypto bytes a level may carry, each level holding at most one chunk
+pub val CRYPTO_PER_LEVEL:             usize = 4096;
 pub val H3_CRITICAL_STREAMS_PER_PEER: usize = 3;
 pub val H3_REQUEST_STREAMS:           usize = 8;
 pub val STREAM_CAPACITY:              usize = 16;
@@ -186,12 +186,6 @@ pub rec Storage {
     send_token:               [TOKEN_CAPACITY]u8;
     retry_token:              [TOKEN_CAPACITY]u8;
     retry_pseudo:             [1024]u8;
-    crypto_receive:           [CRYPTO_LENGTH]u8;
-    crypto_receive_present:   [CRYPTO_LENGTH]bool;
-    crypto_send:              [CRYPTO_LENGTH]u8;
-    crypto_send_pending:      [CRYPTO_LENGTH]bool;
-    crypto_send_acked:        [CRYPTO_LENGTH]bool;
-    crypto_send_inflight:     [CRYPTO_LENGTH]u16;
     crypto_attempts:          [8]handshake_api.Attempt;
     local_cids:               [CONNECTION_ID_CAPACITY]cid_api.Entry;
     peer_cids:                [CONNECTION_ID_CAPACITY]cid_api.Entry;
@@ -432,20 +426,6 @@ fun public_core_storage(storage: *Storage) core_api.Storage {
     };
 }
 
-fun public_handshake_storage(storage: *Storage) handshake_api.Storage {
-    ret handshake_api.Storage{
-        receive_data:    ?storage.crypto_receive[0],
-        receive_present: ?storage.crypto_receive_present[0],
-        receive_length:  CRYPTO_LENGTH, receive_stride: CRYPTO_STRIDE,
-        send_data:       ?storage.crypto_send[0],
-        send_pending:    ?storage.crypto_send_pending[0],
-        send_acked:      ?storage.crypto_send_acked[0],
-        send_inflight:   ?storage.crypto_send_inflight[0],
-        send_length:     CRYPTO_LENGTH, send_stride: CRYPTO_STRIDE,
-        attempts:        ?storage.crypto_attempts[0], attempt_capacity: 8
-    };
-}
-
 fun public_cid_storage(storage: *Storage) cid_api.Storage {
     ret cid_api.Storage{local: ?storage.local_cids[0],
         local_capacity: CONNECTION_ID_CAPACITY, peer: ?storage.peer_cids[0],
@@ -557,9 +537,16 @@ fun storage_ranges_valid(c: *Connection, config: *Config, storage: *Storage,
 # filled chunk at each end, and a spill each for its chunk list and its ranges
 val SPILLS_PER_STREAM: usize = 2;
 
+# each of the four crypto levels holds its bytes and a range spill
+val CRYPTO_CHUNKS: usize = 4 * 2;
+
+fun chunks_for(bytes: u64) usize {
+    ret ((bytes + pool.CHUNK::u64 - 1) / pool.CHUNK::u64)::usize;
+}
+
 fun chunk_budget(window: u64) usize {
-    val chunks: usize = ((window + pool.CHUNK::u64 - 1) / pool.CHUNK::u64)::usize;
-    ret STREAM_CAPACITY * (chunks + 1 + SPILLS_PER_STREAM);
+    ret STREAM_CAPACITY * (chunks_for(window) + 1 + SPILLS_PER_STREAM) +
+        CRYPTO_CHUNKS * chunks_for(CRYPTO_PER_LEVEL::u64);
 }
 
 fun backing_lease_valid(c: *Connection) bool {
@@ -703,11 +690,12 @@ pub fun encode_parameters(config: *Config, role: transport_api.Role,
 }
 
 fun crypto_storage(c: *Connection) handshake_api.Storage {
-    ret public_handshake_storage(c.storage);
+    ret handshake_api.Storage{attempts: ?c.storage.crypto_attempts[0],
+        attempt_capacity: 8, chunks: c.chunks, account: ?c.account};
 }
 
 fun crypto_config(config: *Config) handshake_api.Config {
-    ret handshake_api.Config{source: config.source, max_crypto_per_level: 4096,
+    ret handshake_api.Config{source: config.source, max_crypto_per_level: CRYPTO_PER_LEVEL,
         max_event_data: 4096, max_peer_identity: 4096};
 }
 
