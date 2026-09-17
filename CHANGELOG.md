@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- A stream no longer counts bytes as delivered that were never sent (#136). A send reserved for an earlier offset range was published after acknowledgements had reclaimed those ring slots and new bytes had been written into them. Its bookkeeping then claimed the new lap, which was never sent and was later marked acknowledged. hedge saw 64 KiB transfers stall with gaps on 4096-byte boundaries. A published send now keeps only the offsets that are still live.
+
 ## [0.9.2] - 2026-09-16
 
 ### Fixed

@@ -1180,6 +1180,16 @@ pub fun publish(manager: *Manager, prepared: Prepared) OperationResult {
         ret operation_error(ERROR_TOKEN);
     }
     if (attempt.kind == SEND_STREAM) {
+        # bytes acknowledged and reclaimed while this attempt was reserved no
+        # longer own their ring slots, which may already hold the next lap.
+        # the attempt keeps only the offsets that are still live, and an
+        # in-flight count keeps those from being reclaimed until it settles
+        if (attempt.offset < stream.send_base) {
+            var reclaimed: u64 = stream.send_base - attempt.offset;
+            if (reclaimed > attempt.length::u64) { reclaimed = attempt.length::u64; }
+            attempt.offset = attempt.offset + reclaimed;
+            attempt.length = attempt.length - reclaimed::usize;
+        }
         var i: usize = 0;
         for (i < attempt.length) {
             val offset:   u64   = attempt.offset + i::u64;
