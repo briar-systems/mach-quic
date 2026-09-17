@@ -521,10 +521,9 @@ account on the source and refuses an engine holding any other lease with
 `supply.TLS`, bounded by `Config.tls_budget` (64 KiB by default). The source
 must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes, and
 declare exactly `supply.LANES` (3) lanes, as `supply.pool_config` does. The
-account supplies one budget per quic lane, and a source with more lanes would
-read past them. From mach-std 5.4.0 the count is read through
-`buffers.source_lanes`, so a host that wraps a `Source` must forward its
-`fn_lanes`. A wrapper that does not reports 0 lanes and its connections are
+account supplies one budget per quic lane, so init refuses any other count,
+read through `buffers.source_lanes`. A host that wraps a `Source` must forward
+its `fn_lanes`. A wrapper that does not reports 0 lanes and its connections are
 refused.
 When tls finds no memory it consumes nothing. The connection stops polling
 it until the source wakes the account's handle, and the caller passes that
@@ -533,7 +532,7 @@ handshake has handed everything over, the adapter moves tls's established
 core out of the engine and the engine holds no memory.
 
 Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 4,464 bytes and `Connection` at 9,768,
+records are `assembly.Storage` at 4,464 bytes and `Connection` at 9,776,
 which includes tls's established core. On a live connection that has gone
 idle, an established connection with no streams holds no chunks at all, and
 tls holds nothing on its lane. With the six H3 control streams open and drained, it
