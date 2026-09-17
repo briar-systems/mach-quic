@@ -184,8 +184,6 @@ pub rec Storage {
     path_challenges:          [4]path_api.Challenge;
     path_responses:           [4]path_api.Response;
     path_sends:               [8]path_api.SendReservation;
-    stream_values:            [STREAM_CAPACITY]stream_api.Stream;
-    stream_attempts:          [STREAM_ATTEMPT_CAPACITY]stream_api.Attempt;
     datagram_send_entries:    [DATAGRAM_CAPACITY]datagram_api.Entry;
     datagram_receive_entries: [DATAGRAM_CAPACITY]datagram_api.Entry;
     datagram_send_bytes:      [DATAGRAM_CAPACITY * DATAGRAM_STRIDE]u8;
@@ -455,9 +453,9 @@ fun public_path_storage(storage: *Storage) path_api.Storage {
 }
 
 fun public_stream_storage(c: *Connection) stream_api.Storage {
-    ret stream_api.Storage{streams: ?c.storage.stream_values[0],
+    ret stream_api.Storage{streams: nil,
         stream_capacity:   STREAM_CAPACITY,
-        attempts:          ?c.storage.stream_attempts[0],
+        attempts:          nil,
         attempt_capacity:  STREAM_ATTEMPT_CAPACITY,
         chunks:            c.chunks, account: ?c.account,
         send_buffer_limit: STREAM_STRIDE};
@@ -552,9 +550,11 @@ fun storage_ranges_valid(c: *Connection, config: *Config, storage: *Storage,
 # filled chunk at each end, and a spill each for its chunk list and its ranges
 val SPILLS_PER_STREAM: usize = 2;
 
-# chunks the core holds against the send direction: the handshake block, the
-# owner table and one packet history per space
-val CORE_BLOCKS: usize = 1 + 1 + 3;
+# chunks held against the send direction besides stream and crypto bytes: the
+# handshake block, the owner table, one packet history per space, the stream
+# records and the stream attempts
+val CORE_BLOCKS: usize = 1 + 1 + 3 +
+    (STREAM_CAPACITY + stream_api.RECORDS_PER_BLOCK - 1) / stream_api.RECORDS_PER_BLOCK + 1;
 
 # packets a space tracks, within one chunk and no more than the recovery
 # events a call can report

@@ -549,12 +549,8 @@ fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
     ranges[1] = ownership.array(storage.sends::*u8, storage.send_capacity,
         $size_of(SendSlot), ownership.ZERO_FORBIDDEN);
     ranges[2] = ownership.record[stream_api.Manager](streams);
-    ranges[3] = ownership.array(streams.storage.streams::*u8,
-        streams.storage.stream_capacity, $size_of(stream_api.Stream),
-        ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(streams.storage.attempts::*u8,
-        streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
-        ownership.ZERO_FORBIDDEN);
+    ranges[3] = stream_api.lent_records(streams.storage);
+    ranges[4] = stream_api.lent_attempts(streams.storage);
     ranges[5] = ownership.record[datagram_api.Queue](datagrams);
     ranges[6] = ownership.array(datagrams.storage.send_entries::*u8,
         datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
@@ -594,12 +590,8 @@ fun borrowed_all_disjoint[T](driver: *Driver[T], borrowed: *ownership.Range,
         driver.storage.send_capacity, $size_of(SendSlot),
         ownership.ZERO_FORBIDDEN);
     ranges[2] = ownership.record[stream_api.Manager](driver.streams);
-    ranges[3] = ownership.array(driver.streams.storage.streams::*u8,
-        driver.streams.storage.stream_capacity, $size_of(stream_api.Stream),
-        ownership.ZERO_FORBIDDEN);
-    ranges[4] = ownership.array(driver.streams.storage.attempts::*u8,
-        driver.streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
-        ownership.ZERO_FORBIDDEN);
+    ranges[3] = stream_api.lent_records(driver.streams.storage);
+    ranges[4] = stream_api.lent_attempts(driver.streams.storage);
     ranges[5] = ownership.record[datagram_api.Queue](driver.datagrams);
     ranges[6] = ownership.array(driver.datagrams.storage.send_entries::*u8,
         driver.datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
@@ -714,13 +706,7 @@ fun source_scope(scope: *cancel.Scope, owner: *cancel.Scope) bool {
 }
 
 fun stream_storage_drained(manager: *stream_api.Manager) bool {
-    if (manager.active_attempts != 0) { ret false; }
-    var i: usize = 0;
-    for (i < manager.storage.attempt_capacity) {
-        if (manager.storage.attempts[i].state != 0) { ret false; }
-        i = i + 1;
-    }
-    ret true;
+    ret stream_api.attempts_drained(manager);
 }
 
 fun update_now[T](driver: *Driver[T], now_ns: u64) bool {

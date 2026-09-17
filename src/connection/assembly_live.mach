@@ -16,6 +16,7 @@ use path_api:   quic.path.path;
 use ack_api:    quic.recovery.ack;
 use quic.storage.limited;
 use quic.storage.pool;
+use stream_api: quic.stream.stream;
 use quic.transport;
 use quic.transport.binding;
 
@@ -125,6 +126,7 @@ fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
         secret_storage_delegate.secret_context, data, count, bytes, alignment);
 }
 
+# marks a stream attempt as escaped, which keeps the rollback from reclaiming
 rec RollbackProbe {
     attempt_state: *u8;
     calls:         usize;
@@ -1039,7 +1041,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     }
 
     var rollback_probe: RollbackProbe;
-    rollback_probe.attempt_state = ?dialer_storage.stream_attempts[0].state;
+    rollback_probe.attempt_state = (?dialer.streams.active_attempts)::*u8;
     rollback_probe.armed         = true;
     var rollback_entropy_source: secret.Entropy = secret.Entropy{
         context: (?rollback_probe)::ptr, secret_context: nil,
@@ -1078,7 +1080,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !dialer_storage.leased || !dialer_secret_storage.leased ||
         dialer_storage.source != rollback_config.source ||
         dialer_secret_storage.source != rollback_config.source ||
-        dialer_storage.stream_attempts[0].state != 1 ||
+        dialer.streams.active_attempts != 1 ||
         dialer.handshake_block.data == nil) { ret 240; }
     val repeated: assembly.InitResult = assembly.init_client(?dialer,
         ?rollback_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
@@ -1100,7 +1102,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         dialer_secret_storage.generation != retained_secret_generation) {
         ret 241;
     }
-    dialer_storage.stream_attempts[0].state = 0;
+    dialer.streams.active_attempts = 0;
     # a connection torn down before its handshake gives the block back
     if (!assembly.release_closed(?dialer) || !assembly.reusable(?dialer) ||
         dialer.handshake_block.data != nil || dialer.account.open ||
@@ -1975,8 +1977,9 @@ fun lossy_transfer(loss: u64, seed: u64) i32 {
     if (finished != 10) { ret 24; }
     if (lossy.dropped == 0 || listener.streams.receive_storage_refusals != 0 ||
         listener.core.refused_packets != 0) { ret 25; }
-    # once the last acknowledgements land, neither side holds a chunk: crypto
-    # levels are discarded or drained, and every stream byte is delivered
+    # once the last acknowledgements land, each side holds only the records of
+    # its ten open streams: crypto levels are discarded or drained, every
+    # stream byte is delivered, and nothing is in flight
     lossy.loss = 0;
     rounds     = 0;
     for (rounds < 64) {
@@ -1988,8 +1991,10 @@ fun lossy_transfer(loss: u64, seed: u64) i32 {
         if (!fire_due(?dialer, clock) || !fire_due(?listener, clock)) { ret 27; }
         rounds = rounds + 1;
     }
-    if (dialer.account.used[0] != 0 || dialer.account.used[1] != 0 ||
-        listener.account.used[0] != 0 || listener.account.used[1] != 0) {
+    val records: usize = (10 + stream_api.RECORDS_PER_BLOCK - 1) / stream_api.RECORDS_PER_BLOCK;
+    if (dialer.account.used[0] != records || dialer.account.used[1] != 0 ||
+        listener.account.used[0] != records || listener.account.used[1] != 0 ||
+        dialer.core.owners != nil || listener.streams.attempt_block.data != nil) {
         ret 28;
     }
     ret 0;

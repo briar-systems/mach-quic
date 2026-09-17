@@ -819,3 +819,90 @@ test "quic.stream.simulated: a reused chunk is untouched by the stream that rele
         records[b.handle.index].send_base != 0) { ret 8; }
     ret 0;
 }
+
+# a manager whose records and attempts come from their own small pool
+fun demand_manager(memory: *limited.Limited, chunks: *pool.Pool,
+    account: *pool.Account, send: usize, manager: *stream.Manager) bool {
+    var policy: pool.Config = pool.default_config(64);
+    policy.trap_misuse = false;
+    if (!limited.make(memory, 1 << 22) ||
+        !pool.make(chunks, limited.allocator_of(memory), policy) ||
+        !pool.open_account(chunks, account, 7, send, 16, 0)) { ret false; }
+    var limits: stream.Config = config(41, 16, 1 << 16);
+    limits.role = stream.ROLE_SERVER;
+    ret stream.initialize(manager, limits, stream.Storage{
+        streams: nil, stream_capacity: 16, attempts: nil, attempt_capacity: 32,
+        chunks:  chunks, account: account, send_buffer_limit: 4096
+    });
+}
+
+test "quic.stream.simulated: records and attempts are held only while in use" {
+    var memory:  limited.Limited;
+    var chunks:  pool.Pool;
+    var account: pool.Account;
+    var manager: stream.Manager;
+    if (!demand_manager(?memory, ?chunks, ?account, 16, ?manager) ||
+        account.used[0] != 0) { ret 1; }
+    # seven streams span two record chunks
+    var handles: [7]stream.Handle;
+    var i:       usize = 0;
+    for (i < 7) {
+        val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+        if (opened.status != stream.STATUS_OK) { ret 2; }
+        handles[i] = opened.handle;
+        i          = i + 1;
+    }
+    if (account.used[0] != 2 || manager.active_streams != 7) { ret 3; }
+    var data: [4]u8 = [4]u8{1, 2, 3, 4};
+    if (stream.write(?manager, handles[6], ?data[0], 4).count != 4 ||
+        account.used[0] != 3) { ret 4; }
+    # an attempt takes the attempt chunk, which goes back when it settles
+    val prepared: stream.Prepared = stream.prepare(?manager, handles[6], 4, false);
+    if (!prepared.ok || account.used[0] != 4 ||
+        stream.publish(?manager, prepared).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, prepared.token, stream.TERMINAL_ACKED).status !=
+        stream.STATUS_OK || manager.attempt_block.data != nil || account.used[0] != 2) { ret 5; }
+    # the settled token stays stale after its chunk is taken again
+    val again: stream.Prepared = stream.prepare(?manager, handles[5], 4, false);
+    if (again.status != stream.STATUS_EMPTY ||
+        stream.on_terminal(?manager, prepared.token, stream.TERMINAL_ACKED).status !=
+        stream.STATUS_STALE) { ret 6; }
+    # releasing the stream alone in the second chunk gives that chunk back
+    if (stream.finish(?manager, handles[6]).status != stream.STATUS_OK) { ret 7; }
+    val fin: stream.Prepared = stream.prepare(?manager, handles[6], 4, false);
+    if (!fin.ok || !fin.fin || stream.publish(?manager, fin).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, fin.token, stream.TERMINAL_ACKED).status !=
+        stream.STATUS_OK) { ret 8; }
+    if (stream.cancel_receive(?manager, handles[6], 0).status != stream.STATUS_OK) { ret 9; }
+    val stop: stream.Prepared = stream.prepare(?manager, handles[6], 4, false);
+    if (!stop.ok || stream.publish(?manager, stop).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, stop.token, stream.TERMINAL_ACKED).status !=
+        stream.STATUS_OK || stream.receive_reset(?manager, handles[6].id, 0, 0).error !=
+        stream.ERROR_NONE) { ret 10; }
+    val stale: stream.Handle = handles[6];
+    if (stream.release(?manager, handles[6]).status != stream.STATUS_OK ||
+        account.used[0] != 1 || manager.record_blocks[1].data != nil) { ret 11; }
+    # a new stream reuses the index under a new generation
+    val reopened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    if (reopened.status != stream.STATUS_OK || reopened.handle.index != 6 ||
+        account.used[0] != 2 ||
+        stream.write(?manager, stale, ?data[0], 4).status != stream.STATUS_ERROR) { ret 12; }
+    ret 0;
+}
+
+test "quic.stream.simulated: a peer stream with no record chunk is refused unchanged" {
+    var memory:  limited.Limited;
+    var chunks:  pool.Pool;
+    var account: pool.Account;
+    var manager: stream.Manager;
+    if (!demand_manager(?memory, ?chunks, ?account, 1, ?manager)) { ret 1; }
+    # the one send chunk holds six records, so a frame opening seven is refused
+    var data:    [1]u8                = [1]u8{9};
+    val refused: stream.ReceiveResult = stream.receive_stream(?manager, 24, 0, ?data[0], 1, false);
+    if (refused.ok || refused.error != stream.ERROR_STORAGE || manager.active_streams != 0 ||
+        manager.peer_bidirectional_opened != 0 || manager.receive_committed != 0 ||
+        manager.receive_storage_refusals != 1 || account.used[0] != 0) { ret 2; }
+    val opened: stream.ReceiveResult = stream.receive_stream(?manager, 20, 0, ?data[0], 1, false);
+    if (!opened.ok || manager.active_streams != 6 || account.used[0] != 1) { ret 3; }
+    ret 0;
+}
