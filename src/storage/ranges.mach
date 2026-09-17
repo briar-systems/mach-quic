@@ -42,11 +42,10 @@ pub val STATUS_ERROR:   Status = 4;
 pub def Source: supply.Source;
 
 pub rec RangeSet {
-    inline:     [INLINE]Interval;
-    spill:      supply.Chunk;
-    spill_data: *Interval;
-    count:      usize;
-    cap:        usize;
+    inline: [INLINE]Interval;
+    spill:  supply.Chunk;
+    count:  usize;
+    cap:    usize;
 }
 
 # an empty set holding at most `cap` intervals. a cap above what one spill
@@ -68,11 +67,15 @@ pub fun empty(set: *RangeSet) bool {
 }
 
 pub fun spilled(set: *RangeSet) bool {
-    ret set.spill_data != nil;
+    ret set.spill.data != nil;
+}
+
+fun spill_of(set: *RangeSet) *Interval {
+    ret set.spill.data::*Interval;
 }
 
 fun items(set: *RangeSet) *Interval {
-    if (set.spill_data != nil) { ret set.spill_data; }
+    if (set.spill.data != nil) { ret spill_of(set); }
     ret ?set.inline[0];
 }
 
@@ -114,26 +117,24 @@ fun locate_start(set: *RangeSet, offset: u64, from: usize) usize {
 # makes room for `needed` intervals, spilling when the inline array is too small
 fun ensure(set: *RangeSet, needed: usize, source: *Source) Status {
     if (needed > set.cap)                          { ret STATUS_FULL; }
-    if (needed <= INLINE || set.spill_data != nil) { ret STATUS_OK; }
+    if (needed <= INLINE || set.spill.data != nil) { ret STATUS_OK; }
     if (source == nil)                             { ret STATUS_ERROR; }
     val got: supply.Taken = supply.take(source, SPILL_CAPACITY * $size_of(Interval));
     if (!got.ok) { ret STATUS_BLOCKED; }
     val spill: *Interval = got.chunk.data::*Interval;
     memory.copy[Interval](spill, ?set.inline[0], set.count);
-    set.spill      = got.chunk;
-    set.spill_data = spill;
+    set.spill = got.chunk;
     ret STATUS_OK;
 }
 
 # gives the spill chunk back once the set fits inline with room to spare
 fun shrink(set: *RangeSet, source: *Source) {
-    if (set.spill_data == nil || set.count > INLINE / 2 || source == nil) { ret; }
-    memory.copy[Interval](?set.inline[0], set.spill_data, set.count);
+    if (set.spill.data == nil || set.count > INLINE / 2 || source == nil) { ret; }
+    memory.copy[Interval](?set.inline[0], spill_of(set), set.count);
     if (!supply.give(source, set.spill)) {
-        memory.copy[Interval](set.spill_data, ?set.inline[0], set.count);
+        memory.copy[Interval](spill_of(set), ?set.inline[0], set.count);
         ret;
     }
-    set.spill_data = nil;
     var none: supply.Chunk;
     set.spill = none;
 }

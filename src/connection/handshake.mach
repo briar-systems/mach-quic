@@ -2111,7 +2111,7 @@ fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
         generation: attempt.generation};
     result.level  = level;
     result.offset = cursor;
-    result.data   = View{data: ?slot.data[(cursor % supply.BYTES::u64)::usize],
+    result.data   = View{data: ?slot.chunk.data[(cursor % supply.BYTES::u64)::usize],
         length: attempt.length};
     ret result;
 }

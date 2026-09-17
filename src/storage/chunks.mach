@@ -27,23 +27,20 @@ pub val RESERVE:        usize = 4;
 pub rec Slot {
     number: u64;
     chunk:  supply.Chunk;
-    data:   *u8;
 }
 
 pub rec Chunks {
-    inline:     [INLINE]Slot;
-    spill:      supply.Chunk;
-    spill_data: *Slot;
-    count:      usize;
+    inline: [INLINE]Slot;
+    spill:  supply.Chunk;
+    count:  usize;
 }
 
 # the chunks one span needs, taken before anything else changes so a refusal
 # leaves the buffer as it was
 pub rec Reserved {
-    slots:      [RESERVE]Slot;
-    count:      usize;
-    spill:      supply.Chunk;
-    spill_data: *Slot;
+    slots: [RESERVE]Slot;
+    count: usize;
+    spill: supply.Chunk;
 }
 
 # one whole chunk laid out by its holder, such as state a connection needs
@@ -81,7 +78,7 @@ pub fun room(offset: u64) u64 {
 }
 
 fun items(chunks: *Chunks) *Slot {
-    if (chunks.spill_data != nil) { ret chunks.spill_data; }
+    if (chunks.spill.data != nil) { ret chunks.spill.data::*Slot; }
     ret ?chunks.inline[0];
 }
 
@@ -103,7 +100,7 @@ pub fun count(chunks: *Chunks) usize {
 }
 
 pub fun spilled(chunks: *Chunks) bool {
-    ret chunks.spill_data != nil;
+    ret chunks.spill.data != nil;
 }
 
 # the chunk numbered `number`, or nil
@@ -119,7 +116,7 @@ pub fun find(chunks: *Chunks, number: u64) *Slot {
 pub fun address(chunks: *Chunks, offset: u64) *u8 {
     val slot: *Slot = find(chunks, number_of(offset));
     if (slot == nil) { ret nil; }
-    ret ?slot.data[(offset % supply.BYTES::u64)::usize];
+    ret ?slot.chunk.data[(offset % supply.BYTES::u64)::usize];
 }
 
 # places a slot in order. the caller has made room, spilling first when needed
@@ -143,7 +140,7 @@ pub fun ensure(chunks: *Chunks, from: *ranges.Source, offset: u64) *Slot {
     if (chunks.count >= SPILL_CAPACITY) { ret nil; }
     val got: supply.Taken = supply.take(from, supply.BYTES);
     if (!got.ok) { ret nil; }
-    if (chunks.count >= INLINE && chunks.spill_data == nil) {
+    if (chunks.count >= INLINE && chunks.spill.data == nil) {
         val spilled: supply.Taken = supply.take(from, supply.BYTES);
         if (!spilled.ok) {
             supply.give(from, got.chunk);
@@ -151,10 +148,9 @@ pub fun ensure(chunks: *Chunks, from: *ranges.Source, offset: u64) *Slot {
         }
         val spill: *Slot = spilled.chunk.data::*Slot;
         memory.copy[Slot](spill, ?chunks.inline[0], chunks.count);
-        chunks.spill      = spilled.chunk;
-        chunks.spill_data = spill;
+        chunks.spill = spilled.chunk;
     }
-    ret insert(chunks, Slot{number: number, chunk: got.chunk, data: got.chunk.data});
+    ret insert(chunks, Slot{number: number, chunk: got.chunk});
 }
 
 pub fun cancel(from: *ranges.Source, reserved: *Reserved) {
@@ -163,11 +159,12 @@ pub fun cancel(from: *ranges.Source, reserved: *Reserved) {
         supply.give(from, reserved.slots[i].chunk);
         i = i + 1;
     }
-    if (reserved.spill_data != nil) {
+    if (reserved.spill.data != nil) {
         supply.give(from, reserved.spill);
     }
-    reserved.count      = 0;
-    reserved.spill_data = nil;
+    var none: supply.Chunk;
+    reserved.count = 0;
+    reserved.spill = none;
 }
 
 # takes the chunks of [offset, offset + length) that `chunks` lacks, plus a
@@ -175,8 +172,9 @@ pub fun cancel(from: *ranges.Source, reserved: *Reserved) {
 # for a buffer that does not exist yet
 pub fun reserve(chunks: *Chunks, from: *ranges.Source, offset: u64, length: usize,
     reserved: *Reserved) bool {
-    reserved.count      = 0;
-    reserved.spill_data = nil;
+    var none: supply.Chunk;
+    reserved.count = 0;
+    reserved.spill = none;
     if (length == 0) { ret true; }
     val last:   u64 = number_of(offset + length::u64 - 1);
     var number: u64 = number_of(offset);
@@ -191,9 +189,8 @@ pub fun reserve(chunks: *Chunks, from: *ranges.Source, offset: u64, length: usiz
                 cancel(from, reserved);
                 ret false;
             }
-            reserved.slots[reserved.count] = Slot{number: number, chunk: got.chunk,
-                data: got.chunk.data};
-            reserved.count = reserved.count + 1;
+            reserved.slots[reserved.count] = Slot{number: number, chunk: got.chunk};
+            reserved.count                 = reserved.count + 1;
         }
         number = number + 1;
     }
@@ -201,7 +198,7 @@ pub fun reserve(chunks: *Chunks, from: *ranges.Source, offset: u64, length: usiz
     var spilled: bool  = false;
     if (chunks != nil) {
         held    = chunks.count;
-        spilled = chunks.spill_data != nil;
+        spilled = chunks.spill.data != nil;
     }
     if (held + reserved.count > SPILL_CAPACITY) {
         cancel(from, reserved);
@@ -213,25 +210,24 @@ pub fun reserve(chunks: *Chunks, from: *ranges.Source, offset: u64, length: usiz
             cancel(from, reserved);
             ret false;
         }
-        reserved.spill      = got.chunk;
-        reserved.spill_data = got.chunk.data::*Slot;
+        reserved.spill = got.chunk;
     }
     ret true;
 }
 
 pub fun commit(chunks: *Chunks, reserved: *Reserved) {
-    if (reserved.spill_data != nil) {
-        memory.copy[Slot](reserved.spill_data, ?chunks.inline[0], chunks.count);
-        chunks.spill      = reserved.spill;
-        chunks.spill_data = reserved.spill_data;
+    if (reserved.spill.data != nil) {
+        memory.copy[Slot](reserved.spill.data::*Slot, ?chunks.inline[0], chunks.count);
+        chunks.spill = reserved.spill;
     }
     var i: usize = 0;
     for (i < reserved.count) {
         insert(chunks, reserved.slots[i]);
         i = i + 1;
     }
-    reserved.count      = 0;
-    reserved.spill_data = nil;
+    var none: supply.Chunk;
+    reserved.count = 0;
+    reserved.spill = none;
 }
 
 # takes every chunk [offset, offset + length) lacks, or none
@@ -252,7 +248,7 @@ pub fun write(chunks: *Chunks, offset: u64, input: *u8, length: usize) {
         val start: usize = (at % supply.BYTES::u64)::usize;
         var span:  usize = supply.BYTES - start;
         if (span > length - done) { span = length - done; }
-        memory.copy[u8](?slot.data[start], ?input[done], span);
+        memory.copy[u8](?slot.chunk.data[start], ?input[done], span);
         done = done + span;
     }
 }
@@ -266,7 +262,7 @@ pub fun read(chunks: *Chunks, offset: u64, output: *u8, length: usize) {
         val start: usize = (at % supply.BYTES::u64)::usize;
         var span:  usize = supply.BYTES - start;
         if (span > length - done) { span = length - done; }
-        memory.copy[u8](?output[done], ?slot.data[start], span);
+        memory.copy[u8](?output[done], ?slot.chunk.data[start], span);
         done = done + span;
     }
 }
@@ -288,7 +284,7 @@ pub fun conflicts(chunks: *Chunks, present: *ranges.RangeSet, offset: u64,
             val start: usize = (at % supply.BYTES::u64)::usize;
             var span:  u64   = (supply.BYTES - start)::u64;
             if (span > stop - at) { span = stop - at; }
-            if (!memory.equal[u8](?slot.data[start], ?input[(at - offset)::usize],
+            if (!memory.equal[u8](?slot.chunk.data[start], ?input[(at - offset)::usize],
                 span::usize)) {
                 ret true;
             }
@@ -301,10 +297,13 @@ pub fun conflicts(chunks: *Chunks, present: *ranges.RangeSet, offset: u64,
 
 # gives the spill back once the list fits inline again
 fun shrink(chunks: *Chunks, from: *ranges.Source) {
-    if (chunks.spill_data == nil || chunks.count > INLINE) { ret; }
-    val spill: *Slot = chunks.spill_data;
+    if (chunks.spill.data == nil || chunks.count > INLINE) { ret; }
+    val spill: *Slot = chunks.spill.data::*Slot;
     memory.copy[Slot](?chunks.inline[0], spill, chunks.count);
-    if (supply.give(from, chunks.spill)) { chunks.spill_data = nil; }
+    if (supply.give(from, chunks.spill)) {
+        var none: supply.Chunk;
+        chunks.spill = none;
+    }
 }
 
 # releases, in order, the chunks that lie wholly below `limit` and that nothing

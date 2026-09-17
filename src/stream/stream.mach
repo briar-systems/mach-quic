@@ -7,6 +7,7 @@ use supply: quic.storage.source;
 use quic.wire.varint;
 
 use std.memory;
+use std.print;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -68,7 +69,10 @@ val RANGE_FLOOR:          usize = 32;
 val NO_STREAM: usize = 0xffffffffffffffff;
 
 # records and attempts left unlent are taken from the pool a chunk at a time
-pub val RECORDS_PER_BLOCK:  usize = supply.BYTES / $size_of(Stream);
+pub val RECORDS_PER_BLOCK: usize = supply.BYTES / $size_of(Stream);
+# the six h3 control streams an idle connection keeps open fit in one block.
+# Stream is laid out to hold this, and a test fails when it no longer does
+pub val RECORDS_PACKED:     usize = 6;
 pub val RECORD_BLOCKS:      usize = 8;
 pub val ATTEMPTS_PER_BLOCK: usize = supply.BYTES / $size_of(Attempt);
 
@@ -99,6 +103,8 @@ pub rec Config {
     receive_unidirectional_limit:      u64;
 }
 
+# laid out so RECORDS_PACKED records fit one chunk: flags share one run and
+# nothing repeats a pointer its chunk already holds
 pub rec Stream {
     id:                      u64;
     generation:              u64;
@@ -137,21 +143,21 @@ pub rec Stream {
     stop_acked:              bool;
     stop_inflight:           u8;
     stop_received:           bool;
-    receive_advertised:      u64;
     max_stream_data_pending: bool;
     has_prepared:            bool;
+    # news not yet handed to the owner, and the causes of the last short write
+    ready_bits:         u8;
+    blocked:            u8;
+    receive_advertised: u64;
     # send: the chunks written and not yet acknowledged, and the acknowledged
     # intervals above send_base. receive: the chunks holding unread bytes, and
     # the intervals present above receive_read
     send:    Buffer;
     receive: Buffer;
-    # the ready queue: news not yet handed to the owner, oldest stream first
-    ready_bits: u8;
-    ready_prev: usize;
-    ready_next: usize;
-    # the causes of the last short write, and the list of streams waiting on
+    # the ready queue, oldest stream first, and the list of streams waiting on
     # connection credit or storage, which a single event can release together
-    blocked:      u8;
+    ready_prev:   usize;
+    ready_next:   usize;
     blocked_prev: usize;
     blocked_next: usize;
 }
@@ -1157,7 +1163,7 @@ pub fun write(manager: *Manager, value: Handle, data: *u8, length: usize) WriteR
         val start: usize = (offset % supply.BYTES::u64)::usize;
         var span:  usize = supply.BYTES - start;
         if (span > wanted - written) { span = wanted - written; }
-        memory.copy[u8](?slot.data[start], ?data[written], span);
+        memory.copy[u8](?slot.chunk.data[start], ?data[written], span);
         written = written + span;
     }
     count = written;
@@ -1448,7 +1454,7 @@ pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: b
                 length      = minimum_size(maximum_bytes, (limit - cursor)::usize);
                 kind        = SEND_STREAM;
                 chunk       = slot.chunk.ref;
-                data        = ?slot.data[(cursor % supply.BYTES::u64)::usize];
+                data        = ?slot.chunk.data[(cursor % supply.BYTES::u64)::usize];
                 include_fin = offset + length::u64 == stream.send_write && stream.send_finished &&
                     !stream.fin_acked && stream.fin_inflight < 255 && (stream.fin_pending || probe);
             }
@@ -2518,6 +2524,14 @@ test "quic.stream.stream: authenticated peer limits bind from exact zero once" {
         manager.config.send_peer_bidirectional_limit != 2 ||
         manager.config.send_unidirectional_limit != 4 ||
         apply_peer_limits(?manager, 11, 2, 3, 4, 5, 6).status != STATUS_ERROR) {
+        ret 1;
+    }
+    ret 0;
+}
+
+test "quic.stream: an idle h3 connection's control streams fit one record block" {
+    if (RECORDS_PER_BLOCK < RECORDS_PACKED) {
+        print.eprintln("Stream grew past one chunk / RECORDS_PACKED: an idle h3 connection now holds two record chunks. restore the packing, or lower RECORDS_PACKED and the size guard's idle count deliberately");
         ret 1;
     }
     ret 0;
