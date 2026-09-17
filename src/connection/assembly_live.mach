@@ -228,6 +228,9 @@ fun connection_id(data: *u8, length: usize) packet_api.ConnectionId {
 var handshake_deadline_ns: u64;
 
 # both sides describe the same connection; only the identity fields differ
+# the DATAGRAM frame size both ends advertise, 0 for none
+var datagram_frame_size: usize;
+
 fun connection_config(role: transport.Role) assembly.Config {
     var value: assembly.Config;
     if (role == transport.CLIENT) {
@@ -256,10 +259,11 @@ fun connection_config(role: transport.Role) assembly.Config {
         assembly.H3_CRITICAL_STREAMS_PER_PEER * 2)::u64;
     value.peer_unidirectional_streams =
         assembly.H3_CRITICAL_STREAMS_PER_PEER::u64;
-    value.receive_max_data       = assembly.STREAM_WINDOW::u64;
-    value.receive_stream_data    = assembly.STREAM_STRIDE::u64;
-    value.verification_time_unix = test_credentials.VERIFICATION_TIME;
-    value.peer_validated         = true;
+    value.receive_max_data        = assembly.STREAM_WINDOW::u64;
+    value.receive_stream_data     = assembly.STREAM_STRIDE::u64;
+    value.verification_time_unix  = test_credentials.VERIFICATION_TIME;
+    value.peer_validated          = true;
+    value.max_datagram_frame_size = datagram_frame_size;
     if (handshake_deadline_ns != 0) {
         value.tls_deadline = opt[time.Instant].some{instants.instant(handshake_deadline_ns)};
     }
@@ -1484,6 +1488,46 @@ test "quic.connection.assembly: a client with a zero-length connection id exchan
     val route: assembly.Route = assembly.route_at(?dialer, 0);
     if (!route.active || route.id.length != 0) { ret 40; }
     ret 0;
+}
+
+var datagram_bytes: [1000]u8;
+
+fun datagram_flow() i32 {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val sending:   usize = supply.held(?dialer.account, supply.SEND);
+    val receiving: usize = supply.held(?listener.account, supply.RECEIVE);
+    var i:         usize = 0;
+    for (i < 1000) {
+        datagram_bytes[i] = (i % 241)::u8;
+        i                 = i + 1;
+    }
+    # the payload holds a chunk only from send until its packet is published
+    val sent: transport.DatagramResult = transport.send_datagram[binding.Binding](
+        ?dialer.driver, ?datagram_bytes[0], 1000);
+    if (sent.status != transport.STATUS_OK ||
+        supply.held(?dialer.account, supply.SEND) != sending + 1) { ret 21; }
+    if (pump(?clock, ?moved, 4) != 0)                         { ret refusal(); }
+    if (supply.held(?dialer.account, supply.SEND) != sending) { ret 22; }
+    val got: transport.ReceivedDatagram = transport.next_datagram[binding.Binding](
+        ?listener.driver);
+    if (got.status != transport.STATUS_OK || got.data.length != 1000 ||
+        got.data.data[0] != 0 || got.data.data[999] != datagram_bytes[999] ||
+        supply.held(?listener.account, supply.RECEIVE) != receiving + 1) { ret 23; }
+    if (transport.release_datagram[binding.Binding](?listener.driver,
+        got.token).status != transport.STATUS_OK ||
+        supply.held(?listener.account, supply.RECEIVE) != receiving) { ret 24; }
+    ret 0;
+}
+
+test "quic.connection.assembly: an application datagram holds chunks only while queued" {
+    datagram_frame_size = assembly.DATAGRAM_STRIDE;
+    val flowed: i32 = datagram_flow();
+    datagram_frame_size = 0;
+    ret flowed;
 }
 
 var bulk_bytes: [4096]u8;
