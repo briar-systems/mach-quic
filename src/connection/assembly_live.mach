@@ -1078,7 +1078,8 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !dialer_storage.leased || !dialer_secret_storage.leased ||
         dialer_storage.source != rollback_config.source ||
         dialer_secret_storage.source != rollback_config.source ||
-        dialer_storage.stream_attempts[0].state != 1) { ret 240; }
+        dialer_storage.stream_attempts[0].state != 1 ||
+        dialer.handshake_block.data == nil) { ret 240; }
     val repeated: assembly.InitResult = assembly.init_client(?dialer,
         ?rollback_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?rollback_tls, ?dialer_scope, clock + 1000);
@@ -1100,7 +1101,9 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         ret 241;
     }
     dialer_storage.stream_attempts[0].state = 0;
+    # a connection torn down before its handshake gives the block back
     if (!assembly.release_closed(?dialer) || !assembly.reusable(?dialer) ||
+        dialer.handshake_block.data != nil || dialer.account.open ||
         dialer.storage != nil || dialer.secret_storage != nil ||
         dialer_storage.leased || dialer_storage.source != 0 ||
         dialer_secret_storage.leased || dialer_secret_storage.source != 0 ||
@@ -1343,7 +1346,10 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     val served: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config, ?listener_storage, ?listener_secret_storage, test_chunks(),
         ?listener_tls, ?listener_scope, clock[0]);
-    if (!served.ok || served.core.reason != core.INIT_OK) { ret 11; }
+    # handshake-only state is held until the handshake is confirmed
+    if (!served.ok || served.core.reason != core.INIT_OK ||
+        listener.handshake_block.data == nil ||
+        listener.core.storage.handshake_block != ?listener.handshake_block) { ret 11; }
     var initial: transport.Datagram;
     initial.local          = listener_endpoint();
     initial.peer           = dialer_endpoint();
@@ -1354,6 +1360,12 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     if (transport.receive_datagram[binding.Binding](?listener.driver,
         ?initial).status != transport.STATUS_OK) { ret 12; }
     if (exchange(clock, moved, 24) != 0) { ret refusal(); }
+    if (dialer.handshake_block.data != nil || listener.handshake_block.data != nil ||
+        dialer.core.storage.handshake_block != nil ||
+        listener.core.storage.negotiation.retry_token != nil ||
+        dialer.core.negotiation.storage.retry_pseudo != nil ||
+        dialer.core.peer_parameters.extensions != nil ||
+        listener.core.local_parameters.extensions != nil) { ret 13; }
     ret 0;
 }
 

@@ -46,6 +46,34 @@ pub rec Reserved {
     spill_data: *Slot;
 }
 
+# one whole chunk laid out by its holder, such as state a connection needs
+# only until its handshake is confirmed
+pub rec Block {
+    ref:  pool.Ref;
+    data: *u8;
+}
+
+# takes a zeroed chunk into an empty block
+pub fun take_block(from: *ranges.Source, block: *Block) bool {
+    if (block.data != nil) { ret false; }
+    val got: pool.Acquired = pool.acquire(from.pool, from.account, from.direction);
+    if (got.status != pool.STATUS_OK) { ret false; }
+    memory.raw_zero(got.data, pool.CHUNK);
+    block.ref  = got.ref;
+    block.data = got.data;
+    ret true;
+}
+
+# wipes and gives back a held block. an empty block is left as it is
+pub fun give_block(from: *ranges.Source, block: *Block) {
+    if (block.data == nil) { ret; }
+    memory.raw_zero(block.data, pool.CHUNK);
+    if (pool.release(from.pool, from.account, from.direction,
+        block.ref) == pool.ERROR_NONE) {
+        block.data = nil;
+    }
+}
+
 pub fun number_of(offset: u64) u64 {
     ret offset >> SHIFT;
 }

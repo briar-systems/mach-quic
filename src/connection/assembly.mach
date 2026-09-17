@@ -18,7 +18,9 @@ use quic.packet.packet;
 use path_api: quic.path.path;
 use ack_api:  quic.recovery.ack;
 use quic.recovery.recovery;
+use chunks_api: quic.storage.chunks;
 use quic.storage.pool;
+use quic.storage.ranges;
 use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
 use transport_api: quic.transport;
@@ -164,7 +166,6 @@ pub fun default_config(source: u64, local: ip.Endpoint,
 pub rec Storage {
     sends:                    [SEND_CAPACITY]transport_api.SendSlot;
     supported_versions:       [2]u32;
-    local_parameters:         [PARAMETER_CAPACITY]u8;
     receive_header:           [MAX_UDP_PAYLOAD]u8;
     receive_decoded:          [MAX_UDP_PAYLOAD]u8;
     send_plaintext:           [MAX_UDP_PAYLOAD]u8;
@@ -178,14 +179,8 @@ pub rec Storage {
     ack_handshake:            [32]ack_api.Range;
     ack_application:          [32]ack_api.Range;
     owners:                   [OWNER_CAPACITY]core_api.Owner;
-    peer_extensions:          [16]transport_parameters.Parameter;
-    peer_extension_bytes:     [PARAMETER_CAPACITY]u8;
-    local_extensions:         [16]transport_parameters.Parameter;
-    local_extension_bytes:    [PARAMETER_CAPACITY]u8;
     received_token:           [TOKEN_CAPACITY]u8;
     send_token:               [TOKEN_CAPACITY]u8;
-    retry_token:              [TOKEN_CAPACITY]u8;
-    retry_pseudo:             [1024]u8;
     crypto_attempts:          [8]handshake_api.Attempt;
     local_cids:               [CONNECTION_ID_CAPACITY]cid_api.Entry;
     peer_cids:                [CONNECTION_ID_CAPACITY]cid_api.Entry;
@@ -226,8 +221,10 @@ pub rec Connection {
     storage:        *Storage;
     secret_storage: *SecretStorage;
     # stream bytes come from the caller's pool, counted against this account
-    chunks:                    *pool.Pool;
-    account:                   pool.Account;
+    chunks:  *pool.Pool;
+    account: pool.Account;
+    # handshake-only state, held until the core confirms the handshake
+    handshake_block:           chunks_api.Block;
     storage_generation:        u64;
     secret_storage_generation: u64;
     local_parameter_length:    usize;
@@ -381,7 +378,32 @@ fun next_generation(value: u64) u64 {
     ret next;
 }
 
-fun public_core_storage(storage: *Storage) core_api.Storage {
+# the handshake block's layout, one pool chunk the core releases once the
+# handshake is confirmed
+val EXTENSION_CAPACITY:       usize = 16;
+val RETRY_PSEUDO_CAPACITY:    usize = 1024;
+val LOCAL_PARAMETERS_AT:      usize = 0;
+val LOCAL_EXTENSION_BYTES_AT: usize = PARAMETER_CAPACITY;
+val PEER_EXTENSION_BYTES_AT:  usize = 2 * PARAMETER_CAPACITY;
+val RETRY_TOKEN_AT:           usize = 3 * PARAMETER_CAPACITY;
+val RETRY_PSEUDO_AT:          usize = RETRY_TOKEN_AT + TOKEN_CAPACITY;
+val LOCAL_EXTENSIONS_AT:      usize = RETRY_PSEUDO_AT + RETRY_PSEUDO_CAPACITY;
+val PEER_EXTENSIONS_AT:       usize = LOCAL_EXTENSIONS_AT +
+    EXTENSION_CAPACITY * $size_of(transport_parameters.Parameter);
+val HANDSHAKE_BLOCK_END: usize = PEER_EXTENSIONS_AT +
+    EXTENSION_CAPACITY * $size_of(transport_parameters.Parameter);
+
+fun handshake_source(c: *Connection) ranges.Source {
+    ret ranges.Source{pool: c.chunks, account: ?c.account, direction: pool.SEND};
+}
+
+fun local_parameter_bytes(c: *Connection) *u8 {
+    ret ?c.handshake_block.data[LOCAL_PARAMETERS_AT];
+}
+
+fun public_core_storage(c: *Connection) core_api.Storage {
+    val storage: *Storage = c.storage;
+    val block:   *u8      = c.handshake_block.data;
     ret core_api.Storage{
         receive_header:           ?storage.receive_header[0],
         receive_header_capacity:  MAX_UDP_PAYLOAD,
@@ -407,22 +429,25 @@ fun public_core_storage(storage: *Storage) core_api.Storage {
             capacity: 32},
         ack_application: ack_api.SpaceStorage{ranges: ?storage.ack_application[0],
             capacity: 32},
-        owners:                        ?storage.owners[0], owner_capacity: OWNER_CAPACITY,
-        peer_extensions:               ?storage.peer_extensions[0], peer_extension_capacity: 16,
-        peer_extension_bytes:          ?storage.peer_extension_bytes[0],
-        peer_extension_byte_capacity:  PARAMETER_CAPACITY,
-        local_extensions:              ?storage.local_extensions[0],
-        local_extension_capacity:      16,
-        local_extension_bytes:         ?storage.local_extension_bytes[0],
+        owners: ?storage.owners[0], owner_capacity: OWNER_CAPACITY,
+        peer_extensions: (?block[PEER_EXTENSIONS_AT])::*transport_parameters.Parameter,
+        peer_extension_capacity:      EXTENSION_CAPACITY,
+        peer_extension_bytes:         ?block[PEER_EXTENSION_BYTES_AT],
+        peer_extension_byte_capacity: PARAMETER_CAPACITY,
+        local_extensions: (?block[LOCAL_EXTENSIONS_AT])::*transport_parameters.Parameter,
+        local_extension_capacity:      EXTENSION_CAPACITY,
+        local_extension_bytes:         ?block[LOCAL_EXTENSION_BYTES_AT],
         local_extension_byte_capacity: PARAMETER_CAPACITY,
         received_token:                ?storage.received_token[0],
         received_token_capacity:       TOKEN_CAPACITY,
         send_token:                    ?storage.send_token[0], send_token_capacity: TOKEN_CAPACITY,
         negotiation:                   negotiation.Storage{
-            retry_token:          ?storage.retry_token[0],
+            retry_token:          ?block[RETRY_TOKEN_AT],
             retry_token_capacity: TOKEN_CAPACITY,
-            retry_pseudo:         ?storage.retry_pseudo[0], retry_pseudo_capacity: 1024
-        }
+            retry_pseudo:         ?block[RETRY_PSEUDO_AT], retry_pseudo_capacity: RETRY_PSEUDO_CAPACITY
+        },
+        handshake_block:  ?c.handshake_block,
+        handshake_source: handshake_source(c)
     };
 }
 
@@ -537,6 +562,9 @@ fun storage_ranges_valid(c: *Connection, config: *Config, storage: *Storage,
 # filled chunk at each end, and a spill each for its chunk list and its ranges
 val SPILLS_PER_STREAM: usize = 2;
 
+# the handshake block counts against the send direction
+val HANDSHAKE_BLOCKS: usize = 1;
+
 # each of the four crypto levels holds its bytes and a range spill
 val CRYPTO_CHUNKS: usize = 4 * 2;
 
@@ -567,9 +595,16 @@ fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
     # the reservation is admission: a pool that cannot back it refuses the
     # connection before anything else is leased
     if (!pool.open_account(chunks, ?c.account, config.source,
-        chunk_budget(STREAM_STRIDE::u64), chunk_budget(config.receive_stream_data),
+        chunk_budget(STREAM_STRIDE::u64) + HANDSHAKE_BLOCKS,
+        chunk_budget(config.receive_stream_data),
         config.chunk_reserve)) { ret false; }
-    c.chunks                    = chunks;
+    c.chunks = chunks;
+    var from: ranges.Source = handshake_source(c);
+    if (!chunks_api.take_block(?from, ?c.handshake_block)) {
+        pool.close_account(chunks, ?c.account);
+        c.chunks = nil;
+        ret false;
+    }
     storage.generation          = next_generation(storage.generation);
     secret_storage.generation   = next_generation(secret_storage.generation);
     storage.source              = config.source;
@@ -585,8 +620,11 @@ fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
 }
 
 fun release_backing(c: *Connection) bool {
-    if (!backing_lease_valid(c))                                     { ret false; }
-    if (c.account.open && !pool.close_account(c.chunks, ?c.account)) { ret false; }
+    if (!backing_lease_valid(c)) { ret false; }
+    var from: ranges.Source = handshake_source(c);
+    chunks_api.give_block(?from, ?c.handshake_block);
+    if (c.handshake_block.data != nil ||
+        (c.account.open && !pool.close_account(c.chunks, ?c.account))) { ret false; }
     c.chunks                    = nil;
     c.storage.source            = 0;
     c.storage.leased            = false;
@@ -718,7 +756,7 @@ fun server_tls_configuration(config: *Config) tls_server_api.Config {
 }
 
 fun core_storage(c: *Connection) core_api.Storage {
-    ret public_core_storage(c.storage);
+    ret public_core_storage(c);
 }
 
 fun secret_storage(c: *Connection) core_api.SecretStorage {
@@ -769,7 +807,7 @@ fun core_configuration(c: *Connection, config: *Config,
     value.server_name = core_api.View{data: config.server_name,
         length: config.server_name_length};
     value.local_transport_parameters = core_api.View{
-        data: ?c.storage.local_parameters[0], length: c.local_parameter_length
+        data: local_parameter_bytes(c), length: c.local_parameter_length
     };
     value.max_udp_payload      = config.max_udp_payload;
     value.max_idle_timeout_ns  = config.max_idle_timeout_ms * 1000000;
@@ -829,7 +867,7 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
     scope: *cancel.Scope, now_ns: u64) InitResult {
     if (!scope_provider_disjoint(c, scope)) { ret staged(STAGE_STORAGE); }
     val encoded: transport_parameters.EncodeResult = encode_parameters(config,
-        role, ?c.storage.local_parameters[0], PARAMETER_CAPACITY);
+        role, local_parameter_bytes(c), PARAMETER_CAPACITY);
     if (!encoded.ok) { ret staged(STAGE_PARAMETERS); }
     c.local_parameter_length = encoded.count;
     var value: InitResult;
@@ -1088,6 +1126,12 @@ pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
         scope, now_ns);
     if (!result.ok) { ret failed(c, result); }
     ret result;
+}
+
+test "quic.connection.assembly: the handshake block fits one pool chunk" {
+    if (HANDSHAKE_BLOCK_END > pool.CHUNK ||
+        LOCAL_EXTENSIONS_AT % $align_of(transport_parameters.Parameter) != 0) { ret 1; }
+    ret 0;
 }
 
 test "quic.connection.assembly: production profile encodes bounded H3 limits" {
