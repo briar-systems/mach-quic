@@ -496,13 +496,20 @@ on its implementation criteria with that one left explicitly undemonstrated.
 
 `connection.assembly` builds a connection and every manager it owns from one
 `Config`. `Connection` is the small secret-welded control record. The caller
-separately owns a public `Storage` whose fixed arrays contain every public
-backing buffer, plus a secret-welded `SecretStorage` whose fixed arrays contain
-the two secret plaintext buffers. Their types enforce every required capacity.
-Both records remain at fixed addresses until release succeeds, and their fresh
-`source` and `leased` headers must be clear on first use. The consumer also
-supplies identities, endpoints, limits, an initialized `mach-tls` engine, and a
-cancellation scope to `init_client` or `init_server`.
+separately owns a public `Storage` holding the connection's fixed state, a
+`std.memory.buffers.Source` for everything taken on demand, and a per-pump
+scratch pair: a public `Scratch` with the per-call packet and event buffers,
+and a secret-welded `SecretScratch` with the two secret plaintext buffers. One
+pair serves every connection on a pump. A connection binds it at init and
+lends it to the core around each call. A call that finds the pair in use,
+through reentry or from another thread, is refused with `ERROR_STATE` before
+the core runs, and the core leaves no secret byte in the pair when a call
+returns. Their types enforce every required capacity. `Storage` and the pair
+remain at fixed addresses until release succeeds, a fresh `Storage` must have
+clear `source` and `leased` headers, and the pair must outlive every
+connection bound to it. The consumer also supplies identities, endpoints,
+limits, an initialized `mach-tls` engine, and a cancellation scope to
+`init_client` or `init_server`.
 
 The reason this belongs in the library rather than in each consumer is that the
 core requires twelve exact equalities between the encoded local transport
