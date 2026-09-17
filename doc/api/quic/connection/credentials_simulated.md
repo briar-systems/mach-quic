@@ -6,6 +6,14 @@
 pub val VERIFICATION_TIME: i64 = 1800000000
 ```
 
+## fun test_clock
+
+```mach
+pub fun test_clock() *clock.Source;
+```
+
+one clock every test engine reads, frozen inside the test chain's validity
+
 ## val ROOT_LENGTH
 
 ```mach

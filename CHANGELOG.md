@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-17
+
+### Security
+
+- `storage.source.open_connection` and `open`, and so `assembly.init_client` and `init_server`, require a source that declares exactly `supply.LANES` (3) lanes, and now say so (#180). They pass three budgets, and std reads one per declared lane, so a caller's pool with more lanes gave the extra lanes whatever followed the three on the stack as their budgets. A refusal follows once mach-std can report a source's lane count.
+
+### Changed
+
+- **Breaking:** `assembly.Config.verification_time_unix` and the `verification_time_unix` fields of the tls client and server configs are gone. mach-tls 0.8 reads certificate time from `ClientConfig.clock` or `ServerConfig.clock`, which the caller sets when it builds the tls config. The clock is wall time for certificate validity, and quic's deadlines stay on the monotonic `Instant`. The binding checks that the clock record and its context do not overlap connection storage (#183).
+- Dependencies: mach-tls v0.8.1 and mach-crypto v0.13.2 (#183). `assembly.Connection` shrinks from 9,776 to 9,768 bytes, and the tls handshake records grow to 6,424 bytes (client) and 6,224 (server).
+- `mach.toml` declares `mach = "^5.3"`. mach-std 5.3.0 already required mach 5.3, so 0.12.1 needed it too. Its manifest now says so, and mach 5.2 refuses the key.
+
 ## [0.12.1] - 2026-09-17
 
 ### Security

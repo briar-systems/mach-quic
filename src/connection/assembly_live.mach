@@ -345,7 +345,6 @@ fun connection_config(role: transport.Role) assembly.Config {
         assembly.H3_CRITICAL_STREAMS_PER_PEER::u64;
     value.receive_max_data        = assembly.STREAM_WINDOW::u64;
     value.receive_stream_data     = assembly.STREAM_STRIDE::u64;
-    value.verification_time_unix  = test_credentials.VERIFICATION_TIME;
     value.peer_validated          = true;
     value.max_datagram_frame_size = datagram_frame_size;
     if (handshake_deadline_ns != 0) {
@@ -532,6 +531,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     listener_tls_config.entropy                         = ?listener_entropy;
     listener_tls_config.entropy_context_size            = 1;
     listener_tls_config.limits                          = config.production_limits();
+    listener_tls_config.clock                           = test_credentials.test_clock();
     listener_tls_config.limits.max_peer_handshake_bytes = 8192;
     listener_tls_config.limits.max_client_hello_bytes   = 8192;
     listener_tls_config.limits.max_client_flight_bytes  = 8192;
@@ -563,6 +563,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     dialer_tls_config.entropy                         = ?dialer_entropy;
     dialer_tls_config.entropy_context_size            = 1;
     dialer_tls_config.limits                          = config.production_limits();
+    dialer_tls_config.clock                           = test_credentials.test_clock();
     dialer_tls_config.limits.max_peer_handshake_bytes = 8192;
     dialer_tls_config.limits.max_client_hello_bytes   = 8192;
     dialer_tls_config.limits.max_client_flight_bytes  = 8192;
@@ -1294,6 +1295,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     listener_tls_config.entropy                         = ?listener_entropy;
     listener_tls_config.entropy_context_size            = 1;
     listener_tls_config.limits                          = config.production_limits();
+    listener_tls_config.clock                           = test_credentials.test_clock();
     listener_tls_config.limits.max_peer_handshake_bytes = 8192;
     listener_tls_config.limits.max_client_hello_bytes   = 8192;
     listener_tls_config.limits.max_client_flight_bytes  = 8192;
@@ -1325,6 +1327,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     dialer_tls_config.entropy                         = ?dialer_entropy;
     dialer_tls_config.entropy_context_size            = 1;
     dialer_tls_config.limits                          = config.production_limits();
+    dialer_tls_config.clock                           = test_credentials.test_clock();
     dialer_tls_config.limits.max_peer_handshake_bytes = 8192;
     dialer_tls_config.limits.max_client_hello_bytes   = 8192;
     dialer_tls_config.limits.max_client_flight_bytes  = 8192;
@@ -2192,7 +2195,7 @@ test "quic.connection.assembly: a full window survives 10% loss and reordering w
 # live idle connection holds. a failure means that cost moved. decide it
 # deliberately, and update these numbers, the changelog and the readme together
 val GUARD_STORAGE_BYTES:    usize = 4464;
-val GUARD_CONNECTION_BYTES: usize = 9776;
+val GUARD_CONNECTION_BYTES: usize = 9768;
 # established, no streams
 val GUARD_IDLE_CHUNKS: usize = 0;
 # established, the six h3 control streams open and drained: one record block
@@ -2473,8 +2476,8 @@ val GUARD_HANDSHAKE_DIALER_SEND:   usize = 5;
 val GUARD_HANDSHAKE_LISTENER_SEND: usize = 6;
 val GUARD_HANDSHAKE_DIALER_TLS:    usize = 8704;
 val GUARD_HANDSHAKE_LISTENER_TLS:  usize = 18944;
-val GUARD_CLIENT_HANDSHAKE_BYTES:  usize = 6416;
-val GUARD_SERVER_HANDSHAKE_BYTES:  usize = 6216;
+val GUARD_CLIENT_HANDSHAKE_BYTES:  usize = 6424;
+val GUARD_SERVER_HANDSHAKE_BYTES:  usize = 6224;
 
 test "quic.connection.assembly: a handshake costs what was measured" {
     if ($size_of(client.Handshake) != GUARD_CLIENT_HANDSHAKE_BYTES ||
