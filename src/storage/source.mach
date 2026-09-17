@@ -98,14 +98,14 @@ pub fun held(account: *Account, lane: Lane) usize {
     ret (account.used[lane::usize] + BYTES - 1) / BYTES;
 }
 
-# a chunk with room for `bytes`, registering the account for a wake on
-# refusal. it is always a whole BYTES chunk, the unit quic's budgets count, so a
-# source with smaller classes never hands quic a chunk its arithmetic misses
+# a chunk of at least `bytes`, registering the account for a wake on refusal.
+# the source picks the smallest class that fits and charges what it hands out,
+# so budgets, which are bytes, stay exact
 pub fun take(from: *Source, bytes: usize) Taken {
     var taken: Taken;
     if (from.provider == nil || bytes == 0 || bytes > BYTES) { ret taken; }
     val got: buffers.Acquired = buffers.source_acquire(from.provider, from.account,
-        buffers.Request{bytes: BYTES, align: 0, lane: from.lane, secret: false}, true);
+        buffers.Request{bytes: bytes, align: 0, lane: from.lane, secret: false}, true);
     if (!sel got.status.ok) { ret taken; }
     taken.ok    = true;
     taken.chunk = got.chunk;

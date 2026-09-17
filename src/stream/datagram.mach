@@ -839,21 +839,22 @@ test "quic.stream.datagram: payload chunks are held only while a datagram is que
     var account: supply.Account;
     if (!supply.make_test(?fixture, 8) ||
         !supply.open(?fixture.provider, ?account, 5, 1, 1, 0)) { ret 1; }
-    var send_entries:    [2]Entry;
-    var receive_entries: [2]Entry;
+    var send_entries:    [1]Entry;
+    var receive_entries: [1]Entry;
     var queue:           Queue;
     if (!initialize(?queue, Config{source: 13, peer_max_frame_size: 64,
         local_max_frame_size: 64, enabled: true}, Storage{
-        send_entries:         ?send_entries[0], send_capacity: 2, send_stride: 32,
-        receive_entries:      ?receive_entries[0], receive_capacity: 2,
+        send_entries:         ?send_entries[0], send_capacity: 1, send_stride: 32,
+        receive_entries:      ?receive_entries[0], receive_capacity: 1,
         receive_stride:       32, chunks: ?fixture.provider, account: ?account
     })) { ret 2; }
     if (supply.held(?account, supply.SEND) != 0 ||
         supply.held(?account, supply.RECEIVE) != 0) { ret 3; }
     var data: [3]u8 = [3]u8{1, 2, 3};
-    # one chunk per lane: a second datagram waits for the first to leave
+    # a small payload is charged the small chunk it got, and the entry table,
+    # not the budget, caps how many wait
     val first: QueueResult = enqueue(?queue, ?data[0], 3);
-    if (!first.ok || supply.held(?account, supply.SEND) != 1 ||
+    if (!first.ok || account.used[supply.SEND::usize] != supply.SMALL ||
         enqueue(?queue, ?data[0], 3).error != ERROR_CAPACITY ||
         queue.send_count != 1) { ret 4; }
     val prepared: Prepared = prepare(?queue, true);
@@ -863,10 +864,10 @@ test "quic.stream.datagram: payload chunks are held only while a datagram is que
     val empty: QueueResult = enqueue(?queue, nil, 0);
     if (!empty.ok || cancel(?queue, empty.token).status != STATUS_OK ||
         supply.held(?account, supply.SEND) != 0) { ret 6; }
-    # an arriving datagram with no chunk is dropped, as RFC 9221 allows
+    # an arriving datagram with no room is dropped, as RFC 9221 allows
     if (!receive(?queue, ?data[0], 3, 5).ok ||
         receive(?queue, ?data[0], 3, 5).error != ERROR_CAPACITY ||
-        supply.held(?account, supply.RECEIVE) != 1) { ret 7; }
+        account.used[supply.RECEIVE::usize] != supply.SMALL) { ret 7; }
     val delivered: Delivery = next(?queue);
     if (delivered.status != STATUS_OK || delivered.data.data[0] != 1 ||
         release(?queue, delivered.token).status != STATUS_OK ||
@@ -877,6 +878,23 @@ test "quic.stream.datagram: payload chunks are held only while a datagram is que
         finish_close(?queue).status != STATUS_OK ||
         supply.held(?account, supply.SEND) != 0 ||
         supply.held(?account, supply.RECEIVE) != 0) { ret 9; }
+    # so is one whose chunk the budget refuses
+    var starved:         supply.Account;
+    var starved_entries: [1]Entry;
+    var starved_queue:   Queue;
+    if (!supply.open(?fixture.provider, ?starved, 6, 1, 0, 0) ||
+        !initialize(?starved_queue, Config{source: 14, peer_max_frame_size: 64,
+        local_max_frame_size: 64, enabled: true}, Storage{
+        send_entries:         ?send_entries[0], send_capacity: 1, send_stride: 32,
+        receive_entries:      ?starved_entries[0], receive_capacity: 1,
+        receive_stride:       32, chunks: ?fixture.provider, account: ?starved
+    })) { ret 11; }
+    if (receive(?starved_queue, ?data[0], 3, 5).error != ERROR_CAPACITY ||
+        starved_queue.receive_count != 0 ||
+        starved.used[supply.RECEIVE::usize] != 0) { ret 12; }
+    if (begin_close(?starved_queue).status != STATUS_OK ||
+        finish_close(?starved_queue).status != STATUS_OK ||
+        !supply.close(?fixture.provider, ?starved)) { ret 13; }
     if (!supply.close(?fixture.provider, ?account) || !supply.end_test(?fixture)) { ret 10; }
     ret 0;
 }

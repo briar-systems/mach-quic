@@ -157,9 +157,9 @@ whole chunks the account holds on a lane
 pub fun take(from: *Source, bytes: usize) Taken;
 ```
 
-a chunk with room for `bytes`, registering the account for a wake on
-refusal. it is always a whole BYTES chunk, the unit quic's budgets count, so a
-source with smaller classes never hands quic a chunk its arithmetic misses
+a chunk of at least `bytes`, registering the account for a wake on refusal.
+the source picks the smallest class that fits and charges what it hands out,
+so budgets, which are bytes, stay exact
 
 ## fun give
 

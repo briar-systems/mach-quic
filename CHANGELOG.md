@@ -38,7 +38,7 @@
   - `assembly.Connection` grows from 9,168 to 9,776 bytes. It now holds tls's established core, which the adapter moves out of the engine once the handshake has handed everything over, so an established connection holds no tls memory.
 - **Breaking.** `transport.Protocol` gains `storage_ready`, which `transport.storage_ready` calls. A core refused memory retries once it is called (#137).
 - A handshake provider may return `handshake.STATUS_WAITING` from start, ingest or poll when it is refused memory and consumed nothing (#137). The adapter keeps the bytes it could not hand over and stops polling until the connection is woken. It then repeats the same call and feeds every level in order. `core.Snapshot` reports `handshake_waiting` and `handshake_settled`.
-- `supply.take` always takes a whole `supply.BYTES` chunk, so a source with smaller classes cannot hand quic a chunk its budgets miss (#137).
+- A small request, such as a datagram payload or a NEW_TOKEN, gets the smallest class that fits, and the account is charged what it got. Budgets are bytes, so they stay exact, and entry tables cap how many payloads wait (#137).
 
 ### Added
 
