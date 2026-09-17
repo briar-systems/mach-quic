@@ -2548,6 +2548,21 @@ fun receive_protected(core: *Core, secrets: *Secrets,
             contracts.SecretBuffer{data: secrets.storage.receive_plaintext,
             capacity: secrets.storage.receive_plaintext_capacity});
     }
+    # the decrypted bytes leave the shared secret scratch before anything else
+    # can return: a failed open may still have written up to the packet length
+    var plaintext_index: usize = 0;
+    if (opened.error == protection.OK) {
+        for (plaintext_index < opened.written) {
+            core.storage.receive_decoded[plaintext_index] =
+                secrets.storage.receive_plaintext[plaintext_index]:>u8;
+            plaintext_index = plaintext_index + 1;
+        }
+    }
+    var touched: usize = value.length;
+    if (touched > secrets.storage.receive_plaintext_capacity) {
+        touched = secrets.storage.receive_plaintext_capacity;
+    }
+    ct.zeroize(secrets.storage.receive_plaintext, touched);
     if (opened.error == protection.AUTH_FAILED ||
         opened.error == protection.KEYS_DISCARDED) {
         if (level == handshake_api.APPLICATION && opened.error ==
@@ -2571,12 +2586,6 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         protection.respond_to_update(?secrets.application_send,
         opened.generation) != protection.OK) {
         ret fail(core, KEY_UPDATE_ERROR, input.received_at_ns);
-    }
-    var plaintext_index: usize = 0;
-    for (plaintext_index < opened.written) {
-        core.storage.receive_decoded[plaintext_index] =
-            secrets.storage.receive_plaintext[plaintext_index]:>u8;
-        plaintext_index = plaintext_index + 1;
     }
     if (core.state == transport_api.CLOSING) {
         core.close_queued = true;
@@ -3637,15 +3646,9 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.error  = INTERNAL_ERROR;
         ret result;
     }
-    val packet_size:  usize = header.count + plaintext.len + 16;
-    var secret_index: usize = 0;
-    for (secret_index < plaintext.len) {
-        secrets.storage.send_plaintext[secret_index] =
-            core.storage.send_plaintext[secret_index];
-        secret_index = secret_index + 1;
-    }
-    val ack_eliciting: bool = frame.ack_eliciting(value.kind);
-    val in_flight:     bool = ack_eliciting;
+    val packet_size:   usize = header.count + plaintext.len + 16;
+    val ack_eliciting: bool  = frame.ack_eliciting(value.kind);
+    val in_flight:     bool  = ack_eliciting;
     if (ack_eliciting && history.len >= history.capacity) {
         cancel_payload(core, secrets, owner);
         result.status = transport_api.STATUS_BLOCKED;
@@ -3705,6 +3708,14 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         ret result;
     }
     owner.path_send = reserved.token;
+    # the secret plaintext lives only across the seal: the scratch it sits in
+    # is shared with every connection on this pump
+    var secret_index: usize = 0;
+    for (secret_index < plaintext.len) {
+        secrets.storage.send_plaintext[secret_index] =
+            core.storage.send_plaintext[secret_index];
+        secret_index = secret_index + 1;
+    }
     var sealed: protection.Result;
     if (owner.level == handshake_api.APPLICATION) {
         owner.send_generation = secrets.application_send.generation;
@@ -3723,6 +3734,7 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
             len: plaintext.len},
             contracts.Buffer{data: output, capacity: available});
     }
+    ct.zeroize(secrets.storage.send_plaintext, plaintext.len);
     if (sealed.error != protection.OK || sealed.written != packet_size) {
         cancel_payload(core, secrets, owner);
         result.status = transport_api.STATUS_ERROR;
