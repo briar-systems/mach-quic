@@ -13,6 +13,7 @@ use quic.connection.token;
 use quic.crypto.protection;
 use packet_api: quic.packet.packet;
 use path_api:   quic.path.path;
+use ack_api:    quic.recovery.ack;
 use quic.transport;
 use quic.transport.binding;
 
@@ -1688,5 +1689,35 @@ test "quic.connection.assembly: a failed recovery event still settles every owne
         opened.stream).status != transport.STATUS_OK ||
         transport.finish_close[binding.Binding](?listener.driver).status !=
         transport.STATUS_OK) { ret 26; }
+    ret 0;
+}
+
+# a fired ack timer hands the ack to generate. reporting the same expired
+# deadline again would make an owner that re-arms first spin
+test "quic.connection.assembly: a fired ack timer is not reported again" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    if (opened.status != transport.STATUS_OK ||
+        send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        dialer_endpoint(), opened.stream, ?clock) != transport.STATUS_OK) { ret 20; }
+    # one ack-eliciting packet leaves the listener holding a delayed ack
+    val space: *ack_api.Space  = ?listener.core.acknowledgements.spaces[2];
+    val armed: transport.Timer = transport.timer[binding.Binding](?listener.driver);
+    if (!space.ack_pending || !space.ack_deadline_armed || !armed.armed ||
+        armed.deadline_ns != space.ack_deadline_ns) { ret 21; }
+    val deadline: u64 = armed.deadline_ns;
+    if (transport.on_timeout[binding.Binding](?listener.driver, armed,
+        deadline).status != transport.STATUS_OK) { ret 22; }
+    val rearmed: transport.Timer = transport.timer[binding.Binding](?listener.driver);
+    if (rearmed.armed && rearmed.deadline_ns <= deadline) { ret 23; }
+    # the ack itself still goes out on the next generate
+    if (hop(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+        listener_endpoint(), deadline) != transport.STATUS_OK ||
+        space.ack_pending) { ret 24; }
     ret 0;
 }

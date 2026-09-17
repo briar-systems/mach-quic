@@ -3708,8 +3708,12 @@ pub fun timer(core: *Core) transport_api.CoreTimer {
         for (space_index_value < 3) {
             val ack_space: ack_api.Space =
                 core.acknowledgements.spaces[space_index_value];
+            # an ack that is already due is generate's work, not a timer's.
+            # reporting its passed deadline again would spin an owner that
+            # re-arms before it generates
             if (!ack_space.discarded && ack_space.ack_pending &&
-                ack_space.ack_deadline_armed) {
+                ack_space.ack_deadline_armed &&
+                ack_space.ack_deadline_ns > core.last_now_ns) {
                 timer_candidate(?armed, ?deadline, ?kind,
                     ack_space.ack_deadline_ns, TIMER_ACK);
             }
