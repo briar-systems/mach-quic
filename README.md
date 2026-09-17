@@ -521,7 +521,10 @@ account on the source and refuses an engine holding any other lease with
 must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes, and
 declare exactly `supply.LANES` (3) lanes, as `supply.pool_config` does. The
 account supplies one budget per quic lane, and a source with more lanes would
-read past them.
+read past them. From mach-std 5.4.0 the count is read through
+`buffers.source_lanes`, so a host that wraps a `Source` must forward its
+`fn_lanes`. A wrapper that does not reports 0 lanes and its connections are
+refused.
 When tls finds no memory it consumes nothing. The connection stops polling
 it until the source wakes the account's handle, and the caller passes that
 wake to `transport.storage_ready`, which retries the same call. Once the
