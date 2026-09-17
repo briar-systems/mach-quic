@@ -1094,6 +1094,15 @@ pub fun release_closed(c: *Connection) bool {
     ret release_backing(c);
 }
 
+# the connection no longer refers to the tls handshake record it was
+# initialized with: the handshake finished and only its established core, held
+# inside `c`, remains. the record may then be initialized for another
+# connection
+pub fun tls_released(c: *Connection) bool {
+    ret c != nil && c.initialized && c.handshake.tls_finished &&
+        c.handshake.tls_client == nil && c.handshake.tls_server == nil;
+}
+
 pub fun reusable(c: *Connection) bool {
     ret c != nil && !c.initialized && c.released &&
         c.storage == nil && c.scratch == nil && c.secret_scratch == nil &&
@@ -1104,7 +1113,7 @@ pub fun reusable(c: *Connection) bool {
 }
 
 # `tls` must have been initialized with tls_lease(c), and is refused at
-# STAGE_HANDSHAKE otherwise. it must outlive the connection
+# STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c)
 pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
     tls: *client.Handshake,
@@ -1142,7 +1151,7 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
 }
 
 # `tls` must have been initialized with tls_lease(c), and is refused at
-# STAGE_HANDSHAKE otherwise. it must outlive the connection
+# STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c)
 pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
     tls: *server.Handshake,

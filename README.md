@@ -540,8 +540,10 @@ acknowledged and on the client until the owner takes it. The scratch pair is pai
 pump, not per connection. During the handshake the dialer holds at most five
 send-lane chunks and 8,704 tls bytes after any call, and the listener six and
 18,944. The caller's `mach-tls` handshake record, 6,416 bytes for a client and
-6,216 for a server, holds nothing once the handshake is finished and can be
-reused.
+6,216 for a server, must stay put until `assembly.tls_released(c)`. From then
+the connection never refers to it again and it may be initialized for another
+connection, so an owner needs one per connection in handshake, not one per
+connection.
 
 The reason this belongs in the library rather than in each consumer is that the
 core requires twelve exact equalities between the encoded local transport
