@@ -13,8 +13,8 @@ use path_api: quic.path.path;
 use ack_api:  quic.recovery.ack;
 use quic.recovery.recovery;
 use quic.storage.chunks;
-use quic.storage.pool;
 use quic.storage.ranges;
+use supply:        quic.storage.source;
 use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
 use transport_api: quic.transport;
@@ -677,7 +677,7 @@ fun lent_owners(storage: *Storage) usize {
 
 fun history_fits(storage: recovery.HistoryStorage) bool {
     ret storage.packets != nil ||
-        storage.capacity * $size_of(recovery.SentPacket) <= pool.CHUNK;
+        storage.capacity * $size_of(recovery.SentPacket) <= supply.BYTES;
 }
 
 # storage taken on demand must fit one chunk and have a source
@@ -687,9 +687,9 @@ fun on_demand_valid(storage: *Storage) bool {
         storage.recovery_handshake.packets == nil ||
         storage.recovery_application.packets == nil;
     if (!demanded) { ret true; }
-    ret storage.chunk_source.pool != nil && storage.chunk_source.account != nil &&
+    ret storage.chunk_source.provider != nil && storage.chunk_source.account != nil &&
         (storage.owners != nil ||
-        storage.owner_capacity * $size_of(Owner) <= pool.CHUNK) &&
+        storage.owner_capacity * $size_of(Owner) <= supply.BYTES) &&
         history_fits(storage.recovery_initial) &&
         history_fits(storage.recovery_handshake) &&
         history_fits(storage.recovery_application);
@@ -703,7 +703,8 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     if (!core_range(core).valid ||
         !secrets_range(secrets).valid ||
         !ownership.record[Config](config).valid ||
-        !ownership.record[Storage](storage).valid ||
+        !ownership.anchored_record[Storage, *u8](?storage.receive_header,
+        $offset_of(Storage, receive_header)).valid ||
         !secret_storage_range(secret_storage).valid ||
         secret_storage.receive_plaintext == nil ||
         secret_storage.send_plaintext == nil ||
@@ -956,7 +957,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         $offset_of(handshake_api.Adapter, config));
     ranges[24] = ownership.record[cid_api.Manager](cids);
     ranges[25] = ownership.record[path_api.Manager](paths);
-    ranges[26] = ownership.record[stream_api.Manager](streams);
+    ranges[26] = stream_api.manager_range(streams);
     ranges[27] = ownership.record[datagram_api.Queue](datagrams);
     val anchored: ownership.Disjointness = ownership.disjointness(?ranges[0], 28);
     if (anchored.kind != ownership.OVERLAP_NONE) {

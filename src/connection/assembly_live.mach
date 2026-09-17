@@ -15,7 +15,7 @@ use packet_api: quic.packet.packet;
 use path_api:   quic.path.path;
 use ack_api:    quic.recovery.ack;
 use quic.storage.limited;
-use quic.storage.pool;
+use supply:     quic.storage.source;
 use stream_api: quic.stream.stream;
 use quic.transport;
 use quic.transport.binding;
@@ -28,6 +28,7 @@ use allocator_testing: std.allocator.testing;
 use std.chrono.time;
 use std.crypto.ct;
 use std.memory;
+use std.memory.buffers;
 use std.net.ip;
 use std.sync.cancel;
 use std.system.os;
@@ -150,16 +151,12 @@ fun rollback_entropy(context: ptr, secret_context: *^u8,
     ret 0;
 }
 
-var chunk_memory: limited.Limited;
-var chunk_pool:   pool.Pool;
+var chunk_pool: supply.TestPool;
 
 # one pool serves every connection a test assembles
-fun test_chunks() *pool.Pool {
-    if (!chunk_pool.valid) {
-        limited.make(?chunk_memory, 1 << 26);
-        pool.make(?chunk_pool, limited.allocator_of(?chunk_memory), pool.default_config(4096));
-    }
-    ret ?chunk_pool;
+fun test_chunks() buffers.Source {
+    if (!supply.test_made(?chunk_pool)) { supply.make_test(?chunk_pool, 4096); }
+    ret chunk_pool.provider;
 }
 
 # a failing exit code is one byte, so the detail lands here and the assertion
@@ -482,8 +479,8 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         len:  dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS)) { ret 6; }
 
-    if (!operation_ok(cancel.make_root(?listener_scope, false, time.Time{sec: 0, nsec: 0})) ||
-        !operation_ok(cancel.make_root(?dialer_scope, false, time.Time{sec: 0, nsec: 0}))) {
+    if (!operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{})) ||
+        !operation_ok(cancel.make_root(?dialer_scope, opt[time.Instant].none{}))) {
         ret 7;
     }
     val core_scope: *cancel.Scope = embedded_scope(
@@ -913,10 +910,8 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         data: contracts.Bytes{data: ?dialer_parameters[0],
         len:  dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS) ||
-        !operation_ok(cancel.make_root(?dialer_scope, false,
-        time.Time{sec: 0, nsec: 0})) ||
-        !operation_ok(cancel.make_root(?listener_scope, false,
-        time.Time{sec: 0, nsec: 0}))) { ret 224; }
+        !operation_ok(cancel.make_root(?dialer_scope, opt[time.Instant].none{})) ||
+        !operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{}))) { ret 224; }
     val redialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls_two, ?dialer_scope,
@@ -989,8 +984,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         data: contracts.Bytes{data: ?listener_parameters[0],
         len:  listener_encoded_two}},
         server.QUIC_TRANSPORT_PARAMETERS) ||
-        !operation_ok(cancel.make_root(?listener_scope, false,
-        time.Time{sec: 0, nsec: 0}))) { ret 235; }
+        !operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{}))) { ret 235; }
     val reserved_two: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config_two, ?listener_storage, ?listener_secret_storage, test_chunks(),
         ?listener_tls_two,
@@ -1064,8 +1058,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         data: contracts.Bytes{data: ?dialer_parameters[0],
         len:  dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS) ||
-        !operation_ok(cancel.make_root(?dialer_scope, false,
-        time.Time{sec: 0, nsec: 0}))) { ret 239; }
+        !operation_ok(cancel.make_root(?dialer_scope, opt[time.Instant].none{}))) { ret 239; }
     val retained: assembly.InitResult = assembly.init_client(?dialer,
         ?rollback_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?rollback_tls, ?dialer_scope, clock + 1000);
@@ -1300,8 +1293,8 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
         data: contracts.Bytes{data: ?dialer_parameters[0],
         len:  dialer_encoded}},
         client.QUIC_TRANSPORT_PARAMETERS)) { ret 5; }
-    if (!operation_ok(cancel.make_root(?listener_scope, false, time.Time{sec: 0, nsec: 0})) ||
-        !operation_ok(cancel.make_root(?dialer_scope, false, time.Time{sec: 0, nsec: 0}))) {
+    if (!operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{})) ||
+        !operation_ok(cancel.make_root(?dialer_scope, opt[time.Instant].none{}))) {
         ret 6;
     }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
@@ -1992,8 +1985,8 @@ fun lossy_transfer(loss: u64, seed: u64) i32 {
         rounds = rounds + 1;
     }
     val records: usize = (10 + stream_api.RECORDS_PER_BLOCK - 1) / stream_api.RECORDS_PER_BLOCK;
-    if (dialer.account.used[0] != records || dialer.account.used[1] != 0 ||
-        listener.account.used[0] != records || listener.account.used[1] != 0 ||
+    if (supply.held(?dialer.account, supply.SEND) != records || supply.held(?dialer.account, supply.RECEIVE) != 0 ||
+        supply.held(?listener.account, supply.SEND) != records || supply.held(?listener.account, supply.RECEIVE) != 0 ||
         dialer.core.owners != nil || listener.streams.attempt_block.data != nil) {
         ret 28;
     }

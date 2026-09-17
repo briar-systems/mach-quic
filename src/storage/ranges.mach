@@ -14,9 +14,10 @@
 #   covered_from:     O(1)
 
 use quic.storage.limited;
-use quic.storage.pool;
+use supply: quic.storage.source;
 
 use std.memory;
+use std.memory.buffers;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -29,7 +30,7 @@ pub rec Interval {
     end:   u64;
 }
 
-pub val SPILL_CAPACITY: usize = pool.CHUNK / 16;
+pub val SPILL_CAPACITY: usize = supply.BYTES / 16;
 
 pub def Status: u8;
 pub val STATUS_OK:      Status = 1;
@@ -38,15 +39,11 @@ pub val STATUS_BLOCKED: Status = 3;
 pub val STATUS_ERROR:   Status = 4;
 
 # where a set's spill chunk comes from and whose budget it counts against
-pub rec Source {
-    pool:      *pool.Pool;
-    account:   *pool.Account;
-    direction: pool.Direction;
-}
+pub def Source: supply.Source;
 
 pub rec RangeSet {
     inline:     [INLINE]Interval;
-    spill:      pool.Ref;
+    spill:      supply.Chunk;
     spill_data: *Interval;
     count:      usize;
     cap:        usize;
@@ -119,12 +116,11 @@ fun ensure(set: *RangeSet, needed: usize, source: *Source) Status {
     if (needed > set.cap)                          { ret STATUS_FULL; }
     if (needed <= INLINE || set.spill_data != nil) { ret STATUS_OK; }
     if (source == nil)                             { ret STATUS_ERROR; }
-    val got: pool.Acquired = pool.acquire(source.pool, source.account, source.direction);
-    if (got.status == pool.STATUS_BLOCKED) { ret STATUS_BLOCKED; }
-    if (got.status != pool.STATUS_OK)      { ret STATUS_ERROR; }
-    val spill: *Interval = got.data::*Interval;
+    val got: supply.Taken = supply.take(source, SPILL_CAPACITY * $size_of(Interval));
+    if (!got.ok) { ret STATUS_BLOCKED; }
+    val spill: *Interval = got.chunk.data::*Interval;
     memory.copy[Interval](spill, ?set.inline[0], set.count);
-    set.spill      = got.ref;
+    set.spill      = got.chunk;
     set.spill_data = spill;
     ret STATUS_OK;
 }
@@ -133,13 +129,13 @@ fun ensure(set: *RangeSet, needed: usize, source: *Source) Status {
 fun shrink(set: *RangeSet, source: *Source) {
     if (set.spill_data == nil || set.count > INLINE / 2 || source == nil) { ret; }
     memory.copy[Interval](?set.inline[0], set.spill_data, set.count);
-    if (pool.release(source.pool, source.account, source.direction, set.spill) !=
-        pool.ERROR_NONE) {
+    if (!supply.give(source, set.spill)) {
         memory.copy[Interval](set.spill_data, ?set.inline[0], set.count);
         ret;
     }
     set.spill_data = nil;
-    set.spill      = pool.Ref{index: 0, generation: 0};
+    var none: supply.Chunk;
+    set.spill = none;
 }
 
 # replaces intervals [first, last) with `replacement_count` new ones
@@ -283,21 +279,33 @@ fun sound(set: *RangeSet) bool {
     ret set.count <= set.cap;
 }
 
-fun test_pool(memory: *limited.Limited, target: *pool.Pool, account: *pool.Account) bool {
-    if (!limited.make(memory, 1 << 20)) { ret false; }
-    var config: pool.Config = pool.default_config(8);
-    config.trap_misuse = false;
-    ret pool.make(target, limited.allocator_of(memory), config) &&
-        pool.open_account(target, account, 1, 4, 4, 0);
+rec Fixture {
+    memory:   limited.Limited;
+    pool:     buffers.Pool;
+    class:    buffers.ClassConfig;
+    provider: supply.Provider;
+    account:  supply.Account;
+}
+
+fun test_pool(fixture: *Fixture) bool {
+    if (!supply.test_pool(?fixture.pool, ?fixture.class, ?fixture.memory, 8)) { ret false; }
+    fixture.provider = buffers.source(?fixture.pool);
+    ret supply.open(?fixture.provider, ?fixture.account, 1, 4, 4, 0);
+}
+
+fun test_done(fixture: *Fixture) bool {
+    val done: bool = supply.close(?fixture.provider, ?fixture.account) &&
+        buffers.destroy(?fixture.pool) && limited.clean(?fixture.memory);
+    limited.dnit(?fixture.memory);
+    ret done;
 }
 
 test "quic.storage.ranges: inserts merge overlaps and neighbours and removes split" {
-    var memory:  limited.Limited;
-    var chunks:  pool.Pool;
-    var account: pool.Account;
-    if (!test_pool(?memory, ?chunks, ?account)) { ret 1; }
-    var source: Source   = Source{pool: ?chunks, account: ?account, direction: pool.RECEIVE};
-    var set:    RangeSet = make(16);
+    var fixture: Fixture;
+    if (!test_pool(?fixture)) { ret 1; }
+    var source: Source = Source{provider: ?fixture.provider, account: ?fixture.account,
+        lane: supply.RECEIVE};
+    var set: RangeSet = make(16);
     if (insert(?set, 10, 20, ?source) != STATUS_OK ||
         insert(?set, 30, 40, ?source) != STATUS_OK ||
         insert(?set, 20, 25, ?source) != STATUS_OK ||
@@ -319,25 +327,22 @@ test "quic.storage.ranges: inserts merge overlaps and neighbours and removes spl
     drop_prefix(?set, 35, ?source);
     if (count(?set) != 1 || at(?set, 0).start != 35 || at(?set, 0).end != 40) { ret 7; }
     clear(?set, ?source);
-    if (!pool.close_account(?chunks, ?account) || !pool.destroy(?chunks) ||
-        !limited.clean(?memory)) { ret 8; }
-    limited.dnit(?memory);
+    if (!test_done(?fixture)) { ret 8; }
     ret 0;
 }
 
 test "quic.storage.ranges: a set spills into a pool chunk and gives it back" {
-    var memory:  limited.Limited;
-    var chunks:  pool.Pool;
-    var account: pool.Account;
-    if (!test_pool(?memory, ?chunks, ?account)) { ret 1; }
-    var source: Source   = Source{pool: ?chunks, account: ?account, direction: pool.RECEIVE};
-    var set:    RangeSet = make(64);
-    var i:      u64      = 0;
+    var fixture: Fixture;
+    if (!test_pool(?fixture)) { ret 1; }
+    var source: Source = Source{provider: ?fixture.provider, account: ?fixture.account,
+        lane: supply.RECEIVE};
+    var set: RangeSet = make(64);
+    var i:   u64      = 0;
     for (i < 40) {
         if (insert(?set, i * 2, i * 2 + 1, ?source) != STATUS_OK) { ret 2; }
         i = i + 1;
     }
-    if (count(?set) != 40 || !spilled(?set) || account.used[1] != 1 || !sound(?set)) { ret 3; }
+    if (count(?set) != 40 || !spilled(?set) || supply.held(?fixture.account, supply.RECEIVE) != 1 || !sound(?set)) { ret 3; }
     # filling the gaps collapses everything and the chunk goes back
     i = 0;
     for (i < 40) {
@@ -353,19 +358,16 @@ test "quic.storage.ranges: a set spills into a pool chunk and gives it back" {
     }
     if (!spilled(?set) || !sound(?set)) { ret 7; }
     drop_prefix(?set, 1000, ?source);
-    if (spilled(?set) || count(?set) != 0 || account.used[1] != 0) { ret 8; }
-    if (!pool.close_account(?chunks, ?account) || !pool.destroy(?chunks) ||
-        !limited.clean(?memory)) { ret 9; }
-    limited.dnit(?memory);
+    if (spilled(?set) || count(?set) != 0 || supply.held(?fixture.account, supply.RECEIVE) != 0) { ret 8; }
+    if (!test_done(?fixture))                                                                    { ret 9; }
     ret 0;
 }
 
 test "quic.storage.ranges: the cap and a refused spill leave the set untouched" {
-    var memory:  limited.Limited;
-    var chunks:  pool.Pool;
-    var account: pool.Account;
-    if (!test_pool(?memory, ?chunks, ?account)) { ret 1; }
-    var source: Source   = Source{pool: ?chunks, account: ?account, direction: pool.RECEIVE};
+    var fixture: Fixture;
+    if (!test_pool(?fixture)) { ret 1; }
+    var source: Source = Source{provider: ?fixture.provider, account: ?fixture.account,
+        lane: supply.RECEIVE};
     var capped: RangeSet = make(3);
     if (insert(?capped, 0, 1, ?source) != STATUS_OK ||
         insert(?capped, 2, 3, ?source) != STATUS_OK ||
@@ -381,9 +383,10 @@ test "quic.storage.ranges: the cap and a refused spill leave the set untouched" 
         remove(?full, 4, 6, ?source) != STATUS_FULL || count(?full) != 2 ||
         at(?full, 0).end != 10) { ret 4; }
     # an account with no receive budget cannot spill
-    var starved: pool.Account;
-    if (!pool.open_account(?chunks, ?starved, 2, 0, 0, 0)) { ret 5; }
-    var poor: Source   = Source{pool: ?chunks, account: ?starved, direction: pool.RECEIVE};
+    var starved: supply.Account;
+    if (!supply.open(?fixture.provider, ?starved, 2, 0, 0, 0)) { ret 5; }
+    var poor: Source = Source{provider: ?fixture.provider, account: ?starved,
+        lane: supply.RECEIVE};
     var wide: RangeSet = make(64);
     var i:    u64      = 0;
     for (i < INLINE::u64) {
@@ -392,8 +395,6 @@ test "quic.storage.ranges: the cap and a refused spill leave the set untouched" 
     }
     if (insert(?wide, 100, 101, ?poor) != STATUS_BLOCKED || count(?wide) != INLINE ||
         spilled(?wide) || !sound(?wide)) { ret 7; }
-    if (!pool.close_account(?chunks, ?starved) || !pool.close_account(?chunks, ?account) ||
-        !pool.destroy(?chunks) || !limited.clean(?memory)) { ret 8; }
-    limited.dnit(?memory);
+    if (!supply.close(?fixture.provider, ?starved) || !test_done(?fixture)) { ret 8; }
     ret 0;
 }

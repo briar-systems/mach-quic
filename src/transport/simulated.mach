@@ -1,6 +1,6 @@
 use quic.connection.ownership;
 use quic.storage.limited;
-use quic.storage.pool;
+use supply:        quic.storage.source;
 use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
 use transport_api: quic.transport;
@@ -9,8 +9,9 @@ use std.chrono.time;
 use io_error:     std.io.error;
 use io_lifecycle: std.io.lifecycle;
 use io_runtime:   std.io.runtime;
-use net_async:    std.net.async;
-use net_types:    std.net.async.types;
+use std.memory.buffers;
+use net_async: std.net.async;
+use net_types: std.net.async.types;
 use std.net.ip;
 use std.net.udp;
 use std.sync.atomic;
@@ -20,6 +21,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.error.err;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 
@@ -56,9 +58,8 @@ rec Core {
 
 rec Fixture {
     stream_records:        [32]stream_api.Stream;
-    memory:                limited.Limited;
-    chunks:                pool.Pool;
-    account:               pool.Account;
+    chunks:                supply.TestPool;
+    account:               supply.Account;
     attempts:              [64]stream_api.Attempt;
     streams:               stream_api.Manager;
     send_entries:          [8]datagram_api.Entry;
@@ -96,7 +97,8 @@ fun stream_config(source: u64, role: u8) stream_api.Config {
 # the protocol answers for its own memory, because a context the driver cannot
 # cast to bytes is the whole reason the entry exists
 fun core_range(core: *Core) ownership.Range {
-    ret ownership.record[Core](core);
+    ret ownership.anchored_record[Core, usize](?core.outbound,
+        $offset_of(Core, outbound));
 }
 
 fun core_outcome(status: u8, error: u64, state: u8) transport_api.CoreResult {
@@ -267,21 +269,19 @@ fun core_timer(core: *Core) transport_api.CoreTimer {
 
 fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     # a fixture made again reuses its record, so its previous pool goes first
-    if (fixture.chunks.valid) {
+    if (supply.test_made(?fixture.chunks)) {
         if ((fixture.account.open &&
-            !pool.close_account(?fixture.chunks, ?fixture.account)) ||
-            !pool.destroy(?fixture.chunks)) { ret false; }
+            !supply.close(?fixture.chunks.provider, ?fixture.account)) ||
+            !supply.end_test(?fixture.chunks)) { ret false; }
     }
-    if ((fixture.memory.a.ctx == nil && !limited.make(?fixture.memory, 1 << 24)) ||
-        !pool.make(?fixture.chunks, limited.allocator_of(?fixture.memory),
-        pool.default_config(512)) ||
-        !pool.open_account(?fixture.chunks, ?fixture.account, source, 256, 256, 0)) {
+    if (!supply.make_test(?fixture.chunks, 512) ||
+        !supply.open(?fixture.chunks.provider, ?fixture.account, source, 256, 256, 0)) {
         ret false;
     }
     val stream_storage: stream_api.Storage = stream_api.Storage{
         streams:  ?fixture.stream_records[0], stream_capacity: 32,
         attempts: ?fixture.attempts[0], attempt_capacity: 64,
-        chunks:   ?fixture.chunks, account: ?fixture.account, send_buffer_limit: 32
+        chunks:   ?fixture.chunks.provider, account: ?fixture.account, send_buffer_limit: 32
     };
     if (!stream_api.initialize(?fixture.streams,
         stream_config(source, role), stream_storage)) { ret false; }
@@ -302,7 +302,7 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     candidate.next_owner       = 1;
     candidate.timer_generation = 1;
     fixture.core               = candidate;
-    if (!operation_ok(cancel.make_root(?fixture.scope, false, time.Time{sec: 0, nsec: 0}))) { ret false; }
+    if (!operation_ok(cancel.make_root(?fixture.scope, opt[time.Instant].none{}))) { ret false; }
     val protocol: transport_api.Protocol[Core] = transport_api.Protocol[Core]{
         context:      ?fixture.core, context_range: core_range,
         receive:      core_receive, timeout: core_timeout,
@@ -506,7 +506,7 @@ test "quic.transport.simulated: malformed generation and scope inputs publish no
     if (generated.status != transport_api.STATUS_OK || generated.token.generation != 1 ||
         generated.count != 5) { ret 3; }
     var unrelated: cancel.Scope;
-    if (!operation_ok(cancel.make_root(?unrelated, false, time.Time{sec: 0, nsec: 0})) ||
+    if (!operation_ok(cancel.make_root(?unrelated, opt[time.Instant].none{})) ||
         transport_api.generate[Core](?fixture.driver, ?unrelated, ?bytes[0], 8, 3, 3).status !=
         transport_api.STATUS_CANCELLED || !operation_ok(cancel.destroy(?unrelated))) { ret 4; }
     if (transport_api.cancel_send[Core](?fixture.driver, generated.token, 4).status !=
@@ -529,8 +529,11 @@ test "quic.transport.simulated: protocol callbacks cannot reenter or mutate driv
     ret 0;
 }
 
+# a driver holds its buffer source, which is secret-welded, so it cannot ride
+# the thread's untyped argument and reaches the worker through this instead
+var race_driver: *transport_api.Driver[Core];
+
 rec CancelRace {
-    driver: *transport_api.Driver[Core];
     go:     *i64;
     result: *i64;
 }
@@ -539,7 +542,7 @@ fun cancel_worker(arg: *u8) {
     val race: *CancelRace = arg::*CancelRace;
     for (atomic.load(race.go) == 0) { atomic.spin_hint(); }
     var result: i64 = 0;
-    if (transport_api.cancel_connection[Core](race.driver)) { result = 1; }
+    if (transport_api.cancel_connection[Core](race_driver)) { result = 1; }
     atomic.store(race.result, result);
 }
 
@@ -553,8 +556,9 @@ test "quic.transport.simulated: send completion and connection cancellation race
     if (generated.status != transport_api.STATUS_OK) { ret 2; }
     var go:        i64        = 0;
     var cancelled: i64        = 0;
-    var race:      CancelRace = CancelRace{driver: ?fixture.driver, go: ?go, result: ?cancelled};
-    var worker:    thread.Thread;
+    var race:      CancelRace = CancelRace{go: ?go, result: ?cancelled};
+    race_driver = ?fixture.driver;
+    var worker: thread.Thread;
     thread.spawn_with(cancel_worker, (?race)::*u8, ?worker);
     if (worker.tid < 0) { ret 3; }
     atomic.store(?go, 1);

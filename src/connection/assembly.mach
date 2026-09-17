@@ -19,8 +19,8 @@ use path_api: quic.path.path;
 use ack_api:  quic.recovery.ack;
 use quic.recovery.recovery;
 use chunks_api: quic.storage.chunks;
-use quic.storage.pool;
 use quic.storage.ranges;
+use supply:        quic.storage.source;
 use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
 use transport_api: quic.transport;
@@ -31,6 +31,7 @@ use tls.client;
 use tls.server;
 
 use std.encoding.binary;
+use std.memory.buffers;
 use std.net.ip;
 use std.sync.cancel;
 use std.types.bool.bool;
@@ -214,9 +215,10 @@ pub rec Connection {
     driver:         transport_api.Driver[binding_api.Binding];
     storage:        *Storage;
     secret_storage: *SecretStorage;
-    # stream bytes come from the caller's pool, counted against this account
-    chunks:  *pool.Pool;
-    account: pool.Account;
+    # every chunk comes from the caller's buffer source, counted against this
+    # connection's account
+    provider: supply.Provider;
+    account:  supply.Account;
     # handshake-only state, held until the core confirms the handshake
     handshake_block:           chunks_api.Block;
     storage_generation:        u64;
@@ -388,7 +390,7 @@ val HANDSHAKE_BLOCK_END: usize = PEER_EXTENSIONS_AT +
     EXTENSION_CAPACITY * $size_of(transport_parameters.Parameter);
 
 fun chunk_source(c: *Connection) ranges.Source {
-    ret ranges.Source{pool: c.chunks, account: ?c.account, direction: pool.SEND};
+    ret ranges.Source{provider: ?c.provider, account: ?c.account, lane: supply.SEND};
 }
 
 fun local_parameter_bytes(c: *Connection) *u8 {
@@ -457,7 +459,7 @@ fun public_stream_storage(c: *Connection) stream_api.Storage {
         stream_capacity:   STREAM_CAPACITY,
         attempts:          nil,
         attempt_capacity:  STREAM_ATTEMPT_CAPACITY,
-        chunks:            c.chunks, account: ?c.account,
+        chunks:            ?c.provider, account: ?c.account,
         send_buffer_limit: STREAM_STRIDE};
 }
 
@@ -564,7 +566,7 @@ val HISTORY_CAPACITY: usize = 32;
 val CRYPTO_CHUNKS: usize = 4 * 2;
 
 fun chunks_for(bytes: u64) usize {
-    ret ((bytes + pool.CHUNK::u64 - 1) / pool.CHUNK::u64)::usize;
+    ret ((bytes + supply.BYTES::u64 - 1) / supply.BYTES::u64)::usize;
 }
 
 fun chunk_budget(window: u64) usize {
@@ -581,23 +583,28 @@ fun backing_lease_valid(c: *Connection) bool {
 }
 
 fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage, chunks: *pool.Pool,
+    secret_storage: *SecretStorage, chunks: buffers.Source,
     scope: *cancel.Scope) bool {
-    if (c == nil || config == nil || chunks == nil || c.storage != nil ||
+    if (c == nil || config == nil || chunks.ctx == nil || c.storage != nil ||
         c.secret_storage != nil || c.account.open ||
         !storage_ranges_valid(c, config, storage, secret_storage, scope) ||
         !capacities_valid(storage, secret_storage)) { ret false; }
     # the reservation is admission: a pool that cannot back it refuses the
     # connection before anything else is leased
-    if (!pool.open_account(chunks, ?c.account, config.source,
+    c.provider = chunks;
+    if (!supply.open(?c.provider, ?c.account, config.source,
         chunk_budget(STREAM_STRIDE::u64) + CORE_BLOCKS,
         chunk_budget(config.receive_stream_data),
-        config.chunk_reserve)) { ret false; }
-    c.chunks = chunks;
+        config.chunk_reserve)) {
+        var no_provider: supply.Provider;
+        c.provider = no_provider;
+        ret false;
+    }
     var from: ranges.Source = chunk_source(c);
     if (!chunks_api.take_block(?from, ?c.handshake_block)) {
-        pool.close_account(chunks, ?c.account);
-        c.chunks = nil;
+        supply.close(?c.provider, ?c.account);
+        var no_provider: supply.Provider;
+        c.provider = no_provider;
         ret false;
     }
     storage.generation          = next_generation(storage.generation);
@@ -621,8 +628,9 @@ fun release_backing(c: *Connection) bool {
     var from: ranges.Source = chunk_source(c);
     chunks_api.give_block(?from, ?c.handshake_block);
     if (c.handshake_block.data != nil ||
-        (c.account.open && !pool.close_account(c.chunks, ?c.account))) { ret false; }
-    c.chunks                    = nil;
+        (c.account.open && !supply.close(?c.provider, ?c.account))) { ret false; }
+    var no_provider: supply.Provider;
+    c.provider                  = no_provider;
     c.storage.source            = 0;
     c.storage.leased            = false;
     c.secret_storage.source     = 0;
@@ -726,7 +734,7 @@ pub fun encode_parameters(config: *Config, role: transport_api.Role,
 
 fun crypto_storage(c: *Connection) handshake_api.Storage {
     ret handshake_api.Storage{attempts: ?c.storage.crypto_attempts[0],
-        attempt_capacity: 8, chunks: c.chunks, account: ?c.account};
+        attempt_capacity: 8, chunks: ?c.provider, account: ?c.account};
 }
 
 fun crypto_config(config: *Config) handshake_api.Config {
@@ -1058,7 +1066,7 @@ pub fun reusable(c: *Connection) bool {
 }
 
 pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage, chunks: *pool.Pool, tls: *client.Client,
+    secret_storage: *SecretStorage, chunks: buffers.Source, tls: *client.Client,
     scope: *cancel.Scope, now_ns: u64) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
@@ -1092,7 +1100,7 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
 }
 
 pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage, chunks: *pool.Pool, tls: *server.Server,
+    secret_storage: *SecretStorage, chunks: buffers.Source, tls: *server.Server,
     scope: *cancel.Scope, now_ns: u64) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
@@ -1126,7 +1134,7 @@ pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
 }
 
 test "quic.connection.assembly: the handshake block fits one pool chunk" {
-    if (HANDSHAKE_BLOCK_END > pool.CHUNK ||
+    if (HANDSHAKE_BLOCK_END > supply.BYTES ||
         LOCAL_EXTENSIONS_AT % $align_of(transport_parameters.Parameter) != 0) { ret 1; }
     ret 0;
 }
