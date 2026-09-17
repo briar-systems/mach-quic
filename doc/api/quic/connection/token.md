@@ -203,7 +203,8 @@ but a reservation's owner still holds it until commit or cancel
 pub rec Config;
 ```
 
-max_replay caps remembered nonces by count, and none is unbounded
+max_replay caps remembered nonces by count. it is required: a peer that can
+present many valid tokens must not be able to grow the store without limit
 
 ## rec Manager
 

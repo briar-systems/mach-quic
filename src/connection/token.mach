@@ -53,6 +53,9 @@ pub val ERROR_CAPACITY: Error = 10;
 pub val ERROR_TOKEN:    Error = 11;
 pub val ERROR_TIME:     Error = 12;
 pub val ERROR_MEMORY:   Error = 13;
+# the replay store is at its bound. the token is refused, never remembered
+# over a live nonce, so replay protection holds under a flood
+pub val ERROR_REPLAY_FULL: Error = 14;
 
 pub def ReplayState: u8;
 pub val REPLAY_FREE:     ReplayState = 0;
@@ -79,12 +82,13 @@ rec ReplayKey {
     key_generation: u64;
 }
 
-# max_replay caps remembered nonces by count, and none is unbounded
+# max_replay caps remembered nonces by count. it is required: a peer that can
+# present many valid tokens must not be able to grow the store without limit
 pub rec Config {
     source:             u64;
     retry_max_age_ns:   u64;
     address_max_age_ns: u64;
-    max_replay:         opt[usize];
+    max_replay:         usize;
 }
 
 pub rec Manager {
@@ -99,6 +103,7 @@ pub rec Manager {
     current_generation:  u64;
     previous_generation: u64;
     reserved:            usize;
+    replay_full:         u64;
     generation:          u64;
     listener_lease:      u64;
     initialized:         bool;
@@ -109,6 +114,7 @@ pub rec Snapshot {
     remembered:  usize;
     reserved:    usize;
     bytes:       usize;
+    replay_full: u64;
     initialized: bool;
     closing:     bool;
 }
@@ -195,7 +201,7 @@ fun physical(manager: *Manager) bool {
 fun config_valid(config: Config) bool {
     if (config.source == 0 || config.retry_max_age_ns == 0 ||
         config.address_max_age_ns == 0) { ret false; }
-    if (sel config.max_replay.some && config.max_replay.some == 0) { ret false; }
+    if (config.max_replay == 0) { ret false; }
     ret true;
 }
 
@@ -471,10 +477,10 @@ fun reserve_replay(manager: *Manager, generation: u64, nonce: u64,
         result.error  = ERROR_REPLAY;
         ret result;
     }
-    if (sel manager.config.max_replay.some &&
-        manager.replay.live >= manager.config.max_replay.some) {
-        result.status = STATUS_BLOCKED;
-        result.error  = ERROR_CAPACITY;
+    if (manager.replay.live >= manager.config.max_replay) {
+        manager.replay_full = manager.replay_full + 1;
+        result.status       = STATUS_BLOCKED;
+        result.error        = ERROR_REPLAY_FULL;
         ret result;
     }
     if (!slots.reserve[ReplaySlot](?manager.replay, manager.backing, 1) ||
@@ -597,9 +603,12 @@ pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
     packet.set_connection_id(?result.claims.retry_source,
         ?input[74], retry_length);
     if (input[4] == PURPOSE_RETRY) {
-        val replay: Result = reserve_replay(manager, key_generation,
+        var replay: Result = reserve_replay(manager, key_generation,
             result.claims.nonce, issued_at_ns + max_age_ns, now_ns);
-        if (replay.status != STATUS_OK) { ret replay; }
+        if (replay.status != STATUS_OK) {
+            replay.claims.purpose = PURPOSE_RETRY;
+            ret replay;
+        }
         result.claims.reservation = replay.claims.reservation;
     }
     ret result;
@@ -693,9 +702,10 @@ pub fun finish_close(manager: *Manager) bool {
 pub fun snapshot(manager: *Manager) Snapshot {
     var value: Snapshot;
     if (!physical(manager) || !manager.initialized) { ret value; }
-    value.remembered = manager.replay.live;
-    value.reserved   = manager.reserved;
-    value.bytes      = slots.bytes[ReplaySlot](?manager.replay) +
+    value.remembered  = manager.replay.live;
+    value.reserved    = manager.reserved;
+    value.replay_full = manager.replay_full;
+    value.bytes       = slots.bytes[ReplaySlot](?manager.replay) +
         index.bytes(?manager.replay_index) + heap.bytes(?manager.expiry);
     value.initialized = manager.initialized;
     value.closing     = manager.closing;
@@ -729,8 +739,8 @@ fun test_config(source: u64, max_replay: usize) Config {
     config.source             = source;
     config.retry_max_age_ns   = 100;
     config.address_max_age_ns = 1000;
-    config.max_replay         = opt[usize].none{};
-    if (max_replay != 0) { config.max_replay = opt[usize].some{max_replay}; }
+    config.max_replay         = 1 << 20;
+    if (max_replay != 0) { config.max_replay = max_replay; }
     ret config;
 }
 
@@ -809,7 +819,7 @@ test "quic.connection.token: invalid configuration and aliases never publish key
     var manager:     Manager;
     val secret:      contracts.SecretBytes = contracts.SecretBytes{data: ?key[0], len: 32};
     var zero_replay: Config                = test_config(303, 0);
-    zero_replay.max_replay = opt[usize].some{0};
+    zero_replay.max_replay = 0;
     if (initialize(?manager, zero_replay, backing, 1, secret) ||
         initialize(?manager, test_config(0, 0), backing, 1, secret) ||
         initialize(?manager, test_config(303, 0), nil, 1, secret) ||
@@ -886,7 +896,8 @@ test "quic.connection.token: expired nonces are forgotten and the replay limit i
     if (!test_retry(?manager, ?encoded[0], 40, 4)) { ret 4; }
     val refused: Result = test_open(?manager, ?encoded[0], 41);
     if (manager.replay.capacity <= 3 || refused.status != STATUS_BLOCKED ||
-        refused.error != ERROR_CAPACITY) { ret 5; }
+        refused.error != ERROR_REPLAY_FULL || refused.claims.purpose != PURPOSE_RETRY ||
+        snapshot(?manager).replay_full != 1) { ret 5; }
     # nonce 1 expires after 110 and nonce 2 after 120
     val admitted: Result = test_open(?manager, ?encoded[0], 115);
     if (admitted.status != STATUS_OK || snapshot(?manager).remembered != 3) { ret 6; }

@@ -371,8 +371,12 @@ charges connection and peer limits before token validation or state allocation.
 Admission peers and charges, remembered Retry nonces, and pending Initials live in
 storage each manager draws from the allocator it was initialized with. It grows
 with what is admitted and is released at close, so nothing is sized for a maximum
-connection count. `max_connections`, `max_connections_per_peer` and `max_replay`
-are optional counts, and an absent limit is unbounded. Peers and nonces are found
+connection count. `max_connections` and `max_connections_per_peer` are optional
+counts, and an absent limit is unbounded. `max_replay` is a required count: at
+the bound a Retry token is refused (the Initial is blocked with
+`token.ERROR_REPLAY_FULL` and nothing is kept) rather than remembered over a live
+nonce, so a flood of valid tokens can neither grow the store nor weaken replay
+protection, and the client retransmits once expiry frees room. Peers and nonces are found
 through a hash index under a random key, so lookups do not scan and a peer cannot
 choose colliding addresses. Handles carry indices and generations rather than
 addresses, because storage moves when it grows. A growth the allocator refuses
