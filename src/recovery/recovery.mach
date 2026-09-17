@@ -232,9 +232,8 @@ pub fun init(initial: HistoryStorage, handshake: HistoryStorage, application: Hi
     recovery.rtt.minimum_ns  = 0 - 1::u64;
     recovery.rtt.smoothed_ns = config.initial_rtt_ns;
     recovery.rtt.variance_ns = config.initial_rtt_ns / 2;
-    if (!valid_config(config) ||
-        initial.packets == nil || handshake.packets == nil || application.packets == nil ||
-        initial.capacity == 0 || handshake.capacity == 0 || application.capacity == 0) {
+    if (!valid_config(config) || !storage_shaped(initial) ||
+        !storage_shaped(handshake) || !storage_shaped(application)) {
         ret recovery;
     }
     recovery.spaces[0].packets  = initial.packets;
@@ -248,6 +247,48 @@ pub fun init(initial: HistoryStorage, handshake: HistoryStorage, application: Hi
     recovery.spaces[2].active   = true;
     recovery.valid              = true;
     ret recovery;
+}
+
+# a space starts with lent storage or with none, to be lent when it sends
+fun storage_shaped(storage: HistoryStorage) bool {
+    ret (storage.packets == nil) == (storage.capacity == 0);
+}
+
+# lends an empty space storage for its history. a space that already has
+# storage, or that was discarded, takes none
+pub fun lend_history(recovery: *Recovery, pn_space: u8, storage: HistoryStorage) bool {
+    val i: usize = index(pn_space);
+    if (recovery == nil || !recovery.valid || i >= 3 || storage.packets == nil ||
+        storage.capacity == 0 || !recovery.spaces[i].active ||
+        recovery.spaces[i].packets != nil || recovery.spaces[i].len != 0) { ret false; }
+    recovery.spaces[i].packets  = storage.packets;
+    recovery.spaces[i].capacity = storage.capacity;
+    ret true;
+}
+
+# takes back the storage of a space that tracks no packets, leaving it with
+# none. a space still tracking packets keeps its storage and gives back none
+pub fun reclaim_history(recovery: *Recovery, pn_space: u8) HistoryStorage {
+    var storage: HistoryStorage;
+    val i:       usize = index(pn_space);
+    if (recovery == nil || !recovery.valid || i >= 3 ||
+        recovery.spaces[i].len != 0 || recovery.spaces[i].packets == nil) { ret storage; }
+    storage.packets             = recovery.spaces[i].packets;
+    storage.capacity            = recovery.spaces[i].capacity;
+    recovery.spaces[i].packets  = nil;
+    recovery.spaces[i].capacity = 0;
+    ret storage;
+}
+
+pub fun has_history(recovery: *Recovery, pn_space: u8) bool {
+    val i: usize = index(pn_space);
+    ret recovery != nil && i < 3 && recovery.spaces[i].packets != nil;
+}
+
+pub fun tracked(recovery: *Recovery, pn_space: u8) usize {
+    val i: usize = index(pn_space);
+    if (recovery == nil || i >= 3) { ret 0; }
+    ret recovery.spaces[i].len;
 }
 
 pub fun update_rtt(recovery: *Recovery, latest_ns: u64, ack_delay_ns: u64, sample_at_ns: u64) bool {
