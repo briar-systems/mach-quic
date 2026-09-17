@@ -7,6 +7,7 @@ use std.chrono.time;
 use io_error:     std.io.error;
 use io_lifecycle: std.io.lifecycle;
 use io_runtime:   std.io.runtime;
+use net_async:    std.net.async;
 use net_types:    std.net.async.types;
 use std.net.ip;
 use std.net.udp;
@@ -16,6 +17,7 @@ use std.sync.thread;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.error.err;
 use std.types.result.res;
 use std.types.size.usize;
 
@@ -740,5 +742,76 @@ test "quic.transport.simulated: native submission refusals name their kind" {
     if (failure.kind != io_error.INVALID || failure.code != 0 ||
         failure.operation != io_error.OP_SEND) { ret 3; }
     if (!close_fixture(?fixture, 2)) { ret 4; }
+    ret 0;
+}
+
+# std 4.0.1 refuses a whole send batch whose packet is malformed, before any
+# native call. the refusal settles the send as failed and nothing else changes
+test "quic.transport.native: a refused native send batch fails only that send" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 112, stream_api.ROLE_CLIENT)) { ret 1; }
+    var runtime:      io_runtime.Runtime;
+    val made_runtime: err[io_error.Error] = io_runtime.make(?runtime, 4);
+    if (sel made_runtime.err) { ret 2; }
+    var network:      net_async.Driver;
+    val made_network: err[io_error.Error] = net_async.make(?network, ?runtime);
+    if (sel made_network.err) { ret 3; }
+    val bound: res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
+    val made:  res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
+    if (sel bound.err) { ret 4; }
+    if (sel made.err)  { ret 4; }
+    var receiver: udp.Socket                       = bound.ok;
+    var sender:   udp.Socket                       = made.ok;
+    val target:   res[ip.Endpoint, io_error.Error] = udp.local_endpoint(?receiver);
+    if (sel target.err) { ret 5; }
+
+    fixture.core.outbound = 1;
+    var output:    [8]u8;
+    val generated: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
+        ?fixture.scope, ?output[0], 8, 1, 9);
+    if (generated.status != transport_api.STATUS_OK) { ret 6; }
+    # the slot's packet claims more bytes than its buffer holds
+    val slot: *transport_api.SendSlot = ?fixture.sends[generated.token.index::usize];
+    slot.packet.peer   = target.ok;
+    slot.packet.length = slot.packet.capacity + 4;
+    val submitted: res[io_runtime.Token, io_error.Error] = transport_api.submit_native[Core](
+        ?fixture.driver, ?network, ?sender, ?fixture.scope, generated.token);
+    if (!(sel submitted.err)) {
+        var completions: [4]io_runtime.Completion;
+        var settled:     bool  = false;
+        var rounds:      usize = 0;
+        for (!settled && rounds < 8) {
+            val waited: res[usize, io_error.Error] = net_async.wait(?network,
+                ?completions[0], 4, 250);
+            if (sel waited.err) { ret 7; }
+            var j: usize = 0;
+            for (j < waited.ok) {
+                if (transport_api.complete_native[Core](?fixture.driver,
+                    ?completions[j], 2).status != transport_api.STATUS_OK) { ret 8; }
+                settled = true;
+                j       = j + 1;
+            }
+            rounds = rounds + 1;
+        }
+        if (!settled) { ret 9; }
+    }
+    val snapshot: transport_api.Snapshot = transport_api.snapshot[Core](?fixture.driver);
+    if (fixture.core.failed != 1 || fixture.core.active_count != 0 ||
+        snapshot.pending_sends != 0 || snapshot.state != transport_api.ACTIVE) { ret 10; }
+    # the connection still sends: the failed datagram is generated again
+    val retried: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
+        ?fixture.scope, ?output[0], 8, 3, 10);
+    if (retried.status != transport_api.STATUS_OK ||
+        transport_api.complete_send[Core](?fixture.driver, retried.token,
+        transport_api.SEND_SENT, retried.count, 4).status != transport_api.STATUS_OK) { ret 11; }
+    udp.socket_close(?sender);
+    udp.socket_close(?receiver);
+    val destroyed: err[io_error.Error] = net_async.destroy(?network);
+    if (sel destroyed.err) { ret 12; }
+    val closed: res[bool, io_error.Error] = io_runtime.close(?runtime);
+    if (sel closed.err) { ret 13; }
+    val released: err[io_error.Error] = io_runtime.destroy(?runtime);
+    if (sel released.err)            { ret 14; }
+    if (!close_fixture(?fixture, 5)) { ret 15; }
     ret 0;
 }
