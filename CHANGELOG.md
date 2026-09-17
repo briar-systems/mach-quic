@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- `storage.source.open_connection` and `open`, and so `assembly.init_client` and `init_server`, require a source that declares exactly `supply.LANES` (3) lanes, and now say so (#180). They pass three budgets, and std reads one per declared lane, so a caller's pool with more lanes gave the extra lanes whatever followed the three on the stack as their budgets. A refusal follows once mach-std can report a source's lane count.
+
 ### Changed
 
 - `mach.toml` declares `mach = "^5.3"`. mach-std 5.3.0 already required mach 5.3, so 0.12.1 needed it too. Its manifest now says so, and mach 5.2 refuses the key.
