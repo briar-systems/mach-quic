@@ -156,6 +156,15 @@ pub val ERROR_TIME:     Error = 12
 pub val ERROR_MEMORY:   Error = 13
 ```
 
+## val ERROR_REPLAY_FULL
+
+```mach
+pub val ERROR_REPLAY_FULL: Error = 14
+```
+
+the replay store is at its bound. the token is refused, never remembered
+over a live nonce, so replay protection holds under a flood
+
 ## def ReplayState
 
 ```mach
@@ -286,7 +295,7 @@ key: contracts.SecretBytes) bool;
 ```mach
 pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
 original_destination: packet.ConnectionId,
-retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
+retry_source: packet.ConnectionId, issued_at: time.Instant, nonce: u64,
 output: *u8, capacity: usize) Result;
 ```
 
@@ -295,7 +304,7 @@ output: *u8, capacity: usize) Result;
 ```mach
 pub fun seal_scoped(manager: *Manager, listener_source: u64, purpose: u8,
 peer: ip.Endpoint, original_destination: packet.ConnectionId,
-retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
+retry_source: packet.ConnectionId, issued_at: time.Instant, nonce: u64,
 output: *u8, capacity: usize) Result;
 ```
 
@@ -303,14 +312,14 @@ output: *u8, capacity: usize) Result;
 
 ```mach
 pub fun open(manager: *Manager, input: *u8, length: usize,
-expected_peer: ip.Endpoint, now_ns: u64) Result;
+expected_peer: ip.Endpoint, now: time.Instant) Result;
 ```
 
 ## fun open_scoped
 
 ```mach
 pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
-length: usize, expected_peer: ip.Endpoint, now_ns: u64) Result;
+length: usize, expected_peer: ip.Endpoint, now: time.Instant) Result;
 ```
 
 ## fun commit

@@ -9,7 +9,7 @@ pub val ALGORITHM_NEW_RENO: u8 = 1
 ## val ALGORITHM_CUBIC
 
 ```mach
-pub val ALGORITHM_CUBIC: u8 = 2
+pub val ALGORITHM_CUBIC:    u8 = 2
 ```
 
 ## val MODE_SLOW_START
@@ -21,43 +21,43 @@ pub val MODE_SLOW_START: u8 = 1
 ## val MODE_RECOVERY
 
 ```mach
-pub val MODE_RECOVERY: u8 = 2
+pub val MODE_RECOVERY:   u8 = 2
 ```
 
 ## val MODE_AVOIDANCE
 
 ```mach
-pub val MODE_AVOIDANCE: u8 = 3
+pub val MODE_AVOIDANCE:  u8 = 3
 ```
 
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: u8 = 0
+pub val ERROR_NONE:     u8 = 0
 ```
 
 ## val ERROR_STATE
 
 ```mach
-pub val ERROR_STATE: u8 = 1
+pub val ERROR_STATE:    u8 = 1
 ```
 
 ## val ERROR_CONFIG
 
 ```mach
-pub val ERROR_CONFIG: u8 = 2
+pub val ERROR_CONFIG:   u8 = 2
 ```
 
 ## val ERROR_TIME
 
 ```mach
-pub val ERROR_TIME: u8 = 3
+pub val ERROR_TIME:     u8 = 3
 ```
 
 ## val ERROR_EVENTS
 
 ```mach
-pub val ERROR_EVENTS: u8 = 4
+pub val ERROR_EVENTS:   u8 = 4
 ```
 
 ## val ERROR_OVERFLOW

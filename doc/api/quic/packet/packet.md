@@ -3,19 +3,19 @@
 ## val VERSION_1
 
 ```mach
-pub val VERSION_1: u32 = 0x00000001
+pub val VERSION_1:           u32   = 0x00000001
 ```
 
 ## val VERSION_2
 
 ```mach
-pub val VERSION_2: u32 = 0x6b3343cf
+pub val VERSION_2:           u32   = 0x6b3343cf
 ```
 
 ## val MAX_CONNECTION_ID
 
 ```mach
-pub val MAX_CONNECTION_ID: usize = 20
+pub val MAX_CONNECTION_ID:   usize = 20
 ```
 
 ## val RETRY_INTEGRITY_TAG
@@ -27,7 +27,7 @@ pub val RETRY_INTEGRITY_TAG: usize = 16
 ## val MAX_PACKET_NUMBER
 
 ```mach
-pub val MAX_PACKET_NUMBER: u64 = 4611686018427387903
+pub val MAX_PACKET_NUMBER:   u64   = 4611686018427387903
 ```
 
 ## val PACKET_VERSION_NEGOTIATION
@@ -39,49 +39,49 @@ pub val PACKET_VERSION_NEGOTIATION: u8 = 0
 ## val PACKET_INITIAL
 
 ```mach
-pub val PACKET_INITIAL: u8 = 1
+pub val PACKET_INITIAL:             u8 = 1
 ```
 
 ## val PACKET_ZERO_RTT
 
 ```mach
-pub val PACKET_ZERO_RTT: u8 = 2
+pub val PACKET_ZERO_RTT:            u8 = 2
 ```
 
 ## val PACKET_HANDSHAKE
 
 ```mach
-pub val PACKET_HANDSHAKE: u8 = 3
+pub val PACKET_HANDSHAKE:           u8 = 3
 ```
 
 ## val PACKET_RETRY
 
 ```mach
-pub val PACKET_RETRY: u8 = 4
+pub val PACKET_RETRY:               u8 = 4
 ```
 
 ## val PACKET_ONE_RTT
 
 ```mach
-pub val PACKET_ONE_RTT: u8 = 5
+pub val PACKET_ONE_RTT:             u8 = 5
 ```
 
 ## val PACKET_UNKNOWN_VERSION
 
 ```mach
-pub val PACKET_UNKNOWN_VERSION: u8 = 6
+pub val PACKET_UNKNOWN_VERSION:     u8 = 6
 ```
 
 ## val SPACE_INITIAL
 
 ```mach
-pub val SPACE_INITIAL: u8 = 1
+pub val SPACE_INITIAL:     u8 = 1
 ```
 
 ## val SPACE_HANDSHAKE
 
 ```mach
-pub val SPACE_HANDSHAKE: u8 = 2
+pub val SPACE_HANDSHAKE:   u8 = 2
 ```
 
 ## val SPACE_APPLICATION
@@ -93,13 +93,13 @@ pub val SPACE_APPLICATION: u8 = 3
 ## val STATUS_DONE
 
 ```mach
-pub val STATUS_DONE: u8 = 1
+pub val STATUS_DONE:  u8 = 1
 ```
 
 ## val STATUS_MORE
 
 ```mach
-pub val STATUS_MORE: u8 = 2
+pub val STATUS_MORE:  u8 = 2
 ```
 
 ## val STATUS_ERROR
@@ -111,25 +111,25 @@ pub val STATUS_ERROR: u8 = 3
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: u8 = 0
+pub val ERROR_NONE:          u8 = 0
 ```
 
 ## val ERROR_TRUNCATED
 
 ```mach
-pub val ERROR_TRUNCATED: u8 = 1
+pub val ERROR_TRUNCATED:     u8 = 1
 ```
 
 ## val ERROR_HEADER_FORM
 
 ```mach
-pub val ERROR_HEADER_FORM: u8 = 2
+pub val ERROR_HEADER_FORM:   u8 = 2
 ```
 
 ## val ERROR_FIXED_BIT
 
 ```mach
-pub val ERROR_FIXED_BIT: u8 = 3
+pub val ERROR_FIXED_BIT:     u8 = 3
 ```
 
 ## val ERROR_CONNECTION_ID
@@ -153,37 +153,37 @@ pub val ERROR_PACKET_LENGTH: u8 = 6
 ## val ERROR_TOKEN_LENGTH
 
 ```mach
-pub val ERROR_TOKEN_LENGTH: u8 = 7
+pub val ERROR_TOKEN_LENGTH:  u8 = 7
 ```
 
 ## val ERROR_VERSION_LIST
 
 ```mach
-pub val ERROR_VERSION_LIST: u8 = 8
+pub val ERROR_VERSION_LIST:  u8 = 8
 ```
 
 ## val ERROR_RETRY
 
 ```mach
-pub val ERROR_RETRY: u8 = 9
+pub val ERROR_RETRY:         u8 = 9
 ```
 
 ## val ERROR_LIMIT
 
 ```mach
-pub val ERROR_LIMIT: u8 = 10
+pub val ERROR_LIMIT:         u8 = 10
 ```
 
 ## val ERROR_KIND
 
 ```mach
-pub val ERROR_KIND: u8 = 11
+pub val ERROR_KIND:          u8 = 11
 ```
 
 ## val ERROR_OUTPUT
 
 ```mach
-pub val ERROR_OUTPUT: u8 = 12
+pub val ERROR_OUTPUT:        u8 = 12
 ```
 
 ## rec Span

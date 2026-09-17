@@ -15,7 +15,7 @@ pub val ZERO_FORBIDDEN: ZeroPolicy = 1
 ## val ZERO_ALLOWED
 
 ```mach
-pub val ZERO_ALLOWED: ZeroPolicy = 2
+pub val ZERO_ALLOWED:   ZeroPolicy = 2
 ```
 
 ## rec Range
@@ -24,11 +24,34 @@ pub val ZERO_ALLOWED: ZeroPolicy = 2
 pub rec Range;
 ```
 
+## fun address
+
+```mach
+pub fun address(start: usize, length: usize,
+zero_policy: ZeroPolicy) Range;
+```
+
 ## fun bytes
 
 ```mach
 pub fun bytes(data: *u8, length: usize, zero_policy: ZeroPolicy) Range;
 ```
+
+## fun record
+
+```mach
+pub fun record[T](data: *T) Range;
+```
+
+public records become numeric extents without a byte alias
+
+## fun anchored_record
+
+```mach
+pub fun anchored_record[T, U](anchor: *U, offset: usize) Range;
+```
+
+pass ?value.field with $offset_of(T, field) for a public field of mixed T
 
 ## fun array
 
@@ -65,13 +88,13 @@ pub def Overlap: u8
 ## val OVERLAP_NONE
 
 ```mach
-pub val OVERLAP_NONE: Overlap = 0
+pub val OVERLAP_NONE:          Overlap = 0
 ```
 
 ## val OVERLAP_LIST_INVALID
 
 ```mach
-pub val OVERLAP_LIST_INVALID: Overlap = 1
+pub val OVERLAP_LIST_INVALID:  Overlap = 1
 ```
 
 ## val OVERLAP_RANGE_INVALID
@@ -83,7 +106,7 @@ pub val OVERLAP_RANGE_INVALID: Overlap = 2
 ## val OVERLAP_PAIR
 
 ```mach
-pub val OVERLAP_PAIR: Overlap = 3
+pub val OVERLAP_PAIR:          Overlap = 3
 ```
 
 ## rec Disjointness
