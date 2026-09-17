@@ -475,17 +475,6 @@ pub fun release_core(manager: *Manager, source: u64) bool {
     ret true;
 }
 
-# the manager record's extent. it holds its buffer source, which is
-# secret-welded, so the extent is measured from its first field
-pub fun manager_range(manager: *Manager) ownership.Range {
-    if (manager == nil) {
-        var invalid: ownership.Range;
-        ret invalid;
-    }
-    ret ownership.anchored_record[Manager, Config](?manager.config,
-        $offset_of(Manager, config));
-}
-
 fun manager_record_valid(manager: *Manager) bool {
     ret manager != nil && ownership.bytes((?manager.config)::*u8,
         $size_of(Manager), ownership.ZERO_FORBIDDEN).valid;
@@ -2492,8 +2481,8 @@ test "quic.stream.stream: owned regions reject maximum addresses and aliases" {
     config.receive_unidirectional_limit      = 4;
     val maximum: usize   = 0 - 1::usize;
     val sound:   Storage = test_storage(?streams[0], 1, ?attempts[0], 1);
-    # a manager holds its buffer source, which is secret-welded, so no integer
-    # or foreign pointer can be cast to one and only its storage is forged
+    if (initialize(maximum::*Manager, config, sound) ||
+        initialize((?streams[0])::*Manager, config, sound)) { ret 1; }
     var hostile_storage: Storage = sound;
     hostile_storage.streams = maximum::*Stream;
     val hostile:         Manager = initialized_for_test(config, hostile_storage);

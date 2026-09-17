@@ -724,6 +724,7 @@ test "quic.connection.core: public descriptors reject wrapping maximum ranges" {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     val maximum: usize = 0 - 1::usize;
+    if (core.snapshot(maximum::*core.Core).state != 0) { ret 2; }
     if (core.generate(?fixture.engine, ?fixture.secrets, maximum::*u8,
         1200, 2).status != transport.STATUS_ERROR) { ret 3; }
     var input: transport.Datagram = transport.Datagram{

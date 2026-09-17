@@ -703,8 +703,7 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     if (!core_range(core).valid ||
         !secrets_range(secrets).valid ||
         !ownership.record[Config](config).valid ||
-        !ownership.anchored_record[Storage, *u8](?storage.receive_header,
-        $offset_of(Storage, receive_header)).valid ||
+        !ownership.record[Storage](storage).valid ||
         !secret_storage_range(secret_storage).valid ||
         secret_storage.receive_plaintext == nil ||
         secret_storage.send_plaintext == nil ||
@@ -957,7 +956,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         $offset_of(handshake_api.Adapter, config));
     ranges[24] = ownership.record[cid_api.Manager](cids);
     ranges[25] = ownership.record[path_api.Manager](paths);
-    ranges[26] = stream_api.manager_range(streams);
+    ranges[26] = ownership.record[stream_api.Manager](streams);
     ranges[27] = ownership.record[datagram_api.Queue](datagrams);
     val anchored: ownership.Disjointness = ownership.disjointness(?ranges[0], 28);
     if (anchored.kind != ownership.OVERLAP_NONE) {

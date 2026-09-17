@@ -548,7 +548,7 @@ fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
     ranges[0] = driver_extent[T](driver);
     ranges[1] = ownership.array(storage.sends::*u8, storage.send_capacity,
         $size_of(SendSlot), ownership.ZERO_FORBIDDEN);
-    ranges[2] = stream_api.manager_range(streams);
+    ranges[2] = ownership.record[stream_api.Manager](streams);
     ranges[3] = stream_api.lent_records(streams.storage);
     ranges[4] = stream_api.lent_attempts(streams.storage);
     ranges[5] = ownership.record[datagram_api.Queue](datagrams);
@@ -589,7 +589,7 @@ fun borrowed_all_disjoint[T](driver: *Driver[T], borrowed: *ownership.Range,
     ranges[1] = ownership.array(driver.storage.sends::*u8,
         driver.storage.send_capacity, $size_of(SendSlot),
         ownership.ZERO_FORBIDDEN);
-    ranges[2] = stream_api.manager_range(driver.streams);
+    ranges[2] = ownership.record[stream_api.Manager](driver.streams);
     ranges[3] = stream_api.lent_records(driver.streams.storage);
     ranges[4] = stream_api.lent_attempts(driver.streams.storage);
     ranges[5] = ownership.record[datagram_api.Queue](driver.datagrams);
