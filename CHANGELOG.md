@@ -29,6 +29,7 @@
 - Per-byte send and receive state is replaced by bounded interval sets. A peer that fragments a stream or CRYPTO level past its interval cap, or whose data finds no storage, has its packet refused before it is acknowledged, so the data is sent again rather than lost (#137). `stream.Manager.receive_storage_refusals`, `handshake.Adapter.receive_storage_refusals` and `core.refused_packets` count these refusals.
 - CRYPTO output that finds no storage waits: `handshake.complete_event` returns `STATUS_BLOCKED` with `ERROR_STORAGE`, and `next_event` offers the same event again (#137).
 
+- **Breaking.** Dependencies: mach-std v5.0.1, mach-crypto v0.13.1, mach-tls v0.7.0 (#137).
 - **Breaking.** mach-tls 0.7.0 takes its memory from the connection's buffer source (#137).
   - Before `init_client` or `init_server`, initialize the engine with `assembly.tls_lease(c)`. It points into `c`, so `c` must not move or be copied from then until `release_closed` succeeds. Init refuses an engine holding any other lease with `STAGE_HANDSHAKE`.
   - tls charges the connection's single account on a new lane, `supply.TLS`, bounded by `assembly.Config.tls_budget` (default `assembly.TLS_BUDGET`, 64 KiB). `supply.LANES` is 3. A source must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes. quic itself still takes only 4,096-byte chunks.
@@ -42,6 +43,7 @@
 
 ### Added
 
+- A third guard pins what a handshake holds after any driver call (#137). The dialer holds five send-lane chunks and 8,704 bytes on the tls lane, and the listener six and 18,944. The tls handshake records are 6,416 bytes (client) and 6,216 (server).
 - A second guard pins what a 64 KiB transfer on one stream holds, sampled after every driver call (#137): five send-lane chunks on the sending end, and four send-lane plus one receive-lane on the receiving end. After the bytes are read, each end holds one record chunk.
 - A size guard pins what an idle connection costs (#137): `assembly.Storage` at 4,464 bytes and `Connection` at 9,776, no chunks and no tls memory held by an established idle connection, and one record chunk once the six H3 control streams are open and drained.
 - `transport.ready_stream`, which reports streams that became readable, writable or reset in O(1) per call, oldest first, and `transport.storage_ready` for when the pool wakes a connection (#137, mach-http#103).

@@ -537,8 +537,11 @@ owner table, one packet history and the attempt block while packets are in
 flight, plus one data chunk, since a stream buffers at most one chunk of
 unacknowledged bytes. A NEW_TOKEN holds a chunk only while it waits, on the server until it is
 acknowledged and on the client until the owner takes it. The scratch pair is paid once per
-pump, not per connection. The caller's `mach-tls` handshake record is not
-included.
+pump, not per connection. During the handshake the dialer holds at most five
+send-lane chunks and 8,704 tls bytes after any call, and the listener six and
+18,944. The caller's `mach-tls` handshake record, 6,416 bytes for a client and
+6,216 for a server, holds nothing once the handshake is finished and can be
+reused.
 
 The reason this belongs in the library rather than in each consumer is that the
 core requires twelve exact equalities between the encoded local transport

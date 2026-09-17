@@ -2296,6 +2296,9 @@ rec Peak {
     dialer_receive:   usize;
     listener_send:    usize;
     listener_receive: usize;
+    # bytes on the tls lane
+    dialer_tls:   usize;
+    listener_tls: usize;
 }
 
 fun observe(peak: *Peak) {
@@ -2307,6 +2310,10 @@ fun observe(peak: *Peak) {
     if (b > peak.dialer_receive)   { peak.dialer_receive = b; }
     if (c > peak.listener_send)    { peak.listener_send = c; }
     if (d > peak.listener_receive) { peak.listener_receive = d; }
+    val e: usize = dialer.account.used[supply.TLS::usize];
+    val f: usize = listener.account.used[supply.TLS::usize];
+    if (e > peak.dialer_tls)   { peak.dialer_tls = e; }
+    if (f > peak.listener_tls) { peak.listener_tls = f; }
 }
 
 # sends `total` bytes on one stream from the dialer, reading as they arrive,
@@ -2449,4 +2456,43 @@ test "quic.connection.assembly: a connection copied after its lease was taken is
     var moved: usize = 0;
     mislease = LEASE_ORIGINAL;
     ret establish_direct(1500, 1500, 8, ?clock, ?moved) - REFUSED;
+}
+
+# what a handshake holds after any driver call, in chunks per lane and tls
+# bytes, beside the caller's tls handshake records. a failure means that cost
+# moved. decide it deliberately, and update these numbers, the changelog and
+# the readme together
+val GUARD_HANDSHAKE_DIALER_SEND:   usize = 5;
+val GUARD_HANDSHAKE_LISTENER_SEND: usize = 6;
+val GUARD_HANDSHAKE_DIALER_TLS:    usize = 8704;
+val GUARD_HANDSHAKE_LISTENER_TLS:  usize = 18944;
+val GUARD_CLIENT_HANDSHAKE_BYTES:  usize = 6416;
+val GUARD_SERVER_HANDSHAKE_BYTES:  usize = 6216;
+
+test "quic.connection.assembly: a handshake costs what was measured" {
+    if ($size_of(client.Handshake) != GUARD_CLIENT_HANDSHAKE_BYTES ||
+        $size_of(server.Handshake) != GUARD_SERVER_HANDSHAKE_BYTES) {
+        print.eprintlnf("tls handshake records are {} and {} bytes (guard {} and {})",
+            $size_of(client.Handshake), $size_of(server.Handshake),
+            GUARD_CLIENT_HANDSHAKE_BYTES, GUARD_SERVER_HANDSHAKE_BYTES);
+        ret 1;
+    }
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    var peak:  Peak;
+    observed = ?peak;
+    val established: i32 = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    observed = nil;
+    if (established != 0) { ret established; }
+    if (peak.dialer_send != GUARD_HANDSHAKE_DIALER_SEND || peak.dialer_receive != 0 ||
+        peak.listener_send != GUARD_HANDSHAKE_LISTENER_SEND ||
+        peak.listener_receive != 0 ||
+        peak.dialer_tls != GUARD_HANDSHAKE_DIALER_TLS ||
+        peak.listener_tls != GUARD_HANDSHAKE_LISTENER_TLS) {
+        print.eprintlnf("a handshake peaked at dialer {}/{} chunks and {} tls bytes, listener {}/{} and {}",
+            peak.dialer_send, peak.dialer_receive, peak.dialer_tls,
+            peak.listener_send, peak.listener_receive, peak.listener_tls);
+        ret 2;
+    }
+    ret 0;
 }
