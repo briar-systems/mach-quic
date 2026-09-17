@@ -204,13 +204,15 @@ pub rec Secrets {
 }
 
 pub rec Snapshot {
-    state:                  transport_api.ConnectionState;
-    version:                u32;
-    authenticated_packets:  usize;
-    retry_count:            usize;
-    version_restart_count:  usize;
-    active_owners:          usize;
-    received_token_length:  usize;
+    state:                 transport_api.ConnectionState;
+    version:               u32;
+    authenticated_packets: usize;
+    retry_count:           usize;
+    version_restart_count: usize;
+    active_owners:         usize;
+    received_token_length: usize;
+    # a queued NEW_TOKEN has not been acknowledged yet
+    new_token_pending:      bool;
     early_disposition:      u8;
     peer_parameters_ready:  bool;
     peer_authenticated:     bool;
@@ -2807,18 +2809,22 @@ fun receive_unsettled(core: *Core, secrets: *Secrets,
     ret core_result(core, transport_api.STATUS_OK, 0);
 }
 
-# queues a NEW_TOKEN for the client. STATUS_BLOCKED when no chunk is free: the
-# connection's account is woken once one is, and the call can be repeated.
-# STATUS_ERROR for a call that can never succeed as made, including while an
-# earlier token is still unacknowledged
+# queues a NEW_TOKEN for the client, one at a time
+# ---
+# ret: STATUS_OK once queued. STATUS_EARLY while an earlier token is still
+#      unacknowledged: repeat once `snapshot().new_token_pending` clears.
+#      STATUS_BLOCKED when no chunk is free: repeat once the connection's
+#      account is woken. STATUS_ERROR for a call that can never succeed as made
 pub fun queue_new_token(core: *Core, data: *u8, length: usize) transport_api.Status {
     val input: ownership.Range = ownership.bytes(data, length,
         ownership.ZERO_FORBIDDEN);
     if (!core_record_valid(core) || !core.initialized || core.destroyed || core.closing ||
         core.role != transport_api.SERVER || !core.handshake_confirmed ||
-        length == 0 || length > supply.BYTES || !borrowed_disjoint(core, input) ||
-        core.send_token_queued || core.send_token_prepared ||
-        core.send_token.data != nil) { ret transport_api.STATUS_ERROR; }
+        length == 0 || length > supply.BYTES || !borrowed_disjoint(core, input)) {
+        ret transport_api.STATUS_ERROR;
+    }
+    if (core.send_token_queued || core.send_token_prepared ||
+        core.send_token.data != nil) { ret transport_api.STATUS_EARLY; }
     if (!take_token(core, supply.SEND, length, ?core.send_token)) {
         ret transport_api.STATUS_BLOCKED;
     }
@@ -3017,6 +3023,7 @@ pub fun snapshot(core: *Core) Snapshot {
     result.retry_count            = core.retry_count;
     result.version_restart_count  = core.version_restart_count;
     result.received_token_length  = core.received_token_length;
+    result.new_token_pending      = core.send_token.data != nil;
     result.early_disposition      = core.early_disposition;
     result.peer_parameters_ready  = core.peer_parameters_ready;
     result.peer_authenticated     = core.peer_authenticated;

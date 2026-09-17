@@ -1619,7 +1619,8 @@ test "quic.connection.assembly: a NEW_TOKEN holds a chunk only while it waits" {
     }
     if (core.queue_new_token(?dialer.core, ?token[0], 40) != transport.STATUS_ERROR ||
         core.queue_new_token(?listener.core, ?token[0], 40) != transport.STATUS_OK ||
-        core.queue_new_token(?listener.core, ?token[0], 40) != transport.STATUS_ERROR ||
+        core.queue_new_token(?listener.core, ?token[0], 40) != transport.STATUS_EARLY ||
+        !core.snapshot(?listener.core).new_token_pending ||
         supply.held(?listener.account, supply.SEND) != sending + 1) { ret 20; }
     var empty: [1]u8;
     if (core.take_received_token(?dialer.core, ?empty[0], 1).status !=
@@ -1629,7 +1630,8 @@ test "quic.connection.assembly: a NEW_TOKEN holds a chunk only while it waits" {
     # the acknowledged token is gone from the server, and waits at the client
     if (supply.held(?listener.account, supply.SEND) != sending ||
         supply.held(?dialer.account, supply.RECEIVE) != receiving + 1 ||
-        core.snapshot(?dialer.core).received_token_length != 40) { ret 22; }
+        core.snapshot(?dialer.core).received_token_length != 40 ||
+        core.snapshot(?listener.core).new_token_pending) { ret 22; }
     var small:  [8]u8;
     var output: [64]u8;
     val short:  core.TakenToken = core.take_received_token(?dialer.core, ?small[0], 8);

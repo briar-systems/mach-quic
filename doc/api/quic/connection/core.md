@@ -477,10 +477,12 @@ input: *transport_api.CoreInput) transport_api.CoreResult;
 pub fun queue_new_token(core: *Core, data: *u8, length: usize) transport_api.Status;
 ```
 
-queues a NEW_TOKEN for the client. STATUS_BLOCKED when no chunk is free: the
-connection's account is woken once one is, and the call can be repeated.
-STATUS_ERROR for a call that can never succeed as made, including while an
-earlier token is still unacknowledged
+queues a NEW_TOKEN for the client, one at a time
+
+ret: STATUS_OK once queued. STATUS_EARLY while an earlier token is still
+     unacknowledged: repeat once `snapshot().new_token_pending` clears.
+     STATUS_BLOCKED when no chunk is free: repeat once the connection's
+     account is woken. STATUS_ERROR for a call that can never succeed as made
 
 ## rec TakenToken
 
