@@ -2,7 +2,8 @@
 # connection's account
 #
 # every chunk quic takes is at most BYTES long and charged to one of two lanes,
-# send or receive. a refusal is backpressure: the account is registered with the
+# send or receive. tls charges the same account on a third lane of its own,
+# for chunks it takes through its lease. a refusal is backpressure: the account is registered with the
 # source and woken once chunks come back. this is the only module that calls the
 # source, so the rest of quic depends on the handful of operations below
 
@@ -25,7 +26,14 @@ pub val BYTES: usize = 4096;
 pub def Lane: u8;
 pub val SEND:    Lane = 0;
 pub val RECEIVE: Lane = 1;
-pub val LANES:   u8   = 2;
+pub val TLS:     Lane = 2;
+pub val LANES:   u8   = 3;
+
+# the chunk sizes a connection asks a source for: quic's BYTES, and the sizes
+# mach-tls requests for handshake messages and records
+pub val CLASS_COUNT: usize = 3;
+pub val SMALL:       usize = 512;
+pub val RECORD:      usize = 17408;
 
 # one connection's view of its provider, charged to one lane
 pub rec Source {
@@ -39,33 +47,45 @@ pub rec Taken {
     chunk: Chunk;
 }
 
-# one class of BYTES chunks, enough for everything quic asks for
+# the CLASS_COUNT plain classes a connection asks for, smallest first
 # ---
-# high_water: released chunks the pool keeps for reuse
-pub fun chunk_class(high_water: usize) buffers.ClassConfig {
-    ret buffers.ClassConfig{size: BYTES, align: 0, secret: false,
+# output:     CLASS_COUNT entries
+# high_water: released chunks each class keeps for reuse
+pub fun classes(output: *buffers.ClassConfig, high_water: usize) {
+    output[0] = buffers.ClassConfig{size: SMALL, align: 0, secret: false,
+        high_water: high_water};
+    output[1] = buffers.ClassConfig{size: BYTES, align: 0, secret: false,
+        high_water: high_water};
+    output[2] = buffers.ClassConfig{size: RECORD, align: 0, secret: false,
         high_water: high_water};
 }
 
-# a pool configuration over `class_count` classes with room for `chunks`
-# chunks of BYTES across every account
+# a pool configuration over `class_count` classes with room for `bytes`
+# across every account
 pub fun pool_config(classes: *buffers.ClassConfig, class_count: usize,
-    chunks: usize) buffers.Config {
+    bytes: usize) buffers.Config {
     var config: buffers.Config;
     config.classes       = classes;
     config.class_count   = class_count;
     config.lanes         = LANES;
-    config.global_budget = chunks * BYTES;
+    config.global_budget = bytes;
     ret config;
 }
 
-# opens a connection's account with budgets and a reservation in chunks
-pub fun open(provider: *Provider, account: *Account, handle: u64, send: usize,
-    receive: usize, reserve: usize) bool {
-    var budgets: [2]usize       = [2]usize{send * BYTES, receive * BYTES};
+# opens a connection's account with quic's budgets and reservation in chunks
+# and tls's budget in bytes
+pub fun open_connection(provider: *Provider, account: *Account, handle: u64,
+    send: usize, receive: usize, tls: usize, reserve: usize) bool {
+    var budgets: [3]usize       = [3]usize{send * BYTES, receive * BYTES, tls};
     val reason:  buffers.Reason = buffers.source_open_account(provider, account, handle, ?budgets[0],
         reserve * BYTES);
     ret sel reason.none;
+}
+
+# opens an account for quic's own chunks alone, with no tls lane
+pub fun open(provider: *Provider, account: *Account, handle: u64, send: usize,
+    receive: usize, reserve: usize) bool {
+    ret open_connection(provider, account, handle, send, receive, 0, reserve);
 }
 
 pub fun close(provider: *Provider, account: *Account) bool {
@@ -78,12 +98,14 @@ pub fun held(account: *Account, lane: Lane) usize {
     ret (account.used[lane::usize] + BYTES - 1) / BYTES;
 }
 
-# a chunk of at least `bytes`, registering the account for a wake on refusal
+# a chunk with room for `bytes`, registering the account for a wake on
+# refusal. it is always a whole BYTES chunk, the unit quic's budgets count, so a
+# source with smaller classes never hands quic a chunk its arithmetic misses
 pub fun take(from: *Source, bytes: usize) Taken {
     var taken: Taken;
     if (from.provider == nil || bytes == 0 || bytes > BYTES) { ret taken; }
     val got: buffers.Acquired = buffers.source_acquire(from.provider, from.account,
-        buffers.Request{bytes: bytes, align: 0, lane: from.lane, secret: false}, true);
+        buffers.Request{bytes: BYTES, align: 0, lane: from.lane, secret: false}, true);
     if (!sel got.status.ok) { ret taken; }
     taken.ok    = true;
     taken.chunk = got.chunk;
@@ -116,26 +138,34 @@ pub fun ready(provider: *Provider, output: *u64, capacity: usize) usize {
     ret buffers.source_ready(provider, output, capacity);
 }
 
-# a pool of `chunks` BYTES chunks over `memory`, for tests
-pub fun test_pool(pool: *buffers.Pool, class: *buffers.ClassConfig,
+# room for this many tls record chunks beside the BYTES chunks of a test pool
+val TEST_RECORDS: usize = 4;
+
+# a pool with room for `chunks` BYTES chunks and a few tls records over
+# `memory`, for tests
+# ---
+# configs: CLASS_COUNT entries
+pub fun test_pool(pool: *buffers.Pool, configs: *buffers.ClassConfig,
     memory: *limited.Limited, chunks: usize) bool {
-    @class = chunk_class(0);
-    if (memory.a.ctx == nil && !limited.make(memory, (chunks + 16) * BYTES * 2)) {
+    classes(configs, 0);
+    val bytes: usize = chunks * BYTES + TEST_RECORDS * RECORD;
+    if (memory.a.ctx == nil && !limited.make(memory, (bytes + 16 * BYTES) * 2)) {
         ret false;
     }
-    ret buffers.make(pool, pool_config(class, 1, chunks), limited.allocator_of(memory));
+    ret buffers.make(pool, pool_config(configs, CLASS_COUNT, bytes),
+        limited.allocator_of(memory));
 }
 
 # a whole test pool and its provider, which must not move once made
 pub rec TestPool {
     memory:   limited.Limited;
     pool:     buffers.Pool;
-    class:    buffers.ClassConfig;
+    classes:  [CLASS_COUNT]buffers.ClassConfig;
     provider: Provider;
 }
 
 pub fun make_test(fixture: *TestPool, chunks: usize) bool {
-    if (!test_pool(?fixture.pool, ?fixture.class, ?fixture.memory, chunks)) { ret false; }
+    if (!test_pool(?fixture.pool, ?fixture.classes[0], ?fixture.memory, chunks)) { ret false; }
     fixture.provider = buffers.source(?fixture.pool);
     ret true;
 }
