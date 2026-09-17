@@ -73,20 +73,20 @@ pub fun pool_config(classes: *buffers.ClassConfig, class_count: usize,
 }
 
 # opens a connection's account with quic's budgets and reservation in chunks
-# and tls's budget in bytes. it supplies exactly LANES budgets, so the source
-# must declare exactly LANES lanes, as pool_config does. std reads one budget
-# per lane the source declares, and a source with more lanes would take
-# whatever lies past these three as its budgets
+# and tls's budget in bytes. it supplies exactly LANES budgets, so it refuses
+# a source that does not declare exactly LANES lanes, as pool_config does,
+# including one that declares none. a wrapping source must forward fn_lanes
 pub fun open_connection(provider: *Provider, account: *Account, handle: u64,
     send: usize, receive: usize, tls: usize, reserve: usize) bool {
+    if (provider == nil || buffers.source_lanes(provider) != LANES) { ret false; }
     var budgets: [3]usize       = [3]usize{send * BYTES, receive * BYTES, tls};
     val reason:  buffers.Reason = buffers.source_open_account(provider, account, handle, ?budgets[0],
         reserve * BYTES);
     ret sel reason.none;
 }
 
-# opens an account for quic's own chunks alone, with no tls lane. the source
-# must declare exactly LANES lanes, as for open_connection
+# opens an account for quic's own chunks alone, with no tls lane. it refuses a
+# source that does not declare exactly LANES lanes, as open_connection does
 pub fun open(provider: *Provider, account: *Account, handle: u64, send: usize,
     receive: usize, reserve: usize) bool {
     ret open_connection(provider, account, handle, send, receive, 0, reserve);
@@ -192,4 +192,37 @@ pub fun misuse(pool: *buffers.Pool) u64 {
     var view: buffers.Snapshot;
     if (!buffers.snapshot(pool, ?view)) { ret 0; }
     ret view.misuse;
+}
+
+test "quic.storage.source: a source with other than three lanes opens no account" {
+    var wide:    TestPool;
+    var configs: [CLASS_COUNT]buffers.ClassConfig;
+    classes(?configs[0], 0);
+    if (!limited.make(?wide.memory, 1 << 20)) { ret 1; }
+    var config: buffers.Config = pool_config(?configs[0], CLASS_COUNT, 64 * BYTES);
+    config.lanes = 5;
+    if (!buffers.make(?wide.pool, config, limited.allocator_of(?wide.memory))) { ret 2; }
+    wide.provider = buffers.source(?wide.pool);
+    var account: Account;
+    if (buffers.source_lanes(?wide.provider) != 5 ||
+        open_connection(?wide.provider, ?account, 1, 4, 4, 4096, 0) || account.open) {
+        ret 3;
+    }
+    if (!buffers.destroy(?wide.pool)) { ret 4; }
+
+    var fixture: TestPool;
+    if (!make_test(?fixture, 16)) { ret 5; }
+    var undeclared: Provider = fixture.provider;
+    undeclared.fn_lanes = nil;
+    if (open_connection(?undeclared, ?account, 2, 4, 4, 4096, 0) ||
+        open(?undeclared, ?account, 2, 4, 4, 0) || account.open ||
+        open_connection(nil, ?account, 2, 4, 4, 4096, 0) || account.open) {
+        ret 6;
+    }
+    if (!open_connection(?fixture.provider, ?account, 3, 4, 4, 4096, 0) ||
+        !account.open || account.budgets[3] != 0 || !close(?fixture.provider, ?account) ||
+        !end_test(?fixture)) {
+        ret 7;
+    }
+    ret 0;
 }
