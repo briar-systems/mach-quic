@@ -557,10 +557,10 @@ fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
         ownership.ZERO_ALLOWED);
     owned[9] = ownership.array(core.storage.ack_initial.ranges::*u8,
         core.storage.ack_initial.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     owned[10] = ownership.array(core.storage.ack_handshake.ranges::*u8,
         core.storage.ack_handshake.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     owned[11] = ownership.array(core.storage.ack_application.ranges::*u8,
         core.storage.ack_application.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
@@ -760,10 +760,10 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         ownership.ZERO_ALLOWED);
     ranges[11] = ownership.array(storage.ack_initial.ranges::*u8,
         storage.ack_initial.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     ranges[12] = ownership.array(storage.ack_handshake.ranges::*u8,
         storage.ack_handshake.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     ranges[13] = ownership.array(storage.ack_application.ranges::*u8,
         storage.ack_application.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
@@ -919,10 +919,10 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         ownership.ZERO_ALLOWED);
     ranges[11] = ownership.array(storage.ack_initial.ranges::*u8,
         storage.ack_initial.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     ranges[12] = ownership.array(storage.ack_handshake.ranges::*u8,
         storage.ack_handshake.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     ranges[13] = ownership.array(storage.ack_application.ranges::*u8,
         storage.ack_application.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
@@ -1485,8 +1485,21 @@ fun discard_initial_keys(core: *Core, secrets: *Secrets) bool {
     ret true;
 }
 
-# nothing reads parameter extensions, the encoded local parameters or retry
-# state once the handshake is confirmed, so their storage is dropped
+# the Initial and Handshake ack spaces are discarded for good, and may live in
+# the handshake block
+fun detach_handshake_acks(core: *Core) {
+    ack_api.discard_space(?core.acknowledgements, packet.SPACE_INITIAL);
+    ack_api.discard_space(?core.acknowledgements, packet.SPACE_HANDSHAKE);
+    ack_api.detach_space(?core.acknowledgements, packet.SPACE_INITIAL);
+    ack_api.detach_space(?core.acknowledgements, packet.SPACE_HANDSHAKE);
+    var none: ack_api.SpaceStorage;
+    core.storage.ack_initial   = none;
+    core.storage.ack_handshake = none;
+}
+
+# nothing reads parameter extensions, the encoded local parameters, retry state
+# or the handshake ack spaces once the handshake is confirmed, so their storage
+# is dropped
 fun release_handshake_storage(core: *Core) {
     if (core.role == transport_api.CLIENT) { negotiation_api.finish(?core.negotiation); }
     var no_negotiation: negotiation_api.Storage;
@@ -1505,6 +1518,7 @@ fun release_handshake_storage(core: *Core) {
     core.local_parameters.extension_count      = 0;
     var no_parameters: View;
     core.config.local_transport_parameters = no_parameters;
+    detach_handshake_acks(core);
     if (core.storage.handshake_block != nil) {
         chunks.give_block(?core.storage.chunk_source, core.storage.handshake_block);
         core.storage.handshake_block = nil;
@@ -1818,6 +1832,7 @@ pub fun release_chunks(core: *Core) {
         i = i + 1;
     }
     if (core.storage.handshake_block != nil) {
+        detach_handshake_acks(core);
         chunks.give_block(source_of(core), core.storage.handshake_block);
         core.storage.handshake_block = nil;
     }
