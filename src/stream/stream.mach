@@ -165,9 +165,12 @@ pub rec Manager {
     peer_bidi_advertised:        u64;
     peer_uni_advertised:         u64;
     control_prepared:            bool;
-    core_lease:                  u64;
-    valid:                       bool;
-    closing:                     bool;
+    # bumped whenever send work may have appeared outside a core call, so an
+    # idle core notices without scanning
+    send_revision: u64;
+    core_lease:    u64;
+    valid:         bool;
+    closing:       bool;
 }
 
 pub rec Handle {
@@ -666,8 +669,11 @@ fun operation_error(code: u8) OperationResult {
 pub fun update_max_data(manager: *Manager, maximum: u64) OperationResult {
     if (!manager_record_valid(manager) || !manager.valid ||
         manager.core_lease != 0) { ret operation_error(ERROR_STATE); }
-    if (maximum > varint.MAX)            { ret operation_error(ERROR_OVERFLOW); }
-    if (maximum > manager.send_max_data) { manager.send_max_data = maximum; }
+    if (maximum > varint.MAX) { ret operation_error(ERROR_OVERFLOW); }
+    if (maximum > manager.send_max_data) {
+        manager.send_max_data = maximum;
+        manager.send_revision = manager.send_revision + 1;
+    }
     var result: OperationResult;
     result.status = STATUS_OK;
     ret result;
@@ -710,9 +716,12 @@ pub fun apply_peer_limits(manager: *Manager, max_data: u64,
 pub fun update_max_stream_data(manager: *Manager, value: Handle, maximum: u64) OperationResult {
     if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
     val stream: *Stream = ?manager.storage.streams[value.index];
-    if (!stream.can_send)            { ret operation_error(ERROR_DIRECTION); }
-    if (maximum > varint.MAX)        { ret operation_error(ERROR_OVERFLOW); }
-    if (maximum > stream.send_limit) { stream.send_limit = maximum; }
+    if (!stream.can_send)     { ret operation_error(ERROR_DIRECTION); }
+    if (maximum > varint.MAX) { ret operation_error(ERROR_OVERFLOW); }
+    if (maximum > stream.send_limit) {
+        stream.send_limit     = maximum;
+        manager.send_revision = manager.send_revision + 1;
+    }
     var result: OperationResult;
     result.status = STATUS_OK;
     ret result;
@@ -814,6 +823,7 @@ pub fun write(manager: *Manager, value: Handle, data: *u8, length: usize) WriteR
         manager.storage.send_inflight[position] = 0;
         i                                       = i + 1;
     }
+    if (count > 0) { manager.send_revision = manager.send_revision + 1; }
     stream.send_write         = stream.send_write + count::u64;
     stream.send_used          = stream.send_used + count;
     manager.send_committed    = manager.send_committed + count::u64;
@@ -832,8 +842,9 @@ pub fun finish(manager: *Manager, value: Handle) OperationResult {
     if (!stream.can_send)                              { ret operation_error(ERROR_DIRECTION); }
     if (stream.send_cancelled || stream.stop_received) { ret operation_error(ERROR_CANCELLED); }
     if (!stream.send_finished) {
-        stream.send_finished = true;
-        stream.fin_pending   = true;
+        stream.send_finished  = true;
+        stream.fin_pending    = true;
+        manager.send_revision = manager.send_revision + 1;
     }
     var result: OperationResult;
     result.status = STATUS_OK;
@@ -851,8 +862,11 @@ pub fun cancel_send(manager: *Manager, value: Handle, error_code: u64) Operation
     if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
     if (error_code > varint.MAX)       { ret operation_error(ERROR_OVERFLOW); }
     val stream: *Stream = ?manager.storage.streams[value.index];
-    if (!stream.can_send)                              { ret operation_error(ERROR_DIRECTION); }
-    if (!stream.send_closed && !stream.send_cancelled) { cancel_send_inner(stream, error_code); }
+    if (!stream.can_send) { ret operation_error(ERROR_DIRECTION); }
+    if (!stream.send_closed && !stream.send_cancelled) {
+        cancel_send_inner(stream, error_code);
+        manager.send_revision = manager.send_revision + 1;
+    }
     var result: OperationResult;
     result.status = STATUS_OK;
     ret result;
@@ -862,6 +876,7 @@ fun grant_connection(manager: *Manager, count: u64) {
     manager.receive_max_data = minimum(varint.MAX, manager.receive_max_data + minimum(count, varint.MAX - manager.receive_max_data));
     if (manager.receive_max_data > manager.receive_advertised) {
         manager.max_data_pending = true;
+        manager.send_revision    = manager.send_revision + 1;
     }
 }
 
@@ -872,6 +887,7 @@ fun release_credit(manager: *Manager, stream: *Stream, count: u64) {
             stream.receive_limit + minimum(count, varint.MAX - stream.receive_limit));
         if (stream.receive_limit > stream.receive_advertised) {
             stream.max_stream_data_pending = true;
+            manager.send_revision          = manager.send_revision + 1;
         }
     }
 }
@@ -905,6 +921,7 @@ pub fun cancel_receive(manager: *Manager, value: Handle, error_code: u64) Operat
         stream.receive_cancelled = true;
         stream.receive_error     = error_code;
         stream.stop_pending      = true;
+        manager.send_revision    = manager.send_revision + 1;
     }
     var result: OperationResult;
     result.status           = STATUS_OK;
@@ -1807,11 +1824,13 @@ pub fun release(manager: *Manager, value: Handle) OperationResult {
         if (uni && manager.config.peer_unidirectional_limit < MAX_STREAM_COUNT) {
             manager.config.peer_unidirectional_limit = manager.config.peer_unidirectional_limit + 1;
             manager.max_streams_uni_pending          = true;
+            manager.send_revision                    = manager.send_revision + 1;
             result.peer_max_streams                  = manager.config.peer_unidirectional_limit;
         }
         if (!uni && manager.config.peer_bidirectional_limit < MAX_STREAM_COUNT) {
             manager.config.peer_bidirectional_limit = manager.config.peer_bidirectional_limit + 1;
             manager.max_streams_bidi_pending        = true;
+            manager.send_revision                   = manager.send_revision + 1;
             result.peer_max_streams                 = manager.config.peer_bidirectional_limit;
         }
     }
