@@ -194,8 +194,6 @@ pub rec Storage {
     path_sends:               [8]path_api.SendReservation;
     datagram_send_entries:    [DATAGRAM_CAPACITY]datagram_api.Entry;
     datagram_receive_entries: [DATAGRAM_CAPACITY]datagram_api.Entry;
-    datagram_send_bytes:      [DATAGRAM_CAPACITY * DATAGRAM_STRIDE]u8;
-    datagram_receive_bytes:   [DATAGRAM_CAPACITY * DATAGRAM_STRIDE]u8;
     source:                   u64;
     generation:               u64;
     leased:                   bool;
@@ -470,18 +468,15 @@ fun public_stream_storage(c: *Connection) stream_api.Storage {
         send_buffer_limit: STREAM_STRIDE};
 }
 
-fun public_datagram_storage(storage: *Storage) datagram_api.Storage {
+fun public_datagram_storage(c: *Connection) datagram_api.Storage {
     ret datagram_api.Storage{
-        send_entries:         ?storage.datagram_send_entries[0],
-        send_capacity:        DATAGRAM_CAPACITY,
-        send_bytes:           ?storage.datagram_send_bytes[0],
-        send_bytes_length:    DATAGRAM_CAPACITY * DATAGRAM_STRIDE,
-        send_stride:          DATAGRAM_STRIDE,
-        receive_entries:      ?storage.datagram_receive_entries[0],
-        receive_capacity:     DATAGRAM_CAPACITY,
-        receive_bytes:        ?storage.datagram_receive_bytes[0],
-        receive_bytes_length: DATAGRAM_CAPACITY * DATAGRAM_STRIDE,
-        receive_stride:       DATAGRAM_STRIDE
+        send_entries:     ?c.storage.datagram_send_entries[0],
+        send_capacity:    DATAGRAM_CAPACITY,
+        send_stride:      DATAGRAM_STRIDE,
+        receive_entries:  ?c.storage.datagram_receive_entries[0],
+        receive_capacity: DATAGRAM_CAPACITY,
+        receive_stride:   DATAGRAM_STRIDE,
+        chunks:           ?c.provider, account: ?c.account
     };
 }
 
@@ -576,6 +571,12 @@ fun chunks_for(bytes: u64) usize {
     ret ((bytes + supply.BYTES::u64 - 1) / supply.BYTES::u64)::usize;
 }
 
+# a queued datagram holds one chunk in its direction
+fun datagram_budget(config: *Config) usize {
+    if (config.max_datagram_frame_size == 0) { ret 0; }
+    ret DATAGRAM_CAPACITY;
+}
+
 fun chunk_budget(window: u64) usize {
     ret STREAM_CAPACITY * (chunks_for(window) + 1 + SPILLS_PER_STREAM) +
         CRYPTO_CHUNKS * chunks_for(CRYPTO_PER_LEVEL::u64);
@@ -600,8 +601,8 @@ fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
     # connection before anything else is leased
     c.provider = chunks;
     if (!supply.open(?c.provider, ?c.account, config.source,
-        chunk_budget(STREAM_STRIDE::u64) + CORE_BLOCKS,
-        chunk_budget(config.receive_stream_data),
+        chunk_budget(STREAM_STRIDE::u64) + CORE_BLOCKS + datagram_budget(config),
+        chunk_budget(config.receive_stream_data) + datagram_budget(config),
         config.chunk_reserve)) {
         var no_provider: supply.Provider;
         c.provider = no_provider;
@@ -782,7 +783,7 @@ fun secret_storage(c: *Connection) core_api.SecretStorage {
 }
 
 fun datagram_storage(c: *Connection) datagram_api.Storage {
-    ret public_datagram_storage(c.storage);
+    ret public_datagram_storage(c);
 }
 
 fun scope_provider_disjoint(c: *Connection, scope: *cancel.Scope) bool {

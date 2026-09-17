@@ -58,20 +58,18 @@ rec Core {
 }
 
 rec Fixture {
-    stream_records:        [32]stream_api.Stream;
-    chunks:                supply.TestPool;
-    account:               supply.Account;
-    attempts:              [64]stream_api.Attempt;
-    streams:               stream_api.Manager;
-    send_entries:          [8]datagram_api.Entry;
-    receive_entries:       [8]datagram_api.Entry;
-    datagram_send_data:    [512]u8;
-    datagram_receive_data: [512]u8;
-    datagrams:             datagram_api.Queue;
-    sends:                 [4]transport_api.SendSlot;
-    core:                  Core;
-    scope:                 cancel.Scope;
-    driver:                transport_api.Driver[Core];
+    stream_records:  [32]stream_api.Stream;
+    chunks:          supply.TestPool;
+    account:         supply.Account;
+    attempts:        [64]stream_api.Attempt;
+    streams:         stream_api.Manager;
+    send_entries:    [8]datagram_api.Entry;
+    receive_entries: [8]datagram_api.Entry;
+    datagrams:       datagram_api.Queue;
+    sends:           [4]transport_api.SendSlot;
+    core:            Core;
+    scope:           cancel.Scope;
+    driver:          transport_api.Driver[Core];
 }
 
 fun stream_config(source: u64, role: u8) stream_api.Config {
@@ -286,11 +284,10 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     if (!stream_api.initialize(?fixture.streams,
         stream_config(source, role), stream_storage)) { ret false; }
     val datagram_storage: datagram_api.Storage = datagram_api.Storage{
-        send_entries:         ?fixture.send_entries[0], send_capacity: 8,
-        send_bytes:           ?fixture.datagram_send_data[0], send_bytes_length: 512,
-        send_stride:          64, receive_entries: ?fixture.receive_entries[0],
-        receive_capacity:     8, receive_bytes: ?fixture.datagram_receive_data[0],
-        receive_bytes_length: 512, receive_stride: 64
+        send_entries:     ?fixture.send_entries[0], send_capacity: 8,
+        send_stride:      64, receive_entries: ?fixture.receive_entries[0],
+        receive_capacity: 8, receive_stride: 64,
+        chunks:           ?fixture.chunks.provider, account: ?fixture.account
     };
     if (!datagram_api.initialize(?fixture.datagrams,
         datagram_api.Config{source: source, peer_max_frame_size: 65,
