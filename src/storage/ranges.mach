@@ -79,6 +79,11 @@ fun items(set: *RangeSet) *Interval {
     ret ?set.inline[0];
 }
 
+# the position of the first interval that ends beyond `offset`
+pub fun index_after(set: *RangeSet, offset: u64) usize {
+    ret locate(set, offset);
+}
+
 pub fun at(set: *RangeSet, index: usize) Interval {
     ret items(set)[index];
 }

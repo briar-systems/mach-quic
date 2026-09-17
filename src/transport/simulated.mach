@@ -1,4 +1,6 @@
 use quic.connection.ownership;
+use quic.storage.limited;
+use quic.storage.pool;
 use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
 use transport_api: quic.transport;
@@ -54,12 +56,9 @@ rec Core {
 
 rec Fixture {
     stream_records:        [32]stream_api.Stream;
-    send_data:             [1024]u8;
-    send_pending:          [1024]bool;
-    send_acked:            [1024]bool;
-    send_inflight:         [1024]u8;
-    receive_data:          [1024]u8;
-    receive_present:       [1024]bool;
+    memory:                limited.Limited;
+    chunks:                pool.Pool;
+    account:               pool.Account;
     attempts:              [64]stream_api.Attempt;
     streams:               stream_api.Manager;
     send_entries:          [8]datagram_api.Entry;
@@ -267,15 +266,22 @@ fun core_timer(core: *Core) transport_api.CoreTimer {
 }
 
 fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
+    # a fixture made again reuses its record, so its previous pool goes first
+    if (fixture.chunks.valid) {
+        if ((fixture.account.open &&
+            !pool.close_account(?fixture.chunks, ?fixture.account)) ||
+            !pool.destroy(?fixture.chunks)) { ret false; }
+    }
+    if ((fixture.memory.a.ctx == nil && !limited.make(?fixture.memory, 1 << 24)) ||
+        !pool.make(?fixture.chunks, limited.allocator_of(?fixture.memory),
+        pool.default_config(512)) ||
+        !pool.open_account(?fixture.chunks, ?fixture.account, source, 256, 256, 0)) {
+        ret false;
+    }
     val stream_storage: stream_api.Storage = stream_api.Storage{
-        streams:         ?fixture.stream_records[0], stream_capacity: 32,
-        send_data:       ?fixture.send_data[0], send_data_length: 1024,
-        send_pending:    ?fixture.send_pending[0], send_acked: ?fixture.send_acked[0],
-        send_inflight:   ?fixture.send_inflight[0], send_state_length: 1024,
-        send_stride:     32,
-        receive_data:    ?fixture.receive_data[0], receive_data_length: 1024,
-        receive_present: ?fixture.receive_present[0], receive_state_length: 1024,
-        receive_stride:  32, attempts: ?fixture.attempts[0], attempt_capacity: 64
+        streams:  ?fixture.stream_records[0], stream_capacity: 32,
+        attempts: ?fixture.attempts[0], attempt_capacity: 64,
+        chunks:   ?fixture.chunks, account: ?fixture.account, send_buffer_limit: 32
     };
     if (!stream_api.initialize(?fixture.streams,
         stream_config(source, role), stream_storage)) { ret false; }

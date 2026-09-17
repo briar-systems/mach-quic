@@ -390,6 +390,13 @@ pub fun data(pool: *Pool, ref: Ref) *u8 {
     ret cell.data;
 }
 
+# whether anything sealed from the chunk is still in flight
+pub fun in_flight(pool: *Pool, ref: Ref) bool {
+    if (!usable(pool)) { ret false; }
+    val cell: *Meta = live_cell(pool, ref);
+    ret cell != nil && cell.inflight != 0;
+}
+
 # an attempt sealed from the chunk, so it may not be released until settled
 pub fun retain(pool: *Pool, ref: Ref) bool {
     if (!usable(pool)) { ret false; }

@@ -14,6 +14,8 @@ use quic.crypto.protection;
 use packet_api: quic.packet.packet;
 use path_api:   quic.path.path;
 use ack_api:    quic.recovery.ack;
+use quic.storage.limited;
+use quic.storage.pool;
 use quic.transport;
 use quic.transport.binding;
 
@@ -24,6 +26,7 @@ use std.allocator;
 use allocator_testing: std.allocator.testing;
 use std.chrono.time;
 use std.crypto.ct;
+use std.memory;
 use std.net.ip;
 use std.sync.cancel;
 use std.system.os;
@@ -143,6 +146,18 @@ fun rollback_entropy(context: ptr, secret_context: *^u8,
         i              = i + 1;
     }
     ret 0;
+}
+
+var chunk_memory: limited.Limited;
+var chunk_pool:   pool.Pool;
+
+# one pool serves every connection a test assembles
+fun test_chunks() *pool.Pool {
+    if (!chunk_pool.valid) {
+        limited.make(?chunk_memory, 1 << 26);
+        pool.make(?chunk_pool, limited.allocator_of(?chunk_memory), pool.default_config(4096));
+    }
+    ret ?chunk_pool;
 }
 
 # a failing exit code is one byte, so the detail lands here and the assertion
@@ -479,16 +494,16 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val path_scope: *cancel.Scope = embedded_scope(
         (?dialer_storage.path_values[0])::*u8, 2 * $size_of(path_api.Path));
     val core_overlap: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
+        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls, core_scope, 1000);
     val handshake_overlap: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
+        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls, handshake_scope, 1000);
     val cid_overlap: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
+        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls, cid_scope, 1000);
     val path_overlap: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
+        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls, path_scope, 1000);
     if (core_scope == nil || handshake_scope == nil || cid_scope == nil ||
         path_scope == nil || core_overlap.stage != assembly.STAGE_STORAGE ||
@@ -505,17 +520,17 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val misaligned: *assembly.Storage =
         ((?dialer_storage)::usize + 1)::*assembly.Storage;
     val malformed: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, misaligned, ?dialer_secret_storage,
+        ?dialer_config, misaligned, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls, ?dialer_scope, 1000);
     val missing: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, nil, ?dialer_secret_storage,
+        ?dialer_config, nil, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls, ?dialer_scope, 1000);
     if (malformed.stage != assembly.STAGE_STORAGE ||
         missing.stage != assembly.STAGE_STORAGE ||
         malformed.cleanup_retained || missing.cleanup_retained ||
         dialer_storage.leased || dialer_secret_storage.leased) { ret 237; }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
+        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls, ?dialer_scope, 1000);
     if (!dialed.ok)                         { ret 170 + dialed.stage::i32; }
     if (dialed.core.reason != core.INIT_OK) { ret 180 + dialed.core.reason::i32; }
@@ -524,13 +539,13 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     copied_storage = dialer_storage;
     var competing:     assembly.Connection;
     val public_reused: assembly.InitResult = assembly.init_client(?competing,
-        ?dialer_config, ?dialer_storage, ?listener_secret_storage,
+        ?dialer_config, ?dialer_storage, ?listener_secret_storage, test_chunks(),
         ?dialer_tls, ?dialer_scope, 1000);
     val secret_reused: assembly.InitResult = assembly.init_client(?competing,
-        ?dialer_config, ?listener_storage, ?dialer_secret_storage,
+        ?dialer_config, ?listener_storage, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls, ?dialer_scope, 1000);
     val copied_reused: assembly.InitResult = assembly.init_client(?competing,
-        ?dialer_config, ?copied_storage, ?listener_secret_storage,
+        ?dialer_config, ?copied_storage, ?listener_secret_storage, test_chunks(),
         ?dialer_tls, ?dialer_scope, 1000);
     if (public_reused.stage != assembly.STAGE_STORAGE ||
         secret_reused.stage != assembly.STAGE_STORAGE ||
@@ -663,7 +678,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         len:  listener_encoded}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 14; }
     val served: assembly.InitResult = assembly.init_server(?listener,
-        ?listener_config, ?listener_storage, ?listener_secret_storage,
+        ?listener_config, ?listener_storage, ?listener_secret_storage, test_chunks(),
         ?listener_tls, ?listener_scope,
         clock);
     if (!served.ok)                         { ret 140 + served.stage::i32; }
@@ -901,7 +916,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !operation_ok(cancel.make_root(?listener_scope, false,
         time.Time{sec: 0, nsec: 0}))) { ret 224; }
     val redialed: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
+        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls_two, ?dialer_scope,
         clock + 1000);
     if (!redialed.ok || redialed.core.reason != core.INIT_OK) { ret 225; }
@@ -949,7 +964,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 228; }
     cancel.cancel(?listener_scope);
     val refused_two: assembly.InitResult = assembly.init_server(?listener,
-        ?listener_config_two, ?listener_storage, ?listener_secret_storage,
+        ?listener_config_two, ?listener_storage, ?listener_secret_storage, test_chunks(),
         ?listener_tls_two,
         ?listener_scope, clock + 2000);
     if (refused_two.ok || refused_two.stage != assembly.STAGE_DRIVER ||
@@ -975,7 +990,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !operation_ok(cancel.make_root(?listener_scope, false,
         time.Time{sec: 0, nsec: 0}))) { ret 235; }
     val reserved_two: assembly.InitResult = assembly.init_server(?listener,
-        ?listener_config_two, ?listener_storage, ?listener_secret_storage,
+        ?listener_config_two, ?listener_storage, ?listener_secret_storage, test_chunks(),
         ?listener_tls_two,
         ?listener_scope, clock + 2000);
     if (!reserved_two.ok || reserved_two.core.reason != core.INIT_OK) { ret 229; }
@@ -1050,7 +1065,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !operation_ok(cancel.make_root(?dialer_scope, false,
         time.Time{sec: 0, nsec: 0}))) { ret 239; }
     val retained: assembly.InitResult = assembly.init_client(?dialer,
-        ?rollback_config, ?dialer_storage, ?dialer_secret_storage,
+        ?rollback_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?rollback_tls, ?dialer_scope, clock + 1000);
     val retained_storage_generation: u64 = dialer_storage.generation;
     val retained_secret_generation:  u64 = dialer_secret_storage.generation;
@@ -1065,13 +1080,13 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         dialer_secret_storage.source != rollback_config.source ||
         dialer_storage.stream_attempts[0].state != 1) { ret 240; }
     val repeated: assembly.InitResult = assembly.init_client(?dialer,
-        ?rollback_config, ?dialer_storage, ?dialer_secret_storage,
+        ?rollback_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?rollback_tls, ?dialer_scope, clock + 1000);
     val public_retained: assembly.InitResult = assembly.init_client(?competing,
-        ?rollback_config, ?dialer_storage, ?listener_secret_storage,
+        ?rollback_config, ?dialer_storage, ?listener_secret_storage, test_chunks(),
         ?rollback_tls, ?dialer_scope, clock + 1000);
     val secret_retained: assembly.InitResult = assembly.init_client(?competing,
-        ?rollback_config, ?listener_storage, ?dialer_secret_storage,
+        ?rollback_config, ?listener_storage, ?dialer_secret_storage, test_chunks(),
         ?rollback_tls, ?dialer_scope, clock + 1000);
     if (repeated.stage != assembly.STAGE_STORAGE ||
         !repeated.cleanup_retained ||
@@ -1285,7 +1300,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
         ret 6;
     }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage,
+        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
         ?dialer_tls, ?dialer_scope, clock[0]);
     if (!dialed.ok || dialed.core.reason != core.INIT_OK) { ret 7; }
 
@@ -1326,7 +1341,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
         len:  listener_encoded}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 10; }
     val served: assembly.InitResult = assembly.init_server(?listener,
-        ?listener_config, ?listener_storage, ?listener_secret_storage,
+        ?listener_config, ?listener_storage, ?listener_secret_storage, test_chunks(),
         ?listener_tls, ?listener_scope, clock[0]);
     if (!served.ok || served.core.reason != core.INIT_OK) { ret 11; }
     var initial: transport.Datagram;
@@ -1791,4 +1806,170 @@ test "quic.connection.assembly: an idle generate does no selection work until so
     if (generate_status(?listener, ?listener_scope, due) != transport.STATUS_OK ||
         space.ack_pending) { ret 29; }
     ret 0;
+}
+
+rec Lossy {
+    seed:        u64;
+    loss:        u64;
+    held:        [1500]u8;
+    held_length: usize;
+    held_at:     u64;
+    dropped:     usize;
+    reordered:   usize;
+}
+
+fun lossy_roll(lossy: *Lossy) u64 {
+    lossy.seed = lossy.seed * 6364136223846793005 + 1442695040888963407;
+    ret (lossy.seed >> 33) % 1000;
+}
+
+fun deliver(sink: *assembly.Connection, local: ip.Endpoint, peer: ip.Endpoint,
+    data: *u8, length: usize, now_ns: u64) bool {
+    var input: transport.Datagram;
+    input.local          = local;
+    input.peer           = peer;
+    input.data           = data;
+    input.length         = length;
+    input.received_at_ns = now_ns;
+    ret transport.receive_datagram[binding.Binding](?sink.driver, ?input).status ==
+        transport.STATUS_OK;
+}
+
+# moves every datagram the source has, dropping some and swapping the order of
+# others. a held datagram goes out after the next one
+fun lossy_carry(source: *assembly.Connection, sink: *assembly.Connection,
+    source_scope: *cancel.Scope, sink_local: ip.Endpoint, sink_peer: ip.Endpoint,
+    now_ns: u64, lossy: *Lossy) bool {
+    var guard: usize = 0;
+    for (guard < 64) {
+        val generated: transport.Generated =
+            transport.generate[binding.Binding](?source.driver, source_scope,
+            ?wire[0], 1500, now_ns, 0);
+        if (generated.status == transport.STATUS_EMPTY ||
+            generated.status == transport.STATUS_BLOCKED) { brk; }
+        if (generated.status != transport.STATUS_OK ||
+            transport.complete_send[binding.Binding](?source.driver, generated.token,
+            transport.SEND_SENT, generated.count, now_ns).status !=
+            transport.STATUS_OK) { ret false; }
+        val roll: u64 = lossy_roll(lossy);
+        if (roll < lossy.loss) {
+            lossy.dropped = lossy.dropped + 1;
+        }
+        or (roll < lossy.loss + 100 && lossy.held_length == 0) {
+            memory.copy[u8](?lossy.held[0], ?wire[0], generated.count);
+            lossy.held_length = generated.count;
+            lossy.reordered   = lossy.reordered + 1;
+        }
+        or {
+            if (!deliver(sink, sink_local, sink_peer, ?wire[0], generated.count, now_ns)) {
+                ret false;
+            }
+            if (lossy.held_length > 0) {
+                if (!deliver(sink, sink_local, sink_peer, ?lossy.held[0],
+                    lossy.held_length, now_ns)) { ret false; }
+                lossy.held_length = 0;
+            }
+        }
+        guard = guard + 1;
+    }
+    ret true;
+}
+
+fun fire_due(c: *assembly.Connection, now_ns: u64) bool {
+    val due: transport.Timer = transport.timer[binding.Binding](?c.driver);
+    if (!due.armed || due.deadline_ns > now_ns) { ret true; }
+    ret transport.on_timeout[binding.Binding](?c.driver, due, now_ns).status !=
+        transport.STATUS_ERROR;
+}
+
+fun next_deadline(clock: u64) u64 {
+    var next:   u64             = clock + 50000000;
+    val dialed: transport.Timer = transport.timer[binding.Binding](?dialer.driver);
+    val served: transport.Timer = transport.timer[binding.Binding](?listener.driver);
+    if (dialed.armed && dialed.deadline_ns < next) { next = dialed.deadline_ns; }
+    if (served.armed && served.deadline_ns < next) { next = served.deadline_ns; }
+    if (next <= clock)                             { next = clock + 1000; }
+    ret next;
+}
+
+var lossy_streams: [10]transport.Stream;
+var lossy_payload: [4096]u8;
+var lossy_sink:    [4096]u8;
+
+# ten request streams each fill their whole window through a lossy, reordering
+# path, and every byte arrives without a storage refusal
+fun lossy_transfer(loss: u64, seed: u64) i32 {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0) { ret established; }
+    var i: usize = 0;
+    for (i < 4096) {
+        lossy_payload[i] = (i * 7 + 3)::u8;
+        i                = i + 1;
+    }
+    i = 0;
+    for (i < 10) {
+        val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+            ?dialer.driver, transport.BIDIRECTIONAL);
+        if (opened.status != transport.STATUS_OK ||
+            transport.write_stream[binding.Binding](?dialer.driver, opened.stream,
+            ?lossy_payload[0], 4096).count != 4096 ||
+            transport.finish_stream[binding.Binding](?dialer.driver,
+            opened.stream).status != transport.STATUS_OK) { ret 20; }
+        i = i + 1;
+    }
+    var lossy: Lossy;
+    lossy.seed = seed;
+    lossy.loss = loss;
+    var received: [10]usize;
+    var accepted: usize = 0;
+    var finished: usize = 0;
+    var rounds:   usize = 0;
+    for (finished < 10 && rounds < 4000) {
+        if (!lossy_carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+            dialer_endpoint(), clock, ?lossy) ||
+            !lossy_carry(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+            listener_endpoint(), clock, ?lossy)) { ret 21; }
+        for (accepted < 10) {
+            val peer: transport.OpenResult = transport.accept_stream[binding.Binding](
+                ?listener.driver);
+            if (peer.status != transport.STATUS_OK) { brk; }
+            lossy_streams[accepted] = peer.stream;
+            accepted                = accepted + 1;
+        }
+        i = 0;
+        for (i < accepted) {
+            val read: transport.ReadResult = transport.read_stream[binding.Binding](
+                ?listener.driver, lossy_streams[i], ?lossy_sink[0], 4096);
+            if (read.count > 0) {
+                var k: usize = 0;
+                for (k < read.count) {
+                    if (lossy_sink[k] != lossy_payload[received[i] + k]) { ret 22; }
+                    k = k + 1;
+                }
+                received[i] = received[i] + read.count;
+            }
+            if (read.fin && received[i] == 4096) {
+                finished    = finished + 1;
+                received[i] = received[i] + 1;
+            }
+            i = i + 1;
+        }
+        clock = next_deadline(clock);
+        if (!fire_due(?dialer, clock) || !fire_due(?listener, clock)) { ret 23; }
+        rounds = rounds + 1;
+    }
+    if (finished != 10) { ret 24; }
+    if (lossy.dropped == 0 || listener.streams.receive_storage_refusals != 0 ||
+        listener.core.refused_packets != 0) { ret 25; }
+    ret 0;
+}
+
+test "quic.connection.assembly: a full window survives 5% loss and reordering without storage refusals" {
+    ret lossy_transfer(50, 11);
+}
+
+test "quic.connection.assembly: a full window survives 10% loss and reordering without storage refusals" {
+    ret lossy_transfer(100, 29);
 }

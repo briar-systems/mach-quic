@@ -320,6 +320,10 @@ pub rec Core {
     retry_source_present:       bool;
     peer_authenticated:         bool;
     handshake_confirmed:        bool;
+    # the packet being applied was refused for storage and stays unacknowledged
+    packet_refused: bool;
+    # packets refused that way
+    refused_packets: u64;
     # crypto data arrived that the provider has not been polled for
     crypto_received: bool;
     # the last generate found nothing to send and nothing has changed since:
@@ -823,7 +827,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     result: *InitResult) bool {
     if (handshake == nil || cids == nil || paths == nil || streams == nil ||
         datagrams == nil) { ret refuse(result, INIT_ARGUMENT); }
-    var ranges: [63]ownership.Range;
+    var ranges: [57]ownership.Range;
     ranges[0] = core_range(core);
     ranges[1] = secrets_range(secrets);
     if (!ranges[0].valid || !ranges[1].valid) {
@@ -941,36 +945,21 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ranges[42] = ownership.array(streams.storage.attempts::*u8,
         streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
         ownership.ZERO_FORBIDDEN);
-    ranges[43] = ownership.bytes(streams.storage.send_data,
-        streams.storage.send_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[44] = ownership.array(streams.storage.send_pending::*u8,
-        streams.storage.send_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[45] = ownership.array(streams.storage.send_acked::*u8,
-        streams.storage.send_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[46] = ownership.bytes(streams.storage.send_inflight,
-        streams.storage.send_state_length, ownership.ZERO_FORBIDDEN);
-    ranges[47] = ownership.bytes(streams.storage.receive_data,
-        streams.storage.receive_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[48] = ownership.array(streams.storage.receive_present::*u8,
-        streams.storage.receive_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
     var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
-    ranges[49] = ownership.array(datagrams.storage.send_entries::*u8,
+    ranges[43] = ownership.array(datagrams.storage.send_entries::*u8,
         datagrams.storage.send_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[50] = ownership.bytes(datagrams.storage.send_bytes,
+    ranges[44] = ownership.bytes(datagrams.storage.send_bytes,
         datagrams.storage.send_bytes_length, datagram_zero);
-    ranges[51] = ownership.array(datagrams.storage.receive_entries::*u8,
+    ranges[45] = ownership.array(datagrams.storage.receive_entries::*u8,
         datagrams.storage.receive_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[52] = ownership.bytes(datagrams.storage.receive_bytes,
+    ranges[46] = ownership.bytes(datagrams.storage.receive_bytes,
         datagrams.storage.receive_bytes_length, datagram_zero);
-    if (!handshake_api.provider_ranges(handshake, ?ranges[53],
+    if (!handshake_api.provider_ranges(handshake, ?ranges[47],
         handshake_api.PROVIDER_RANGE_CAPACITY)) {
         ret refuse(result, INIT_PROVIDER_RANGES);
     }
-    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], 63);
+    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], 57);
     if (whole.kind != ownership.OVERLAP_NONE) {
         ret refuse_overlap(result, INIT_COMPONENT_RANGES, whole);
     }
@@ -996,7 +985,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     var i: usize = 0;
     for (i < 4) {
         val lent: ownership.Disjointness = ownership.disjoint_from(borrowed[i], i,
-            ?ranges[0], 23, 63);
+            ?ranges[0], 23, 57);
         if (lent.kind != ownership.OVERLAP_NONE) {
             ret refuse_overlap(result, INIT_COMPONENT_BORROWED, lent);
         }
@@ -2084,6 +2073,10 @@ fun process_frame(core: *Core, secrets: *Secrets,
             core.streams, core.config.source, value.stream_id, value.offset, value.data.data,
             value.data.len, value.fin);
         if (received.ok) { ret true; }
+        if (received.error == stream_api.ERROR_STORAGE) {
+            core.packet_refused = true;
+            ret true;
+        }
         ret stream_failure(core, received.error);
     }
     if (value.kind == frame.RESET_STREAM) {
@@ -2257,7 +2250,7 @@ fun apply_plaintext(core: *Core, secrets: *Secrets,
             !process_frame(core, secrets, level, space, receive_path,
             receive_destination,
             ?value, decoder.pos - frame_begin, now_ns)) { ret false; }
-        if (core.peer_close_received) { brk; }
+        if (core.peer_close_received || core.packet_refused) { brk; }
     }
     ret true;
 }
@@ -2431,13 +2424,17 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     var non_probing:   bool = false;
     if (!scan_plaintext(core, plaintext, opened.written, ?ack_eliciting,
         ?non_probing)) { ret fail(core, FRAME_ENCODING_ERROR, input.received_at_ns); }
-    val received: ack_api.ReceiveResult = ack_api.on_packet(?core.acknowledgements,
-        space, opened.packet_number, input.received_at_ns, ack_eliciting, input.ecn);
-    if (received.status == ack_api.RECEIVE_DUPLICATE ||
-        received.status == ack_api.RECEIVE_DROPPED) {
+    # the packet is recorded for acknowledgement only once its frames were
+    # taken. a packet refused for storage stays unacknowledged, so its sender
+    # retransmits what it carried
+    val seen: u8 = ack_api.classify(?core.acknowledgements, space,
+        opened.packet_number);
+    if (seen == ack_api.RECEIVE_DUPLICATE || seen == ack_api.RECEIVE_DROPPED) {
+        ack_api.on_packet(?core.acknowledgements, space, opened.packet_number,
+            input.received_at_ns, ack_eliciting, input.ecn);
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
-    if (received.status != ack_api.RECEIVE_NEW) {
+    if (seen != ack_api.RECEIVE_NEW) {
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
     if (core.role == transport_api.CLIENT && core.authenticated_packets == 0 &&
@@ -2486,12 +2483,26 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         input.received_at_ns)) {
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
+    core.packet_refused = false;
     if (!apply_plaintext(core, secrets, level, space, observed.handle,
         receive_destination.handle, plaintext, opened.written,
         input.received_at_ns)) {
         var failure: u64 = PROTOCOL_VIOLATION;
         if (core.close_error != NO_ERROR) { failure = core.close_error; }
         ret fail(core, failure, input.received_at_ns);
+    }
+    if (core.packet_refused) {
+        core.packet_refused  = false;
+        core.refused_packets = core.refused_packets + 1;
+    }
+    or {
+        # applying the frames may have discarded this space, and then there is
+        # nothing left to acknowledge
+        val recorded: u8 = ack_api.on_packet(?core.acknowledgements, space,
+            opened.packet_number, input.received_at_ns, ack_eliciting, input.ecn).status;
+        if (recorded != ack_api.RECEIVE_NEW && recorded != ack_api.RECEIVE_DISCARDED) {
+            ret fail(core, INTERNAL_ERROR, input.received_at_ns);
+        }
     }
     if (core.role == transport_api.CLIENT && level == handshake_api.HANDSHAKE &&
         !discard_initial_keys(core, secrets)) {
