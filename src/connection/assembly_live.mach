@@ -1664,8 +1664,8 @@ test "quic.connection.assembly: an acknowledged MTU probe keeps a connection who
 
 fun sent_owner(value: *assembly.Connection, number: u64) *core.Owner {
     var i: usize = 0;
-    for (i < value.core.storage.owner_capacity) {
-        val owner: *core.Owner = ?value.core.storage.owners[i];
+    for (i < value.core.owner_capacity) {
+        val owner: *core.Owner = ?value.core.owners[i];
         if (owner.state == core.OWNER_SENT && owner.space == packet_api.SPACE_APPLICATION &&
             owner.packet_number == number) { ret owner; }
         i = i + 1;

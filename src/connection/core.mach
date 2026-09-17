@@ -13,6 +13,7 @@ use path_api: quic.path.path;
 use ack_api:  quic.recovery.ack;
 use quic.recovery.recovery;
 use quic.storage.chunks;
+use quic.storage.pool;
 use quic.storage.ranges;
 use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
@@ -179,8 +180,10 @@ pub rec Storage {
     # the chunk behind the extension tables, local parameter bytes and retry
     # storage, all of which the core lets go once the handshake is confirmed.
     # nil when the caller lends that storage for the connection's lifetime
-    handshake_block:  *chunks.Block;
-    handshake_source: ranges.Source;
+    handshake_block: *chunks.Block;
+    # where the core takes chunks for owners and packet histories that the
+    # caller leaves nil, holding them only while packets are in flight
+    chunk_source: ranges.Source;
 }
 
 pub rec SecretStorage {
@@ -283,13 +286,20 @@ fun refuse_overlap(result: *InitResult, reason: InitReason,
 }
 
 pub rec Core {
-    config:                     Config;
-    storage:                    Storage;
-    cids:                       *cid_api.Manager;
-    paths:                      *path_api.Manager;
-    streams:                    *stream_api.Manager;
-    datagrams:                  *datagram_api.Queue;
-    negotiation:                negotiation_api.Client;
+    config:      Config;
+    storage:     Storage;
+    cids:        *cid_api.Manager;
+    paths:       *path_api.Manager;
+    streams:     *stream_api.Manager;
+    datagrams:   *datagram_api.Queue;
+    negotiation: negotiation_api.Client;
+    # the live owner table: lent for the lifetime, or a chunk held while any
+    # owner is active, and nil with no capacity otherwise
+    owners:                     *Owner;
+    owner_capacity:             usize;
+    owners_active:              usize;
+    owner_block:                chunks.Block;
+    history_blocks:             [3]chunks.Block;
     recovery_state:             recovery.Recovery;
     acknowledgements:           ack_api.Tracker;
     peer_parameters:            transport_parameters.Parameters;
@@ -536,15 +546,15 @@ fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
     owned[5] = ownership.array(core.storage.recovery_events::*u8,
         core.storage.recovery_event_capacity, $size_of(recovery.Event),
         ownership.ZERO_FORBIDDEN);
-    owned[6] = ownership.array(core.storage.recovery_initial.packets::*u8,
-        core.storage.recovery_initial.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
-    owned[7] = ownership.array(core.storage.recovery_handshake.packets::*u8,
-        core.storage.recovery_handshake.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
-    owned[8] = ownership.array(core.storage.recovery_application.packets::*u8,
-        core.storage.recovery_application.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+    owned[6] = ownership.array(core.recovery_state.spaces[0].packets::*u8,
+        core.recovery_state.spaces[0].capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
+    owned[7] = ownership.array(core.recovery_state.spaces[1].packets::*u8,
+        core.recovery_state.spaces[1].capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
+    owned[8] = ownership.array(core.recovery_state.spaces[2].packets::*u8,
+        core.recovery_state.spaces[2].capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     owned[9] = ownership.array(core.storage.ack_initial.ranges::*u8,
         core.storage.ack_initial.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
@@ -554,8 +564,8 @@ fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
     owned[11] = ownership.array(core.storage.ack_application.ranges::*u8,
         core.storage.ack_application.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
-    owned[12] = ownership.array(core.storage.owners::*u8,
-        core.storage.owner_capacity, $size_of(Owner), ownership.ZERO_FORBIDDEN);
+    owned[12] = ownership.array(core.owners::*u8,
+        core.owner_capacity, $size_of(Owner), ownership.ZERO_ALLOWED);
     owned[13] = ownership.array(core.storage.peer_extensions::*u8,
         core.storage.peer_extension_capacity,
         $size_of(transport_parameters.Parameter), ownership.ZERO_ALLOWED);
@@ -647,6 +657,44 @@ fun welded_keys_disjoint(secrets: *Secrets, data: *^u8,
         key_set_disjoint(data, length, ?secrets.application_receive.next);
 }
 
+# capacity of storage the caller lends for the connection's lifetime. storage
+# left nil is taken from the chunk source when needed
+fun lent_history(storage: recovery.HistoryStorage) usize {
+    if (storage.packets == nil) { ret 0; }
+    ret storage.capacity;
+}
+
+fun lent_only(storage: recovery.HistoryStorage) recovery.HistoryStorage {
+    var lent: recovery.HistoryStorage;
+    if (storage.packets != nil) { lent = storage; }
+    ret lent;
+}
+
+fun lent_owners(storage: *Storage) usize {
+    if (storage.owners == nil) { ret 0; }
+    ret storage.owner_capacity;
+}
+
+fun history_fits(storage: recovery.HistoryStorage) bool {
+    ret storage.packets != nil ||
+        storage.capacity * $size_of(recovery.SentPacket) <= pool.CHUNK;
+}
+
+# storage taken on demand must fit one chunk and have a source
+fun on_demand_valid(storage: *Storage) bool {
+    val demanded: bool = storage.owners == nil ||
+        storage.recovery_initial.packets == nil ||
+        storage.recovery_handshake.packets == nil ||
+        storage.recovery_application.packets == nil;
+    if (!demanded) { ret true; }
+    ret storage.chunk_source.pool != nil && storage.chunk_source.account != nil &&
+        (storage.owners != nil ||
+        storage.owner_capacity * $size_of(Owner) <= pool.CHUNK) &&
+        history_fits(storage.recovery_initial) &&
+        history_fits(storage.recovery_handshake) &&
+        history_fits(storage.recovery_application);
+}
+
 fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     storage: *Storage, secret_storage: *SecretStorage,
     result: *InitResult) bool {
@@ -673,7 +721,8 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.frame_ack_capacity < storage.ack_handshake.capacity - 1 ||
         storage.frame_ack_capacity < storage.ack_application.capacity - 1 ||
         storage.recovery_event_capacity < storage.owner_capacity ||
-        storage.owner_capacity == 0 || storage.received_token_capacity == 0 ||
+        storage.owner_capacity == 0 || !on_demand_valid(storage) ||
+        storage.received_token_capacity == 0 ||
         storage.send_token_capacity == 0) {
         ret refuse(result, INIT_STORAGE_CAPACITY);
     }
@@ -701,14 +750,14 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.recovery_event_capacity, $size_of(recovery.Event),
         ownership.ZERO_FORBIDDEN);
     ranges[8] = ownership.array(storage.recovery_initial.packets::*u8,
-        storage.recovery_initial.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_initial), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[9] = ownership.array(storage.recovery_handshake.packets::*u8,
-        storage.recovery_handshake.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_handshake), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[10] = ownership.array(storage.recovery_application.packets::*u8,
-        storage.recovery_application.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_application), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[11] = ownership.array(storage.ack_initial.ranges::*u8,
         storage.ack_initial.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
@@ -718,8 +767,8 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ranges[13] = ownership.array(storage.ack_application.ranges::*u8,
         storage.ack_application.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
-    ranges[14] = ownership.array(storage.owners::*u8, storage.owner_capacity,
-        $size_of(Owner), ownership.ZERO_FORBIDDEN);
+    ranges[14] = ownership.array(storage.owners::*u8, lent_owners(storage),
+        $size_of(Owner), ownership.ZERO_ALLOWED);
     ranges[15] = ownership.array(storage.peer_extensions::*u8,
         storage.peer_extension_capacity, $size_of(transport_parameters.Parameter),
         ownership.ZERO_ALLOWED);
@@ -860,14 +909,14 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.recovery_event_capacity, $size_of(recovery.Event),
         ownership.ZERO_FORBIDDEN);
     ranges[8] = ownership.array(storage.recovery_initial.packets::*u8,
-        storage.recovery_initial.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_initial), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[9] = ownership.array(storage.recovery_handshake.packets::*u8,
-        storage.recovery_handshake.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_handshake), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[10] = ownership.array(storage.recovery_application.packets::*u8,
-        storage.recovery_application.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_application), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[11] = ownership.array(storage.ack_initial.ranges::*u8,
         storage.ack_initial.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
@@ -877,8 +926,8 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ranges[13] = ownership.array(storage.ack_application.ranges::*u8,
         storage.ack_application.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
-    ranges[14] = ownership.array(storage.owners::*u8, storage.owner_capacity,
-        $size_of(Owner), ownership.ZERO_FORBIDDEN);
+    ranges[14] = ownership.array(storage.owners::*u8, lent_owners(storage),
+        $size_of(Owner), ownership.ZERO_ALLOWED);
     ranges[15] = ownership.array(storage.peer_extensions::*u8,
         storage.peer_extension_capacity, $size_of(transport_parameters.Parameter),
         ownership.ZERO_ALLOWED);
@@ -1087,8 +1136,8 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     candidate.idle_timeout_ns      = config.max_idle_timeout_ns;
     candidate.idle_timer_enabled   = config.max_idle_timeout_ns != 0;
 
-    candidate.recovery_state = recovery.init(storage.recovery_initial,
-        storage.recovery_handshake, storage.recovery_application,
+    candidate.recovery_state = recovery.init(lent_only(storage.recovery_initial),
+        lent_only(storage.recovery_handshake), lent_only(storage.recovery_application),
         recovery.default_config());
     if (!candidate.recovery_state.valid || !recovery.set_peer_address_validated(
         ?candidate.recovery_state, config.peer_validated, now_ns).ok) {
@@ -1183,11 +1232,13 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         ret refuse(init_result, INIT_PROVIDER_START);
     }
     var i: usize = 0;
-    for (i < storage.owner_capacity) {
+    for (i < lent_owners(?storage)) {
         storage.owners[i].state      = OWNER_FREE;
         storage.owners[i].generation = next_generation(storage.owners[i].generation);
         i                            = i + 1;
     }
+    candidate.owners              = storage.owners;
+    candidate.owner_capacity      = lent_owners(?storage);
     candidate_secrets.initialized = true;
     candidate.initialized         = true;
     secrets[0]                    = candidate_secrets;
@@ -1265,8 +1316,8 @@ pub fun abandon_initialization(core: *Core, secrets: *Secrets) bool {
         core.retry_count != 0 || core.version_restart_count != 0 ||
         core.next_owner != 1 || core.next_owner_slot != 0) { ret false; }
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state != OWNER_FREE) { ret false; }
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state != OWNER_FREE) { ret false; }
         i = i + 1;
     }
     val selected: path_api.PathResult = path_api.selected(core.paths);
@@ -1463,7 +1514,7 @@ fun release_handshake_storage(core: *Core) {
     var no_parameters: View;
     core.config.local_transport_parameters = no_parameters;
     if (core.storage.handshake_block != nil) {
-        chunks.give_block(?core.storage.handshake_source, core.storage.handshake_block);
+        chunks.give_block(?core.storage.chunk_source, core.storage.handshake_block);
         core.storage.handshake_block = nil;
     }
 }
@@ -1688,17 +1739,96 @@ fun receive_keys(core: *Core, secrets: *Secrets,
 
 fun owner_by_id(core: *Core, owner: u64) *Owner {
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state != OWNER_FREE &&
-            core.storage.owners[i].owner == owner) { ret ?core.storage.owners[i]; }
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state != OWNER_FREE &&
+            core.owners[i].owner == owner) { ret ?core.owners[i]; }
         i = i + 1;
     }
     ret nil;
 }
 
-fun free_owner(value: *Owner) {
+fun free_owner(core: *Core, value: *Owner) {
+    if (value.state != OWNER_FREE && core.owners_active > 0) {
+        core.owners_active = core.owners_active - 1;
+    }
     value.state      = OWNER_FREE;
     value.generation = next_generation(value.generation);
+}
+
+fun source_of(core: *Core) *ranges.Source {
+    ret ?core.storage.chunk_source;
+}
+
+# the owner table, taken from the chunk source when none is held
+fun owners_ready(core: *Core) bool {
+    if (core.owners != nil)                                     { ret true; }
+    if (!chunks.take_block(source_of(core), ?core.owner_block)) { ret false; }
+    core.owners         = core.owner_block.data::*Owner;
+    core.owner_capacity = core.storage.owner_capacity;
+    ret true;
+}
+
+fun space_history(core: *Core, space: u8) recovery.HistoryStorage {
+    if (space == packet.SPACE_INITIAL)   { ret core.storage.recovery_initial; }
+    if (space == packet.SPACE_HANDSHAKE) { ret core.storage.recovery_handshake; }
+    ret core.storage.recovery_application;
+}
+
+# a history for `space`, taken from the chunk source when the space has none
+fun history_ready(core: *Core, space: u8) bool {
+    if (recovery.has_history(?core.recovery_state, space)) { ret true; }
+    val block: *chunks.Block = ?core.history_blocks[space_index(space)];
+    if (!chunks.take_block(source_of(core), block)) { ret false; }
+    if (!recovery.lend_history(?core.recovery_state, space, recovery.HistoryStorage{
+        packets:  block.data::*recovery.SentPacket,
+        capacity: space_history(core, space).capacity
+    })) {
+        chunks.give_block(source_of(core), block);
+        ret false;
+    }
+    ret true;
+}
+
+# gives back taken tables once nothing is in them
+fun settle_flight(core: *Core) {
+    if (core.owner_block.data != nil && core.owners_active == 0) {
+        core.owners         = nil;
+        core.owner_capacity = 0;
+        chunks.give_block(source_of(core), ?core.owner_block);
+    }
+    var i: usize = 0;
+    for (i < 3) {
+        val space: u8 = packet.SPACE_INITIAL + i::u8;
+        if (core.history_blocks[i].data != nil &&
+            recovery.tracked(?core.recovery_state, space) == 0) {
+            recovery.reclaim_history(?core.recovery_state, space);
+            chunks.give_block(source_of(core), ?core.history_blocks[i]);
+        }
+        i = i + 1;
+    }
+}
+
+# a dead core's chunks, given back whatever they hold
+pub fun release_chunks(core: *Core) {
+    if (!core_record_valid(core)) { ret; }
+    core.owners         = nil;
+    core.owner_capacity = 0;
+    core.owners_active  = 0;
+    chunks.give_block(source_of(core), ?core.owner_block);
+    var i: usize = 0;
+    for (i < 3) {
+        if (core.history_blocks[i].data != nil) {
+            var none: recovery.History;
+            none.active                   = false;
+            core.recovery_state.spaces[i] = none;
+            chunks.give_block(source_of(core), ?core.history_blocks[i]);
+        }
+        i = i + 1;
+    }
+    if (core.storage.handshake_block != nil) {
+        chunks.give_block(source_of(core), core.storage.handshake_block);
+        core.storage.handshake_block = nil;
+    }
 }
 
 # settles one owner that recovery has already forgotten. a failing step fails
@@ -1764,7 +1894,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
         !core.paths.storage.paths[path_handle.index].valid ||
         core.paths.storage.paths[path_handle.index].generation !=
         path_handle.generation) {
-        free_owner(owner);
+        free_owner(core, owner);
         ret false;
     }
     val transport_path: *path_api.Path =
@@ -1815,7 +1945,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
         core.recovery_state.rtt.smoothed_ns).ok && ok;
     ok = path_api.release_recovery_scoped(core.paths, core.config.source,
         path_handle).status == path_api.STATUS_OK && ok;
-    free_owner(owner);
+    free_owner(core, owner);
     ret ok;
 }
 
@@ -1872,7 +2002,7 @@ fun terminal_discarded_owner(core: *Core, secrets: *Secrets,
         !discard_initial_keys(core, secrets)) {
         ret false;
     }
-    free_owner(owner);
+    free_owner(core, owner);
     ret true;
 }
 
@@ -2294,10 +2424,10 @@ fun restart_client(core: *Core, secrets: *Secrets, value: negotiation_api.Result
     now_ns: u64) bool {
     if (value.status != negotiation_api.STATUS_RESTART) { ret false; }
     var owner_index: usize = 0;
-    for (owner_index < core.storage.owner_capacity) {
-        if (core.storage.owners[owner_index].state == OWNER_PREPARED &&
+    for (owner_index < core.owner_capacity) {
+        if (core.owners[owner_index].state == OWNER_PREPARED &&
             !cancel_payload(core, secrets,
-            ?core.storage.owners[owner_index])) { ret false; }
+            ?core.owners[owner_index])) { ret false; }
         owner_index = owner_index + 1;
     }
     val before:  u64                    = core.recovery_state.bytes_in_flight::u64;
@@ -2559,6 +2689,13 @@ fun receive_protected(core: *Core, secrets: *Secrets,
 
 pub fun receive(core: *Core, secrets: *Secrets,
     input: *transport_api.Datagram) transport_api.CoreResult {
+    val result: transport_api.CoreResult = receive_unsettled(core, secrets, input);
+    if (core_record_valid(core) && core.initialized) { settle_flight(core); }
+    ret result;
+}
+
+fun receive_unsettled(core: *Core, secrets: *Secrets,
+    input: *transport_api.Datagram) transport_api.CoreResult {
     if (!core_record_valid(core) || !secret_record_valid(secrets) ||
         !ownership.bytes(input::*u8, $size_of(transport_api.Datagram),
         ownership.ZERO_FORBIDDEN).valid) {
@@ -2811,8 +2948,8 @@ pub fun snapshot(core: *Core) Snapshot {
     result.closing                = core.closing;
     result.destroyed              = core.destroyed;
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state != OWNER_FREE) {
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state != OWNER_FREE) {
             result.active_owners = result.active_owners + 1;
         }
         i = i + 1;
@@ -2820,30 +2957,39 @@ pub fun snapshot(core: *Core) Snapshot {
     ret result;
 }
 
-fun claim_owner(core: *Core) *Owner {
+# names a new owner. it takes a table slot only once its frame is prepared
+fun claim_owner(core: *Core, claimed: *Owner) bool {
+    if (core.owners != nil && core.owners_active >= core.owner_capacity) { ret false; }
+    var candidate: u64   = core.next_owner;
+    var attempts:  usize = 0;
+    for (attempts <= core.owner_capacity && owner_by_id(core, candidate) != nil) {
+        candidate = next_generation(candidate);
+        attempts  = attempts + 1;
+    }
+    if (owner_by_id(core, candidate) != nil) { ret false; }
+    var clean: Owner;
+    clean.owner     = candidate;
+    clean.state     = OWNER_PREPARED;
+    @claimed        = clean;
+    core.next_owner = next_generation(candidate);
+    ret true;
+}
+
+# puts a prepared owner in the table, with a history ready for its space. nil
+# when storage for either is refused
+fun place_owner(core: *Core, claimed: *Owner) *Owner {
+    val space: u8 = packet.number_space(kind_for_level(claimed.level));
+    if (!owners_ready(core) || !history_ready(core, space)) { ret nil; }
     var slot_offset: usize = 0;
-    for (slot_offset < core.storage.owner_capacity) {
-        val index: usize = (core.next_owner_slot + slot_offset) %
-            core.storage.owner_capacity;
-        if (core.storage.owners[index].state == OWNER_FREE) {
-            var candidate: u64   = core.next_owner;
-            var attempts:  usize = 0;
-            for (attempts <= core.storage.owner_capacity &&
-                owner_by_id(core, candidate) != nil) {
-                candidate = next_generation(candidate);
-                attempts  = attempts + 1;
-            }
-            if (owner_by_id(core, candidate) != nil) { ret nil; }
-            val generation: u64 = next_generation(
-                core.storage.owners[index].generation);
-            var clean: Owner;
-            clean.owner                = candidate;
-            clean.generation           = generation;
-            clean.state                = OWNER_PREPARED;
-            core.storage.owners[index] = clean;
-            core.next_owner            = next_generation(candidate);
-            core.next_owner_slot       = (index + 1) % core.storage.owner_capacity;
-            ret ?core.storage.owners[index];
+    for (slot_offset < core.owner_capacity) {
+        val index: usize = (core.next_owner_slot + slot_offset) % core.owner_capacity;
+        if (core.owners[index].state == OWNER_FREE) {
+            val generation: u64 = next_generation(core.owners[index].generation);
+            core.owners[index]            = @claimed;
+            core.owners[index].generation = generation;
+            core.owners_active            = core.owners_active + 1;
+            core.next_owner_slot          = (index + 1) % core.owner_capacity;
+            ret ?core.owners[index];
         }
         slot_offset = slot_offset + 1;
     }
@@ -2852,8 +2998,8 @@ fun claim_owner(core: *Core) *Owner {
 
 fun has_prepared_owner(core: *Core) bool {
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state == OWNER_PREPARED) { ret true; }
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state == OWNER_PREPARED) { ret true; }
         i = i + 1;
     }
     ret false;
@@ -2931,7 +3077,7 @@ fun cancel_payload(core: *Core, secrets: *Secrets, owner: *Owner) bool {
                 owner.pacer).ok && ok;
         }
     }
-    free_owner(owner);
+    free_owner(core, owner);
     ret ok;
 }
 
@@ -3353,18 +3499,26 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     var sized: usize =
         core.paths.storage.paths[selected.handle.index].current_mtu::usize;
     if (sized > available) { sized = available; }
-    val owner: *Owner = claim_owner(core);
-    if (owner == nil) {
+    var claimed: Owner;
+    if (!claim_owner(core, ?claimed)) {
         result.status = transport_api.STATUS_BLOCKED;
         ret result;
     }
     var value: frame.Frame;
     var path:  path_api.Handle;
-    if (!prepare_frame(core, secrets, owner, now_ns,
+    if (!prepare_frame(core, secrets, ?claimed, now_ns,
         sized - 96, ?value, ?path)) {
-        free_owner(owner);
         if (!core.closing && core.handshake_confirmed) { mark_idle(core); }
         result.status = transport_api.STATUS_EMPTY;
+        ret result;
+    }
+    # a refused table or history chunk is backpressure: the frame goes back
+    # and the pool wakes the connection once chunks free up
+    val owner: *Owner = place_owner(core, ?claimed);
+    if (owner == nil) {
+        cancel_payload(core, secrets, ?claimed);
+        settle_flight(core);
+        result.status = transport_api.STATUS_BLOCKED;
         ret result;
     }
     if (path_api.configure_transport_scoped(core.paths, core.config.source, path,
@@ -3673,6 +3827,14 @@ fun publish_payload(core: *Core, secrets: *Secrets, owner: *Owner,
 pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
     status: transport_api.SendStatus, count: usize,
     now_ns: u64) transport_api.CoreResult {
+    val result: transport_api.CoreResult = complete_send_unsettled(core, secrets, owner_id, status, count, now_ns);
+    if (core_record_valid(core) && core.initialized) { settle_flight(core); }
+    ret result;
+}
+
+fun complete_send_unsettled(core: *Core, secrets: *Secrets, owner_id: u64,
+    status: transport_api.SendStatus, count: usize,
+    now_ns: u64) transport_api.CoreResult {
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
         now_ns < core.last_now_ns) {
@@ -3733,7 +3895,7 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
             owner.packet_number, now_ns).ok) {
             ret fail(core, INTERNAL_ERROR, now_ns);
         }
-        free_owner(owner);
+        free_owner(core, owner);
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
     val recovery_path: path_api.Handle = path_api.Handle{
@@ -3871,9 +4033,9 @@ fun compute_timer(core: *Core) transport_api.CoreTimer {
 fun terminal_drain(core: *Core, secrets: *Secrets, now_ns: u64) bool {
     var ok: bool  = true;
     var i:  usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state == OWNER_PREPARED) {
-            ok = cancel_payload(core, secrets, ?core.storage.owners[i]) && ok;
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state == OWNER_PREPARED) {
+            ok = cancel_payload(core, secrets, ?core.owners[i]) && ok;
         }
         i = i + 1;
     }
@@ -3904,6 +4066,13 @@ fun apply_path_timeout(core: *Core, value: path_api.TimeoutResult,
 }
 
 pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
+    now_ns: u64) transport_api.CoreResult {
+    val result: transport_api.CoreResult = on_timeout_unsettled(core, secrets, generation, now_ns);
+    if (core_record_valid(core) && core.initialized) { settle_flight(core); }
+    ret result;
+}
+
+fun on_timeout_unsettled(core: *Core, secrets: *Secrets, generation: u64,
     now_ns: u64) transport_api.CoreResult {
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
@@ -3990,6 +4159,14 @@ pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
 pub fun begin_close(core: *Core, secrets: *Secrets, abortive: bool,
     application_error: u64, reason: *u8,
     reason_length: usize, now_ns: u64) transport_api.CoreResult {
+    val result: transport_api.CoreResult = begin_close_unsettled(core, secrets, abortive, application_error, reason, reason_length, now_ns);
+    if (core_record_valid(core) && core.initialized) { settle_flight(core); }
+    ret result;
+}
+
+fun begin_close_unsettled(core: *Core, secrets: *Secrets, abortive: bool,
+    application_error: u64, reason: *u8,
+    reason_length: usize, now_ns: u64) transport_api.CoreResult {
     val reason_range: ownership.Range = ownership.bytes(reason, reason_length,
         ownership.ZERO_ALLOWED);
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
@@ -4053,8 +4230,8 @@ pub fun close_ready(core: *Core) bool {
         ret false;
     }
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state != OWNER_FREE) { ret false; }
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state != OWNER_FREE) { ret false; }
         i = i + 1;
     }
     ret true;
@@ -4086,6 +4263,7 @@ pub fun finish_close(core: *Core, secrets: *Secrets) bool {
         datagram_api.finish_close_scoped(core.datagrams, core.config.source).status != datagram_api.STATUS_OK) {
         ret false;
     }
+    release_chunks(core);
     secrets.initialized = false;
     secrets.destroyed   = true;
     core.initialized    = false;
