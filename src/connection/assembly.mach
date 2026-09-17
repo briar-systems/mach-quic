@@ -177,8 +177,6 @@ pub rec Storage {
     sends:                    [SEND_CAPACITY]transport_api.SendSlot;
     supported_versions:       [2]u32;
     close_reason:             [256]u8;
-    ack_initial:              [32]ack_api.Range;
-    ack_handshake:            [32]ack_api.Range;
     ack_application:          [32]ack_api.Range;
     received_token:           [TOKEN_CAPACITY]u8;
     send_token:               [TOKEN_CAPACITY]u8;
@@ -385,8 +383,16 @@ val RETRY_PSEUDO_AT:          usize = RETRY_TOKEN_AT + TOKEN_CAPACITY;
 val LOCAL_EXTENSIONS_AT:      usize = RETRY_PSEUDO_AT + RETRY_PSEUDO_CAPACITY;
 val PEER_EXTENSIONS_AT:       usize = LOCAL_EXTENSIONS_AT +
     EXTENSION_CAPACITY * $size_of(transport_parameters.Parameter);
-val HANDSHAKE_BLOCK_END: usize = PEER_EXTENSIONS_AT +
+# the Initial and Handshake spaces see a few packets each. a space that
+# fragments past this evicts its oldest ranges, which only costs the peer a
+# retransmission of data already received
+val HANDSHAKE_ACK_RANGES: usize = 8;
+val INITIAL_ACKS_AT:      usize = PEER_EXTENSIONS_AT +
     EXTENSION_CAPACITY * $size_of(transport_parameters.Parameter);
+val HANDSHAKE_ACKS_AT: usize = INITIAL_ACKS_AT +
+    HANDSHAKE_ACK_RANGES * $size_of(ack_api.Range);
+val HANDSHAKE_BLOCK_END: usize = HANDSHAKE_ACKS_AT +
+    HANDSHAKE_ACK_RANGES * $size_of(ack_api.Range);
 
 fun chunk_source(c: *Connection) ranges.Source {
     ret ranges.Source{provider: ?c.provider, account: ?c.account, lane: supply.SEND};
@@ -415,10 +421,14 @@ fun public_core_storage(c: *Connection) core_api.Storage {
         recovery_initial:         recovery.HistoryStorage{capacity: HISTORY_CAPACITY},
         recovery_handshake:       recovery.HistoryStorage{capacity: HISTORY_CAPACITY},
         recovery_application:     recovery.HistoryStorage{capacity: HISTORY_CAPACITY},
-        ack_initial:              ack_api.SpaceStorage{ranges: ?storage.ack_initial[0],
-            capacity: 32},
-        ack_handshake: ack_api.SpaceStorage{ranges: ?storage.ack_handshake[0],
-            capacity: 32},
+        ack_initial:              ack_api.SpaceStorage{
+            ranges: (?block[INITIAL_ACKS_AT])::*ack_api.Range,
+            capacity: HANDSHAKE_ACK_RANGES
+        },
+        ack_handshake: ack_api.SpaceStorage{
+            ranges: (?block[HANDSHAKE_ACKS_AT])::*ack_api.Range,
+            capacity: HANDSHAKE_ACK_RANGES
+        },
         ack_application: ack_api.SpaceStorage{ranges: ?storage.ack_application[0],
             capacity: 32},
         owners: nil, owner_capacity: OWNER_CAPACITY,
@@ -1150,7 +1160,8 @@ pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
 
 test "quic.connection.assembly: the handshake block fits one pool chunk" {
     if (HANDSHAKE_BLOCK_END > supply.BYTES ||
-        LOCAL_EXTENSIONS_AT % $align_of(transport_parameters.Parameter) != 0) { ret 1; }
+        LOCAL_EXTENSIONS_AT % $align_of(transport_parameters.Parameter) != 0 ||
+        INITIAL_ACKS_AT % $align_of(ack_api.Range) != 0) { ret 1; }
     ret 0;
 }
 

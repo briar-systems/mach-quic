@@ -1362,7 +1362,10 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
         listener.core.storage.negotiation.retry_token != nil ||
         dialer.core.negotiation.storage.retry_pseudo != nil ||
         dialer.core.peer_parameters.extensions != nil ||
-        listener.core.local_parameters.extensions != nil) { ret 13; }
+        listener.core.local_parameters.extensions != nil ||
+        dialer.core.storage.ack_handshake.ranges != nil ||
+        listener.core.acknowledgements.spaces[0].ranges != nil ||
+        listener.core.acknowledgements.spaces[1].capacity != 0) { ret 13; }
     ret 0;
 }
 
@@ -2100,7 +2103,7 @@ test "quic.connection.assembly: a full window survives 10% loss and reordering w
 # for each other: the fixed records every connection carries, and the chunks a
 # live idle connection holds. a failure means that cost moved. decide it
 # deliberately, and update these numbers, the changelog and the readme together
-val GUARD_STORAGE_BYTES:    usize = 6512;
+val GUARD_STORAGE_BYTES:    usize = 5488;
 val GUARD_CONNECTION_BYTES: usize = 9136;
 # established, no streams
 val GUARD_IDLE_CHUNKS: usize = 0;
