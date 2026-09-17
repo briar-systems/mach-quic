@@ -137,7 +137,6 @@ pub rec Config {
     receive_stream_data:         u64;
     active_connection_id_limit:  u64;
     max_datagram_frame_size:     usize;
-    verification_time_unix:      i64;
     # when the handshake must have finished, on the monotonic clock
     tls_deadline:                opt[time.Instant];
     entropy_context_size:        usize;
@@ -772,7 +771,6 @@ fun tls_deadline_ns(config: *Config) u64 {
 
 fun tls_configuration(config: *Config) tls_client_api.Config {
     ret tls_client_api.Config{
-        verification_time_unix:      config.verification_time_unix,
         deadline_ns:                 tls_deadline_ns(config),
         entropy_context_size:        config.entropy_context_size,
         entropy_secret_context_size: config.entropy_secret_context_size
@@ -781,7 +779,6 @@ fun tls_configuration(config: *Config) tls_client_api.Config {
 
 fun server_tls_configuration(config: *Config) tls_server_api.Config {
     ret tls_server_api.Config{
-        verification_time_unix:      config.verification_time_unix,
         deadline_ns:                 tls_deadline_ns(config),
         entropy_context_size:        config.entropy_context_size,
         entropy_secret_context_size: config.entropy_secret_context_size
