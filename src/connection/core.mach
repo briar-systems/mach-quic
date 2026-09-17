@@ -320,6 +320,10 @@ pub rec Core {
     retry_source_present:       bool;
     peer_authenticated:         bool;
     handshake_confirmed:        bool;
+    # the packet being applied was refused for storage and stays unacknowledged
+    packet_refused: bool;
+    # packets refused that way
+    refused_packets: u64;
     # crypto data arrived that the provider has not been polled for
     crypto_received: bool;
     # the last generate found nothing to send and nothing has changed since:
@@ -2069,6 +2073,10 @@ fun process_frame(core: *Core, secrets: *Secrets,
             core.streams, core.config.source, value.stream_id, value.offset, value.data.data,
             value.data.len, value.fin);
         if (received.ok) { ret true; }
+        if (received.error == stream_api.ERROR_STORAGE) {
+            core.packet_refused = true;
+            ret true;
+        }
         ret stream_failure(core, received.error);
     }
     if (value.kind == frame.RESET_STREAM) {
@@ -2242,7 +2250,7 @@ fun apply_plaintext(core: *Core, secrets: *Secrets,
             !process_frame(core, secrets, level, space, receive_path,
             receive_destination,
             ?value, decoder.pos - frame_begin, now_ns)) { ret false; }
-        if (core.peer_close_received) { brk; }
+        if (core.peer_close_received || core.packet_refused) { brk; }
     }
     ret true;
 }
@@ -2416,13 +2424,17 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     var non_probing:   bool = false;
     if (!scan_plaintext(core, plaintext, opened.written, ?ack_eliciting,
         ?non_probing)) { ret fail(core, FRAME_ENCODING_ERROR, input.received_at_ns); }
-    val received: ack_api.ReceiveResult = ack_api.on_packet(?core.acknowledgements,
-        space, opened.packet_number, input.received_at_ns, ack_eliciting, input.ecn);
-    if (received.status == ack_api.RECEIVE_DUPLICATE ||
-        received.status == ack_api.RECEIVE_DROPPED) {
+    # the packet is recorded for acknowledgement only once its frames were
+    # taken. a packet refused for storage stays unacknowledged, so its sender
+    # retransmits what it carried
+    val seen: u8 = ack_api.classify(?core.acknowledgements, space,
+        opened.packet_number);
+    if (seen == ack_api.RECEIVE_DUPLICATE || seen == ack_api.RECEIVE_DROPPED) {
+        ack_api.on_packet(?core.acknowledgements, space, opened.packet_number,
+            input.received_at_ns, ack_eliciting, input.ecn);
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
-    if (received.status != ack_api.RECEIVE_NEW) {
+    if (seen != ack_api.RECEIVE_NEW) {
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
     if (core.role == transport_api.CLIENT && core.authenticated_packets == 0 &&
@@ -2471,12 +2483,26 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         input.received_at_ns)) {
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
+    core.packet_refused = false;
     if (!apply_plaintext(core, secrets, level, space, observed.handle,
         receive_destination.handle, plaintext, opened.written,
         input.received_at_ns)) {
         var failure: u64 = PROTOCOL_VIOLATION;
         if (core.close_error != NO_ERROR) { failure = core.close_error; }
         ret fail(core, failure, input.received_at_ns);
+    }
+    if (core.packet_refused) {
+        core.packet_refused  = false;
+        core.refused_packets = core.refused_packets + 1;
+    }
+    or {
+        # applying the frames may have discarded this space, and then there is
+        # nothing left to acknowledge
+        val recorded: u8 = ack_api.on_packet(?core.acknowledgements, space,
+            opened.packet_number, input.received_at_ns, ack_eliciting, input.ecn).status;
+        if (recorded != ack_api.RECEIVE_NEW && recorded != ack_api.RECEIVE_DISCARDED) {
+            ret fail(core, INTERNAL_ERROR, input.received_at_ns);
+        }
     }
     if (core.role == transport_api.CLIENT && level == handshake_api.HANDSHAKE &&
         !discard_initial_keys(core, secrets)) {
