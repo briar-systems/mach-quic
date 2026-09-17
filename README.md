@@ -672,8 +672,11 @@ descendant of the connection cancellation scope through `submit_native`, use
 another UDP adapter, or cancel it before submission. Exactly one successful
 `complete_send`, `complete_native`, or `cancel_send` returns buffer ownership and
 settles the protocol core's opaque recovery owner. UDP success is atomic and must
-report the full datagram length. Failures, cancellation, and timeout report zero
-bytes. Duplicate and foreign completions are stale and cannot settle a reused
+report the full datagram length. A datagram that went out whole is sent, even when
+the operation was then cancelled or timed out: `complete_native` reads the transfer
+a cancelled or timed-out mach-std completion reports, and an adapter calling
+`complete_send` must report such a datagram as `SEND_SENT`. Failures, cancellation,
+and timeout of anything less than the whole datagram report zero bytes. Duplicate and foreign completions are stale and cannot settle a reused
 slot. Native completion routing additionally verifies the mach-std runtime token,
 so a delayed completion cannot target a later generation.
 

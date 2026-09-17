@@ -45,6 +45,8 @@ rec Core {
     active_count:      usize;
     received:          usize;
     completed:         usize;
+    sent:              usize;
+    sent_bytes:        usize;
     failed:            usize;
     cancelled:         usize;
     timed_out:         usize;
@@ -224,6 +226,10 @@ fun core_complete(core: *Core, owner: u64, status: u8, count: usize,
     core.active_owners[index] = false;
     core.active_count         = core.active_count - 1;
     core.completed            = core.completed + 1;
+    if (status == transport_api.SEND_SENT) {
+        core.sent       = core.sent + 1;
+        core.sent_bytes = core.sent_bytes + count;
+    }
     if (status == transport_api.SEND_FAILED) {
         core.failed = core.failed + 1;
         if (!core.closing) { core.outbound = core.outbound + 1; }
@@ -822,5 +828,135 @@ test "quic.transport.native: a refused native send batch fails only that send" {
     val released: err[io_error.Error] = io_runtime.destroy(?runtime);
     if (sel released.err)            { ret 14; }
     if (!close_fixture(?fixture, 5)) { ret 15; }
+    ret 0;
+}
+
+# a real native send, completed by the runtime, for a test to reshape
+rec NativeSend {
+    completion: io_runtime.Completion;
+    length:     usize;
+    ok:         bool;
+}
+
+fun native_send(fixture: *Fixture, network: *net_async.Driver, sender: *udp.Socket,
+    target: ip.Endpoint, output: *u8, at: u64) NativeSend {
+    var result: NativeSend;
+    fixture.core.outbound = 1;
+    val generated: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
+        ?fixture.scope, output, 8, clock.instant(at), 9);
+    if (generated.status != transport_api.STATUS_OK) { ret result; }
+    fixture.sends[generated.token.index::usize].packet.peer = target;
+    val submitted: res[io_runtime.Token, io_error.Error] = transport_api.submit_native[Core](
+        ?fixture.driver, network, sender, ?fixture.scope, generated.token);
+    if (sel submitted.err) { ret result; }
+    var rounds: usize = 0;
+    for (rounds < 8) {
+        val waited: res[usize, io_error.Error] = net_async.wait(network,
+            ?result.completion, 1, 250);
+        if (sel waited.err) { ret result; }
+        if (waited.ok == 1) {
+            result.length = generated.count;
+            result.ok     = !result.completion.has_error &&
+                result.completion.items == 1 &&
+                result.completion.bytes == generated.count;
+            ret result;
+        }
+        rounds = rounds + 1;
+    }
+    ret result;
+}
+
+# mach-std 5.3 reports a cancelled or timed-out completion with the transfer
+# that finished first. a datagram that went out whole was sent, whatever
+# stopped the operation after it, and nothing less than whole counts as sent
+test "quic.transport.native: a cancelled send that went out whole is sent" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 113, stream_api.ROLE_CLIENT)) { ret 1; }
+    var runtime:      io_runtime.Runtime;
+    val made_runtime: err[io_error.Error] = io_runtime.make(?runtime, 4);
+    if (sel made_runtime.err) { ret 2; }
+    var network:      net_async.Driver;
+    val made_network: err[io_error.Error] = net_async.make(?network, ?runtime);
+    if (sel made_network.err) { ret 3; }
+    val bound: res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
+    val made:  res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
+    if (sel bound.err) { ret 4; }
+    if (sel made.err)  { ret 4; }
+    var receiver: udp.Socket                       = bound.ok;
+    var sender:   udp.Socket                       = made.ok;
+    val target:   res[ip.Endpoint, io_error.Error] = udp.local_endpoint(?receiver);
+    if (sel target.err) { ret 5; }
+    var output: [8]u8;
+
+    # whole datagram out, then cancelled: sent, with its full length
+    var whole: NativeSend = native_send(?fixture, ?network, ?sender, target.ok, ?output[0], 1);
+    if (!whole.ok) { ret 6; }
+    whole.completion.has_error = true;
+    whole.completion.error     = io_error.make(io_error.CANCELLED, io_error.OP_SEND);
+    val sent: transport_api.Completion = transport_api.complete_native[Core](?fixture.driver,
+        ?whole.completion, clock.instant(2));
+    if (sent.status != transport_api.STATUS_OK ||
+        sent.send_status != transport_api.SEND_SENT || sent.count != whole.length ||
+        fixture.core.sent != 1 || fixture.core.sent_bytes != whole.length ||
+        fixture.core.cancelled != 0) { ret 7; }
+
+    # whole datagram out, then timed out: sent as well
+    var late: NativeSend = native_send(?fixture, ?network, ?sender, target.ok, ?output[0], 3);
+    if (!late.ok) { ret 8; }
+    late.completion.has_error = true;
+    late.completion.error     = io_error.make(io_error.TIMEOUT, io_error.OP_SEND);
+    val timed: transport_api.Completion = transport_api.complete_native[Core](?fixture.driver,
+        ?late.completion, clock.instant(4));
+    if (timed.send_status != transport_api.SEND_SENT || fixture.core.sent != 2 ||
+        fixture.core.timed_out != 0) { ret 9; }
+
+    # nothing out before the cancellation: cancelled, as before
+    var none: NativeSend = native_send(?fixture, ?network, ?sender, target.ok, ?output[0], 5);
+    if (!none.ok) { ret 10; }
+    none.completion.has_error = true;
+    none.completion.error     = io_error.make(io_error.CANCELLED, io_error.OP_SEND);
+    none.completion.items     = 0;
+    none.completion.bytes     = 0;
+    val cancelled: transport_api.Completion = transport_api.complete_native[Core](
+        ?fixture.driver, ?none.completion, clock.instant(6));
+    if (cancelled.send_status != transport_api.SEND_CANCELLED || cancelled.count != 0 ||
+        fixture.core.cancelled != 1 || fixture.core.sent != 2) { ret 11; }
+
+    # part of a datagram is not a packet: a timed-out partial stays timed out,
+    # and a partial with no error still fails
+    var part: NativeSend = native_send(?fixture, ?network, ?sender, target.ok, ?output[0], 7);
+    if (!part.ok) { ret 12; }
+    part.completion.has_error = true;
+    part.completion.error     = io_error.make(io_error.TIMEOUT, io_error.OP_SEND);
+    part.completion.items     = 0;
+    part.completion.bytes     = part.length - 1;
+    val partial: transport_api.Completion = transport_api.complete_native[Core](
+        ?fixture.driver, ?part.completion, clock.instant(8));
+    if (partial.send_status != transport_api.SEND_TIMED_OUT || partial.count != 0 ||
+        fixture.core.timed_out != 1 || fixture.core.sent != 2) { ret 13; }
+    var short: NativeSend = native_send(?fixture, ?network, ?sender, target.ok, ?output[0], 9);
+    if (!short.ok) { ret 14; }
+    short.completion.bytes = short.length - 1;
+    val failed: transport_api.Completion = transport_api.complete_native[Core](
+        ?fixture.driver, ?short.completion, clock.instant(10));
+    if (failed.send_status != transport_api.SEND_FAILED || failed.count != 0 ||
+        fixture.core.failed != 1 || fixture.core.sent != 2) { ret 15; }
+    # the failed datagram is generated again and goes out
+    val retried: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
+        ?fixture.scope, ?output[0], 8, clock.instant(11), 10);
+    if (retried.status != transport_api.STATUS_OK ||
+        transport_api.complete_send[Core](?fixture.driver, retried.token,
+        transport_api.SEND_SENT, retried.count, clock.instant(12)).status !=
+        transport_api.STATUS_OK) { ret 20; }
+
+    udp.socket_close(?sender);
+    udp.socket_close(?receiver);
+    val destroyed: err[io_error.Error] = net_async.destroy(?network);
+    if (sel destroyed.err) { ret 16; }
+    val closed: res[bool, io_error.Error] = io_runtime.close(?runtime);
+    if (sel closed.err) { ret 17; }
+    val released: err[io_error.Error] = io_runtime.destroy(?runtime);
+    if (sel released.err)             { ret 18; }
+    if (!close_fixture(?fixture, 13)) { ret 19; }
     ret 0;
 }
