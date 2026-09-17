@@ -1993,7 +1993,7 @@ pub fun configure_transport(manager: *Manager, value: Handle,
         congestion_api.ALGORITHM_CUBIC, path.current_mtu::u64), now_ns);
     if (!path.congestion.valid) { ret operation_error(ERROR_STATE); }
     path.pacer = pacer_api.init(pacer_api.default_config(path.current_mtu::u64,
-        path.congestion.congestion_window), path.congestion.congestion_window,
+        path.congestion.config.initial_window), path.congestion.congestion_window,
         smoothed_rtt_ns, now_ns);
     if (!path.pacer.valid) {
         var clean: congestion_api.State;

@@ -1615,3 +1615,78 @@ test "quic.connection.assembly: an established connection outlives the handshake
         ?fin) != sent) { ret 23; }
     ret 0;
 }
+
+test "quic.connection.assembly: an acknowledged MTU probe keeps a connection whose window passed ten datagrams" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0) { ret established; }
+    val path: *path_api.Path = ?listener.storage.path_values[0];
+    if (path.current_mtu != 1200) { ret 20; }
+    # a window larger than any pacer burst for the next probe size
+    path.congestion.congestion_window = 40000;
+    if (pump(?clock, ?moved, 12) != 0) { ret refusal(); }
+    if (path.current_mtu <= 1200 ||
+        path.congestion.congestion_window <= 10 * path.current_mtu::u64 ||
+        transport.snapshot[binding.Binding](?listener.driver).state != transport.ACTIVE) {
+        ret 21;
+    }
+    ret 0;
+}
+
+fun sent_owner(value: *assembly.Connection, number: u64) *core.Owner {
+    var i: usize = 0;
+    for (i < value.core.storage.owner_capacity) {
+        val owner: *core.Owner = ?value.core.storage.owners[i];
+        if (owner.state == core.OWNER_SENT && owner.space == packet_api.SPACE_APPLICATION &&
+            owner.packet_number == number) { ret owner; }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+test "quic.connection.assembly: a failed recovery event still settles every owner and close completes" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?listener.driver, transport.UNIDIRECTIONAL);
+    if (opened.status != transport.STATUS_OK) { ret 20; }
+    val first: u64   = listener.core.packet_numbers[2];
+    var i:     usize = 0;
+    for (i < 3) {
+        if (send_byte(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+            listener_endpoint(), opened.stream, ?clock) != transport.STATUS_OK) { ret 21; }
+        i = i + 1;
+    }
+    # the middle packet's settlement fails, the others are sound
+    val broken: *core.Owner = sent_owner(?listener, first + 1);
+    if (broken == nil || sent_owner(?listener, first) == nil ||
+        sent_owner(?listener, first + 2) == nil) { ret 22; }
+    broken.bytes = 60000;
+    var ack_wire: [1500]u8;
+    clock = clock + 1000;
+    val ack: transport.Generated = transport.generate[binding.Binding](
+        ?dialer.driver, ?dialer_scope, ?ack_wire[0], 1500, clock, 0);
+    if (ack.status != transport.STATUS_OK ||
+        transport.complete_send[binding.Binding](?dialer.driver, ack.token,
+        transport.SEND_SENT, ack.count, clock).status != transport.STATUS_OK) { ret 23; }
+    var input: transport.Datagram;
+    input.local          = listener_endpoint();
+    input.peer           = dialer_endpoint();
+    input.data           = ?ack_wire[0];
+    input.length         = ack.count;
+    input.received_at_ns = clock;
+    if (transport.receive_datagram[binding.Binding](?listener.driver,
+        ?input).status != transport.STATUS_ERROR) { ret 24; }
+    if (sent_owner(?listener, first) != nil || sent_owner(?listener, first + 1) != nil ||
+        sent_owner(?listener, first + 2) != nil) { ret 25; }
+    if (!transport.cancel_connection[binding.Binding](?listener.driver) ||
+        transport.release_stream[binding.Binding](?listener.driver,
+        opened.stream).status != transport.STATUS_OK ||
+        transport.finish_close[binding.Binding](?listener.driver).status !=
+        transport.STATUS_OK) { ret 26; }
+    ret 0;
+}

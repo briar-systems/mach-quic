@@ -1668,14 +1668,17 @@ fun free_owner(value: *Owner) {
     value.generation = next_generation(value.generation);
 }
 
+# settles one owner that recovery has already forgotten. a failing step fails
+# the connection, but the owner is still released, because nothing else will
 fun terminal_owner(core: *Core, secrets: *Secrets,
     event: *recovery.Event, now_ns: u64,
     persistent: bool) bool {
     val owner: *Owner = owner_by_id(core, event.owner);
     if (owner == nil || owner.state != OWNER_SENT || owner.packet_number != event.number ||
         owner.space != event.space) { ret false; }
-    var terminal:        u8 = handshake_api.TERMINAL_LOST;
-    var stream_terminal: u8 = stream_api.TERMINAL_LOST;
+    var ok:              bool = true;
+    var terminal:        u8   = handshake_api.TERMINAL_LOST;
+    var stream_terminal: u8   = stream_api.TERMINAL_LOST;
     if (event.kind == recovery.EVENT_ACKED) {
         terminal        = handshake_api.TERMINAL_ACKED;
         stream_terminal = stream_api.TERMINAL_ACKED;
@@ -1684,23 +1687,27 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
             protection.note_acknowledged(?secrets.application_send, event.number);
         }
     }
-    if (owner.kind == OWNER_CRYPTO && handshake_api.on_terminal_scoped(secrets.handshake, core.config.source, owner.handshake, terminal).status != handshake_api.STATUS_OK) { ret false; }
-    if (owner.kind == OWNER_STREAM && stream_api.on_terminal_scoped(core.streams, core.config.source,
-        owner.stream, stream_terminal).status != stream_api.STATUS_OK) { ret false; }
-    if (owner.kind == OWNER_ACK && event.kind == recovery.EVENT_ACKED &&
-        !ack_api.on_ack_packet_acked(?core.acknowledgements, owner.space,
-        owner.ack_largest)) { ret false; }
-    if (owner.kind == OWNER_CID_RETIREMENT &&
-        cid_api.retirement_terminal_scoped(core.cids, core.config.source,
-        owner.cid_retirement,
-        event.kind == recovery.EVENT_ACKED).status != cid_api.STATUS_OK) {
-        ret false;
+    if (owner.kind == OWNER_CRYPTO) {
+        ok = handshake_api.on_terminal_scoped(secrets.handshake, core.config.source,
+            owner.handshake, terminal).status == handshake_api.STATUS_OK && ok;
     }
-    if (owner.kind == OWNER_NEW_CID &&
-        cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
-        owner.cid_retirement,
-        event.kind == recovery.EVENT_ACKED).status != cid_api.STATUS_OK) {
-        ret false;
+    if (owner.kind == OWNER_STREAM) {
+        ok = stream_api.on_terminal_scoped(core.streams, core.config.source,
+            owner.stream, stream_terminal).status == stream_api.STATUS_OK && ok;
+    }
+    if (owner.kind == OWNER_ACK && event.kind == recovery.EVENT_ACKED) {
+        ok = ack_api.on_ack_packet_acked(?core.acknowledgements, owner.space,
+            owner.ack_largest) && ok;
+    }
+    if (owner.kind == OWNER_CID_RETIREMENT) {
+        ok = cid_api.retirement_terminal_scoped(core.cids, core.config.source,
+            owner.cid_retirement,
+            event.kind == recovery.EVENT_ACKED).status == cid_api.STATUS_OK && ok;
+    }
+    if (owner.kind == OWNER_NEW_CID) {
+        ok = cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
+            owner.cid_retirement,
+            event.kind == recovery.EVENT_ACKED).status == cid_api.STATUS_OK && ok;
     }
     if (owner.kind == OWNER_HANDSHAKE_DONE &&
         event.kind != recovery.EVENT_ACKED) {
@@ -1723,7 +1730,10 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
         core.paths.storage.path_capacity ||
         !core.paths.storage.paths[path_handle.index].valid ||
         core.paths.storage.paths[path_handle.index].generation !=
-        path_handle.generation) { ret false; }
+        path_handle.generation) {
+        free_owner(owner);
+        ret false;
+    }
     val transport_path: *path_api.Path =
         ?core.paths.storage.paths[path_handle.index];
     val selected:        path_api.PathResult = path_api.selected(core.paths);
@@ -1732,7 +1742,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
         selected.handle.source == path_handle.source &&
         selected.handle.index == path_handle.index &&
         selected.handle.generation == path_handle.generation;
-    val updated: congestion_api.UpdateResult = congestion_api.on_recovery(
+    ok = congestion_api.on_recovery(
         ?transport_path.congestion, congestion_api.Signals{
         events:                 event, event_count: 1,
         bytes_in_flight_before: transport_path.recovery_bytes_in_flight,
@@ -1744,53 +1754,57 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
             event.kind == recovery.EVENT_LOST,
         growth_permitted: owner.growth_permitted,
         retry:            event.kind == recovery.EVENT_RETRY
-    });
-    if (!updated.ok) { ret false; }
+    }).ok && ok;
     if (owner.kind == OWNER_MTU_PROBE) {
-        var terminal: u8 = path_api.MTU_TERMINAL_LOST;
+        var mtu_terminal: u8 = path_api.MTU_TERMINAL_LOST;
         if (event.kind == recovery.EVENT_ACKED) {
-            terminal = path_api.MTU_TERMINAL_ACKED;
+            mtu_terminal = path_api.MTU_TERMINAL_ACKED;
         }
-        val mtu: path_api.MtuResult = path_api.on_mtu_terminal_scoped(core.paths, core.config.source,
-            owner.mtu_probe, terminal);
-        if (mtu.status != path_api.STATUS_OK) { ret false; }
-        if (mtu.reconfigure_congestion &&
-            !congestion_api.set_max_datagram_size(?transport_path.congestion,
-            mtu.current_mtu::u64, now_ns).ok) { ret false; }
-        if (mtu.reconfigure_pacer && !pacer_api.reconfigure(?transport_path.pacer,
-            pacer_api.default_config(mtu.current_mtu::u64,
-            transport_path.congestion.congestion_window), now_ns,
-            transport_path.congestion.congestion_window,
-            core.recovery_state.rtt.smoothed_ns).ok) { ret false; }
+        ok = apply_mtu(core, transport_path,
+            path_api.on_mtu_terminal_scoped(core.paths, core.config.source,
+            owner.mtu_probe, mtu_terminal), now_ns) && ok;
     }
     or (owner.path_send.source != 0) {
         if (event.kind == recovery.EVENT_ACKED) {
-            if (path_api.on_packet_acked_scoped(core.paths, core.config.source, path_handle,
-                owner.bytes::u16).status != path_api.STATUS_OK) { ret false; }
+            ok = path_api.on_packet_acked_scoped(core.paths, core.config.source,
+                path_handle, owner.bytes::u16).status == path_api.STATUS_OK && ok;
         }
         or (event.kind == recovery.EVENT_LOST) {
-            val mtu: path_api.MtuResult = path_api.on_large_packet_lost_scoped(
-                core.paths, core.config.source, path_handle, owner.bytes::u16);
-            if (mtu.status != path_api.STATUS_OK) { ret false; }
-            if (mtu.reconfigure_congestion &&
-                !congestion_api.set_max_datagram_size(?transport_path.congestion,
-                mtu.current_mtu::u64, now_ns).ok) { ret false; }
-            if (mtu.reconfigure_pacer && !pacer_api.reconfigure(?transport_path.pacer,
-                pacer_api.default_config(mtu.current_mtu::u64,
-                transport_path.congestion.congestion_window), now_ns,
-                transport_path.congestion.congestion_window,
-                core.recovery_state.rtt.smoothed_ns).ok) { ret false; }
+            ok = apply_mtu(core, transport_path,
+                path_api.on_large_packet_lost_scoped(core.paths,
+                core.config.source, path_handle, owner.bytes::u16), now_ns) && ok;
         }
     }
-    if (path_api.recovery_terminal_scoped(core.paths, core.config.source, path_handle,
-        owner.bytes::u64).status != path_api.STATUS_OK ||
-        !pacer_api.sync(?transport_path.pacer, now_ns,
+    ok = path_api.recovery_terminal_scoped(core.paths, core.config.source,
+        path_handle, owner.bytes::u64).status == path_api.STATUS_OK && ok;
+    ok = pacer_api.sync(?transport_path.pacer, now_ns,
         transport_path.congestion.congestion_window,
-        core.recovery_state.rtt.smoothed_ns).ok ||
-        path_api.release_recovery_scoped(core.paths, core.config.source,
-        path_handle).status != path_api.STATUS_OK) { ret false; }
+        core.recovery_state.rtt.smoothed_ns).ok && ok;
+    ok = path_api.release_recovery_scoped(core.paths, core.config.source,
+        path_handle).status == path_api.STATUS_OK && ok;
     free_owner(owner);
-    ret true;
+    ret ok;
+}
+
+# the pacer's burst is the rfc 9002 initial window for the datagram size, never
+# the live congestion window, which can exceed any burst the pacer accepts
+fun pacer_config(max_datagram_size: u64) pacer_api.Config {
+    ret pacer_api.default_config(max_datagram_size,
+        congestion_api.default_config(congestion_api.ALGORITHM_CUBIC,
+        max_datagram_size).initial_window);
+}
+
+# carries an mtu change into the path's congestion controller and pacer
+fun apply_mtu(core: *Core, transport_path: *path_api.Path,
+    mtu: path_api.MtuResult, now_ns: u64) bool {
+    if (mtu.status != path_api.STATUS_OK) { ret false; }
+    if (mtu.reconfigure_congestion &&
+        !congestion_api.set_max_datagram_size(?transport_path.congestion,
+        mtu.current_mtu::u64, now_ns).ok) { ret false; }
+    ret !mtu.reconfigure_pacer || pacer_api.reconfigure(?transport_path.pacer,
+        pacer_config(mtu.current_mtu::u64), now_ns,
+        transport_path.congestion.congestion_window,
+        core.recovery_state.rtt.smoothed_ns).ok;
 }
 
 fun terminal_discarded_owner(core: *Core, secrets: *Secrets,
@@ -1832,12 +1846,16 @@ fun terminal_discarded_owner(core: *Core, secrets: *Secrets,
 fun apply_recovery_events(core: *Core, secrets: *Secrets, count: usize, now_ns: u64,
     persistent: bool, retry_event: bool,
     bytes_before: u64) bool {
-    var i: usize = 0;
+    # recovery has already forgotten every event, so each owner is settled
+    # even after one fails
+    var ok: bool  = true;
+    var i:  usize = 0;
     for (i < count) {
-        if (!terminal_owner(core, secrets, ?core.storage.recovery_events[i],
-            now_ns, persistent)) { ret false; }
+        ok = terminal_owner(core, secrets, ?core.storage.recovery_events[i],
+            now_ns, persistent) && ok;
         i = i + 1;
     }
+    if (!ok) { ret false; }
     if (retry_event && count == 0) {
         val selected: path_api.PathResult = path_api.selected(core.paths);
         if (selected.status != path_api.STATUS_OK ||
@@ -2625,20 +2643,7 @@ pub fun on_path_packet_too_big(core: *Core, value: path_api.Handle,
     if (updated.status != path_api.STATUS_OK) { ret updated; }
     val transport_path: *path_api.Path =
         ?core.paths.storage.paths[value.index];
-    if (updated.reconfigure_congestion &&
-        !congestion_api.set_max_datagram_size(?transport_path.congestion,
-        updated.current_mtu::u64, now_ns).ok) {
-        var failed: path_api.MtuResult;
-        failed.status = path_api.STATUS_ERROR;
-        failed.error  = path_api.ERROR_STATE;
-        ret failed;
-    }
-    if (updated.reconfigure_pacer &&
-        !pacer_api.reconfigure(?transport_path.pacer,
-        pacer_api.default_config(updated.current_mtu::u64,
-        transport_path.congestion.congestion_window), now_ns,
-        transport_path.congestion.congestion_window,
-        core.recovery_state.rtt.smoothed_ns).ok) {
+    if (!apply_mtu(core, transport_path, updated, now_ns)) {
         var failed: path_api.MtuResult;
         failed.status = path_api.STATUS_ERROR;
         failed.error  = path_api.ERROR_STATE;
@@ -3733,11 +3738,15 @@ pub fun timer(core: *Core) transport_api.CoreTimer {
     ret result;
 }
 
+# releases every owner and closes the managers even when a step fails, so a
+# draining connection always reaches CLOSED and the owner can finish it
 fun terminal_drain(core: *Core, secrets: *Secrets, now_ns: u64) bool {
-    var i: usize = 0;
+    var ok: bool  = true;
+    var i:  usize = 0;
     for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state == OWNER_PREPARED &&
-            !cancel_payload(core, secrets, ?core.storage.owners[i])) { ret false; }
+        if (core.storage.owners[i].state == OWNER_PREPARED) {
+            ok = cancel_payload(core, secrets, ?core.storage.owners[i]) && ok;
+        }
         i = i + 1;
     }
     val discarded: recovery.DiscardResult = recovery.discard_all(
@@ -3746,8 +3755,8 @@ fun terminal_drain(core: *Core, secrets: *Secrets, now_ns: u64) bool {
     if (!discarded.ok) { ret false; }
     i = 0;
     for (i < discarded.event_count) {
-        if (!terminal_owner(core, secrets,
-            ?core.storage.recovery_events[i], now_ns, false)) { ret false; }
+        ok = terminal_owner(core, secrets,
+            ?core.storage.recovery_events[i], now_ns, false) && ok;
         i = i + 1;
     }
     if ((!core.cids.closing && !cid_api.begin_close_scoped(core.cids,
@@ -3755,7 +3764,7 @@ fun terminal_drain(core: *Core, secrets: *Secrets, now_ns: u64) bool {
         (!core.paths.closing && path_api.begin_close_scoped(core.paths, core.config.source).status !=
         path_api.STATUS_OK)) { ret false; }
     core.state = transport_api.CLOSED;
-    ret true;
+    ret ok;
 }
 
 fun apply_path_timeout(core: *Core, value: path_api.TimeoutResult,
