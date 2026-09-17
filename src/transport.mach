@@ -346,7 +346,9 @@ fun callback_reentry[T](driver: *Driver[T]) bool {
         atomic.load(?driver.callback_owner) == os.thread_current_id();
 }
 
-fun callback_intact[T](driver: *Driver[T], before: *Driver[T]) bool {
+# os.thread_current_id is a system call on linux, so each callback reads it
+# once and checks the owner against that value
+fun callback_intact[T](driver: *Driver[T], before: *Driver[T], caller: i64) bool {
     ret driver.config.source == before.config.source &&
         driver.config.max_udp_payload == before.config.max_udp_payload &&
         driver.config.max_close_reason == before.config.max_close_reason &&
@@ -379,7 +381,7 @@ fun callback_intact[T](driver: *Driver[T], before: *Driver[T]) bool {
         driver.initialized == before.initialized &&
         driver.released == before.released &&
         driver.closing == before.closing &&
-        atomic.load(?driver.callback_owner) == os.thread_current_id();
+        atomic.load(?driver.callback_owner) == caller;
 }
 
 fun restore_callback[T](driver: *Driver[T], before: *Driver[T]) {
@@ -391,10 +393,11 @@ fun restore_callback[T](driver: *Driver[T], before: *Driver[T]) {
 
 fun callback_receive[T](driver: *Driver[T], input: *Datagram) CoreResult {
     val before: Driver[T] = @driver;
-    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
     val result: CoreResult = driver.protocol.receive(driver.protocol.context,
         input);
-    if (!callback_intact[T](driver, ?before)) {
+    if (!callback_intact[T](driver, ?before, caller)) {
         restore_callback[T](driver, ?before);
         ret CoreResult{status: STATUS_ERROR, error: 0,
             provider_error: 0, state: before.state};
@@ -406,10 +409,11 @@ fun callback_receive[T](driver: *Driver[T], input: *Datagram) CoreResult {
 fun callback_timeout[T](driver: *Driver[T], generation: u64,
     now_ns: u64) CoreResult {
     val before: Driver[T] = @driver;
-    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
     val result: CoreResult = driver.protocol.timeout(driver.protocol.context,
         generation, now_ns);
-    if (!callback_intact[T](driver, ?before)) {
+    if (!callback_intact[T](driver, ?before, caller)) {
         restore_callback[T](driver, ?before);
         ret CoreResult{status: STATUS_ERROR, error: 0,
             provider_error: 0, state: before.state};
@@ -421,10 +425,11 @@ fun callback_timeout[T](driver: *Driver[T], generation: u64,
 fun callback_generate[T](driver: *Driver[T], output: *u8, capacity: usize,
     now_ns: u64) CoreDatagram {
     val before: Driver[T] = @driver;
-    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
     val result: CoreDatagram = driver.protocol.generate(
         driver.protocol.context, output, capacity, now_ns);
-    if (!callback_intact[T](driver, ?before)) {
+    if (!callback_intact[T](driver, ?before, caller)) {
         restore_callback[T](driver, ?before);
         var refused: CoreDatagram;
         refused.status = STATUS_ERROR;
@@ -439,10 +444,11 @@ fun callback_complete_send[T](driver: *Driver[T], owner: u64,
     send_status: SendStatus, count: usize,
     now_ns: u64) CoreResult {
     val before: Driver[T] = @driver;
-    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
     val result: CoreResult = driver.protocol.complete_send(
         driver.protocol.context, owner, send_status, count, now_ns);
-    if (!callback_intact[T](driver, ?before)) {
+    if (!callback_intact[T](driver, ?before, caller)) {
         restore_callback[T](driver, ?before);
         ret CoreResult{status: STATUS_ERROR, error: 0,
             provider_error: 0, state: before.state};
@@ -455,11 +461,12 @@ fun callback_begin_close[T](driver: *Driver[T], abortive: bool,
     application_error: u64, reason: *u8,
     reason_length: usize, now_ns: u64) CoreResult {
     val before: Driver[T] = @driver;
-    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
     val result: CoreResult = driver.protocol.begin_close(
         driver.protocol.context, abortive, application_error, reason,
         reason_length, now_ns);
-    if (!callback_intact[T](driver, ?before)) {
+    if (!callback_intact[T](driver, ?before, caller)) {
         restore_callback[T](driver, ?before);
         ret CoreResult{status: STATUS_ERROR, error: 0,
             provider_error: 0, state: before.state};
@@ -470,9 +477,10 @@ fun callback_begin_close[T](driver: *Driver[T], abortive: bool,
 
 fun callback_timer[T](driver: *Driver[T]) CoreTimer {
     val before: Driver[T] = @driver;
-    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
     val result: CoreTimer = driver.protocol.timer(driver.protocol.context);
-    if (!callback_intact[T](driver, ?before)) {
+    if (!callback_intact[T](driver, ?before, caller)) {
         restore_callback[T](driver, ?before);
         var failed: CoreTimer;
         ret failed;
@@ -483,9 +491,10 @@ fun callback_timer[T](driver: *Driver[T]) CoreTimer {
 
 fun callback_close_ready[T](driver: *Driver[T]) bool {
     val before: Driver[T] = @driver;
-    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
     val result: bool = driver.protocol.close_ready(driver.protocol.context);
-    if (!callback_intact[T](driver, ?before)) {
+    if (!callback_intact[T](driver, ?before, caller)) {
         restore_callback[T](driver, ?before);
         ret false;
     }
@@ -495,9 +504,10 @@ fun callback_close_ready[T](driver: *Driver[T]) bool {
 
 fun callback_finish_close[T](driver: *Driver[T]) bool {
     val before: Driver[T] = @driver;
-    atomic.store(?driver.callback_owner, os.thread_current_id());
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
     val result: bool = driver.protocol.finish_close(driver.protocol.context);
-    if (!callback_intact[T](driver, ?before)) {
+    if (!callback_intact[T](driver, ?before, caller)) {
         restore_callback[T](driver, ?before);
         ret false;
     }
@@ -565,7 +575,18 @@ fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
 }
 
 fun borrowed_disjoint[T](driver: *Driver[T], borrowed: ownership.Range) bool {
-    if (!borrowed.valid) { ret false; }
+    ret borrowed_all_disjoint[T](driver, ?borrowed, 1);
+}
+
+# checks every borrowed range against the driver's owned ranges, building
+# those once for the whole set
+fun borrowed_all_disjoint[T](driver: *Driver[T], borrowed: *ownership.Range,
+    count: usize) bool {
+    var b: usize = 0;
+    for (b < count) {
+        if (!borrowed[b].valid) { ret false; }
+        b = b + 1;
+    }
     var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (!driver.datagrams.config.enabled) {
         datagram_zero = ownership.ZERO_ALLOWED;
@@ -610,19 +631,23 @@ fun borrowed_disjoint[T](driver: *Driver[T], borrowed: ownership.Range) bool {
         driver.datagrams.storage.receive_bytes_length, datagram_zero);
     ranges[16] = ownership.record[cancel.Scope](driver.operation_scope);
     ranges[17] = driver.protocol.context_range(driver.protocol.context);
-    var i: usize = 0;
-    for (i < 18) {
-        if (!ownership.disjoint(borrowed, ranges[i])) { ret false; }
-        i = i + 1;
-    }
-    i = 0;
-    for (i < driver.storage.send_capacity) {
-        if (driver.storage.sends[i].state != SLOT_FREE &&
-            !ownership.disjoint(borrowed,
-            ownership.bytes(driver.storage.sends[i].buffer,
-            driver.storage.sends[i].capacity,
-            ownership.ZERO_FORBIDDEN))) { ret false; }
-        i = i + 1;
+    b          = 0;
+    for (b < count) {
+        var i: usize = 0;
+        for (i < 18) {
+            if (!ownership.disjoint(borrowed[b], ranges[i])) { ret false; }
+            i = i + 1;
+        }
+        i = 0;
+        for (i < driver.storage.send_capacity) {
+            if (driver.storage.sends[i].state != SLOT_FREE &&
+                !ownership.disjoint(borrowed[b],
+                ownership.bytes(driver.storage.sends[i].buffer,
+                driver.storage.sends[i].capacity,
+                ownership.ZERO_FORBIDDEN))) { ret false; }
+            i = i + 1;
+        }
+        b = b + 1;
     }
     ret true;
 }
@@ -959,16 +984,18 @@ pub fun receive_datagram[T](driver: *Driver[T], input: *Datagram) OperationResul
     if (driver == nil || input == nil || !driver.initialized) {
         ret operation_error(ERROR_BUFFER);
     }
-    val input_record: ownership.Range = ownership.record[Datagram](input);
-    if (!borrowed_disjoint[T](driver, input_record)) {
+    var borrowed: [2]ownership.Range;
+    borrowed[0] = ownership.record[Datagram](input);
+    borrowed[1] = ownership.bytes(input.data, input.length, ownership.ZERO_ALLOWED);
+    if (!borrowed_all_disjoint[T](driver, ?borrowed[0], 2) ||
+        !ownership.disjoint(borrowed[0], borrowed[1])) {
         ret operation_error(ERROR_BUFFER);
     }
-    val input_data: ownership.Range = ownership.bytes(input.data, input.length,
-        ownership.ZERO_ALLOWED);
-    if (!input_data.valid || !borrowed_disjoint[T](driver, input_data) ||
-        !ownership.disjoint(input_record, input_data)) {
-        ret operation_error(ERROR_BUFFER);
-    }
+    ret receive_checked[T](driver, input);
+}
+
+# the input and its bytes are already known to be disjoint from the driver
+fun receive_checked[T](driver: *Driver[T], input: *Datagram) OperationResult {
     mutex.lock(?driver.lock);
     apply_cancellation[T](driver);
     if (driver.state == CLOSED || (driver.closing &&
@@ -1002,11 +1029,17 @@ pub fun receive_datagram[T](driver: *Driver[T], input: *Datagram) OperationResul
 
 pub fun receive_native[T](driver: *Driver[T], packet: *net_types.Packet,
     bound_local: ip.Endpoint, received_at_ns: u64, ecn: u8) OperationResult {
+    if (callback_reentry[T](driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized || packet == nil ||
-        !borrowed_disjoint[T](driver,
-        ownership.record[net_types.Packet](packet)) ||
         packet.truncated || packet.length > packet.capacity ||
         (packet.length > 0 && packet.buffer == nil)) { ret operation_error(ERROR_BUFFER); }
+    var borrowed: [2]ownership.Range;
+    borrowed[0] = ownership.record[net_types.Packet](packet);
+    borrowed[1] = ownership.bytes(packet.buffer, packet.length, ownership.ZERO_ALLOWED);
+    if (!borrowed_all_disjoint[T](driver, ?borrowed[0], 2) ||
+        !ownership.disjoint(borrowed[0], borrowed[1])) {
+        ret operation_error(ERROR_BUFFER);
+    }
     var local: ip.Endpoint = bound_local;
     if (packet.has_local_destination) {
         local.addr = packet.local_destination;
@@ -1014,7 +1047,7 @@ pub fun receive_native[T](driver: *Driver[T], packet: *net_types.Packet,
     }
     var input: Datagram = Datagram{local: local, peer: packet.peer, data: packet.buffer,
         length: packet.length, received_at_ns: received_at_ns, ecn: ecn};
-    ret receive_datagram[T](driver, ?input);
+    ret receive_checked[T](driver, ?input);
 }
 
 pub fun timer[T](driver: *Driver[T]) Timer {

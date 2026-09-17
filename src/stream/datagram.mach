@@ -71,10 +71,12 @@ pub fun empty_storage() Storage {
 }
 
 pub rec Queue {
-    config:           Config;
-    storage:          Storage;
-    next_sequence:    u64;
-    send_count:       usize;
+    config:        Config;
+    storage:       Storage;
+    next_sequence: u64;
+    send_count:    usize;
+    # bumped when a datagram is queued, so an idle core notices without scanning
+    send_revision:    u64;
     receive_count:    usize;
     delivered_count:  usize;
     core_lease:       u64;
@@ -325,8 +327,9 @@ pub fun enqueue(queue: *Queue, data: *u8, length: usize) QueueResult {
     val entry: *Entry = ?queue.storage.send_entries[i];
     entry.length = length;
     if (!take_sequence(queue, ?entry.sequence)) { ret queue_error(ERROR_OVERFLOW); }
-    entry.state      = ENTRY_QUEUED;
-    queue.send_count = queue.send_count + 1;
+    entry.state         = ENTRY_QUEUED;
+    queue.send_count    = queue.send_count + 1;
+    queue.send_revision = queue.send_revision + 1;
     var result: QueueResult;
     result.ok     = true;
     result.status = STATUS_OK;

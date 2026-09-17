@@ -13,6 +13,7 @@ use quic.connection.token;
 use quic.crypto.protection;
 use packet_api: quic.packet.packet;
 use path_api:   quic.path.path;
+use ack_api:    quic.recovery.ack;
 use quic.transport;
 use quic.transport.binding;
 
@@ -1688,5 +1689,106 @@ test "quic.connection.assembly: a failed recovery event still settles every owne
         opened.stream).status != transport.STATUS_OK ||
         transport.finish_close[binding.Binding](?listener.driver).status !=
         transport.STATUS_OK) { ret 26; }
+    ret 0;
+}
+
+# a fired ack timer hands the ack to generate. reporting the same expired
+# deadline again would make an owner that re-arms first spin
+test "quic.connection.assembly: a fired ack timer is not reported again" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    if (opened.status != transport.STATUS_OK ||
+        send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        dialer_endpoint(), opened.stream, ?clock) != transport.STATUS_OK) { ret 20; }
+    # one ack-eliciting packet leaves the listener holding a delayed ack
+    val space: *ack_api.Space  = ?listener.core.acknowledgements.spaces[2];
+    val armed: transport.Timer = transport.timer[binding.Binding](?listener.driver);
+    if (!space.ack_pending || !space.ack_deadline_armed || !armed.armed ||
+        armed.deadline_ns != space.ack_deadline_ns) { ret 21; }
+    val deadline: u64 = armed.deadline_ns;
+    if (transport.on_timeout[binding.Binding](?listener.driver, armed,
+        deadline).status != transport.STATUS_OK) { ret 22; }
+    val rearmed: transport.Timer = transport.timer[binding.Binding](?listener.driver);
+    if (rearmed.armed && rearmed.deadline_ns <= deadline) { ret 23; }
+    # the ack itself still goes out on the next generate
+    if (hop(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+        listener_endpoint(), deadline) != transport.STATUS_OK ||
+        space.ack_pending) { ret 24; }
+    ret 0;
+}
+
+fun generate_status(value: *assembly.Connection, scope: *cancel.Scope, now_ns: u64) u8 {
+    var scratch:   [1500]u8;
+    val generated: transport.Generated = transport.generate[binding.Binding](
+        ?value.driver, scope, ?scratch[0], 1500, now_ns, 0);
+    if (generated.status == transport.STATUS_OK) {
+        transport.complete_send[binding.Binding](?value.driver, generated.token,
+            transport.SEND_SENT, generated.count, now_ns);
+    }
+    ret generated.status;
+}
+
+# an idle connection's generate does no selection work, and every way send
+# work can appear still reaches it
+test "quic.connection.assembly: an idle generate does no selection work until something changes" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 8) != 0) { ret refusal(); }
+    clock = clock + 1000;
+    if (generate_status(?listener, ?listener_scope, clock) != transport.STATUS_EMPTY) { ret 20; }
+    # a thousand idle calls cost one selection at most
+    val before: u64   = listener.core.selecting_generates;
+    var i:      usize = 0;
+    for (i < 1000) {
+        clock = clock + 1000;
+        if (generate_status(?listener, ?listener_scope, clock) != transport.STATUS_EMPTY) {
+            ret 21;
+        }
+        i = i + 1;
+    }
+    if (listener.core.selecting_generates != before) { ret 22; }
+    # a stream write outside any core call ends the idle stretch
+    val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?listener.driver, transport.UNIDIRECTIONAL);
+    var byte: [1]u8 = [1]u8{7};
+    if (opened.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?listener.driver, opened.stream,
+        ?byte[0], 1).count != 1) { ret 23; }
+    clock = clock + 1000;
+    if (generate_status(?listener, ?listener_scope, clock) != transport.STATUS_OK) { ret 24; }
+    if (pump(?clock, ?moved, 4) != 0)                                              { ret refusal(); }
+    clock = clock + 1000;
+    if (generate_status(?listener, ?listener_scope, clock) != transport.STATUS_EMPTY) { ret 25; }
+    # a received packet ends it, and a delayed ack becomes due by time alone
+    val request: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    if (request.status != transport.STATUS_OK ||
+        send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        dialer_endpoint(), request.stream, ?clock) != transport.STATUS_OK) { ret 26; }
+    # an immediate ack goes out at once, so send until one is delayed
+    val space:   *ack_api.Space = ?listener.core.acknowledgements.spaces[2];
+    var delayed: bool           = false;
+    var tries:   usize          = 0;
+    for (!delayed && tries < 6) {
+        if (pump(?clock, ?moved, 2) != 0) { ret refusal(); }
+        if (send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+            dialer_endpoint(), request.stream, ?clock) != transport.STATUS_OK) { ret 30; }
+        delayed = space.ack_pending && space.ack_deadline_armed &&
+            !space.ack_immediate && space.ack_deadline_ns > clock + 1;
+        tries = tries + 1;
+    }
+    if (!delayed) { ret 27; }
+    val due: u64 = space.ack_deadline_ns;
+    if (generate_status(?listener, ?listener_scope, clock + 1) != transport.STATUS_EMPTY ||
+        !listener.core.send_idle) { ret 28; }
+    if (generate_status(?listener, ?listener_scope, due) != transport.STATUS_OK ||
+        space.ack_pending) { ret 29; }
     ret 0;
 }

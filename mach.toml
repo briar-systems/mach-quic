@@ -1,6 +1,6 @@
 [project]
 id = "quic"
-version = "0.10.0"
+version = "0.10.1"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -64,8 +64,8 @@ ref = "tag/v4.0.1"
 
 [dep.crypto]
 git = "https://github.com/briar-systems/mach-crypto"
-ref = "tag/v0.11.0"
+ref = "tag/v0.12.0"
 
 [dep.tls]
 git = "https://github.com/briar-systems/mach-tls"
-ref = "tag/v0.5.0"
+ref = "tag/v0.5.1"
