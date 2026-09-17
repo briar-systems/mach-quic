@@ -26,13 +26,16 @@ rec PublicEvent {
 }
 
 rec Provider {
-    events:           [16]PublicEvent;
-    event_count:      usize;
-    next_event:       usize;
-    active_token:     u64;
-    ingested:         [256]u8;
-    ingested_length:  usize;
-    ingested_calls:   usize;
+    events:          [16]PublicEvent;
+    event_count:     usize;
+    next_event:      usize;
+    active_token:    u64;
+    ingested:        [256]u8;
+    ingested_length: usize;
+    ingested_calls:  usize;
+    # each level's next offset, and the level of each ingest in call order
+    level_offsets:    [5]u64;
+    ingested_levels:  [16]u8;
     completed:        usize;
     rejected:         usize;
     retries:          usize;
@@ -45,6 +48,8 @@ rec Provider {
 var reentry_adapter:    *handshake.Adapter;
 var reentry_rejected:   bool;
 var mutate_start_input: bool;
+# ingests the provider refuses for memory before it takes one
+var waiting_ingests: usize;
 
 rec Fixture {
     chunk_pool: supply.TestPool;
@@ -83,16 +88,24 @@ fun ingest_provider(context: ptr, secret_context: *^u8, level: u8, offset: u64,
         reentry_rejected = true;
     }
     if (!provider.started || level < handshake.INITIAL ||
-        level > handshake.APPLICATION || offset != provider.ingested_length::u64 ||
+        level > handshake.APPLICATION || offset != provider.level_offsets[level] ||
         data == nil || length == 0 || length > 256 - provider.ingested_length ||
         now_ns == 0 - 1::u64) { ret provider_result(handshake.STATUS_ERROR, 2); }
+    if (waiting_ingests > 0) {
+        waiting_ingests = waiting_ingests - 1;
+        ret provider_result(handshake.STATUS_WAITING, 0);
+    }
     var i: usize = 0;
     for (i < length) {
         provider.ingested[provider.ingested_length + i] = data[i];
         i                                               = i + 1;
     }
-    provider.ingested_length = provider.ingested_length + length;
-    provider.ingested_calls  = provider.ingested_calls + 1;
+    provider.ingested_length      = provider.ingested_length + length;
+    provider.level_offsets[level] = offset + length::u64;
+    if (provider.ingested_calls < 16) {
+        provider.ingested_levels[provider.ingested_calls] = level;
+    }
+    provider.ingested_calls = provider.ingested_calls + 1;
     ret provider_result(handshake.STATUS_OK, 0);
 }
 
@@ -642,5 +655,37 @@ test "quic.connection.handshake: crypto storage refusals change nothing and resu
     }
     if (!handshake.destroy(?fixture.adapter) ||
         supply.held(?fixture.account, supply.SEND) != 0 || supply.held(?fixture.account, supply.RECEIVE) != 0) { ret 10; }
+    ret 0;
+}
+
+test "quic.connection.handshake: a provider waiting for memory is fed the same bytes in level order" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 412)) { ret 1; }
+    var initial: [4]u8 = [4]u8{1, 2, 3, 4};
+    var later:   [3]u8 = [3]u8{5, 6, 7};
+    waiting_ingests = 2;
+    # the refused bytes stay stored and later levels wait behind them
+    if (handshake.receive(?fixture.adapter, handshake.INITIAL, 0, ?initial[0], 4,
+        2).status != handshake.STATUS_OK ||
+        handshake.receive(?fixture.adapter, handshake.HANDSHAKE, 0, ?later[0], 3,
+        3).status != handshake.STATUS_OK ||
+        fixture.provider.ingested_calls != 0 || waiting_ingests != 1) { ret 2; }
+    if (handshake.poll(?fixture.adapter, 4).status != handshake.STATUS_WAITING ||
+        fixture.provider.ingested_calls != 0 || waiting_ingests != 0) { ret 3; }
+    if (handshake.poll(?fixture.adapter, 5).status != handshake.STATUS_EMPTY ||
+        fixture.provider.ingested_calls != 2 ||
+        fixture.provider.ingested_length != 7 ||
+        fixture.provider.ingested_levels[0] != handshake.INITIAL ||
+        fixture.provider.ingested_levels[1] != handshake.HANDSHAKE) { ret 4; }
+    var i: usize = 0;
+    for (i < 7) {
+        if (fixture.provider.ingested[i] != (i + 1)::u8) { ret 5; }
+        i = i + 1;
+    }
+    # nothing owed any more, so new bytes go straight to the provider
+    var more: [1]u8 = [1]u8{8};
+    if (handshake.receive(?fixture.adapter, handshake.HANDSHAKE, 3, ?more[0], 1,
+        6).status != handshake.STATUS_OK ||
+        fixture.provider.ingested_calls != 3) { ret 6; }
     ret 0;
 }

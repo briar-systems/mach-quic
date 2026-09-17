@@ -217,6 +217,8 @@ pub rec Snapshot {
     peer_parameters_ready:  bool;
     peer_authenticated:     bool;
     handshake_confirmed:    bool;
+    handshake_settled:      bool;
+    handshake_waiting:      bool;
     initial_keys_discarded: bool;
     provider_error:         u64;
     closing:                bool;
@@ -350,6 +352,12 @@ pub rec Core {
     refused_packets: u64;
     # crypto data arrived that the provider has not been polled for
     crypto_received: bool;
+    # the provider is waiting for memory, so polling it waits for a wake
+    handshake_waiting: bool;
+    # the connection's account woke, so the provider is polled once more
+    storage_woken: bool;
+    # the handshake handed everything over and holds no memory
+    handshake_settled: bool;
     # the last generate found nothing to send and nothing has changed since:
     # no core input, no manager revision, no due ack or pacing deadline
     send_idle:              bool;
@@ -877,6 +885,9 @@ fun validate_local_parameters(config: Config, parameters: *transport_parameters.
     ret true;
 }
 
+# the core's own component ranges, then the handshake provider's
+val COMPONENT_RANGES: usize = 39 + handshake_api.PROVIDER_RANGE_CAPACITY;
+
 fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     storage: *Storage, secret_storage: *SecretStorage,
     handshake: *handshake_api.Adapter,
@@ -886,7 +897,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     result: *InitResult) bool {
     if (handshake == nil || cids == nil || paths == nil || streams == nil ||
         datagrams == nil) { ret refuse(result, INIT_ARGUMENT); }
-    var ranges: [49]ownership.Range;
+    var ranges: [COMPONENT_RANGES]ownership.Range;
     ranges[0] = core_range(core);
     ranges[1] = secrets_range(secrets);
     if (!ranges[0].valid || !ranges[1].valid) {
@@ -992,7 +1003,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         handshake_api.PROVIDER_RANGE_CAPACITY)) {
         ret refuse(result, INIT_PROVIDER_RANGES);
     }
-    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], 49);
+    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], COMPONENT_RANGES);
     if (whole.kind != ownership.OVERLAP_NONE) {
         ret refuse_overlap(result, INIT_COMPONENT_RANGES, whole);
     }
@@ -1018,7 +1029,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     var i: usize = 0;
     for (i < 4) {
         val lent: ownership.Disjointness = ownership.disjoint_from(borrowed[i], i,
-            ?ranges[0], 23, 49);
+            ?ranges[0], 23, COMPONENT_RANGES);
         if (lent.kind != ownership.OVERLAP_NONE) {
             ret refuse_overlap(result, INIT_COMPONENT_BORROWED, lent);
         }
@@ -2970,7 +2981,17 @@ pub fun poll_handshake(core: *Core, secrets: *Secrets,
 }
 
 fun handshake_poll_due(core: *Core) bool {
-    ret !core.handshake_confirmed || core.crypto_received;
+    ret core.storage_woken || (!core.handshake_waiting &&
+        (!core.handshake_confirmed || core.crypto_received ||
+        !core.handshake_settled));
+}
+
+# the connection's account woke: whatever the provider was refused for memory
+# is tried again on the next call
+pub fun storage_ready(core: *Core) {
+    if (!core_record_valid(core) || !core.initialized || core.destroyed) { ret; }
+    core.storage_woken = true;
+    wake(core);
 }
 
 # anything that can create send work outside generate ends an idle stretch
@@ -3006,12 +3027,33 @@ fun still_idle(core: *Core, now_ns: u64) bool {
 
 fun advance_handshake(core: *Core, secrets: *Secrets, now_ns: u64) u64 {
     core.crypto_received = false;
+    core.storage_woken   = false;
     val polled: handshake_api.Result = handshake_api.poll_scoped(
         secrets.handshake, core.config.source, now_ns);
     if (polled.status == handshake_api.STATUS_ERROR) {
         ret handshake_failure(core, polled);
     }
-    ret pump_handshake(core, secrets);
+    core.handshake_waiting = polled.status == handshake_api.STATUS_WAITING;
+    val pumped: u64 = pump_handshake(core, secrets);
+    if (pumped != NO_ERROR) { ret pumped; }
+    ret settle_handshake(core, secrets);
+}
+
+# retires the provider's handshake state once it is complete and drained
+fun settle_handshake(core: *Core, secrets: *Secrets) u64 {
+    if (core.handshake_settled || core.closing) { ret NO_ERROR; }
+    val state: handshake_api.Snapshot = handshake_api.snapshot(secrets.handshake);
+    if (!state.handshake_complete || state.event_active || state.closing) {
+        ret NO_ERROR;
+    }
+    val settled: handshake_api.Result = handshake_api.settle_scoped(
+        secrets.handshake, core.config.source);
+    if (settled.status == handshake_api.STATUS_OK) {
+        core.handshake_settled = true;
+        ret NO_ERROR;
+    }
+    if (settled.status == handshake_api.STATUS_MORE) { ret NO_ERROR; }
+    ret handshake_failure(core, settled);
 }
 
 pub fun snapshot(core: *Core) Snapshot {
@@ -3028,6 +3070,8 @@ pub fun snapshot(core: *Core) Snapshot {
     result.peer_parameters_ready  = core.peer_parameters_ready;
     result.peer_authenticated     = core.peer_authenticated;
     result.handshake_confirmed    = core.handshake_confirmed;
+    result.handshake_settled      = core.handshake_settled;
+    result.handshake_waiting      = core.handshake_waiting;
     result.initial_keys_discarded = core.initial_keys_discarded;
     result.provider_error         = core.last_provider_error;
     result.closing                = core.closing;

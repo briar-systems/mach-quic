@@ -28,6 +28,7 @@ use transport_api: quic.transport;
 use binding_api:   quic.transport.binding;
 use quic.transport_parameters;
 
+use tls_buffer: tls.buffer;
 use tls.client;
 use tls.server;
 
@@ -142,7 +143,10 @@ pub rec Config {
     entropy_context_size:        usize;
     entropy_secret_context_size: usize;
     # chunks the pool sets aside for this connection alone
-    chunk_reserve:             usize;
+    chunk_reserve: usize;
+    # bytes tls may hold on its own lane. this is a slice of the connection's
+    # single account, not an allowance beside it
+    tls_budget:                usize;
     peer_validated:            bool;
     retry_source_present:      bool;
     server_acceptance_applied: bool;
@@ -169,6 +173,7 @@ pub fun default_config(source: u64, local: ip.Endpoint,
     value.entropy_context_size        = 1;
     value.entropy_secret_context_size = 0;
     value.chunk_reserve               = 4;
+    value.tls_budget                  = TLS_BUDGET;
     ret value;
 }
 
@@ -308,7 +313,7 @@ fun parameter_role(role: transport_api.Role) u8 {
 }
 
 fun config_valid(config: *Config, role: transport_api.Role) bool {
-    if (config == nil || config.source == 0 ||
+    if (config == nil || config.source == 0 || config.tls_budget == 0 ||
         (config.version != packet.VERSION_1 &&
         config.version != packet.VERSION_2) ||
         config.max_udp_payload < 1200 ||
@@ -584,6 +589,19 @@ fun chunk_budget(window: u64) usize {
         CRYPTO_CHUNKS * chunks_for(CRYPTO_PER_LEVEL::u64);
 }
 
+# the default for Config.tls_budget, room for a handshake's records and
+# messages at once
+pub val TLS_BUDGET: usize = 64 * 1024;
+
+# the memory a tls engine for `c` must be initialized with, before init_client
+# or init_server. it points into `c`, so `c` must not move or be copied from
+# the moment the lease is taken until the connection is released. init opens
+# the account behind it and refuses an engine holding any other lease
+pub fun tls_lease(c: *Connection) tls_buffer.Lease {
+    if (!connection_range(c).valid) { ret tls_buffer.no_lease(); }
+    ret tls_buffer.Lease{source: ?c.provider, account: ?c.account, lane: supply.TLS};
+}
+
 fun backing_lease_valid(c: *Connection) bool {
     ret c != nil && c.storage != nil && c.scratch != nil &&
         c.secret_scratch != nil && c.storage.leased && c.storage.source != 0 &&
@@ -600,10 +618,10 @@ fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
     # the reservation is admission: a pool that cannot back it refuses the
     # connection before anything else is leased
     c.provider = chunks;
-    if (!supply.open(?c.provider, ?c.account, config.source,
+    if (!supply.open_connection(?c.provider, ?c.account, config.source,
         chunk_budget(STREAM_STRIDE::u64) + CORE_BLOCKS + datagram_budget(config),
         chunk_budget(config.receive_stream_data) + TOKEN_CHUNKS +
-        datagram_budget(config),
+        datagram_budget(config), config.tls_budget,
         config.chunk_reserve)) {
         var no_provider: supply.Provider;
         c.provider = no_provider;
@@ -1085,9 +1103,11 @@ pub fun reusable(c: *Connection) bool {
         !c.paths.valid && !c.streams.valid && !c.datagrams.valid;
 }
 
+# `tls` must have been initialized with tls_lease(c), and is refused at
+# STAGE_HANDSHAKE otherwise. it must outlive the connection
 pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
-    tls: *client.Client,
+    tls: *client.Handshake,
     scope: *cancel.Scope, now: time.Instant) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
@@ -1112,7 +1132,7 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     val built: Stage = build_managers(c, config, transport_api.CLIENT);
     if (built != STAGE_OK) { ret failed(c, staged(built)); }
     if (!tls_client_api.initialize(?c.handshake, crypto_config(config),
-        crypto_storage(c), tls, tls_configuration(config))) {
+        crypto_storage(c), tls, tls_lease(c), tls_configuration(config))) {
         ret failed(c, staged(STAGE_HANDSHAKE));
     }
     val result: InitResult = finish(c, config, transport_api.CLIENT,
@@ -1121,9 +1141,11 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     ret result;
 }
 
+# `tls` must have been initialized with tls_lease(c), and is refused at
+# STAGE_HANDSHAKE otherwise. it must outlive the connection
 pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
-    tls: *server.Server,
+    tls: *server.Handshake,
     scope: *cancel.Scope, now: time.Instant) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
@@ -1148,7 +1170,7 @@ pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
     val built: Stage = build_managers(c, config, transport_api.SERVER);
     if (built != STAGE_OK) { ret failed(c, staged(built)); }
     if (!tls_server_api.initialize(?c.handshake, crypto_config(config),
-        crypto_storage(c), tls, server_tls_configuration(config))) {
+        crypto_storage(c), tls, tls_lease(c), server_tls_configuration(config))) {
         ret failed(c, staged(STAGE_HANDSHAKE));
     }
     val result: InitResult = finish(c, config, transport_api.SERVER,

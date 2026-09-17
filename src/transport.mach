@@ -162,6 +162,8 @@ pub rec Protocol[T] {
     close_ready:   fun(*T) bool;
     finish_close:  fun(*T) bool;
     timer:         fun(*T) CoreTimer;
+    # the connection's account woke. memory the core was refused is tried again
+    storage_ready: fun(*T);
 }
 
 # the scope's cancellation callback runs on a foreign thread and is handed an
@@ -374,7 +376,8 @@ fun protocol_valid[T](protocol: *Protocol[T]) bool {
     ret protocol.receive != nil && protocol.timeout != nil &&
         protocol.generate != nil && protocol.complete_send != nil &&
         protocol.begin_close != nil && protocol.close_ready != nil &&
-        protocol.finish_close != nil && protocol.timer != nil;
+        protocol.finish_close != nil && protocol.timer != nil &&
+        protocol.storage_ready != nil;
 }
 
 fun callback_reentry[T](driver: *Driver[T]) bool {
@@ -398,6 +401,7 @@ fun callback_intact[T](driver: *Driver[T], before: *Driver[T], caller: i64) bool
         driver.protocol.close_ready == before.protocol.close_ready &&
         driver.protocol.finish_close == before.protocol.finish_close &&
         driver.protocol.timer == before.protocol.timer &&
+        driver.protocol.storage_ready == before.protocol.storage_ready &&
         driver.streams == before.streams &&
         driver.datagrams == before.datagrams &&
         driver.operation_scope == before.operation_scope &&
@@ -549,6 +553,18 @@ fun callback_finish_close[T](driver: *Driver[T]) bool {
     }
     atomic.store(?driver.callback_owner, 0);
     ret result;
+}
+
+fun callback_storage_ready[T](driver: *Driver[T]) {
+    val before: Driver[T] = @driver;
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
+    driver.protocol.storage_ready(driver.protocol.context);
+    if (!callback_intact[T](driver, ?before, caller)) {
+        restore_callback[T](driver, ?before);
+        ret;
+    }
+    atomic.store(?driver.callback_owner, 0);
 }
 
 fun driver_extent[T](driver: *Driver[T]) ownership.Range {
@@ -1453,11 +1469,14 @@ pub fun ready_stream[T](driver: *Driver[T]) ReadyStream {
     ret result;
 }
 
-# the connection's chunk pool woke this connection: writes it refused for
-# storage are reported writable again
+# the connection's buffer source woke this connection's account: writes it
+# refused for storage are reported writable again, and the core retries
+# whatever it was refused, including a tls call waiting for memory. the caller
+# then drives the connection as for any other input
 pub fun storage_ready[T](driver: *Driver[T]) {
     if (callback_reentry[T](driver) || driver == nil || !driver.initialized) { ret; }
     mutex.lock(?driver.lock);
+    if (driver.state != CLOSED) { callback_storage_ready[T](driver); }
     stream_api.storage_released(driver.streams);
     driver.streams.send_revision = driver.streams.send_revision + 1;
     mutex.unlock(?driver.lock);

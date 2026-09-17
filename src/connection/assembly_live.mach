@@ -42,6 +42,7 @@ use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.size.usize;
+use tls_buffer: tls.buffer;
 use tls.cert;
 use tls.cert.credentials;
 use tls.client;
@@ -64,22 +65,11 @@ var copied_storage:   assembly.Storage;
 # both ends run on this test's one pump, so they share its scratch pair
 var pump_scratch:     assembly.Scratch;
 var pump_secret:      assembly.SecretScratch;
-var dialer_tls:       client.Client;
-var listener_tls:     server.Server;
-var dialer_tls_two:   client.Client;
-var listener_tls_two: server.Server;
-var rollback_tls:     client.Client;
-
-var dialer_input:             [8192]u8;
-var dialer_output:            [8192]u8;
-var dialer_hello:             [8192]u8;
-var dialer_certificates:      [4]cert.Certificate;
-var dialer_peer_parameters:   [512]u8;
-var listener_input:           [8192]u8;
-var listener_output:          [8192]u8;
-var listener_hello:           [8192]u8;
-var listener_certificates:    [4]cert.Certificate;
-var listener_peer_parameters: [512]u8;
+var dialer_tls:       client.Handshake;
+var listener_tls:     server.Handshake;
+var dialer_tls_two:   client.Handshake;
+var listener_tls_two: server.Handshake;
+var rollback_tls:     client.Handshake;
 
 var dialer_parameters:   [512]u8;
 var listener_parameters: [512]u8;
@@ -157,10 +147,99 @@ fun rollback_entropy(context: ptr, secret_context: *^u8,
 
 var chunk_pool: supply.TestPool;
 
+# a pool small enough for a test to exhaust, and whether connections use it
+var small_pool: supply.TestPool;
+var starving:   bool;
+
 # one pool serves every connection a test assembles
 fun test_chunks() buffers.Source {
+    if (starving) {
+        if (!supply.test_made(?small_pool)) { supply.make_test(?small_pool, 128); }
+        ret small_pool.provider;
+    }
     if (!supply.test_made(?chunk_pool)) { supply.make_test(?chunk_pool, 4096); }
     ret chunk_pool.provider;
+}
+
+# which lease establish_direct gives the dialer's engine
+val LEASE_OWN:      u8 = 0;
+val LEASE_PEER:     u8 = 1;
+val LEASE_NONE:     u8 = 2;
+val LEASE_ORIGINAL: u8 = 3;
+var mislease:       u8;
+# a connection the dialer is copied from after its lease was taken
+var original: assembly.Connection;
+# what establish_direct returns once the dialer's engine was refused
+val REFUSED: i32 = 99;
+
+fun dialer_engine_lease() tls_buffer.Lease {
+    if (mislease == LEASE_PEER) { ret assembly.tls_lease(?listener); }
+    if (mislease == LEASE_NONE) { ret tls_buffer.no_lease(); }
+    if (mislease == LEASE_ORIGINAL) {
+        val lease: tls_buffer.Lease = assembly.tls_lease(?original);
+        dialer = original;
+        ret lease;
+    }
+    ret assembly.tls_lease(?dialer);
+}
+
+# chunks another account holds on the small pool
+var hog_account: supply.Account;
+var hog_chunks:  [256]supply.Chunk;
+var hog_count:   usize;
+
+# holds every chunk of the small pool but one, which the dialer's handshake
+# block takes, so its tls start finds no memory at all
+fun hog() bool {
+    test_chunks();
+    if (!supply.open(?small_pool.provider, ?hog_account, 77, 256, 0, 0)) { ret false; }
+    var from: supply.Source = supply.Source{provider: ?small_pool.provider,
+        account: ?hog_account, lane: supply.SEND};
+    hog_count = 0;
+    for (hog_count < 256) {
+        val taken: supply.Taken = supply.take(?from, supply.BYTES);
+        if (!taken.ok) { brk; }
+        hog_chunks[hog_count] = taken.chunk;
+        hog_count             = hog_count + 1;
+    }
+    if (hog_count == 0 || hog_count == 256) { ret false; }
+    hog_count = hog_count - 1;
+    ret supply.give(?from, hog_chunks[hog_count]);
+}
+
+fun unhog() bool {
+    var from: supply.Source = supply.Source{provider: ?small_pool.provider,
+        account: ?hog_account, lane: supply.SEND};
+    for (hog_count > 0) {
+        hog_count = hog_count - 1;
+        if (!supply.give(?from, hog_chunks[hog_count])) { ret false; }
+    }
+    ret supply.close(?small_pool.provider, ?hog_account);
+}
+
+# the dialer's tls start waited for memory: nothing goes out and polling stops
+# until the pool wakes the connection, and then the same start runs again
+fun starved_start(clock: *u64) i32 {
+    clock[0] = clock[0] + 1000;
+    val waiting: transport.Generated = transport.generate[binding.Binding](
+        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, instants.instant(clock[0]), 0);
+    if (waiting.status == transport.STATUS_OK ||
+        waiting.status == transport.STATUS_ERROR ||
+        !core.snapshot(?dialer.core).handshake_waiting ||
+        dialer.handshake.levels[0].send_acked != 0 ||
+        dialer_tls.hello_len != 0) { ret 40; }
+    if (!unhog()) { ret 41; }
+    var woken: [8]u64;
+    val count: usize = supply.ready(?small_pool.provider, ?woken[0], 8);
+    var found: bool  = false;
+    var i:     usize = 0;
+    for (i < count) {
+        if (woken[i] == dialer.core.config.source) { found = true; }
+        i = i + 1;
+    }
+    if (!found) { ret 42; }
+    transport.storage_ready[binding.Binding](?dialer.driver);
+    ret 0;
 }
 
 # a failing exit code is one byte, so the detail lands here and the assertion
@@ -249,6 +328,8 @@ fun connection_config(role: transport.Role) assembly.Config {
         value.local_source     = ?listener_source[0];
         value.peer_destination = ?dialer_source[0];
     }
+    # a starved pool has nothing to set aside
+    if (starving) { value.chunk_reserve = 0; }
     value.local_source_length         = 8;
     value.peer_destination_length     = 8;
     value.original_destination        = ?initial_destination[0];
@@ -486,14 +567,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     dialer_tls_config.limits.max_client_flight_bytes  = 8192;
     dialer_tls_config.limits.max_chain_bytes          = 4096;
     dialer_tls_config.limits.max_ticket_bytes         = 4096;
-    if (!client.init(?dialer_tls, ?dialer_tls_config, client.Storage{
-        input:                    ?dialer_input[0], input_capacity: 8192,
-        output:                   ?dialer_output[0], output_capacity: 8192,
-        hello:                    ?dialer_hello[0], hello_capacity: 8192,
-        certificates:             ?dialer_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?dialer_peer_parameters[0],
-        peer_parameters_capacity: 512
-    },
+    if (!client.init(?dialer_tls, ?dialer_tls_config, assembly.tls_lease(?dialer),
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?dialer_parameters[0],
         len:  dialer_encoded}},
@@ -682,15 +756,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val listener_encoded: usize = assembly.encode_parameters(?listener_config,
         transport.SERVER, ?listener_parameters[0], 512).count;
     if (listener_encoded == 0 || !server.init(?listener_tls,
-        ?listener_tls_config, server.Storage{
-        input:                    ?listener_input[0], input_capacity: 8192,
-        output:                   ?listener_output[0], output_capacity: 8192,
-        hello:                    ?listener_hello[0], hello_capacity: 8192,
-        certificates:             ?listener_certificates[0],
-        certificate_capacity:     4,
-        peer_parameters:          ?listener_peer_parameters[0],
-        peer_parameters_capacity: 512
-    },
+        ?listener_tls_config, assembly.tls_lease(?listener),
         server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?listener_parameters[0],
         len:  listener_encoded}},
@@ -917,14 +983,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     }
 
     # the same stable records now serve a second real client/server generation
-    if (!client.init(?dialer_tls_two, ?dialer_tls_config, client.Storage{
-        input:                    ?dialer_input[0], input_capacity: 8192,
-        output:                   ?dialer_output[0], output_capacity: 8192,
-        hello:                    ?dialer_hello[0], hello_capacity: 8192,
-        certificates:             ?dialer_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?dialer_peer_parameters[0],
-        peer_parameters_capacity: 512
-    },
+    if (!client.init(?dialer_tls_two, ?dialer_tls_config, assembly.tls_lease(?dialer),
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?dialer_parameters[0],
         len:  dialer_encoded}},
@@ -965,15 +1024,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val listener_encoded_two: usize = assembly.encode_parameters(
         ?listener_config_two, transport.SERVER, ?listener_parameters[0], 512).count;
     if (listener_encoded_two == 0 || !server.init(?listener_tls_two,
-        ?listener_tls_config, server.Storage{
-        input:                    ?listener_input[0], input_capacity: 8192,
-        output:                   ?listener_output[0], output_capacity: 8192,
-        hello:                    ?listener_hello[0], hello_capacity: 8192,
-        certificates:             ?listener_certificates[0],
-        certificate_capacity:     4,
-        peer_parameters:          ?listener_peer_parameters[0],
-        peer_parameters_capacity: 512
-    },
+        ?listener_tls_config, assembly.tls_lease(?listener),
         server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?listener_parameters[0],
         len:  listener_encoded_two}},
@@ -990,15 +1041,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !server.destroy(?listener_tls_two) ||
         !operation_ok(cancel.destroy(?listener_scope)) ||
         !server.init(?listener_tls_two,
-        ?listener_tls_config, server.Storage{
-        input:                    ?listener_input[0], input_capacity: 8192,
-        output:                   ?listener_output[0], output_capacity: 8192,
-        hello:                    ?listener_hello[0], hello_capacity: 8192,
-        certificates:             ?listener_certificates[0],
-        certificate_capacity:     4,
-        peer_parameters:          ?listener_peer_parameters[0],
-        peer_parameters_capacity: 512
-    },
+        ?listener_tls_config, assembly.tls_lease(?listener),
         server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?listener_parameters[0],
         len:  listener_encoded_two}},
@@ -1065,14 +1108,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     rollback_tls_config.entropy_context_size = $size_of(RollbackProbe);
     var rollback_config: assembly.Config = connection_config(transport.CLIENT);
     rollback_config.entropy_context_size = $size_of(RollbackProbe);
-    if (!client.init(?rollback_tls, ?rollback_tls_config, client.Storage{
-        input:                    ?dialer_input[0], input_capacity: 8192,
-        output:                   ?dialer_output[0], output_capacity: 8192,
-        hello:                    ?dialer_hello[0], hello_capacity: 8192,
-        certificates:             ?dialer_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?dialer_peer_parameters[0],
-        peer_parameters_capacity: 512
-    },
+    if (!client.init(?rollback_tls, ?rollback_tls_config, assembly.tls_lease(?dialer),
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?dialer_parameters[0],
         len:  dialer_encoded}},
@@ -1293,26 +1329,31 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     dialer_tls_config.limits.max_client_flight_bytes  = 8192;
     dialer_tls_config.limits.max_chain_bytes          = 4096;
     dialer_tls_config.limits.max_ticket_bytes         = 4096;
-    if (!client.init(?dialer_tls, ?dialer_tls_config, client.Storage{
-        input:                    ?dialer_input[0], input_capacity: 8192,
-        output:                   ?dialer_output[0], output_capacity: 8192,
-        hello:                    ?dialer_hello[0], hello_capacity: 8192,
-        certificates:             ?dialer_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?dialer_peer_parameters[0],
-        peer_parameters_capacity: 512
-    },
+    val engine_ready: bool = client.init(?dialer_tls, ?dialer_tls_config,
+        dialer_engine_lease(),
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?dialer_parameters[0],
         len:  dialer_encoded}},
-        client.QUIC_TRANSPORT_PARAMETERS)) { ret 5; }
+        client.QUIC_TRANSPORT_PARAMETERS);
+    if (engine_ready == (mislease == LEASE_NONE)) { ret 5; }
     if (!operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{})) ||
         !operation_ok(cancel.make_root(?dialer_scope, opt[time.Instant].none{}))) {
         ret 6;
     }
+    if (starving && !hog()) { ret 39; }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, ?dialer_scope, instants.instant(clock[0]));
+    if (mislease != LEASE_OWN) {
+        if (dialed.ok || dialed.stage != assembly.STAGE_HANDSHAKE ||
+            !assembly.reusable(?dialer) || dialer.account.open) { ret 8; }
+        ret REFUSED;
+    }
     if (!dialed.ok || dialed.core.reason != core.INIT_OK) { ret 7; }
+    if (starving) {
+        val starved: i32 = starved_start(clock);
+        if (starved != 0) { ret starved; }
+    }
 
     clock[0] = clock[0] + 1000;
     val first: transport.Generated = transport.generate[binding.Binding](
@@ -1337,15 +1378,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     val listener_encoded: usize = assembly.encode_parameters(?listener_config,
         transport.SERVER, ?listener_parameters[0], 512).count;
     if (listener_encoded == 0 || !server.init(?listener_tls,
-        ?listener_tls_config, server.Storage{
-        input:                    ?listener_input[0], input_capacity: 8192,
-        output:                   ?listener_output[0], output_capacity: 8192,
-        hello:                    ?listener_hello[0], hello_capacity: 8192,
-        certificates:             ?listener_certificates[0],
-        certificate_capacity:     4,
-        peer_parameters:          ?listener_peer_parameters[0],
-        peer_parameters_capacity: 512
-    },
+        ?listener_tls_config, assembly.tls_lease(?listener),
         server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?listener_parameters[0],
         len:  listener_encoded}},
@@ -2158,7 +2191,7 @@ test "quic.connection.assembly: a full window survives 10% loss and reordering w
 # live idle connection holds. a failure means that cost moved. decide it
 # deliberately, and update these numbers, the changelog and the readme together
 val GUARD_STORAGE_BYTES:    usize = 4464;
-val GUARD_CONNECTION_BYTES: usize = 9168;
+val GUARD_CONNECTION_BYTES: usize = 9776;
 # established, no streams
 val GUARD_IDLE_CHUNKS: usize = 0;
 # established, the six h3 control streams open and drained: one record block
@@ -2199,6 +2232,16 @@ test "quic.connection.assembly: an idle connection costs what was measured" {
         !holds(?listener, GUARD_IDLE_CHUNKS, GUARD_IDLE_CHUNKS)) {
         print.eprintln("an idle established connection holds chunks it did not before");
         ret 2;
+    }
+    # a settled handshake leaves tls holding nothing
+    if (!core.snapshot(?dialer.core).handshake_settled ||
+        !core.snapshot(?listener.core).handshake_settled ||
+        dialer.account.used[supply.TLS::usize] != 0 ||
+        listener.account.used[supply.TLS::usize] != 0) {
+        print.eprintlnf("tls holds {} and {} bytes once established",
+            dialer.account.used[supply.TLS::usize],
+            listener.account.used[supply.TLS::usize]);
+        ret 7;
     }
     var byte: [1]u8 = [1]u8{0x07};
     var i:    usize = 0;
@@ -2365,4 +2408,45 @@ test "quic.connection.assembly: a 64 KiB transfer costs what was measured" {
     if (after != 0)                                       { ret after; }
     if (!holds(?dialer, 1, 0) || !holds(?listener, 1, 0)) { ret 2; }
     ret 0;
+}
+
+test "quic.connection.assembly: a tls start refused for memory resumes when the pool wakes it" {
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    starving = true;
+    val established: i32 = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0) { ret established; }
+    val settled: i32 = settle(?clock, ?moved);
+    if (settled != 0) { ret settled; }
+    val dialed: core.Snapshot = core.snapshot(?dialer.core);
+    if (!dialed.handshake_confirmed || !dialed.handshake_settled ||
+        dialed.handshake_waiting || dialer.account.used[supply.TLS::usize] != 0) { ret 50; }
+    ret 0;
+}
+
+# only the lease the connection handed out lets an engine in, so an engine
+# charging anything else cannot reach an account the connection closes. tls
+# refuses to initialize without a lease, and the engine left uninitialized is
+# refused in turn
+test "quic.connection.assembly: an engine holding another connection's lease is refused" {
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    mislease = LEASE_PEER;
+    ret establish_direct(1500, 1500, 8, ?clock, ?moved) - REFUSED;
+}
+
+test "quic.connection.assembly: an engine holding no lease is refused" {
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    mislease = LEASE_NONE;
+    ret establish_direct(1500, 1500, 8, ?clock, ?moved) - REFUSED;
+}
+
+# the lease points into the connection, so a copy made after it was taken is
+# not the connection the engine charges
+test "quic.connection.assembly: a connection copied after its lease was taken is refused" {
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    mislease = LEASE_ORIGINAL;
+    ret establish_direct(1500, 1500, 8, ?clock, ?moved) - REFUSED;
 }
