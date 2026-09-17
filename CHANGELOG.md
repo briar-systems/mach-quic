@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-17
+
 ### Security
 
 - Secret packet plaintext no longer outlives the call that sealed or opened it (#137). Before, the last packet's plaintext stayed in the connection's secret buffers until close. The core now wipes exactly the bytes it wrote on every exit path.
