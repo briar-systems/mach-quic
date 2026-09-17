@@ -586,7 +586,7 @@ test "quic.connection.core: Version Negotiation releases sent and prepared Initi
     var builder:        binary.Builder = binary.builder(?datagram_bytes[0], 64,
         binary.BIG);
     if (!packet.encode(?builder, ?value, packet.default_limits()).ok) { ret 5; }
-    var input: transport.Datagram = transport.Datagram{
+    var input: transport.CoreInput = transport.CoreInput{
         local:          fixture.engine.config.local, peer: fixture.engine.config.peer,
         data:           ?datagram_bytes[0], length: builder.len,
         received_at_ns: pto.deadline_ns + 1, ecn: 0
@@ -649,7 +649,7 @@ test "quic.connection.core: authenticated Retry rotates Initial identity and own
     }
     builder = binary.builder(?datagram_bytes[0], 128, binary.BIG);
     if (!packet.encode(?builder, ?value, packet.default_limits()).ok) { ret 5; }
-    var input: transport.Datagram = transport.Datagram{
+    var input: transport.CoreInput = transport.CoreInput{
         local: fixture.engine.config.local, peer: fixture.engine.config.peer,
         data:  ?datagram_bytes[0], length: builder.len, received_at_ns: 4, ecn: 0
     };
@@ -705,8 +705,8 @@ test "quic.connection.core: idle timer enters bounded draining" {
         1000009).status != transport.STATUS_EARLY ||
         core.on_timeout(?fixture.engine, ?fixture.secrets, armed.generation,
         1000010).state != transport.DRAINING) { ret 2; }
-    var ignored: [1]u8              = [1]u8{0};
-    var input:   transport.Datagram = transport.Datagram{
+    var ignored: [1]u8               = [1]u8{0};
+    var input:   transport.CoreInput = transport.CoreInput{
         local: fixture.engine.config.local, peer: fixture.engine.config.peer,
         data:  ?ignored[0], length: 1, received_at_ns: 1000011, ecn: 0
     };
@@ -727,7 +727,7 @@ test "quic.connection.core: public descriptors reject wrapping maximum ranges" {
     if (core.snapshot(maximum::*core.Core).state != 0) { ret 2; }
     if (core.generate(?fixture.engine, ?fixture.secrets, maximum::*u8,
         1200, 2).status != transport.STATUS_ERROR) { ret 3; }
-    var input: transport.Datagram = transport.Datagram{
+    var input: transport.CoreInput = transport.CoreInput{
         local: fixture.engine.config.local, peer: fixture.engine.config.peer,
         data:  maximum::*u8, length: 2, received_at_ns: 2, ecn: 0
     };
@@ -930,7 +930,7 @@ fun dirty_frame(seed: u64) u64 {
 test "quic.connection.core: a refusal reports every field it did not set" {
     var fixture: Fixture;
     var payload: [16]u8;
-    var input:   transport.Datagram = transport.Datagram{
+    var input:   transport.CoreInput = transport.CoreInput{
         local: endpoint(1, 4433), peer: endpoint(2, 55000),
         data:  ?payload[0], length: 16, received_at_ns: 1, ecn: 0
     };

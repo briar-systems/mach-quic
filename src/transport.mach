@@ -1,9 +1,11 @@
 # bounded public quic connection driver
 
+use quic.clock;
 use quic.connection.ownership;
 use datagram_api: quic.stream.datagram;
 use stream_api:   quic.stream.stream;
 
+use std.chrono.time;
 use io_error: std.io.error;
 use std.io.lifecycle;
 use io_runtime: std.io.runtime;
@@ -82,7 +84,18 @@ val SLOT_SUBMITTED: u8 = 2;
 
 pub rec View { data: *u8; length: usize; }
 
+# a datagram the caller received, read at `received_at` on the monotonic clock
 pub rec Datagram {
+    local:       ip.Endpoint;
+    peer:        ip.Endpoint;
+    data:        *u8;
+    length:      usize;
+    received_at: time.Instant;
+    ecn:         u8;
+}
+
+# the same datagram as a protocol sees it, with time in clock nanoseconds
+pub rec CoreInput {
     local:          ip.Endpoint;
     peer:           ip.Endpoint;
     data:           *u8;
@@ -91,7 +104,7 @@ pub rec Datagram {
     ecn:            u8;
 }
 
-pub rec Timer     { source: u64; deadline_ns: u64; generation: u64; armed: bool; }
+pub rec Timer     { source: u64; deadline: time.Instant; generation: u64; armed: bool; }
 pub rec CoreTimer { deadline_ns: u64; generation: u64; armed: bool; }
 
 pub rec CoreResult {
@@ -130,7 +143,7 @@ pub rec CoreDatagram {
 pub rec Protocol[T] {
     context:       *T;
     context_range: fun(*T) ownership.Range;
-    receive:       fun(*T, *Datagram) CoreResult;
+    receive:       fun(*T, *CoreInput) CoreResult;
     timeout:       fun(*T, u64, u64) CoreResult;
     generate:      fun(*T, *u8, usize, u64) CoreDatagram;
     complete_send: fun(*T, u64, SendStatus, usize, u64) CoreResult;
@@ -403,7 +416,7 @@ fun restore_callback[T](driver: *Driver[T], before: *Driver[T]) {
     atomic.store(?driver.callback_owner, 0);
 }
 
-fun callback_receive[T](driver: *Driver[T], input: *Datagram) CoreResult {
+fun callback_receive[T](driver: *Driver[T], input: *CoreInput) CoreResult {
     val before: Driver[T] = @driver;
     val caller: i64       = os.thread_current_id();
     atomic.store(?driver.callback_owner, caller);
@@ -959,11 +972,14 @@ pub fun receive_datagram[T](driver: *Driver[T], input: *Datagram) OperationResul
         !ownership.disjoint(borrowed[0], borrowed[1])) {
         ret operation_error(ERROR_BUFFER);
     }
-    ret receive_checked[T](driver, input);
+    var core_input: CoreInput = CoreInput{local: input.local, peer: input.peer,
+        data:           input.data, length: input.length,
+        received_at_ns: clock.nanos(input.received_at), ecn: input.ecn};
+    ret receive_checked[T](driver, ?core_input);
 }
 
 # the input and its bytes are already known to be disjoint from the driver
-fun receive_checked[T](driver: *Driver[T], input: *Datagram) OperationResult {
+fun receive_checked[T](driver: *Driver[T], input: *CoreInput) OperationResult {
     mutex.lock(?driver.lock);
     apply_cancellation[T](driver);
     if (driver.state == CLOSED || (driver.closing &&
@@ -996,7 +1012,7 @@ fun receive_checked[T](driver: *Driver[T], input: *Datagram) OperationResult {
 }
 
 pub fun receive_native[T](driver: *Driver[T], packet: *net_types.Packet,
-    bound_local: ip.Endpoint, received_at_ns: u64, ecn: u8) OperationResult {
+    bound_local: ip.Endpoint, received_at: time.Instant, ecn: u8) OperationResult {
     if (callback_reentry[T](driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized || packet == nil ||
         packet.truncated || packet.length > packet.capacity ||
@@ -1013,8 +1029,8 @@ pub fun receive_native[T](driver: *Driver[T], packet: *net_types.Packet,
         local.addr = packet.local_destination;
         if (local.addr.is_v6 != 0) { local.scope = packet.interface_index; }
     }
-    var input: Datagram = Datagram{local: local, peer: packet.peer, data: packet.buffer,
-        length: packet.length, received_at_ns: received_at_ns, ecn: ecn};
+    var input: CoreInput = CoreInput{local: local, peer: packet.peer, data: packet.buffer,
+        length: packet.length, received_at_ns: clock.nanos(received_at), ecn: ecn};
     ret receive_checked[T](driver, ?input);
 }
 
@@ -1029,17 +1045,19 @@ pub fun timer[T](driver: *Driver[T]) Timer {
         scope_active(driver.operation_scope)) {
         val core: CoreTimer = callback_timer[T](driver);
         if (core.armed && core.generation != 0) {
-            result.source      = driver.config.source;
-            result.deadline_ns = core.deadline_ns;
-            result.generation  = core.generation;
-            result.armed       = true;
+            result.source     = driver.config.source;
+            result.deadline   = clock.instant(core.deadline_ns);
+            result.generation = core.generation;
+            result.armed      = true;
         }
     }
     mutex.unlock(?driver.lock);
     ret result;
 }
 
-pub fun on_timeout[T](driver: *Driver[T], value: Timer, now_ns: u64) OperationResult {
+pub fun on_timeout[T](driver: *Driver[T], value: Timer, now: time.Instant) OperationResult {
+    val now_ns:      u64 = clock.nanos(now);
+    val deadline_ns: u64 = clock.nanos(value.deadline);
     if (callback_reentry[T](driver)) { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized || !value.armed ||
         value.source != driver.config.source || value.generation == 0) {
@@ -1063,12 +1081,12 @@ pub fun on_timeout[T](driver: *Driver[T], value: Timer, now_ns: u64) OperationRe
     }
     val current: CoreTimer = callback_timer[T](driver);
     if (!current.armed || current.generation != value.generation ||
-        current.deadline_ns != value.deadline_ns) {
+        current.deadline_ns != deadline_ns) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
         ret operation_result(STATUS_STALE, ERROR_TOKEN, 0, 0, state);
     }
-    if (now_ns < value.deadline_ns) {
+    if (now_ns < deadline_ns) {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
         ret operation_result(STATUS_EARLY, ERROR_TIME, 0, 0, state);
@@ -1081,7 +1099,8 @@ pub fun on_timeout[T](driver: *Driver[T], value: Timer, now_ns: u64) OperationRe
 }
 
 pub fun generate[T](driver: *Driver[T], scope: *cancel.Scope, buffer: *u8,
-    capacity: usize, now_ns: u64, context: usize) Generated {
+    capacity: usize, now: time.Instant, context: usize) Generated {
+    val now_ns: u64 = clock.nanos(now);
     var result: Generated;
     if (callback_reentry[T](driver)) {
         result.status = STATUS_ERROR;
@@ -1212,7 +1231,8 @@ fun complete_locked[T](driver: *Driver[T], slot: *SendSlot, send_status: SendSta
 }
 
 pub fun complete_send[T](driver: *Driver[T], token: Token, send_status: SendStatus,
-    count: usize, now_ns: u64) Completion {
+    count: usize, now: time.Instant) Completion {
+    val now_ns: u64 = clock.nanos(now);
     var result: Completion;
     result.token = token;
     if (callback_reentry[T](driver)) {
@@ -1239,8 +1259,8 @@ pub fun complete_send[T](driver: *Driver[T], token: Token, send_status: SendStat
     ret result;
 }
 
-pub fun cancel_send[T](driver: *Driver[T], token: Token, now_ns: u64) Completion {
-    ret complete_send[T](driver, token, SEND_CANCELLED, 0, now_ns);
+pub fun cancel_send[T](driver: *Driver[T], token: Token, now: time.Instant) Completion {
+    ret complete_send[T](driver, token, SEND_CANCELLED, 0, now);
 }
 
 pub fun submit_native[T](driver: *Driver[T], network: *net_async.Driver, socket: *udp.Socket,
@@ -1281,7 +1301,8 @@ pub fun submit_native[T](driver: *Driver[T], network: *net_async.Driver, socket:
 }
 
 pub fun complete_native[T](driver: *Driver[T], native: *io_runtime.Completion,
-    now_ns: u64) Completion {
+    now: time.Instant) Completion {
+    val now_ns: u64 = clock.nanos(now);
     var result: Completion;
     if (callback_reentry[T](driver)) {
         result.status = STATUS_ERROR;
@@ -1805,7 +1826,8 @@ pub fun release_datagram[T](driver: *Driver[T], value: DatagramToken) OperationR
 }
 
 pub fun begin_close[T](driver: *Driver[T], application_error: u64, reason: *u8,
-    reason_length: usize, now_ns: u64) OperationResult {
+    reason_length: usize, now: time.Instant) OperationResult {
+    val now_ns: u64 = clock.nanos(now);
     if (callback_reentry[T](driver))          { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
     if (!borrowed_disjoint[T](driver, ownership.bytes(reason, reason_length,

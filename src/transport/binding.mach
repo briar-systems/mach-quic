@@ -114,7 +114,7 @@ fun binding_range(binding: *Binding) ownership.Range {
 }
 
 fun on_receive(binding: *Binding,
-    input: *transport_api.Datagram) transport_api.CoreResult {
+    input: *transport_api.CoreInput) transport_api.CoreResult {
     if (!bound(binding)) { ret refused(); }
     ret core_api.receive(binding.core, binding.secrets, input);
 }

@@ -5,6 +5,7 @@
 # both from a single record is the only way that agreement is structural rather
 # than something each consumer rediscovers.
 
+use quic.clock;
 use cid_api:       quic.connection.cid;
 use core_api:      quic.connection.core;
 use handshake_api: quic.connection.handshake;
@@ -30,6 +31,8 @@ use quic.transport_parameters;
 use tls.client;
 use tls.server;
 
+use std.chrono.duration;
+use std.chrono.time;
 use std.encoding.binary;
 use std.memory.buffers;
 use std.net.ip;
@@ -37,6 +40,7 @@ use std.sync.cancel;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.size.usize;
 
 # the exact capacities required of caller-owned public and secret backing
@@ -121,8 +125,9 @@ pub rec Config {
     server_name:                 *u8;
     server_name_length:          usize;
     max_udp_payload:             usize;
-    max_idle_timeout_ms:         u64;
-    drain_timeout_ns:            u64;
+    # the idle timeout advertised to the peer, whole milliseconds on the wire
+    max_idle_timeout:            duration.Duration;
+    drain_timeout:               duration.Duration;
     peer_bidirectional_streams:  u64;
     peer_unidirectional_streams: u64;
     receive_max_data:            u64;
@@ -130,7 +135,8 @@ pub rec Config {
     active_connection_id_limit:  u64;
     max_datagram_frame_size:     usize;
     verification_time_unix:      i64;
-    tls_deadline_ns:             u64;
+    # when the handshake must have finished, on the monotonic clock
+    tls_deadline:                opt[time.Instant];
     entropy_context_size:        usize;
     entropy_secret_context_size: usize;
     # chunks the pool sets aside for this connection alone
@@ -149,8 +155,9 @@ pub fun default_config(source: u64, local: ip.Endpoint,
     value.local                       = local;
     value.peer                        = peer;
     value.max_udp_payload             = MAX_UDP_PAYLOAD;
-    value.max_idle_timeout_ms         = 30000;
-    value.drain_timeout_ns            = 3000000000;
+    value.max_idle_timeout            = 30 * duration.SECOND;
+    value.drain_timeout               = 3 * duration.SECOND;
+    value.tls_deadline                = opt[time.Instant].none{};
     value.peer_bidirectional_streams  = H3_REQUEST_STREAMS::u64;
     value.peer_unidirectional_streams = H3_CRITICAL_STREAMS_PER_PEER::u64;
     value.receive_max_data            = STREAM_WINDOW::u64;
@@ -318,7 +325,7 @@ fun config_valid(config: *Config, role: transport_api.Role) bool {
         config.version != packet.VERSION_2) ||
         config.max_udp_payload < 1200 ||
         config.max_udp_payload > MAX_UDP_PAYLOAD ||
-        config.drain_timeout_ns == 0 || config.max_idle_timeout_ms == 0 ||
+        config.drain_timeout <= 0 || config.max_idle_timeout < duration.MILLISECOND ||
         config.alpn == nil || config.alpn_length == 0 ||
         (config.local_source == nil && config.local_source_length != 0) ||
         (config.local_source_length == 0 && role != transport_api.CLIENT) ||
@@ -672,7 +679,7 @@ fun stream_configuration(config: *Config,
 fun local_parameters(config: *Config,
     role: transport_api.Role) transport_parameters.Parameters {
     var value: transport_parameters.Parameters = transport_parameters.defaults();
-    value.max_idle_timeout                    = config.max_idle_timeout_ms;
+    value.max_idle_timeout                    = clock.span(config.max_idle_timeout) / 1000000;
     value.max_udp_payload_size                = config.max_udp_payload::u64;
     value.initial_max_data                    = config.receive_max_data;
     value.initial_max_stream_data_bidi_local  = config.receive_stream_data;
@@ -742,10 +749,16 @@ fun crypto_config(config: *Config) handshake_api.Config {
         max_event_data: 4096, max_peer_identity: 4096};
 }
 
+# the handshake deadline as the adapters take it, 0 for none
+fun tls_deadline_ns(config: *Config) u64 {
+    if (sel config.tls_deadline.some) { ret clock.nanos(config.tls_deadline.some); }
+    ret 0;
+}
+
 fun tls_configuration(config: *Config) tls_client_api.Config {
     ret tls_client_api.Config{
         verification_time_unix:      config.verification_time_unix,
-        deadline_ns:                 config.tls_deadline_ns,
+        deadline_ns:                 tls_deadline_ns(config),
         entropy_context_size:        config.entropy_context_size,
         entropy_secret_context_size: config.entropy_secret_context_size
     };
@@ -754,7 +767,7 @@ fun tls_configuration(config: *Config) tls_client_api.Config {
 fun server_tls_configuration(config: *Config) tls_server_api.Config {
     ret tls_server_api.Config{
         verification_time_unix:      config.verification_time_unix,
-        deadline_ns:                 config.tls_deadline_ns,
+        deadline_ns:                 tls_deadline_ns(config),
         entropy_context_size:        config.entropy_context_size,
         entropy_secret_context_size: config.entropy_secret_context_size
     };
@@ -815,8 +828,8 @@ fun core_configuration(c: *Connection, config: *Config,
         data: local_parameter_bytes(c), length: c.local_parameter_length
     };
     value.max_udp_payload      = config.max_udp_payload;
-    value.max_idle_timeout_ns  = config.max_idle_timeout_ms * 1000000;
-    value.drain_timeout_ns     = config.drain_timeout_ns;
+    value.max_idle_timeout_ns  = clock.span(config.max_idle_timeout) / 1000000 * 1000000;
+    value.drain_timeout_ns     = clock.span(config.drain_timeout);
     value.peer_validated       = config.peer_validated;
     value.retry_source_present = config.retry_source_present;
     value.enable_early_data    = config.enable_early_data;
@@ -869,7 +882,7 @@ fun build_managers(c: *Connection, config: *Config,
 }
 
 fun finish(c: *Connection, config: *Config, role: transport_api.Role,
-    scope: *cancel.Scope, now_ns: u64) InitResult {
+    scope: *cancel.Scope, now: time.Instant) InitResult {
     if (!scope_provider_disjoint(c, scope)) { ret staged(STAGE_STORAGE); }
     val encoded: transport_parameters.EncodeResult = encode_parameters(config,
         role, local_parameter_bytes(c), PARAMETER_CAPACITY);
@@ -880,13 +893,13 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
         value.core = core_api.init_client_result(?c.core, ?c.secrets,
             core_configuration(c, config, role), core_storage(c),
             secret_storage(c), ?c.handshake, ?c.cids, ?c.paths, ?c.streams,
-            ?c.datagrams, now_ns);
+            ?c.datagrams, clock.nanos(now));
     }
     or {
         value.core = core_api.init_server_result(?c.core, ?c.secrets,
             core_configuration(c, config, role), core_storage(c),
             secret_storage(c), ?c.handshake, ?c.cids, ?c.paths, ?c.streams,
-            ?c.datagrams, now_ns);
+            ?c.datagrams, clock.nanos(now));
     }
     if (!value.core.ok) {
         value.stage = STAGE_CORE;
@@ -1067,7 +1080,7 @@ pub fun reusable(c: *Connection) bool {
 
 pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     secret_storage: *SecretStorage, chunks: buffers.Source, tls: *client.Client,
-    scope: *cancel.Scope, now_ns: u64) InitResult {
+    scope: *cancel.Scope, now: time.Instant) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
         !ownership.record[cancel.Scope](scope).valid) {
@@ -1094,14 +1107,14 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
         ret failed(c, staged(STAGE_HANDSHAKE));
     }
     val result: InitResult = finish(c, config, transport_api.CLIENT,
-        scope, now_ns);
+        scope, now);
     if (!result.ok) { ret failed(c, result); }
     ret result;
 }
 
 pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
     secret_storage: *SecretStorage, chunks: buffers.Source, tls: *server.Server,
-    scope: *cancel.Scope, now_ns: u64) InitResult {
+    scope: *cancel.Scope, now: time.Instant) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
         !ownership.record[cancel.Scope](scope).valid) {
@@ -1128,7 +1141,7 @@ pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
         ret failed(c, staged(STAGE_HANDSHAKE));
     }
     val result: InitResult = finish(c, config, transport_api.SERVER,
-        scope, now_ns);
+        scope, now);
     if (!result.ok) { ret failed(c, result); }
     ret result;
 }

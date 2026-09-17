@@ -2484,7 +2484,7 @@ fun restart_client(core: *Core, secrets: *Secrets, value: negotiation_api.Result
 }
 
 fun receive_special(core: *Core, secrets: *Secrets,
-    input: *transport_api.Datagram,
+    input: *transport_api.CoreInput,
     value: Envelope) transport_api.CoreResult {
     if (core.role != transport_api.CLIENT || value.offset != 0 ||
         core.authenticated_packets != 0) {
@@ -2509,7 +2509,7 @@ fun receive_special(core: *Core, secrets: *Secrets,
 }
 
 fun receive_protected(core: *Core, secrets: *Secrets,
-    input: *transport_api.Datagram,
+    input: *transport_api.CoreInput,
     value: Envelope) transport_api.CoreResult {
     if (value.kind == packet.PACKET_INITIAL && input.length < 1200) {
         ret core_result(core, transport_api.STATUS_OK, 0);
@@ -2690,16 +2690,16 @@ fun receive_protected(core: *Core, secrets: *Secrets,
 }
 
 pub fun receive(core: *Core, secrets: *Secrets,
-    input: *transport_api.Datagram) transport_api.CoreResult {
+    input: *transport_api.CoreInput) transport_api.CoreResult {
     val result: transport_api.CoreResult = receive_unsettled(core, secrets, input);
     if (core_record_valid(core) && core.initialized) { settle_flight(core); }
     ret result;
 }
 
 fun receive_unsettled(core: *Core, secrets: *Secrets,
-    input: *transport_api.Datagram) transport_api.CoreResult {
+    input: *transport_api.CoreInput) transport_api.CoreResult {
     if (!core_record_valid(core) || !secret_record_valid(secrets) ||
-        !ownership.bytes(input::*u8, $size_of(transport_api.Datagram),
+        !ownership.bytes(input::*u8, $size_of(transport_api.CoreInput),
         ownership.ZERO_FORBIDDEN).valid) {
         ret core_refused(INTERNAL_ERROR);
     }
