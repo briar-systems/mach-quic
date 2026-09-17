@@ -1,0 +1,394 @@
+# a bounded set of byte offsets kept as sorted, disjoint, non-adjacent
+# half-open intervals
+#
+# a few intervals live inline. more spill into one pool chunk, taken from the
+# owning account's budget and given back once the set shrinks. every operation
+# that could grow the set checks its cap and its storage first and changes
+# nothing when either refuses, so a caller can refuse the input that asked
+#
+# complexity, with n intervals and n at most the cap:
+#   locate:           O(log n)
+#   insert, remove:   O(log n) search plus an O(n) shift
+#   contains, gap:    O(log n)
+#   drop_prefix:      O(k) for k intervals removed, plus the shift
+#   covered_from:     O(1)
+
+use quic.storage.limited;
+use quic.storage.pool;
+
+use std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+pub val INLINE: usize = 4;
+
+pub rec Interval {
+    start: u64;
+    end:   u64;
+}
+
+pub val SPILL_CAPACITY: usize = pool.CHUNK / 16;
+
+pub def Status: u8;
+pub val STATUS_OK:      Status = 1;
+pub val STATUS_FULL:    Status = 2;
+pub val STATUS_BLOCKED: Status = 3;
+pub val STATUS_ERROR:   Status = 4;
+
+# where a set's spill chunk comes from and whose budget it counts against
+pub rec Source {
+    pool:      *pool.Pool;
+    account:   *pool.Account;
+    direction: pool.Direction;
+}
+
+pub rec RangeSet {
+    inline:     [INLINE]Interval;
+    spill:      pool.Ref;
+    spill_data: *Interval;
+    count:      usize;
+    cap:        usize;
+}
+
+# an empty set holding at most `cap` intervals. a cap above what one spill
+# chunk holds is lowered to it
+pub fun make(cap: usize) RangeSet {
+    var set: RangeSet;
+    set.cap = cap;
+    if (set.cap > SPILL_CAPACITY) { set.cap = SPILL_CAPACITY; }
+    if (set.cap == 0)             { set.cap = 1; }
+    ret set;
+}
+
+pub fun count(set: *RangeSet) usize {
+    ret set.count;
+}
+
+pub fun empty(set: *RangeSet) bool {
+    ret set.count == 0;
+}
+
+pub fun spilled(set: *RangeSet) bool {
+    ret set.spill_data != nil;
+}
+
+fun items(set: *RangeSet) *Interval {
+    if (set.spill_data != nil) { ret set.spill_data; }
+    ret ?set.inline[0];
+}
+
+pub fun at(set: *RangeSet, index: usize) Interval {
+    ret items(set)[index];
+}
+
+# the first interval whose end lies beyond `offset`
+fun locate(set: *RangeSet, offset: u64) usize {
+    val values: *Interval = items(set);
+    var low:    usize     = 0;
+    var high:   usize     = set.count;
+    for (low < high) {
+        val middle: usize = low + (high - low) / 2;
+        if (values[middle].end <= offset) { low = middle + 1; }
+        or                                { high = middle; }
+    }
+    ret low;
+}
+
+# the first interval that starts at or beyond `offset`
+fun locate_start(set: *RangeSet, offset: u64, from: usize) usize {
+    val values: *Interval = items(set);
+    var low:    usize     = from;
+    var high:   usize     = set.count;
+    for (low < high) {
+        val middle: usize = low + (high - low) / 2;
+        if (values[middle].start < offset) { low = middle + 1; }
+        or                                 { high = middle; }
+    }
+    ret low;
+}
+
+# makes room for `needed` intervals, spilling when the inline array is too small
+fun ensure(set: *RangeSet, needed: usize, source: *Source) Status {
+    if (needed > set.cap)                          { ret STATUS_FULL; }
+    if (needed <= INLINE || set.spill_data != nil) { ret STATUS_OK; }
+    if (source == nil)                             { ret STATUS_ERROR; }
+    val got: pool.Acquired = pool.acquire(source.pool, source.account, source.direction);
+    if (got.status == pool.STATUS_BLOCKED) { ret STATUS_BLOCKED; }
+    if (got.status != pool.STATUS_OK)      { ret STATUS_ERROR; }
+    val spill: *Interval = got.data::*Interval;
+    memory.copy[Interval](spill, ?set.inline[0], set.count);
+    set.spill      = got.ref;
+    set.spill_data = spill;
+    ret STATUS_OK;
+}
+
+# gives the spill chunk back once the set fits inline with room to spare
+fun shrink(set: *RangeSet, source: *Source) {
+    if (set.spill_data == nil || set.count > INLINE / 2 || source == nil) { ret; }
+    memory.copy[Interval](?set.inline[0], set.spill_data, set.count);
+    if (pool.release(source.pool, source.account, source.direction, set.spill) !=
+        pool.ERROR_NONE) {
+        memory.copy[Interval](set.spill_data, ?set.inline[0], set.count);
+        ret;
+    }
+    set.spill_data = nil;
+    set.spill      = pool.Ref{index: 0, generation: 0};
+}
+
+# replaces intervals [first, last) with `replacement_count` new ones
+fun splice(set: *RangeSet, first: usize, last: usize,
+    replacement: *Interval, replacement_count: usize) {
+    val values: *Interval = items(set);
+    val tail:   usize     = set.count - last;
+    if (replacement_count != last - first && tail > 0) {
+        memory.move[Interval](?values[first + replacement_count], ?values[last], tail);
+    }
+    var i: usize = 0;
+    for (i < replacement_count) {
+        values[first + i] = replacement[i];
+        i                 = i + 1;
+    }
+    set.count = first + replacement_count + tail;
+}
+
+# the number of intervals the set would hold after inserting [start, end)
+pub fun count_after_insert(set: *RangeSet, start: u64, end: u64) usize {
+    if (start >= end) { ret set.count; }
+    val first: usize = locate(set, start);
+    # an interval that ends exactly at `start` merges too
+    var merge_from: usize = first;
+    if (merge_from > 0 && items(set)[merge_from - 1].end == start) {
+        merge_from = merge_from - 1;
+    }
+    var last: usize = merge_from;
+    for (last < set.count && items(set)[last].start <= end) { last = last + 1; }
+    ret set.count - (last - merge_from) + 1;
+}
+
+# adds [start, end). a refusal changes nothing
+pub fun insert(set: *RangeSet, start: u64, end: u64, source: *Source) Status {
+    if (start >= end) { ret STATUS_OK; }
+    val needed: usize  = count_after_insert(set, start, end);
+    val room:   Status = ensure(set, needed, source);
+    if (room != STATUS_OK) { ret room; }
+    var first: usize = locate(set, start);
+    if (first > 0 && items(set)[first - 1].end == start) { first = first - 1; }
+    val values: *Interval = items(set);
+    var last:   usize     = first;
+    var merged: Interval  = Interval{start: start, end: end};
+    for (last < set.count && values[last].start <= end) {
+        if (values[last].start < merged.start) { merged.start = values[last].start; }
+        if (values[last].end > merged.end)     { merged.end = values[last].end; }
+        last = last + 1;
+    }
+    splice(set, first, last, ?merged, 1);
+    shrink(set, source);
+    ret STATUS_OK;
+}
+
+# removes [start, end). splitting an interval can grow the set, so this can
+# refuse too, and a refusal changes nothing
+pub fun remove(set: *RangeSet, start: u64, end: u64, source: *Source) Status {
+    if (start >= end || set.count == 0) { ret STATUS_OK; }
+    val first: usize = locate(set, start);
+    val last:  usize = locate_start(set, end, first);
+    if (first >= last) { ret STATUS_OK; }
+    val values: *Interval = items(set);
+    var pieces: [2]Interval;
+    var kept:   usize     = 0;
+    if (values[first].start < start) {
+        pieces[kept] = Interval{start: values[first].start, end: start};
+        kept         = kept + 1;
+    }
+    if (values[last - 1].end > end) {
+        pieces[kept] = Interval{start: end, end: values[last - 1].end};
+        kept         = kept + 1;
+    }
+    val needed: usize  = set.count - (last - first) + kept;
+    val room:   Status = ensure(set, needed, source);
+    if (room != STATUS_OK) { ret room; }
+    splice(set, first, last, ?pieces[0], kept);
+    shrink(set, source);
+    ret STATUS_OK;
+}
+
+# removes every offset below `offset`
+pub fun drop_prefix(set: *RangeSet, offset: u64, source: *Source) {
+    val first: usize = locate(set, offset);
+    if (first > 0) { splice(set, 0, first, nil, 0); }
+    if (set.count > 0 && items(set)[0].start < offset) {
+        items(set)[0].start = offset;
+    }
+    shrink(set, source);
+}
+
+pub fun contains(set: *RangeSet, start: u64, end: u64) bool {
+    if (start >= end) { ret true; }
+    val index: usize = locate(set, start);
+    ret index < set.count && items(set)[index].start <= start &&
+        items(set)[index].end >= end;
+}
+
+# the first offset in [from, limit) the set does not hold, or `limit`
+pub fun gap_start(set: *RangeSet, from: u64, limit: u64) u64 {
+    if (from >= limit) { ret limit; }
+    val index: usize = locate(set, from);
+    if (index < set.count && items(set)[index].start <= from) {
+        val next: u64 = items(set)[index].end;
+        if (next < limit) { ret next; }
+        ret limit;
+    }
+    ret from;
+}
+
+# where the gap that starts at `from` ends: the next held offset, or `limit`
+pub fun gap_end(set: *RangeSet, from: u64, limit: u64) u64 {
+    val index: usize = locate(set, from);
+    if (index < set.count && items(set)[index].start < limit) {
+        if (items(set)[index].start > from) { ret items(set)[index].start; }
+        ret from;
+    }
+    ret limit;
+}
+
+# how far the set holds every offset from `from` on, or `from` itself
+pub fun covered_from(set: *RangeSet, from: u64) u64 {
+    if (set.count == 0) { ret from; }
+    val first: Interval = items(set)[0];
+    if (first.start <= from && first.end > from) { ret first.end; }
+    ret from;
+}
+
+# forgets every interval and gives the spill chunk back
+pub fun clear(set: *RangeSet, source: *Source) {
+    set.count = 0;
+    shrink(set, source);
+}
+
+fun sound(set: *RangeSet) bool {
+    var i: usize = 0;
+    for (i < set.count) {
+        val value: Interval = items(set)[i];
+        if (value.start >= value.end)                      { ret false; }
+        if (i > 0 && items(set)[i - 1].end >= value.start) { ret false; }
+        i = i + 1;
+    }
+    ret set.count <= set.cap;
+}
+
+fun test_pool(memory: *limited.Limited, target: *pool.Pool, account: *pool.Account) bool {
+    if (!limited.make(memory, 1 << 20)) { ret false; }
+    var config: pool.Config = pool.default_config(8);
+    config.trap_misuse = false;
+    ret pool.make(target, limited.allocator_of(memory), config) &&
+        pool.open_account(target, account, 1, 4, 4, 0);
+}
+
+test "quic.storage.ranges: inserts merge overlaps and neighbours and removes split" {
+    var memory:  limited.Limited;
+    var chunks:  pool.Pool;
+    var account: pool.Account;
+    if (!test_pool(?memory, ?chunks, ?account)) { ret 1; }
+    var source: Source   = Source{pool: ?chunks, account: ?account, direction: pool.RECEIVE};
+    var set:    RangeSet = make(16);
+    if (insert(?set, 10, 20, ?source) != STATUS_OK ||
+        insert(?set, 30, 40, ?source) != STATUS_OK ||
+        insert(?set, 20, 25, ?source) != STATUS_OK ||
+        count(?set) != 2 || at(?set, 0).end != 25) { ret 2; }
+    # a range bridging both merges them, and a contained one changes nothing
+    if (insert(?set, 22, 31, ?source) != STATUS_OK || count(?set) != 1 ||
+        at(?set, 0).start != 10 || at(?set, 0).end != 40 ||
+        insert(?set, 12, 15, ?source) != STATUS_OK || count(?set) != 1) { ret 3; }
+    if (!contains(?set, 10, 40) || contains(?set, 9, 11) || !sound(?set)) { ret 4; }
+    # removing the middle splits, removing across an edge trims
+    if (remove(?set, 20, 30, ?source) != STATUS_OK || count(?set) != 2 ||
+        at(?set, 0).end != 20 || at(?set, 1).start != 30 ||
+        remove(?set, 5, 12, ?source) != STATUS_OK || at(?set, 0).start != 12 ||
+        !sound(?set)) { ret 5; }
+    if (gap_start(?set, 12, 100) != 20 || gap_end(?set, 20, 100) != 30 ||
+        gap_start(?set, 0, 100) != 0 || gap_end(?set, 0, 100) != 12 ||
+        gap_start(?set, 35, 100) != 40 || gap_end(?set, 40, 100) != 100 ||
+        covered_from(?set, 12) != 20 || covered_from(?set, 11) != 11) { ret 6; }
+    drop_prefix(?set, 35, ?source);
+    if (count(?set) != 1 || at(?set, 0).start != 35 || at(?set, 0).end != 40) { ret 7; }
+    clear(?set, ?source);
+    if (!pool.close_account(?chunks, ?account) || !pool.destroy(?chunks) ||
+        !limited.clean(?memory)) { ret 8; }
+    limited.dnit(?memory);
+    ret 0;
+}
+
+test "quic.storage.ranges: a set spills into a pool chunk and gives it back" {
+    var memory:  limited.Limited;
+    var chunks:  pool.Pool;
+    var account: pool.Account;
+    if (!test_pool(?memory, ?chunks, ?account)) { ret 1; }
+    var source: Source   = Source{pool: ?chunks, account: ?account, direction: pool.RECEIVE};
+    var set:    RangeSet = make(64);
+    var i:      u64      = 0;
+    for (i < 40) {
+        if (insert(?set, i * 2, i * 2 + 1, ?source) != STATUS_OK) { ret 2; }
+        i = i + 1;
+    }
+    if (count(?set) != 40 || !spilled(?set) || account.used[1] != 1 || !sound(?set)) { ret 3; }
+    # filling the gaps collapses everything and the chunk goes back
+    i = 0;
+    for (i < 40) {
+        if (insert(?set, i * 2 + 1, i * 2 + 2, ?source) != STATUS_OK) { ret 4; }
+        i = i + 1;
+    }
+    if (count(?set) != 0 + 1 || at(?set, 0).start != 0 || at(?set, 0).end != 80) { ret 5; }
+    # growing again spills again, and clearing releases it
+    i = 0;
+    for (i < 10) {
+        if (remove(?set, i * 4 + 1, i * 4 + 2, ?source) != STATUS_OK) { ret 6; }
+        i = i + 1;
+    }
+    if (!spilled(?set) || !sound(?set)) { ret 7; }
+    drop_prefix(?set, 1000, ?source);
+    if (spilled(?set) || count(?set) != 0 || account.used[1] != 0) { ret 8; }
+    if (!pool.close_account(?chunks, ?account) || !pool.destroy(?chunks) ||
+        !limited.clean(?memory)) { ret 9; }
+    limited.dnit(?memory);
+    ret 0;
+}
+
+test "quic.storage.ranges: the cap and a refused spill leave the set untouched" {
+    var memory:  limited.Limited;
+    var chunks:  pool.Pool;
+    var account: pool.Account;
+    if (!test_pool(?memory, ?chunks, ?account)) { ret 1; }
+    var source: Source   = Source{pool: ?chunks, account: ?account, direction: pool.RECEIVE};
+    var capped: RangeSet = make(3);
+    if (insert(?capped, 0, 1, ?source) != STATUS_OK ||
+        insert(?capped, 2, 3, ?source) != STATUS_OK ||
+        insert(?capped, 4, 5, ?source) != STATUS_OK) { ret 2; }
+    # a fourth separate interval is refused, joining two is fine
+    if (count_after_insert(?capped, 6, 7) != 4 ||
+        insert(?capped, 6, 7, ?source) != STATUS_FULL || count(?capped) != 3 ||
+        insert(?capped, 1, 2, ?source) != STATUS_OK || count(?capped) != 2) { ret 3; }
+    # a split that would pass the cap is refused too
+    var full: RangeSet = make(2);
+    if (insert(?full, 0, 10, ?source) != STATUS_OK ||
+        insert(?full, 20, 30, ?source) != STATUS_OK ||
+        remove(?full, 4, 6, ?source) != STATUS_FULL || count(?full) != 2 ||
+        at(?full, 0).end != 10) { ret 4; }
+    # an account with no receive budget cannot spill
+    var starved: pool.Account;
+    if (!pool.open_account(?chunks, ?starved, 2, 0, 0, 0)) { ret 5; }
+    var poor: Source   = Source{pool: ?chunks, account: ?starved, direction: pool.RECEIVE};
+    var wide: RangeSet = make(64);
+    var i:    u64      = 0;
+    for (i < INLINE::u64) {
+        if (insert(?wide, i * 2, i * 2 + 1, ?poor) != STATUS_OK) { ret 6; }
+        i = i + 1;
+    }
+    if (insert(?wide, 100, 101, ?poor) != STATUS_BLOCKED || count(?wide) != INLINE ||
+        spilled(?wide) || !sound(?wide)) { ret 7; }
+    if (!pool.close_account(?chunks, ?starved) || !pool.close_account(?chunks, ?account) ||
+        !pool.destroy(?chunks) || !limited.clean(?memory)) { ret 8; }
+    limited.dnit(?memory);
+    ret 0;
+}
