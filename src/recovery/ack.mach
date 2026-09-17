@@ -397,6 +397,18 @@ pub fun discard_space(tracker: *Tracker, pn_space: u8) bool {
     ret true;
 }
 
+# drops a discarded space's range storage so its holder can release it. the
+# space is never read again
+pub fun detach_space(tracker: *Tracker, pn_space: u8) bool {
+    val i: usize = index(pn_space);
+    if (tracker == nil || !tracker.valid || i >= 2 || !tracker.spaces[i].discarded) {
+        ret false;
+    }
+    tracker.spaces[i].ranges   = nil;
+    tracker.spaces[i].capacity = 0;
+    ret true;
+}
+
 test "quic.recovery.ack: reordering, gaps, and duplication produce bounded ranges" {
     var initial:     [4]Range;
     var handshake:   [4]Range;
