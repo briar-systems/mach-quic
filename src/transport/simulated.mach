@@ -868,7 +868,10 @@ fun native_send(fixture: *Fixture, network: *net_async.Driver, sender: *udp.Sock
 
 # mach-std 5.3 reports a cancelled or timed-out completion with the transfer
 # that finished first. a datagram that went out whole was sent, whatever
-# stopped the operation after it, and nothing less than whole counts as sent
+# stopped the operation after it, and nothing less than whole counts as sent.
+# the sends are real, but each completion's error and transfer are set by
+# hand, so this proves quic reads that completion shape correctly. that std
+# produces the shape on this path is proven by std's own tests
 test "quic.transport.native: a cancelled send that went out whole is sent" {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 113, stream_api.ROLE_CLIENT)) { ret 1; }
