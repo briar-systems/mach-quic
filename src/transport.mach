@@ -1249,6 +1249,9 @@ fun complete_locked[T](driver: *Driver[T], slot: *SendSlot, send_status: SendSta
     ret completion;
 }
 
+# settles a datagram the caller sent through its own adapter. one that went
+# out whole is SEND_SENT with its full length, even if the operation was
+# cancelled or timed out afterwards, since the peer may acknowledge it
 pub fun complete_send[T](driver: *Driver[T], token: Token, send_status: SendStatus,
     count: usize, now: time.Instant) Completion {
     val now_ns: u64 = clock.nanos(now);
@@ -1353,17 +1356,19 @@ pub fun complete_native[T](driver: *Driver[T], native: *io_runtime.Completion,
         result.error  = ERROR_TOKEN;
         ret result;
     }
+    # a cancelled or timed-out operation still reports what went out before it
+    # stopped, and a datagram that went out whole was sent. anything less than
+    # the whole datagram is no packet at all
+    val whole:   bool = native.items == 1 && native.bytes == slot.length;
+    val stopped: bool = native.has_error &&
+        (native.error.kind == io_error.CANCELLED || native.error.kind == io_error.TIMEOUT);
     var send_status: SendStatus = SEND_SENT;
-    var count:       usize      = native.bytes;
-    if (native.has_error) {
+    var count:       usize      = slot.length;
+    if (!whole || (native.has_error && !stopped)) {
         send_status = SEND_FAILED;
         count       = 0;
-        if (native.error.kind == io_error.CANCELLED) { send_status = SEND_CANCELLED; }
-        if (native.error.kind == io_error.TIMEOUT)   { send_status = SEND_TIMED_OUT; }
-    }
-    or (native.items != 1 || native.bytes != slot.length) {
-        send_status = SEND_FAILED;
-        count       = 0;
+        if (stopped && native.error.kind == io_error.CANCELLED) { send_status = SEND_CANCELLED; }
+        if (stopped && native.error.kind == io_error.TIMEOUT)   { send_status = SEND_TIMED_OUT; }
     }
     result = complete_locked[T](driver, slot, send_status, count, now_ns);
     mutex.unlock(?driver.lock);

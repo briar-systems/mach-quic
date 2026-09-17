@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-17
+
+### Security
+
+- A cancelled or timed-out send whose datagram went out whole is now settled as sent (#174). mach-std 5.3.0 reports the transfer that finished before a cancellation, and `transport.complete_native` used to discard it. The core then refunded the datagram's anti-amplification credit, so a server facing an unvalidated peer could exceed its 3× budget. It also left the bytes out of congestion control, and sent the packet's frames again, which could deliver an application DATAGRAM twice. A partial datagram is still settled as not sent.
+
+### Changed
+
+- Dependencies: mach-std v5.3.0, whose completions carry the bytes transferred before a cancellation or timeout (#174).
+
 ## [0.12.0] - 2026-09-17
 
 ### Security
