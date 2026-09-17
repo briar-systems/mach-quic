@@ -593,7 +593,6 @@ to close, so it is destroyed and the caller initializes it again to reuse it
 ```mach
 pub fun initialize_tls_client(adapter: *Adapter, config: Config, storage: Storage,
 value: *tls_client_api.Handshake, lease: tls_buffer.Lease,
-verification_time_unix: i64,
 deadline_ns: u64,
 entropy_context_size: usize,
 entropy_secret_context_size: usize) bool;
@@ -604,7 +603,6 @@ entropy_secret_context_size: usize) bool;
 ```mach
 pub fun initialize_tls_server(adapter: *Adapter, config: Config, storage: Storage,
 value: *tls_server_api.Handshake, lease: tls_buffer.Lease,
-verification_time_unix: i64,
 deadline_ns: u64,
 entropy_context_size: usize,
 entropy_secret_context_size: usize) bool;

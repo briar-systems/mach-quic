@@ -26,7 +26,6 @@ use tls.server;
 use tls.tls13;
 
 pub rec Config {
-    verification_time_unix:      i64;
     deadline_ns:                 u64;
     entropy_context_size:        usize;
     entropy_secret_context_size: usize;
@@ -37,7 +36,7 @@ pub fun initialize(adapter: *handshake_api.Adapter,
     storage: handshake_api.Storage, value: *server.Handshake,
     lease: buffer.Lease, configuration: Config) bool {
     ret handshake_api.initialize_tls_server(adapter, adapter_config, storage,
-        value, lease, configuration.verification_time_unix, configuration.deadline_ns,
+        value, lease, configuration.deadline_ns,
         configuration.entropy_context_size,
         configuration.entropy_secret_context_size);
 }
@@ -282,6 +281,7 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
     listener_config.entropy                         = ?listener_entropy;
     listener_config.entropy_context_size            = 1;
     listener_config.limits                          = config.production_limits();
+    listener_config.clock                           = test_credentials.test_clock();
     listener_config.limits.max_peer_handshake_bytes = 8192;
     listener_config.limits.max_client_hello_bytes   = 8192;
     listener_config.limits.max_client_flight_bytes  = 8192;
@@ -324,6 +324,7 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
     dialer_config.entropy                         = ?dialer_entropy;
     dialer_config.entropy_context_size            = 1;
     dialer_config.limits                          = config.production_limits();
+    dialer_config.clock                           = test_credentials.test_clock();
     dialer_config.limits.max_peer_handshake_bytes = 8192;
     dialer_config.limits.max_client_hello_bytes   = 8192;
     dialer_config.limits.max_client_flight_bytes  = 8192;
@@ -338,14 +339,13 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
 
     var listener_adapter: handshake_api.Adapter;
     var dialer_adapter:   handshake_api.Adapter;
-    val binding:          Config = Config{verification_time_unix: test_credentials.VERIFICATION_TIME,
-        deadline_ns:                 0, entropy_context_size: 1,
+    val binding:          Config = Config{deadline_ns: 0, entropy_context_size: 1,
         entropy_secret_context_size: 0};
     if (!initialize(?listener_adapter, adapter_config(81), listener_storage(),
         ?listener_engine, adapter_lease(), binding)) { ret 6; }
     if (!handshake_api.initialize_tls_client(?dialer_adapter,
         adapter_config(82), dialer_storage(), ?dialer_engine, adapter_lease(),
-        test_credentials.VERIFICATION_TIME, 0, 1, 0)) { ret 7; }
+        0, 1, 0)) { ret 7; }
     if (listener_adapter.tls_role != handshake_api.SERVER ||
         dialer_adapter.tls_role != handshake_api.CLIENT) { ret 8; }
 
@@ -495,6 +495,7 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
     listener_config.entropy                         = ?entropy;
     listener_config.entropy_context_size            = 1;
     listener_config.limits                          = config.production_limits();
+    listener_config.clock                           = test_credentials.test_clock();
     listener_config.limits.max_peer_handshake_bytes = 8192;
     listener_config.limits.max_client_hello_bytes   = 8192;
     listener_config.limits.max_client_flight_bytes  = 8192;
@@ -508,8 +509,7 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
         data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
 
-    val binding: Config = Config{verification_time_unix: test_credentials.VERIFICATION_TIME,
-        deadline_ns:                 0, entropy_context_size: 1,
+    val binding: Config = Config{deadline_ns: 0, entropy_context_size: 1,
         entropy_secret_context_size: 0};
 
     # adapter storage that aliases the listener's own record is not a binding
@@ -637,6 +637,7 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
     listener_config.entropy                         = ?entropy;
     listener_config.entropy_context_size            = 1;
     listener_config.limits                          = config.production_limits();
+    listener_config.clock                           = test_credentials.test_clock();
     listener_config.limits.max_peer_handshake_bytes = 8192;
     listener_config.limits.max_client_hello_bytes   = 8192;
     listener_config.limits.max_client_flight_bytes  = 8192;
@@ -652,8 +653,7 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
 
     var adapter: handshake_api.Adapter;
     if (!initialize(?adapter, adapter_config(86), listener_storage(),
-        ?listener_engine, adapter_lease(), Config{verification_time_unix: test_credentials.VERIFICATION_TIME,
-        deadline_ns:                 0, entropy_context_size: 1,
+        ?listener_engine, adapter_lease(), Config{deadline_ns: 0, entropy_context_size: 1,
         entropy_secret_context_size: 0})) { ret 5; }
 
     var reported: [10]ownership.Range;

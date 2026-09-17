@@ -427,11 +427,12 @@ that adapter. The binding is typed because a TLS client contains welded secret
 state and cannot safely pass through an untyped callback context. Its ownership
 descriptor includes the entropy provider's public and secret context sizes. The
 binding validates the client record, every nested writable TLS buffer, immutable
-configuration anchor, persistent TLS secret, and entropy context against the
-adapter and connection storage before initialization. It also validates
+configuration anchor, persistent TLS secret, entropy context, and clock source
+against the adapter and connection storage before initialization. It also validates
 the exact SNI, single ALPN, QUIC transport-parameter extension, client role, and
-QUIC version before starting. Certificate verification uses a separate Unix
-verification time. The optional handshake deadline, every public `now`, and
+QUIC version before starting. Certificate verification reads wall time from the
+`mach-tls` config's `clock`, a `tls.clock.Source` the caller supplies and
+may share across connections. quic never sources a clock of its own. The optional handshake deadline, every public `now`, and
 every reported timer deadline are `std.chrono.time.Instant` readings of the
 monotonic clock, and configured spans are `std.chrono.duration.Duration`.
 `quic.clock` converts them to the u64 nanoseconds the core runs on. TLS Initial, Handshake, and
@@ -532,7 +533,7 @@ handshake has handed everything over, the adapter moves tls's established
 core out of the engine and the engine holds no memory.
 
 Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 4,464 bytes and `Connection` at 9,776,
+records are `assembly.Storage` at 4,464 bytes and `Connection` at 9,768,
 which includes tls's established core. On a live connection that has gone
 idle, an established connection with no streams holds no chunks at all, and
 tls holds nothing on its lane. With the six H3 control streams open and drained, it
@@ -545,8 +546,8 @@ unacknowledged bytes. A NEW_TOKEN holds a chunk only while it waits, on the serv
 acknowledged and on the client until the owner takes it. The scratch pair is paid once per
 pump, not per connection. During the handshake the dialer holds at most five
 send-lane chunks and 8,704 tls bytes after any call, and the listener six and
-18,944. The caller's `mach-tls` handshake record, 6,416 bytes for a client and
-6,216 for a server, must stay put until `assembly.tls_released(c)`. From then
+18,944. The caller's `mach-tls` handshake record, 6,424 bytes for a client and
+6,224 for a server, must stay put until `assembly.tls_released(c)`. From then
 the connection never refers to it again and it may be initialized for another
 connection, so an owner needs one per connection in handshake, not one per
 connection.

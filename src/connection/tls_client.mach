@@ -2,7 +2,8 @@
 
 use crypto.contracts;
 use crypto.secret;
-use handshake_api: quic.connection.handshake;
+use test_credentials: quic.connection.credentials_simulated;
+use handshake_api:    quic.connection.handshake;
 use quic.packet.packet;
 use quic.storage.limited;
 use supply: quic.storage.source;
@@ -13,12 +14,12 @@ use std.types.size.usize;
 use tls.buffer;
 use tls.cert;
 use tls.client;
+use tls.clock;
 use tls.config;
 use tls.record;
 use tls.tls13;
 
 pub rec Config {
-    verification_time_unix:      i64;
     deadline_ns:                 u64;
     entropy_context_size:        usize;
     entropy_secret_context_size: usize;
@@ -38,7 +39,7 @@ pub fun initialize(adapter: *handshake_api.Adapter,
     storage: handshake_api.Storage, value: *client.Handshake,
     lease: buffer.Lease, configuration: Config) bool {
     ret handshake_api.initialize_tls_client(adapter, adapter_config, storage, value, lease,
-        configuration.verification_time_unix, configuration.deadline_ns,
+        configuration.deadline_ns,
         configuration.entropy_context_size,
         configuration.entropy_secret_context_size);
 }
@@ -115,6 +116,7 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
     client_config.entropy                         = ?entropy;
     client_config.entropy_context_size            = 1;
     client_config.limits                          = config.production_limits();
+    client_config.clock                           = test_credentials.test_clock();
     client_config.limits.max_peer_handshake_bytes = 4096;
     client_config.limits.max_client_hello_bytes   = 4096;
     client_config.limits.max_client_flight_bytes  = 4096;
@@ -137,23 +139,39 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
     var other_lane:       buffer.Lease = adapter_lease();
     other_lane.lane = supply.RECEIVE;
     if (initialize(?rejected_adapter, adapter_config, adapter_storage, ?tls_value,
-        other_lane, Config{verification_time_unix: 1800000000, deadline_ns: 1000,
+        other_lane, Config{deadline_ns: 1000,
         entropy_context_size: 1, entropy_secret_context_size: 0}) ||
         initialize(?rejected_adapter, adapter_config, adapter_storage, ?tls_value,
-        buffer.no_lease(), Config{verification_time_unix: 1800000000,
-        deadline_ns:                 1000, entropy_context_size: 1,
+        buffer.no_lease(), Config{deadline_ns: 1000, entropy_context_size: 1,
         entropy_secret_context_size: 0}) || rejected_adapter.initialized) {
         ret 23;
     }
     if (initialize(?rejected_adapter, adapter_config, overlapping, ?tls_value,
-        adapter_lease(), Config{verification_time_unix: 1800000000, deadline_ns: 1000,
+        adapter_lease(), Config{deadline_ns: 1000,
         entropy_context_size:        1,
         entropy_secret_context_size: 0}) || rejected_adapter.initialized) {
         ret 21;
     }
+    var shared_clock:      clock.Source = @test_credentials.test_clock();
+    var overlapping_clock: clock.Source = shared_clock;
+    overlapping_clock.context      = (?adapter_attempts[0])::ptr;
+    overlapping_clock.context_size = 8;
+    tls_value.config.clock         = ?overlapping_clock;
+    if (initialize(?rejected_adapter, adapter_config, adapter_storage, ?tls_value,
+        adapter_lease(), Config{deadline_ns: 1000, entropy_context_size: 1,
+        entropy_secret_context_size: 0}) || rejected_adapter.initialized) {
+        ret 24;
+    }
+    tls_value.config.clock = (?adapter_attempts[1])::*clock.Source;
+    if (initialize(?rejected_adapter, adapter_config, adapter_storage, ?tls_value,
+        adapter_lease(), Config{deadline_ns: 1000, entropy_context_size: 1,
+        entropy_secret_context_size: 0}) || rejected_adapter.initialized) {
+        ret 25;
+    }
+    tls_value.config.clock = test_credentials.test_clock();
     var adapter: handshake_api.Adapter;
     if (!initialize(?adapter, adapter_config, adapter_storage, ?tls_value,
-        adapter_lease(), Config{verification_time_unix: 1800000000, deadline_ns: 1000,
+        adapter_lease(), Config{deadline_ns: 1000,
         entropy_context_size:        1,
         entropy_secret_context_size: 0})) {
         ret 22;
@@ -243,7 +261,7 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
         max_event_data: 4096, max_peer_identity: 4096},
         handshake_api.Storage{attempts: ?adapter_attempts[0], attempt_capacity: 8,
         account: adapter_account(), chunks: ?adapter_chunk_pool.provider}, ?tls_value,
-        adapter_lease(), Config{verification_time_unix: 1800000000, deadline_ns: 10,
+        adapter_lease(), Config{deadline_ns: 10,
         entropy_context_size:        1,
         entropy_secret_context_size: 0})) { ret 14; }
     start.now_ns = 5;

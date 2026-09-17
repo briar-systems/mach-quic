@@ -20,6 +20,7 @@ use tls_buffer:      tls.buffer;
 use tls_cert:        tls.cert;
 use tls_credentials: tls.cert.credentials;
 use tls_client_api:  tls.client;
+use tls_clock:       tls.clock;
 use tls_config:      tls.config;
 use tls_engine:      tls.engine;
 use tls_error_api:   tls.error;
@@ -217,7 +218,6 @@ pub rec Adapter {
     event:                           ProviderEvent;
     tls_client:                      *tls_client_api.Handshake;
     tls_server:                      *tls_server_api.Handshake;
-    tls_verification_time_unix:      i64;
     tls_deadline_ns:                 u64;
     tls_entropy_context_size:        usize;
     tls_entropy_secret_context_size: usize;
@@ -565,6 +565,17 @@ fun tls_server_secret_context_valid(value: *tls_server_api.Handshake,
         secret_context_size);
 }
 
+# the clock source the engine reads is the caller's, shared by its connections
+fun tls_clock_disjoint(source: *tls_clock.Source, owned: *ownership.Range,
+    count: usize) bool {
+    if (source == nil) { ret false; }
+    var context_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (source.context_size == 0) { context_zero = ownership.ZERO_ALLOWED; }
+    ret tls_anchor_disjoint(ownership.record[tls_clock.Source](source), owned, count) &&
+        tls_anchor_disjoint(ownership.bytes(source.context::*u8, source.context_size,
+        context_zero), owned, count);
+}
+
 fun tls_client_context_valid(adapter: *Adapter, storage: Storage,
     value: *tls_client_api.Handshake,
     context_size: usize,
@@ -621,7 +632,8 @@ fun tls_client_context_valid(adapter: *Adapter, storage: Storage,
         value.config.signature_len, $size_of(tls13.SignatureScheme),
         ownership.ZERO_FORBIDDEN), ?owned[0], 4) ||
         !tls_anchor_disjoint(ownership.bytes(value.extra.data.data,
-        value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 4)) {
+        value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 4) ||
+        !tls_clock_disjoint(value.config.clock, ?owned[0], 4)) {
         ret false;
     }
     var i: usize = 0;
@@ -709,7 +721,8 @@ fun tls_server_context_valid(adapter: *Adapter, storage: Storage,
         value.config.signature_len, $size_of(tls13.SignatureScheme),
         ownership.ZERO_FORBIDDEN), ?owned[0], 4) ||
         !tls_anchor_disjoint(ownership.bytes(value.extra.data.data,
-        value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 4)) {
+        value.extra.data.len, ownership.ZERO_FORBIDDEN), ?owned[0], 4) ||
+        !tls_clock_disjoint(value.config.clock, ?owned[0], 4)) {
         ret false;
     }
     var i: usize = 0;
@@ -962,11 +975,10 @@ fun tls_bound(adapter: *Adapter) bool {
     ret adapter.tls_role == CLIENT || adapter.tls_role == SERVER;
 }
 
-fun tls_api_start(adapter: *Adapter, verification_time: i64) tls_engine.Result {
-    if (adapter.tls_role == SERVER) {
-        ret tls_server_api.start(adapter.tls_server, verification_time);
-    }
-    ret tls_client_api.start(adapter.tls_client, verification_time);
+# the engine reads certificate time from its configured clock source
+fun tls_api_start(adapter: *Adapter) tls_engine.Result {
+    if (adapter.tls_role == SERVER) { ret tls_server_api.start(adapter.tls_server); }
+    ret tls_client_api.start(adapter.tls_client);
 }
 
 fun tls_api_ingest(adapter: *Adapter, level: tls_engine.Level, data: *u8,
@@ -1166,8 +1178,7 @@ fun tls_start(adapter: *Adapter, value: *Start) ProviderResult {
         ret provider_result(STATUS_ERROR, adapter.tls_error);
     }
     adapter.tls_started = true;
-    ret tls_provider_result(adapter, tls_api_start(adapter,
-        adapter.tls_verification_time_unix), false);
+    ret tls_provider_result(adapter, tls_api_start(adapter), false);
 }
 
 fun tls_ingest(adapter: *Adapter, level: Level, offset: u64, data: *u8,
@@ -1533,7 +1544,6 @@ fun lease_matches(held: tls_buffer.Lease, expected: tls_buffer.Lease) bool {
 
 pub fun initialize_tls_client(adapter: *Adapter, config: Config, storage: Storage,
     value: *tls_client_api.Handshake, lease: tls_buffer.Lease,
-    verification_time_unix: i64,
     deadline_ns: u64,
     entropy_context_size: usize,
     entropy_secret_context_size: usize) bool {
@@ -1553,7 +1563,6 @@ pub fun initialize_tls_client(adapter: *Adapter, config: Config, storage: Storag
         entropy_context_size, entropy_secret_context_size) ||
         !init_base(adapter, config, storage)) { ret false; }
     adapter.tls_client                      = value;
-    adapter.tls_verification_time_unix      = verification_time_unix;
     adapter.tls_deadline_ns                 = deadline_ns;
     adapter.tls_entropy_context_size        = entropy_context_size;
     adapter.tls_entropy_secret_context_size = entropy_secret_context_size;
@@ -1565,7 +1574,6 @@ pub fun initialize_tls_client(adapter: *Adapter, config: Config, storage: Storag
 
 pub fun initialize_tls_server(adapter: *Adapter, config: Config, storage: Storage,
     value: *tls_server_api.Handshake, lease: tls_buffer.Lease,
-    verification_time_unix: i64,
     deadline_ns: u64,
     entropy_context_size: usize,
     entropy_secret_context_size: usize) bool {
@@ -1590,7 +1598,6 @@ pub fun initialize_tls_server(adapter: *Adapter, config: Config, storage: Storag
         entropy_context_size, entropy_secret_context_size) ||
         !init_base(adapter, config, storage)) { ret false; }
     adapter.tls_server                      = value;
-    adapter.tls_verification_time_unix      = verification_time_unix;
     adapter.tls_deadline_ns                 = deadline_ns;
     adapter.tls_entropy_context_size        = entropy_context_size;
     adapter.tls_entropy_secret_context_size = entropy_secret_context_size;
