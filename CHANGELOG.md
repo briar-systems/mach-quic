@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.11.0] - 2026-09-17
+
+### Security
+
+- The listener's replay store has a hard bound on every configuration (#148). With `token.Config.max_replay` unset, a peer holding many valid Retry tokens could grow the store without limit, which is a memory-exhaustion denial of service. At the bound a Retry token is now refused and nothing is kept: the Initial is blocked with `token.ERROR_REPLAY_FULL`, no live nonce is evicted, and replay protection holds. The client retransmits and is admitted once expiry frees room. `token.Snapshot.replay_full` counts the refusals.
+
+### Changed
+
+- **Breaking.** `token.Config.max_replay` is a required `usize` instead of `opt[usize]`, and 0 is refused (#148).
+
 ## [0.10.1] - 2026-09-17
 
 ### Fixed

@@ -572,7 +572,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     token_config.source             = 912;
     token_config.retry_max_age_ns   = 1000000000;
     token_config.address_max_age_ns = 1000000000;
-    token_config.max_replay         = opt[usize].none{};
+    token_config.max_replay         = 1024;
     var token_key:     [32]^u8;
     var token_manager: token.Manager;
     if (!token.initialize(?token_manager, token_config,
