@@ -38,6 +38,7 @@
   - `supply.open_connection` opens an account with the tls budget, and `supply.pool_config` takes its global budget in bytes. `supply.chunk_class` is replaced by `supply.classes`.
   - `connection.tls_client.initialize`, `tls_server.initialize` and `handshake.initialize_tls_client` and `initialize_tls_server` take the lease after the engine.
   - A failed init that already started the engine destroys it, since its memory is on the account being closed. Initialize it again to reuse it.
+  - The tls handshake record must stay put only until `assembly.tls_released(c)`, after which the connection no longer refers to it and it may be reused. Owners need one record per connection in handshake, not per connection.
   - `assembly.Connection` grows from 9,168 to 9,776 bytes. It now holds tls's established core, which the adapter moves out of the engine once the handshake has handed everything over, so an established connection holds no tls memory.
 - **Breaking.** `transport.Protocol` gains `storage_ready`, which `transport.storage_ready` calls. A core refused memory retries once it is called (#137).
 - A handshake provider may return `handshake.STATUS_WAITING` from start, ingest or poll when it is refused memory and consumed nothing (#137). The adapter keeps the bytes it could not hand over and stops polling until the connection is woken. It then repeats the same call and feeds every level in order. `core.Snapshot` reports `handshake_waiting` and `handshake_settled`.

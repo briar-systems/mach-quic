@@ -226,6 +226,7 @@ fun starved_start(clock: *u64) i32 {
     if (waiting.status == transport.STATUS_OK ||
         waiting.status == transport.STATUS_ERROR ||
         !core.snapshot(?dialer.core).handshake_waiting ||
+        assembly.tls_released(?dialer) ||
         dialer.handshake.levels[0].send_acked != 0 ||
         dialer_tls.hello_len != 0) { ret 40; }
     if (!unhog()) { ret 41; }
@@ -2233,8 +2234,9 @@ test "quic.connection.assembly: an idle connection costs what was measured" {
         print.eprintln("an idle established connection holds chunks it did not before");
         ret 2;
     }
-    # a settled handshake leaves tls holding nothing
-    if (!core.snapshot(?dialer.core).handshake_settled ||
+    # a settled handshake leaves tls holding nothing, and its records free
+    if (!assembly.tls_released(?dialer) || !assembly.tls_released(?listener) ||
+        !core.snapshot(?dialer.core).handshake_settled ||
         !core.snapshot(?listener.core).handshake_settled ||
         dialer.account.used[supply.TLS::usize] != 0 ||
         listener.account.used[supply.TLS::usize] != 0) {
@@ -2243,6 +2245,11 @@ test "quic.connection.assembly: an idle connection costs what was measured" {
             listener.account.used[supply.TLS::usize]);
         ret 7;
     }
+    # wiping the released records does not disturb either connection
+    var blank_client: client.Handshake;
+    var blank_server: server.Handshake;
+    dialer_tls   = blank_client;
+    listener_tls = blank_server;
     var byte: [1]u8 = [1]u8{0x07};
     var i:    usize = 0;
     for (i < assembly.H3_CRITICAL_STREAMS_PER_PEER) {

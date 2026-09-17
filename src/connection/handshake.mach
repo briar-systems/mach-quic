@@ -1149,6 +1149,11 @@ fun tls_finish(adapter: *Adapter) bool {
         finished = tls_client_api.finish(adapter.tls_client, ?adapter.tls_established);
     }
     adapter.tls_finished = finished == contracts.OK;
+    # finish destroyed the handshake, so the caller may reuse its record
+    if (adapter.tls_finished) {
+        adapter.tls_client = nil;
+        adapter.tls_server = nil;
+    }
     ret adapter.tls_finished;
 }
 
