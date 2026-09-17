@@ -12,6 +12,8 @@ use quic.packet.packet;
 use path_api: quic.path.path;
 use ack_api:  quic.recovery.ack;
 use quic.recovery.recovery;
+use quic.storage.chunks;
+use quic.storage.ranges;
 use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
 use transport_api: quic.transport;
@@ -169,6 +171,11 @@ pub rec Storage {
     send_token:                    *u8;
     send_token_capacity:           usize;
     negotiation:                   negotiation_api.Storage;
+    # the chunk behind the extension tables, local parameter bytes and retry
+    # storage, all of which the core lets go once the handshake is confirmed.
+    # nil when the caller lends that storage for the connection's lifetime
+    handshake_block:  *chunks.Block;
+    handshake_source: ranges.Source;
 }
 
 pub rec SecretStorage {
@@ -1430,6 +1437,32 @@ fun discard_initial_keys(core: *Core, secrets: *Secrets) bool {
     ret true;
 }
 
+# nothing reads parameter extensions, the encoded local parameters or retry
+# state once the handshake is confirmed, so their storage is dropped
+fun release_handshake_storage(core: *Core) {
+    if (core.role == transport_api.CLIENT) { negotiation_api.finish(?core.negotiation); }
+    var no_negotiation: negotiation_api.Storage;
+    core.storage.negotiation                   = no_negotiation;
+    core.storage.peer_extensions               = nil;
+    core.storage.peer_extension_capacity       = 0;
+    core.storage.peer_extension_bytes          = nil;
+    core.storage.peer_extension_byte_capacity  = 0;
+    core.storage.local_extensions              = nil;
+    core.storage.local_extension_capacity      = 0;
+    core.storage.local_extension_bytes         = nil;
+    core.storage.local_extension_byte_capacity = 0;
+    core.peer_parameters.extensions            = nil;
+    core.peer_parameters.extension_count       = 0;
+    core.local_parameters.extensions           = nil;
+    core.local_parameters.extension_count      = 0;
+    var no_parameters: View;
+    core.config.local_transport_parameters = no_parameters;
+    if (core.storage.handshake_block != nil) {
+        chunks.give_block(?core.storage.handshake_source, core.storage.handshake_block);
+        core.storage.handshake_block = nil;
+    }
+}
+
 fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
     if (core.handshake_confirmed) { ret true; }
     val handshake_index: usize = space_index(packet.SPACE_HANDSHAKE);
@@ -1453,6 +1486,7 @@ fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
     protection.destroy(?secrets.handshake_send);
     protection.destroy(?secrets.handshake_receive);
     ack_api.discard_space(?core.acknowledgements, packet.SPACE_HANDSHAKE);
+    release_handshake_storage(core);
     if (handshake_api.discard_scoped(secrets.handshake, core.config.source,
         handshake_api.HANDSHAKE).status != handshake_api.STATUS_OK) { ret false; }
     core.handshake_confirmed = true;
