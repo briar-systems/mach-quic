@@ -2,8 +2,8 @@ use quic.connection.ownership;
 use quic.packet.packet;
 use quic.storage.chunks;
 use quic.storage.limited;
-use quic.storage.pool;
 use quic.storage.ranges;
+use supply: quic.storage.source;
 use quic.wire.varint;
 
 use std.memory;
@@ -68,9 +68,9 @@ val RANGE_FLOOR:          usize = 32;
 val NO_STREAM: usize = 0xffffffffffffffff;
 
 # records and attempts left unlent are taken from the pool a chunk at a time
-pub val RECORDS_PER_BLOCK:  usize = pool.CHUNK / $size_of(Stream);
+pub val RECORDS_PER_BLOCK:  usize = supply.BYTES / $size_of(Stream);
 pub val RECORD_BLOCKS:      usize = 8;
-pub val ATTEMPTS_PER_BLOCK: usize = pool.CHUNK / $size_of(Attempt);
+pub val ATTEMPTS_PER_BLOCK: usize = supply.BYTES / $size_of(Attempt);
 
 # news an owner can act on for one stream
 pub val READY_READABLE: u8 = 1;
@@ -176,7 +176,7 @@ pub rec Attempt {
     offset:            u64;
     length:            usize;
     maximum:           u64;
-    chunk:             pool.Ref;
+    chunk:             supply.Ref;
     kind:              u8;
     state:             u8;
     fin:               bool;
@@ -192,8 +192,8 @@ pub rec Storage {
     stream_capacity:   usize;
     attempts:          *Attempt;
     attempt_capacity:  usize;
-    chunks:            *pool.Pool;
-    account:           *pool.Account;
+    chunks:            *supply.Provider;
+    account:           *supply.Account;
     send_buffer_limit: usize;
 }
 
@@ -387,7 +387,7 @@ fun valid_config(config: Config, storage: Storage) bool {
         config.receive_peer_bidirectional_limit > varint.MAX || config.receive_unidirectional_limit > varint.MAX) { ret false; }
     if (storage.stream_capacity == 0 || storage.attempt_capacity == 0 ||
         storage.chunks == nil || storage.account == nil || !storage.account.open ||
-        storage.account.pool != storage.chunks || storage.send_buffer_limit == 0) { ret false; }
+        storage.send_buffer_limit == 0) { ret false; }
     if ((storage.streams == nil &&
         storage.stream_capacity > RECORDS_PER_BLOCK * RECORD_BLOCKS) ||
         (storage.attempts == nil && storage.attempt_capacity > ATTEMPTS_PER_BLOCK)) {
@@ -506,7 +506,7 @@ fun live(manager: *Manager, index: usize) *Stream {
 }
 
 fun record_source(manager: *Manager) ranges.Source {
-    ret source(manager, pool.SEND);
+    ret source(manager, supply.SEND);
 }
 
 # records the block at `block` can hold within the capacity
@@ -649,12 +649,12 @@ fun free_index(manager: *Manager) usize {
     ret i;
 }
 
-fun source(manager: *Manager, direction: pool.Direction) ranges.Source {
-    ret ranges.Source{pool: manager.storage.chunks, account: manager.storage.account,
-        direction: direction};
+fun source(manager: *Manager, direction: supply.Lane) ranges.Source {
+    ret ranges.Source{provider: manager.storage.chunks, account: manager.storage.account,
+        lane: direction};
 }
 
-fun buffer_release(manager: *Manager, buffer: *Buffer, direction: pool.Direction) {
+fun buffer_release(manager: *Manager, buffer: *Buffer, direction: supply.Lane) {
     var from: ranges.Source = source(manager, direction);
     chunks.release_all(?buffer.chunks, ?from);
     ranges.clear(?buffer.ranges, ?from);
@@ -1146,7 +1146,7 @@ pub fun write(manager: *Manager, value: Handle, data: *u8, length: usize) WriteR
     val wanted:      usize         = count;
     var chunk_short: bool          = false;
     var written:     usize         = 0;
-    var from:        ranges.Source = source(manager, pool.SEND);
+    var from:        ranges.Source = source(manager, supply.SEND);
     for (written < wanted) {
         val offset: u64          = stream.send_write + written::u64;
         val slot:   *chunks.Slot = chunks.ensure(?stream.send.chunks, ?from, offset);
@@ -1154,8 +1154,8 @@ pub fun write(manager: *Manager, value: Handle, data: *u8, length: usize) WriteR
             chunk_short = true;
             brk;
         }
-        val start: usize = (offset % pool.CHUNK::u64)::usize;
-        var span:  usize = pool.CHUNK - start;
+        val start: usize = (offset % supply.BYTES::u64)::usize;
+        var span:  usize = supply.BYTES - start;
         if (span > wanted - written) { span = wanted - written; }
         memory.copy[u8](?slot.data[start], ?data[written], span);
         written = written + span;
@@ -1243,7 +1243,7 @@ fun reconcile_uncredited(manager: *Manager, stream: *Stream) {
 }
 
 fun clear_receive(manager: *Manager, index: usize) {
-    buffer_release(manager, ?record(manager, index).receive, pool.RECEIVE);
+    buffer_release(manager, ?record(manager, index).receive, supply.RECEIVE);
 }
 
 pub fun cancel_receive(manager: *Manager, value: Handle, error_code: u64) OperationResult {
@@ -1413,7 +1413,7 @@ pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: b
     var offset:      u64   = 0;
     var length:      usize = 0;
     var include_fin: bool  = false;
-    var chunk:       pool.Ref;
+    var chunk:       supply.Ref;
     var data:        *u8   = nil;
     if ((stream.reset_pending || (probe && stream.reset_inflight > 0 && !stream.reset_acked)) &&
         stream.reset_inflight < 255) {
@@ -1447,8 +1447,8 @@ pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: b
                 offset      = cursor;
                 length      = minimum_size(maximum_bytes, (limit - cursor)::usize);
                 kind        = SEND_STREAM;
-                chunk       = slot.ref;
-                data        = ?slot.data[(cursor % pool.CHUNK::u64)::usize];
+                chunk       = slot.chunk.ref;
+                data        = ?slot.data[(cursor % supply.BYTES::u64)::usize];
                 include_fin = offset + length::u64 == stream.send_write && stream.send_finished &&
                     !stream.fin_acked && stream.fin_inflight < 255 && (stream.fin_pending || probe);
             }
@@ -1578,7 +1578,7 @@ pub fun publish(manager: *Manager, prepared: Prepared) OperationResult {
         }
         # the chunk cannot have been reclaimed while any of its offsets are
         # still above send_base, so a surviving length still has its chunk
-        if (attempt.length > 0 && !pool.retain(manager.storage.chunks, attempt.chunk)) {
+        if (attempt.length > 0 && !supply.retain(manager.storage.chunks, attempt.chunk)) {
             attempt.length = 0;
         }
         if (attempt.fin) {
@@ -1605,7 +1605,7 @@ pub fun publish(manager: *Manager, prepared: Prepared) OperationResult {
 
 fun reclaim_send(manager: *Manager, index: usize) {
     val stream: *Stream       = record(manager, index);
-    var from:   ranges.Source = source(manager, pool.SEND);
+    var from:   ranges.Source = source(manager, supply.SEND);
     var base:   u64           = ranges.covered_from(?stream.send.ranges, stream.send_base);
     if (base > stream.send_write) { base = stream.send_write; }
     stream.send_base = base;
@@ -1691,14 +1691,14 @@ pub fun on_terminal(manager: *Manager, value: AttemptToken, terminal: u8) Operat
     if (!stream.active || stream.generation != attempt.stream_generation) { ret operation_error(ERROR_TOKEN); }
     if (attempt.kind == SEND_STREAM) {
         if (attempt.length > 0) {
-            pool.settle(manager.storage.chunks, attempt.chunk);
+            supply.settle(manager.storage.chunks, attempt.chunk);
             # an acknowledgement is recorded above send_base only. a refused
             # record just means those bytes are sent again, never lost
             var start: u64 = attempt.offset;
             val end:   u64 = attempt.offset + attempt.length::u64;
             if (start < stream.send_base) { start = stream.send_base; }
             if (terminal == TERMINAL_ACKED && start < end) {
-                var from: ranges.Source = source(manager, pool.SEND);
+                var from: ranges.Source = source(manager, supply.SEND);
                 if (ranges.insert(?stream.send.ranges, start, end, ?from) != ranges.STATUS_OK) {
                     manager.ack_record_refusals = manager.ack_record_refusals + 1;
                 }
@@ -1888,7 +1888,7 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
     val copy_length: usize         = length - copy_start;
     val storing:     bool          = !discarding && copy_length > 0;
     var reserved:    chunks.Reserved;
-    var from:        ranges.Source = source(manager, pool.RECEIVE);
+    var from:        ranges.Source = source(manager, supply.RECEIVE);
     if (storing) {
         if (!provisional) {
             val current: *Stream = record(manager, index);
@@ -2119,7 +2119,7 @@ pub fun read(manager: *Manager, value: Handle, output: *u8, capacity: usize) Rea
     }
     stream.receive_read = stream.receive_read + count::u64;
     if (count > 0) {
-        var from: ranges.Source = source(manager, pool.RECEIVE);
+        var from: ranges.Source = source(manager, supply.RECEIVE);
         ranges.drop_prefix(?stream.receive.ranges, stream.receive_read, ?from);
         chunks.release_consumed(?stream.receive.chunks, ?from, stream.receive_read,
             ranges.empty(?stream.receive.ranges));
@@ -2196,8 +2196,8 @@ pub fun release(manager: *Manager, value: Handle) OperationResult {
     val uni:  bool = stream.unidirectional;
     reconcile_uncredited(manager, stream);
     unlink_everywhere(manager, value.index);
-    buffer_release(manager, ?stream.send, pool.SEND);
-    buffer_release(manager, ?stream.receive, pool.RECEIVE);
+    buffer_release(manager, ?stream.send, supply.SEND);
+    buffer_release(manager, ?stream.receive, supply.RECEIVE);
     stream.active     = false;
     stream.generation = 0;
     record_dropped(manager, value.index);
@@ -2252,8 +2252,8 @@ pub fun finish_close(manager: *Manager) OperationResult {
     for (i < manager.storage.stream_capacity) {
         val stream: *Stream = live(manager, i);
         if (stream != nil) {
-            buffer_release(manager, ?stream.send, pool.SEND);
-            buffer_release(manager, ?stream.receive, pool.RECEIVE);
+            buffer_release(manager, ?stream.send, supply.SEND);
+            buffer_release(manager, ?stream.receive, supply.RECEIVE);
             stream.active     = false;
             stream.generation = 0;
             record_dropped(manager, i);
@@ -2446,23 +2446,19 @@ test "quic.stream.stream: stream id bits expose ownership and direction" {
     ret 0;
 }
 
-var test_memory:  limited.Limited;
-var test_chunks:  pool.Pool;
-var test_account: pool.Account;
+var test_pool:    supply.TestPool;
+var test_account: supply.Account;
 
 # a pool and account for a stream manager under test
 fun test_storage(streams: *Stream, stream_capacity: usize, attempts: *Attempt,
     attempt_capacity: usize) Storage {
-    if (!test_chunks.valid) {
-        limited.make(?test_memory, 1 << 24);
-        var chunk_config: pool.Config = pool.default_config(256);
-        chunk_config.trap_misuse = false;
-        pool.make(?test_chunks, limited.allocator_of(?test_memory), chunk_config);
-        pool.open_account(?test_chunks, ?test_account, 1, 64, 64, 0);
+    if (!supply.test_made(?test_pool)) {
+        supply.make_test(?test_pool, 256);
+        supply.open(?test_pool.provider, ?test_account, 1, 64, 64, 0);
     }
     ret Storage{streams: streams, stream_capacity: stream_capacity,
         attempts: attempts, attempt_capacity: attempt_capacity,
-        chunks:   ?test_chunks, account: ?test_account, send_buffer_limit: 4};
+        chunks:   ?test_pool.provider, account: ?test_account, send_buffer_limit: 4};
 }
 
 test "quic.stream.stream: owned regions reject maximum addresses and aliases" {

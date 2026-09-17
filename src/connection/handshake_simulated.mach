@@ -1,10 +1,11 @@
 use quic.connection.handshake;
 use quic.crypto.protection;
 use quic.storage.limited;
-use quic.storage.pool;
 use quic.storage.ranges;
+use supply: quic.storage.source;
 
 use std.crypto.ct;
+use std.memory.buffers;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -46,13 +47,12 @@ var reentry_rejected:   bool;
 var mutate_start_input: bool;
 
 rec Fixture {
-    chunk_memory: limited.Limited;
-    chunks:       pool.Pool;
-    account:      pool.Account;
-    attempts:     [16]handshake.Attempt;
-    secret:       [32]^u8;
-    provider:     Provider;
-    adapter:      handshake.Adapter;
+    chunk_pool: supply.TestPool;
+    account:    supply.Account;
+    attempts:   [16]handshake.Attempt;
+    secret:     [32]^u8;
+    provider:   Provider;
+    adapter:    handshake.Adapter;
 }
 
 fun provider_result(status: u8, error: u64) handshake.ProviderResult {
@@ -173,20 +173,18 @@ fun destroy_provider(context: ptr, secret_context: *^u8) bool {
 fun make_fixture(fixture: *Fixture, source: u64) bool {
     reentry_adapter  = ?fixture.adapter;
     reentry_rejected = false;
-    if (fixture.chunks.valid) {
+    if (supply.test_made(?fixture.chunk_pool)) {
         if ((fixture.account.open &&
-            !pool.close_account(?fixture.chunks, ?fixture.account)) ||
-            !pool.destroy(?fixture.chunks)) { ret false; }
+            !supply.close(?fixture.chunk_pool.provider, ?fixture.account)) ||
+            !supply.end_test(?fixture.chunk_pool)) { ret false; }
     }
-    if ((fixture.chunk_memory.a.ctx == nil && !limited.make(?fixture.chunk_memory, 1 << 20)) ||
-        !pool.make(?fixture.chunks, limited.allocator_of(?fixture.chunk_memory),
-        pool.default_config(16)) ||
-        !pool.open_account(?fixture.chunks, ?fixture.account, source, 8, 8, 0)) {
+    if (!supply.make_test(?fixture.chunk_pool, 16) ||
+        !supply.open(?fixture.chunk_pool.provider, ?fixture.account, source, 8, 8, 0)) {
         ret false;
     }
     val storage: handshake.Storage = handshake.Storage{
         attempts: ?fixture.attempts[0], attempt_capacity: 16,
-        chunks:   ?fixture.chunks, account: ?fixture.account
+        chunks:   ?fixture.chunk_pool.provider, account: ?fixture.account
     };
     val protocol: handshake.Protocol = handshake.Protocol{
         context: (?fixture.provider)::ptr, context_size: $size_of(Provider),
@@ -330,9 +328,9 @@ test "quic.connection.handshake: every-byte crypto fragmentation is reassembled 
         ?message[0], 1, 31).status != handshake.STATUS_MORE ||
         handshake.receive(?fixture.adapter, handshake.HANDSHAKE, 20,
         ?message[1], 1, 32).error != handshake.ERROR_CONFLICT) { ret 7; }
-    if (fixture.account.used[1] != 1) { ret 8; }
+    if (supply.held(?fixture.account, supply.RECEIVE) != 1) { ret 8; }
     if (!handshake.destroy(?fixture.adapter) || !fixture.provider.destroyed ||
-        fixture.account.used[1] != 0) { ret 9; }
+        supply.held(?fixture.account, supply.RECEIVE) != 0) { ret 9; }
     ret 0;
 }
 
@@ -497,7 +495,7 @@ test "quic.connection.handshake: acknowledged crypto gives its chunk back and ac
     if (!queue_event(?fixture.provider, crypto_event(1, handshake.HANDSHAKE, 0,
         handshake.View{data: ?output[0], length: 32})) ||
         !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO) ||
-        fixture.account.used[0] != 1) { ret 2; }
+        supply.held(?fixture.account, supply.SEND) != 1) { ret 2; }
     var tokens: [4]handshake.AttemptToken;
     i = 0;
     for (i < 4) {
@@ -530,14 +528,14 @@ test "quic.connection.handshake: acknowledged crypto gives its chunk back and ac
     if (again.status != handshake.STATUS_OK || again.offset != 0 ||
         again.data.length != 8 ||
         handshake.publish(?fixture.adapter, again.token).status !=
-        handshake.STATUS_OK || fixture.account.used[0] != 1) { ret 6; }
+        handshake.STATUS_OK || supply.held(?fixture.account, supply.SEND) != 1) { ret 6; }
     if (handshake.on_terminal(?fixture.adapter, again.token,
         handshake.TERMINAL_ACKED).status != handshake.STATUS_OK ||
-        fixture.account.used[0] != 1) { ret 7; }
+        supply.held(?fixture.account, supply.SEND) != 1) { ret 7; }
     # the last gap closes, so the whole level is acknowledged and released
     if (handshake.on_terminal(?fixture.adapter, tokens[2],
         handshake.TERMINAL_ACKED).status != handshake.STATUS_OK ||
-        fixture.account.used[0] != 0 ||
+        supply.held(?fixture.account, supply.SEND) != 0 ||
         handshake.prepare_probe(?fixture.adapter, handshake.HANDSHAKE, 8).status !=
         handshake.STATUS_EMPTY) { ret 8; }
     if (!handshake.destroy(?fixture.adapter)) { ret 9; }
@@ -563,11 +561,11 @@ test "quic.connection.handshake: key discard releases a level with retransmits i
     if (second.status != handshake.STATUS_OK ||
         handshake.receive(?fixture.adapter, handshake.INITIAL, 8, ?peer[0], 4,
         2).status != handshake.STATUS_MORE ||
-        fixture.account.used[0] != 1 || fixture.account.used[1] != 1) { ret 4; }
+        supply.held(?fixture.account, supply.SEND) != 1 || supply.held(?fixture.account, supply.RECEIVE) != 1) { ret 4; }
     if (handshake.discard(?fixture.adapter, handshake.INITIAL).status !=
         handshake.STATUS_OK ||
-        fixture.account.used[0] != 0 || fixture.account.used[1] != 0 ||
-        fixture.chunks.misuse != 0) { ret 5; }
+        supply.held(?fixture.account, supply.SEND) != 0 || supply.held(?fixture.account, supply.RECEIVE) != 0 ||
+        supply.misuse(?fixture.chunk_pool.pool) != 0) { ret 5; }
     # the recovery owners of either attempt now find nothing to settle
     if (handshake.on_terminal(?fixture.adapter, first.token,
         handshake.TERMINAL_LOST).error != handshake.ERROR_TOKEN ||
@@ -581,7 +579,7 @@ test "quic.connection.handshake: key discard releases a level with retransmits i
         !queue_event(?fixture.provider, crypto_event(2, handshake.INITIAL, 16,
         handshake.View{data: ?output[0], length: 4})) ||
         !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO) ||
-        fixture.account.used[0] != 0 || fixture.account.used[1] != 0 ||
+        supply.held(?fixture.account, supply.SEND) != 0 || supply.held(?fixture.account, supply.RECEIVE) != 0 ||
         fixture.provider.ingested_calls != 0) { ret 7; }
     if (handshake.discard(?fixture.adapter, handshake.APPLICATION).status !=
         handshake.STATUS_ERROR || !handshake.destroy(?fixture.adapter)) { ret 8; }
@@ -592,15 +590,18 @@ test "quic.connection.handshake: crypto storage refusals change nothing and resu
     var fixture: Fixture;
     if (!make_fixture(?fixture, 406)) { ret 1; }
     # the whole budget is taken in both directions
-    var held:  [16]pool.Ref;
+    var sends: ranges.Source = ranges.Source{provider: ?fixture.chunk_pool.provider,
+        account: ?fixture.account, lane: supply.SEND};
+    var receives: ranges.Source = ranges.Source{provider: ?fixture.chunk_pool.provider,
+        account: ?fixture.account, lane: supply.RECEIVE};
+    var held:  [16]supply.Chunk;
     var count: usize = 0;
     for (count < 16) {
-        var direction: pool.Direction = pool.SEND;
-        if (count >= 8) { direction = pool.RECEIVE; }
-        val got: pool.Acquired = pool.acquire(?fixture.chunks, ?fixture.account,
-            direction);
-        if (got.status != pool.STATUS_OK) { brk; }
-        held[count] = got.ref;
+        var from: *ranges.Source = ?sends;
+        if (count >= 8) { from = ?receives; }
+        val got: supply.Taken = supply.take(from, supply.BYTES);
+        if (!got.ok) { brk; }
+        held[count] = got.chunk;
         count       = count + 1;
     }
     if (count != 16) { ret 2; }
@@ -621,27 +622,25 @@ test "quic.connection.handshake: crypto storage refusals change nothing and resu
     if (again.status != handshake.STATUS_OK ||
         again.token.generation != offered.token.generation ||
         again.data.data != offered.data.data) { ret 6; }
-    pool.release(?fixture.chunks, ?fixture.account, pool.SEND, held[0]);
+    supply.give(?sends, held[0]);
     if (handshake.complete_event(?fixture.adapter, again.token, true).status !=
         handshake.STATUS_OK || fixture.provider.completed != 1) { ret 7; }
     val prepared: handshake.Prepared = handshake.prepare(?fixture.adapter,
         handshake.HANDSHAKE, 8);
     if (prepared.status != handshake.STATUS_OK || prepared.data.data[7] != 8) { ret 8; }
-    pool.release(?fixture.chunks, ?fixture.account, pool.RECEIVE, held[8]);
+    supply.give(?receives, held[8]);
     if (handshake.receive(?fixture.adapter, handshake.HANDSHAKE, 4, ?output[0], 4,
         3).status != handshake.STATUS_MORE ||
         handshake.cancel_prepared(?fixture.adapter, prepared.token).status !=
         handshake.STATUS_OK) { ret 9; }
     count = 1;
     for (count < 16) {
-        var direction: pool.Direction = pool.SEND;
-        if (count >= 8) { direction = pool.RECEIVE; }
-        if (count != 8) {
-            pool.release(?fixture.chunks, ?fixture.account, direction, held[count]);
-        }
+        var from: *ranges.Source = ?sends;
+        if (count >= 8) { from = ?receives; }
+        if (count != 8) { supply.give(from, held[count]); }
         count = count + 1;
     }
     if (!handshake.destroy(?fixture.adapter) ||
-        fixture.account.used[0] != 0 || fixture.account.used[1] != 0) { ret 10; }
+        supply.held(?fixture.account, supply.SEND) != 0 || supply.held(?fixture.account, supply.RECEIVE) != 0) { ret 10; }
     ret 0;
 }

@@ -9,31 +9,31 @@ pub def Algorithm: u8
 ## def Level
 
 ```mach
-pub def Level: u8
+pub def Level:     u8
 ```
 
 ## def State
 
 ```mach
-pub def State: u8
+pub def State:     u8
 ```
 
 ## def Error
 
 ```mach
-pub def Error: u8
+pub def Error:     u8
 ```
 
 ## val AES_128_GCM_SHA256
 
 ```mach
-pub val AES_128_GCM_SHA256: Algorithm = 1
+pub val AES_128_GCM_SHA256:       Algorithm = 1
 ```
 
 ## val AES_256_GCM_SHA384
 
 ```mach
-pub val AES_256_GCM_SHA384: Algorithm = 2
+pub val AES_256_GCM_SHA384:       Algorithm = 2
 ```
 
 ## val CHACHA20_POLY1305_SHA256
@@ -45,19 +45,19 @@ pub val CHACHA20_POLY1305_SHA256: Algorithm = 3
 ## val LEVEL_INITIAL
 
 ```mach
-pub val LEVEL_INITIAL: Level = 1
+pub val LEVEL_INITIAL:     Level = 1
 ```
 
 ## val LEVEL_EARLY
 
 ```mach
-pub val LEVEL_EARLY: Level = 2
+pub val LEVEL_EARLY:       Level = 2
 ```
 
 ## val LEVEL_HANDSHAKE
 
 ```mach
-pub val LEVEL_HANDSHAKE: Level = 3
+pub val LEVEL_HANDSHAKE:   Level = 3
 ```
 
 ## val LEVEL_APPLICATION
@@ -69,13 +69,13 @@ pub val LEVEL_APPLICATION: Level = 4
 ## val STATE_EMPTY
 
 ```mach
-pub val STATE_EMPTY: State = 0
+pub val STATE_EMPTY:     State = 0
 ```
 
 ## val STATE_ACTIVE
 
 ```mach
-pub val STATE_ACTIVE: State = 1
+pub val STATE_ACTIVE:    State = 1
 ```
 
 ## val STATE_DISCARDED
@@ -87,37 +87,37 @@ pub val STATE_DISCARDED: State = 2
 ## val OK
 
 ```mach
-pub val OK: Error = 0
+pub val OK:                    Error = 0
 ```
 
 ## val INVALID_INPUT
 
 ```mach
-pub val INVALID_INPUT: Error = 1
+pub val INVALID_INPUT:         Error = 1
 ```
 
 ## val OUTPUT_TOO_SMALL
 
 ```mach
-pub val OUTPUT_TOO_SMALL: Error = 2
+pub val OUTPUT_TOO_SMALL:      Error = 2
 ```
 
 ## val INVALID_KEY
 
 ```mach
-pub val INVALID_KEY: Error = 3
+pub val INVALID_KEY:           Error = 3
 ```
 
 ## val AUTH_FAILED
 
 ```mach
-pub val AUTH_FAILED: Error = 4
+pub val AUTH_FAILED:           Error = 4
 ```
 
 ## val UNSUPPORTED_VERSION
 
 ```mach
-pub val UNSUPPORTED_VERSION: Error = 5
+pub val UNSUPPORTED_VERSION:   Error = 5
 ```
 
 ## val UNSUPPORTED_ALGORITHM
@@ -129,67 +129,67 @@ pub val UNSUPPORTED_ALGORITHM: Error = 6
 ## val KEYS_DISCARDED
 
 ```mach
-pub val KEYS_DISCARDED: Error = 7
+pub val KEYS_DISCARDED:        Error = 7
 ```
 
 ## val PACKET_NUMBER_ERROR
 
 ```mach
-pub val PACKET_NUMBER_ERROR: Error = 8
+pub val PACKET_NUMBER_ERROR:   Error = 8
 ```
 
 ## val SAMPLE_ERROR
 
 ```mach
-pub val SAMPLE_ERROR: Error = 9
+pub val SAMPLE_ERROR:          Error = 9
 ```
 
 ## val KEY_UPDATE_ERROR
 
 ```mach
-pub val KEY_UPDATE_ERROR: Error = 10
+pub val KEY_UPDATE_ERROR:      Error = 10
 ```
 
 ## val RESERVED_BITS
 
 ```mach
-pub val RESERVED_BITS: Error = 11
+pub val RESERVED_BITS:         Error = 11
 ```
 
 ## val MAX_SECRET_SIZE
 
 ```mach
-pub val MAX_SECRET_SIZE: usize = 48
+pub val MAX_SECRET_SIZE:   usize = 48
 ```
 
 ## val MAX_KEY_SIZE
 
 ```mach
-pub val MAX_KEY_SIZE: usize = 32
+pub val MAX_KEY_SIZE:      usize = 32
 ```
 
 ## val IV_SIZE
 
 ```mach
-pub val IV_SIZE: usize = 12
+pub val IV_SIZE:           usize = 12
 ```
 
 ## val SAMPLE_SIZE
 
 ```mach
-pub val SAMPLE_SIZE: usize = 16
+pub val SAMPLE_SIZE:       usize = 16
 ```
 
 ## val MASK_SIZE
 
 ```mach
-pub val MASK_SIZE: usize = 5
+pub val MASK_SIZE:         usize = 5
 ```
 
 ## val TAG_SIZE
 
 ```mach
-pub val TAG_SIZE: usize = 16
+pub val TAG_SIZE:          usize = 16
 ```
 
 ## val MAX_CONNECTION_ID

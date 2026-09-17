@@ -21,7 +21,7 @@ pub val STATUS_IGNORED: Status = 2
 ## val STATUS_ERROR
 
 ```mach
-pub val STATUS_ERROR: Status = 3
+pub val STATUS_ERROR:   Status = 3
 ```
 
 ## def Error
@@ -33,25 +33,25 @@ pub def Error: u8
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: Error = 0
+pub val ERROR_NONE:     Error = 0
 ```
 
 ## val ERROR_STATE
 
 ```mach
-pub val ERROR_STATE: Error = 1
+pub val ERROR_STATE:    Error = 1
 ```
 
 ## val ERROR_CONFIG
 
 ```mach
-pub val ERROR_CONFIG: Error = 2
+pub val ERROR_CONFIG:   Error = 2
 ```
 
 ## val ERROR_PACKET
 
 ```mach
-pub val ERROR_PACKET: Error = 3
+pub val ERROR_PACKET:   Error = 3
 ```
 
 ## val ERROR_IDENTITY
@@ -63,13 +63,13 @@ pub val ERROR_IDENTITY: Error = 4
 ## val ERROR_VERSION
 
 ```mach
-pub val ERROR_VERSION: Error = 5
+pub val ERROR_VERSION:  Error = 5
 ```
 
 ## val ERROR_RETRY
 
 ```mach
-pub val ERROR_RETRY: Error = 6
+pub val ERROR_RETRY:    Error = 6
 ```
 
 ## val ERROR_CAPACITY
@@ -87,7 +87,7 @@ pub val RESTART_VERSION: u8 = 1
 ## val RESTART_RETRY
 
 ```mach
-pub val RESTART_RETRY: u8 = 2
+pub val RESTART_RETRY:   u8 = 2
 ```
 
 ## rec Config
@@ -151,4 +151,6 @@ pub fun token(client: *Client) packet.Span;
 ```mach
 pub fun finish(client: *Client) bool;
 ```
+
+wipes and lets go of the retry storage, which the caller may then release
 

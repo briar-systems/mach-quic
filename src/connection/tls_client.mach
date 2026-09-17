@@ -5,7 +5,8 @@ use crypto.secret;
 use handshake_api: quic.connection.handshake;
 use quic.packet.packet;
 use quic.storage.limited;
-use quic.storage.pool;
+use supply: quic.storage.source;
+use std.memory.buffers;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.size.usize;
@@ -46,17 +47,14 @@ var integration_output:       [4096]u8;
 var integration_hello:        [4096]u8;
 var integration_certificates: [4]cert.Certificate;
 var integration_parameters:   [256]u8;
-var adapter_chunk_memory:     limited.Limited;
-var adapter_chunk_pool:       pool.Pool;
-var adapter_chunk_account:    pool.Account;
+var adapter_chunk_pool:       supply.TestPool;
+var adapter_chunk_account:    supply.Account;
 
 # one pool for every adapter these tests build, which may outlive a test
-fun adapter_account() *pool.Account {
-    if (!adapter_chunk_pool.valid) {
-        limited.make(?adapter_chunk_memory, 1 << 22);
-        pool.make(?adapter_chunk_pool, limited.allocator_of(?adapter_chunk_memory),
-            pool.default_config(256));
-        pool.open_account(?adapter_chunk_pool, ?adapter_chunk_account, 1, 128, 128, 0);
+fun adapter_account() *supply.Account {
+    if (!supply.test_made(?adapter_chunk_pool)) {
+        supply.make_test(?adapter_chunk_pool, 256);
+        supply.open(?adapter_chunk_pool.provider, ?adapter_chunk_account, 1, 128, 128, 0);
     }
     ret ?adapter_chunk_account;
 }
@@ -135,7 +133,7 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
         max_crypto_per_level: 4096, max_event_data: 4096,
         max_peer_identity:    4096};
     val adapter_storage: handshake_api.Storage = handshake_api.Storage{attempts: ?adapter_attempts[0], attempt_capacity: 8,
-        chunks: ?adapter_chunk_pool, account: adapter_account()};
+        account: adapter_account(), chunks: ?adapter_chunk_pool.provider};
     var overlapping: handshake_api.Storage = adapter_storage;
     overlapping.attempts = (?integration_input[0])::*handshake_api.Attempt;
     var rejected_adapter: handshake_api.Adapter;
@@ -243,7 +241,7 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
         handshake_api.Config{source: 78, max_crypto_per_level: 4096,
         max_event_data: 4096, max_peer_identity: 4096},
         handshake_api.Storage{attempts: ?adapter_attempts[0], attempt_capacity: 8,
-        chunks: ?adapter_chunk_pool, account: adapter_account()}, ?tls_value,
+        account: adapter_account(), chunks: ?adapter_chunk_pool.provider}, ?tls_value,
         Config{verification_time_unix: 1800000000, deadline_ns: 10,
         entropy_context_size:        1,
         entropy_secret_context_size: 0})) { ret 14; }

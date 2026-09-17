@@ -5,15 +5,15 @@
 # spill included, counts against the source's account and direction. a chunk
 # that an in-flight attempt retains is never released
 #
-# this is the internal seam between byte buffers and where their chunks come
-# from. only the pool calls live here, so moving to a shared std chunk
-# interface changes this file alone
+# chunks come from quic.storage.source, which is the only caller of std's
+# buffer source
 
 use quic.storage.limited;
-use quic.storage.pool;
 use quic.storage.ranges;
+use supply: quic.storage.source;
 
 use std.memory;
+use std.memory.buffers;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -21,18 +21,18 @@ use std.types.size.usize;
 
 pub val SHIFT:          u64   = 12;
 pub val INLINE:         usize = 2;
-pub val SPILL_CAPACITY: usize = pool.CHUNK / 32;
+pub val SPILL_CAPACITY: usize = supply.BYTES / $size_of(Slot);
 pub val RESERVE:        usize = 4;
 
 pub rec Slot {
     number: u64;
-    ref:    pool.Ref;
+    chunk:  supply.Chunk;
     data:   *u8;
 }
 
 pub rec Chunks {
     inline:     [INLINE]Slot;
-    spill:      pool.Ref;
+    spill:      supply.Chunk;
     spill_data: *Slot;
     count:      usize;
 }
@@ -42,36 +42,33 @@ pub rec Chunks {
 pub rec Reserved {
     slots:      [RESERVE]Slot;
     count:      usize;
-    spill:      pool.Ref;
+    spill:      supply.Chunk;
     spill_data: *Slot;
 }
 
 # one whole chunk laid out by its holder, such as state a connection needs
 # only until its handshake is confirmed
 pub rec Block {
-    ref:  pool.Ref;
-    data: *u8;
+    chunk: supply.Chunk;
+    data:  *u8;
 }
 
 # takes a zeroed chunk into an empty block
 pub fun take_block(from: *ranges.Source, block: *Block) bool {
     if (block.data != nil) { ret false; }
-    val got: pool.Acquired = pool.acquire(from.pool, from.account, from.direction);
-    if (got.status != pool.STATUS_OK) { ret false; }
-    memory.raw_zero(got.data, pool.CHUNK);
-    block.ref  = got.ref;
-    block.data = got.data;
+    val got: supply.Taken = supply.take(from, supply.BYTES);
+    if (!got.ok) { ret false; }
+    memory.raw_zero(got.chunk.data, supply.BYTES);
+    block.chunk = got.chunk;
+    block.data  = got.chunk.data;
     ret true;
 }
 
 # wipes and gives back a held block. an empty block is left as it is
 pub fun give_block(from: *ranges.Source, block: *Block) {
     if (block.data == nil) { ret; }
-    memory.raw_zero(block.data, pool.CHUNK);
-    if (pool.release(from.pool, from.account, from.direction,
-        block.ref) == pool.ERROR_NONE) {
-        block.data = nil;
-    }
+    memory.raw_zero(block.data, supply.BYTES);
+    if (supply.give(from, block.chunk)) { block.data = nil; }
 }
 
 pub fun number_of(offset: u64) u64 {
@@ -80,7 +77,7 @@ pub fun number_of(offset: u64) u64 {
 
 # bytes from `offset` to the end of its chunk
 pub fun room(offset: u64) u64 {
-    ret pool.CHUNK::u64 - offset % pool.CHUNK::u64;
+    ret supply.BYTES::u64 - offset % supply.BYTES::u64;
 }
 
 fun items(chunks: *Chunks) *Slot {
@@ -122,7 +119,7 @@ pub fun find(chunks: *Chunks, number: u64) *Slot {
 pub fun address(chunks: *Chunks, offset: u64) *u8 {
     val slot: *Slot = find(chunks, number_of(offset));
     if (slot == nil) { ret nil; }
-    ret ?slot.data[(offset % pool.CHUNK::u64)::usize];
+    ret ?slot.data[(offset % supply.BYTES::u64)::usize];
 }
 
 # places a slot in order. the caller has made room, spilling first when needed
@@ -144,30 +141,30 @@ pub fun ensure(chunks: *Chunks, from: *ranges.Source, offset: u64) *Slot {
     val existing: *Slot = find(chunks, number);
     if (existing != nil)                { ret existing; }
     if (chunks.count >= SPILL_CAPACITY) { ret nil; }
-    val got: pool.Acquired = pool.acquire(from.pool, from.account, from.direction);
-    if (got.status != pool.STATUS_OK) { ret nil; }
+    val got: supply.Taken = supply.take(from, supply.BYTES);
+    if (!got.ok) { ret nil; }
     if (chunks.count >= INLINE && chunks.spill_data == nil) {
-        val spilled: pool.Acquired = pool.acquire(from.pool, from.account, from.direction);
-        if (spilled.status != pool.STATUS_OK) {
-            pool.release(from.pool, from.account, from.direction, got.ref);
+        val spilled: supply.Taken = supply.take(from, supply.BYTES);
+        if (!spilled.ok) {
+            supply.give(from, got.chunk);
             ret nil;
         }
-        val spill: *Slot = spilled.data::*Slot;
+        val spill: *Slot = spilled.chunk.data::*Slot;
         memory.copy[Slot](spill, ?chunks.inline[0], chunks.count);
-        chunks.spill      = spilled.ref;
+        chunks.spill      = spilled.chunk;
         chunks.spill_data = spill;
     }
-    ret insert(chunks, Slot{number: number, ref: got.ref, data: got.data});
+    ret insert(chunks, Slot{number: number, chunk: got.chunk, data: got.chunk.data});
 }
 
 pub fun cancel(from: *ranges.Source, reserved: *Reserved) {
     var i: usize = 0;
     for (i < reserved.count) {
-        pool.release(from.pool, from.account, from.direction, reserved.slots[i].ref);
+        supply.give(from, reserved.slots[i].chunk);
         i = i + 1;
     }
     if (reserved.spill_data != nil) {
-        pool.release(from.pool, from.account, from.direction, reserved.spill);
+        supply.give(from, reserved.spill);
     }
     reserved.count      = 0;
     reserved.spill_data = nil;
@@ -189,13 +186,13 @@ pub fun reserve(chunks: *Chunks, from: *ranges.Source, offset: u64, length: usiz
                 cancel(from, reserved);
                 ret false;
             }
-            val got: pool.Acquired = pool.acquire(from.pool, from.account, from.direction);
-            if (got.status != pool.STATUS_OK) {
+            val got: supply.Taken = supply.take(from, supply.BYTES);
+            if (!got.ok) {
                 cancel(from, reserved);
                 ret false;
             }
-            reserved.slots[reserved.count] = Slot{number: number, ref: got.ref,
-                data: got.data};
+            reserved.slots[reserved.count] = Slot{number: number, chunk: got.chunk,
+                data: got.chunk.data};
             reserved.count = reserved.count + 1;
         }
         number = number + 1;
@@ -211,13 +208,13 @@ pub fun reserve(chunks: *Chunks, from: *ranges.Source, offset: u64, length: usiz
         ret false;
     }
     if (held + reserved.count > INLINE && !spilled) {
-        val got: pool.Acquired = pool.acquire(from.pool, from.account, from.direction);
-        if (got.status != pool.STATUS_OK) {
+        val got: supply.Taken = supply.take(from, supply.BYTES);
+        if (!got.ok) {
             cancel(from, reserved);
             ret false;
         }
-        reserved.spill      = got.ref;
-        reserved.spill_data = got.data::*Slot;
+        reserved.spill      = got.chunk;
+        reserved.spill_data = got.chunk.data::*Slot;
     }
     ret true;
 }
@@ -252,8 +249,8 @@ pub fun write(chunks: *Chunks, offset: u64, input: *u8, length: usize) {
     for (done < length) {
         val at:    u64   = offset + done::u64;
         val slot:  *Slot = find(chunks, number_of(at));
-        val start: usize = (at % pool.CHUNK::u64)::usize;
-        var span:  usize = pool.CHUNK - start;
+        val start: usize = (at % supply.BYTES::u64)::usize;
+        var span:  usize = supply.BYTES - start;
         if (span > length - done) { span = length - done; }
         memory.copy[u8](?slot.data[start], ?input[done], span);
         done = done + span;
@@ -266,8 +263,8 @@ pub fun read(chunks: *Chunks, offset: u64, output: *u8, length: usize) {
     for (done < length) {
         val at:    u64   = offset + done::u64;
         val slot:  *Slot = find(chunks, number_of(at));
-        val start: usize = (at % pool.CHUNK::u64)::usize;
-        var span:  usize = pool.CHUNK - start;
+        val start: usize = (at % supply.BYTES::u64)::usize;
+        var span:  usize = supply.BYTES - start;
         if (span > length - done) { span = length - done; }
         memory.copy[u8](?output[done], ?slot.data[start], span);
         done = done + span;
@@ -288,8 +285,8 @@ pub fun conflicts(chunks: *Chunks, present: *ranges.RangeSet, offset: u64,
         if (stop > end) { stop = end; }
         for (at < stop) {
             val slot:  *Slot = find(chunks, number_of(at));
-            val start: usize = (at % pool.CHUNK::u64)::usize;
-            var span:  u64   = (pool.CHUNK - start)::u64;
+            val start: usize = (at % supply.BYTES::u64)::usize;
+            var span:  u64   = (supply.BYTES - start)::u64;
             if (span > stop - at) { span = stop - at; }
             if (!memory.equal[u8](?slot.data[start], ?input[(at - offset)::usize],
                 span::usize)) {
@@ -307,10 +304,7 @@ fun shrink(chunks: *Chunks, from: *ranges.Source) {
     if (chunks.spill_data == nil || chunks.count > INLINE) { ret; }
     val spill: *Slot = chunks.spill_data;
     memory.copy[Slot](?chunks.inline[0], spill, chunks.count);
-    if (pool.release(from.pool, from.account, from.direction,
-        chunks.spill) == pool.ERROR_NONE) {
-        chunks.spill_data = nil;
-    }
+    if (supply.give(from, chunks.spill)) { chunks.spill_data = nil; }
 }
 
 # releases, in order, the chunks that lie wholly below `limit` and that nothing
@@ -321,9 +315,8 @@ pub fun release_below(chunks: *Chunks, from: *ranges.Source, limit: u64) {
     for (released < chunks.count) {
         val slot: Slot = list[released];
         if ((slot.number + 1) << SHIFT > limit ||
-            pool.in_flight(from.pool, slot.ref)) { brk; }
-        if (pool.release(from.pool, from.account, from.direction,
-            slot.ref) != pool.ERROR_NONE) { brk; }
+            supply.in_flight(from.provider, slot.chunk.ref)) { brk; }
+        if (!supply.give(from, slot.chunk)) { brk; }
         released = released + 1;
     }
     if (released > 0) {
@@ -337,8 +330,7 @@ pub fun release_below(chunks: *Chunks, from: *ranges.Source, limit: u64) {
 pub fun release_from(chunks: *Chunks, from: *ranges.Source, number: u64) {
     val list: *Slot = items(chunks);
     for (chunks.count > 0 && list[chunks.count - 1].number >= number) {
-        if (pool.release(from.pool, from.account, from.direction,
-            list[chunks.count - 1].ref) != pool.ERROR_NONE) { brk; }
+        if (!supply.give(from, list[chunks.count - 1].chunk)) { brk; }
         chunks.count = chunks.count - 1;
     }
     shrink(chunks, from);
@@ -358,21 +350,25 @@ pub fun release_all(chunks: *Chunks, from: *ranges.Source) {
     release_below(chunks, from, 0 - 1::u64);
 }
 
-fun test_pool(backing: *limited.Limited, target: *pool.Pool, account: *pool.Account) bool {
-    if (!limited.make(backing, 1 << 20)) { ret false; }
-    var config: pool.Config = pool.default_config(8);
-    config.trap_misuse = false;
-    ret pool.make(target, limited.allocator_of(backing), config) &&
-        pool.open_account(target, account, 1, 5, 5, 0);
+rec Fixture {
+    backing:  limited.Limited;
+    pool:     buffers.Pool;
+    class:    buffers.ClassConfig;
+    provider: supply.Provider;
+    account:  supply.Account;
+}
+
+fun test_pool(fixture: *Fixture) bool {
+    if (!supply.test_pool(?fixture.pool, ?fixture.class, ?fixture.backing, 16)) { ret false; }
+    fixture.provider = buffers.source(?fixture.pool);
+    ret supply.open(?fixture.provider, ?fixture.account, 1, 5, 5, 0);
 }
 
 test "quic.storage.chunks: bytes round trip across chunks and the spill is given back" {
-    var backing: limited.Limited;
-    var target:  pool.Pool;
-    var account: pool.Account;
-    if (!test_pool(?backing, ?target, ?account)) { ret 1; }
-    var from: ranges.Source = ranges.Source{pool: ?target, account: ?account,
-        direction: pool.SEND};
+    var fixture: Fixture;
+    if (!test_pool(?fixture)) { ret 1; }
+    var from: ranges.Source = ranges.Source{provider: ?fixture.provider,
+        account: ?fixture.account, lane: supply.SEND};
     var held:   Chunks;
     var input:  [9000]u8;
     var output: [9000]u8;
@@ -383,39 +379,37 @@ test "quic.storage.chunks: bytes round trip across chunks and the spill is given
     }
     if (!ensure_span(?held, ?from, 100, 9000)) { ret 2; }
     # three data chunks outgrow the inline slots, so a spill is held too
-    if (count(?held) != 3 || !spilled(?held) || account.used[0] != 4) { ret 3; }
+    if (count(?held) != 3 || !spilled(?held) || supply.held(?fixture.account, supply.SEND) != 4) { ret 3; }
     write(?held, 100, ?input[0], 9000);
     read(?held, 100, ?output[0], 9000);
     if (!memory.equal[u8](?input[0], ?output[0], 9000)) { ret 4; }
     release_below(?held, ?from, 8192);
-    if (count(?held) != 1 || spilled(?held) || account.used[0] != 1) { ret 5; }
-    if (address(?held, 8192)[0] != input[8092])                      { ret 6; }
+    if (count(?held) != 1 || spilled(?held) || supply.held(?fixture.account, supply.SEND) != 1) { ret 5; }
+    if (address(?held, 8192)[0] != input[8092])                                                 { ret 6; }
     release_all(?held, ?from);
-    if (count(?held) != 0 || account.used[0] != 0) { ret 7; }
+    if (count(?held) != 0 || supply.held(?fixture.account, supply.SEND) != 0) { ret 7; }
     ret 0;
 }
 
 test "quic.storage.chunks: a refused span takes nothing and retained chunks stay" {
-    var backing: limited.Limited;
-    var target:  pool.Pool;
-    var account: pool.Account;
-    if (!test_pool(?backing, ?target, ?account)) { ret 1; }
-    var from: ranges.Source = ranges.Source{pool: ?target, account: ?account,
-        direction: pool.RECEIVE};
+    var fixture: Fixture;
+    if (!test_pool(?fixture)) { ret 1; }
+    var from: ranges.Source = ranges.Source{provider: ?fixture.provider,
+        account: ?fixture.account, lane: supply.RECEIVE};
     var held: Chunks;
     if (!ensure_span(?held, ?from, 0, 4096)) { ret 2; }
     # four more chunks plus a spill exceed the budget of five
-    if (ensure_span(?held, ?from, 4096, 4 * 4096))                   { ret 3; }
-    if (count(?held) != 1 || spilled(?held) || account.used[1] != 1) { ret 4; }
+    if (ensure_span(?held, ?from, 4096, 4 * 4096))                                                 { ret 3; }
+    if (count(?held) != 1 || spilled(?held) || supply.held(?fixture.account, supply.RECEIVE) != 1) { ret 4; }
     val slot: *Slot = find(?held, 0);
-    if (!pool.retain(?target, slot.ref)) { ret 5; }
+    if (!supply.retain(?fixture.provider, slot.chunk.ref)) { ret 5; }
     release_all(?held, ?from);
     if (count(?held) != 1) { ret 6; }
-    pool.settle(?target, find(?held, 0).ref);
+    supply.settle(?fixture.provider, find(?held, 0).chunk.ref);
     release_all(?held, ?from);
-    if (count(?held) != 0 || account.used[1] != 0) { ret 7; }
-    if (!ensure_span(?held, ?from, 0, 3 * 4096))   { ret 8; }
+    if (count(?held) != 0 || supply.held(?fixture.account, supply.RECEIVE) != 0) { ret 7; }
+    if (!ensure_span(?held, ?from, 0, 3 * 4096))                                 { ret 8; }
     release_from(?held, ?from, 1);
-    if (count(?held) != 1 || spilled(?held) || account.used[1] != 1) { ret 9; }
+    if (count(?held) != 1 || spilled(?held) || supply.held(?fixture.account, supply.RECEIVE) != 1) { ret 9; }
     ret 0;
 }

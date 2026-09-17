@@ -3,31 +3,31 @@
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: u8 = 0
+pub val ERROR_NONE:     u8 = 0
 ```
 
 ## val ERROR_STATE
 
 ```mach
-pub val ERROR_STATE: u8 = 1
+pub val ERROR_STATE:    u8 = 1
 ```
 
 ## val ERROR_CONFIG
 
 ```mach
-pub val ERROR_CONFIG: u8 = 2
+pub val ERROR_CONFIG:   u8 = 2
 ```
 
 ## val ERROR_TIME
 
 ```mach
-pub val ERROR_TIME: u8 = 3
+pub val ERROR_TIME:     u8 = 3
 ```
 
 ## val ERROR_PACKET
 
 ```mach
-pub val ERROR_PACKET: u8 = 4
+pub val ERROR_PACKET:   u8 = 4
 ```
 
 ## val ERROR_OVERFLOW
@@ -39,7 +39,7 @@ pub val ERROR_OVERFLOW: u8 = 5
 ## val PUBLISH_OK
 
 ```mach
-pub val PUBLISH_OK: u8 = 1
+pub val PUBLISH_OK:    u8 = 1
 ```
 
 ## val PUBLISH_STALE

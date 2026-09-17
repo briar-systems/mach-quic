@@ -3,6 +3,7 @@
 # consumed retry nonces are remembered until their token could no longer
 # authenticate, in storage that grows with what is remembered
 
+use quic.clock;
 use quic.connection.ownership;
 use quic.packet.packet;
 use quic.storage.hash;
@@ -14,6 +15,8 @@ use quic.storage.slots;
 use crypto.contracts;
 use crypto.hmac;
 use std.allocator;
+use std.chrono.duration;
+use std.chrono.time;
 use std.crypto.ct;
 use std.encoding.binary;
 use std.memory;
@@ -85,10 +88,10 @@ rec ReplayKey {
 # max_replay caps remembered nonces by count. it is required: a peer that can
 # present many valid tokens must not be able to grow the store without limit
 pub rec Config {
-    source:             u64;
-    retry_max_age_ns:   u64;
-    address_max_age_ns: u64;
-    max_replay:         usize;
+    source:          u64;
+    retry_max_age:   duration.Duration;
+    address_max_age: duration.Duration;
+    max_replay:      usize;
 }
 
 pub rec Manager {
@@ -199,8 +202,8 @@ fun physical(manager: *Manager) bool {
 }
 
 fun config_valid(config: Config) bool {
-    if (config.source == 0 || config.retry_max_age_ns == 0 ||
-        config.address_max_age_ns == 0) { ret false; }
+    if (config.source == 0 || config.retry_max_age <= 0 ||
+        config.address_max_age <= 0) { ret false; }
     if (config.max_replay == 0) { ret false; }
     ret true;
 }
@@ -347,17 +350,18 @@ fun mac(manager: *Manager, generation: u64, input: *u8, output: *u8) bool {
 
 pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
     original_destination: packet.ConnectionId,
-    retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
+    retry_source: packet.ConnectionId, issued_at: time.Instant, nonce: u64,
     output: *u8, capacity: usize) Result {
     ret seal_scoped(manager, 0, purpose, peer, original_destination,
-        retry_source, issued_at_ns, nonce, output, capacity);
+        retry_source, issued_at, nonce, output, capacity);
 }
 
 pub fun seal_scoped(manager: *Manager, listener_source: u64, purpose: u8,
     peer: ip.Endpoint, original_destination: packet.ConnectionId,
-    retry_source: packet.ConnectionId, issued_at_ns: u64, nonce: u64,
+    retry_source: packet.ConnectionId, issued_at: time.Instant, nonce: u64,
     output: *u8, capacity: usize) Result {
-    var result: Result;
+    val issued_at_ns: u64 = clock.nanos(issued_at);
+    var result:       Result;
     if (!physical(manager) || !manager.initialized || manager.closing ||
         !scope_allowed(manager, listener_source)) {
         result.status = STATUS_ERROR;
@@ -512,12 +516,13 @@ fun reserve_replay(manager: *Manager, generation: u64, nonce: u64,
 }
 
 pub fun open(manager: *Manager, input: *u8, length: usize,
-    expected_peer: ip.Endpoint, now_ns: u64) Result {
-    ret open_scoped(manager, 0, input, length, expected_peer, now_ns);
+    expected_peer: ip.Endpoint, now: time.Instant) Result {
+    ret open_scoped(manager, 0, input, length, expected_peer, now);
 }
 
 pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
-    length: usize, expected_peer: ip.Endpoint, now_ns: u64) Result {
+    length: usize, expected_peer: ip.Endpoint, now: time.Instant) Result {
+    val now_ns: u64 = clock.nanos(now);
     var result: Result;
     if (!physical(manager) || !manager.initialized || manager.closing ||
         !scope_allowed(manager, listener_source)) {
@@ -578,8 +583,8 @@ pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
         ret result;
     }
     val issued_at_ns: u64 = binary.get_uint(?input[13], 8, binary.BIG);
-    var max_age_ns:   u64 = manager.config.address_max_age_ns;
-    if (input[4] == PURPOSE_RETRY) { max_age_ns = manager.config.retry_max_age_ns; }
+    var max_age_ns:   u64 = clock.span(manager.config.address_max_age);
+    if (input[4] == PURPOSE_RETRY) { max_age_ns = clock.span(manager.config.retry_max_age); }
     if (issued_at_ns == 0 || now_ns < issued_at_ns ||
         now_ns - issued_at_ns > max_age_ns ||
         issued_at_ns > (0 - 1::u64) - max_age_ns) {
@@ -736,21 +741,21 @@ fun test_id(value: u8) packet.ConnectionId {
 
 fun test_config(source: u64, max_replay: usize) Config {
     var config: Config;
-    config.source             = source;
-    config.retry_max_age_ns   = 100;
-    config.address_max_age_ns = 1000;
-    config.max_replay         = 1 << 20;
+    config.source          = source;
+    config.retry_max_age   = 100;
+    config.address_max_age = 1000;
+    config.max_replay      = 1 << 20;
     if (max_replay != 0) { config.max_replay = max_replay; }
     ret config;
 }
 
 fun test_retry(manager: *Manager, output: *u8, issued_at_ns: u64, nonce: u64) bool {
     ret seal(manager, PURPOSE_RETRY, ip.endpoint(192, 0, 2, 44, 4433), test_id(9),
-        test_id(19), issued_at_ns, nonce, output, TOKEN_SIZE).status == STATUS_OK;
+        test_id(19), clock.instant(issued_at_ns), nonce, output, TOKEN_SIZE).status == STATUS_OK;
 }
 
 fun test_open(manager: *Manager, input: *u8, now_ns: u64) Result {
-    ret open(manager, input, TOKEN_SIZE, ip.endpoint(192, 0, 2, 44, 4433), now_ns);
+    ret open(manager, input, TOKEN_SIZE, ip.endpoint(192, 0, 2, 44, 4433), clock.instant(now_ns));
 }
 
 test "quic.connection.token: retry tokens bind address and are single use" {
@@ -763,16 +768,16 @@ test "quic.connection.token: retry tokens bind address and are single use" {
     val peer:    ip.Endpoint = ip.endpoint(192, 0, 2, 10, 4433);
     var encoded: [TOKEN_SIZE]u8;
     val sealed:  Result      = seal(?manager, PURPOSE_RETRY, peer, test_id(9),
-        test_id(19), 10, 77, ?encoded[0], TOKEN_SIZE);
-    val opened: Result = open(?manager, ?encoded[0], TOKEN_SIZE, peer, 50);
+        test_id(19), clock.instant(10), 77, ?encoded[0], TOKEN_SIZE);
+    val opened: Result = open(?manager, ?encoded[0], TOKEN_SIZE, peer, clock.instant(50));
     if (sealed.status != STATUS_OK || opened.status != STATUS_OK ||
         opened.claims.original_destination.data[0] != 9 ||
         commit(?manager, opened.claims.reservation).status != STATUS_OK ||
-        open(?manager, ?encoded[0], TOKEN_SIZE, peer, 51).error != ERROR_REPLAY) { ret 1; }
+        open(?manager, ?encoded[0], TOKEN_SIZE, peer, clock.instant(51)).error != ERROR_REPLAY) { ret 1; }
     if (open(?manager, ?encoded[0], TOKEN_SIZE,
-        ip.endpoint(192, 0, 2, 10, 4434), 52).error != ERROR_ADDRESS) { ret 2; }
+        ip.endpoint(192, 0, 2, 10, 4434), clock.instant(52)).error != ERROR_ADDRESS) { ret 2; }
     encoded[60] = encoded[60] ^ 1;
-    if (open(?manager, ?encoded[0], TOKEN_SIZE, peer, 53).error != ERROR_AUTH) { ret 3; }
+    if (open(?manager, ?encoded[0], TOKEN_SIZE, peer, clock.instant(53)).error != ERROR_AUTH) { ret 3; }
     if (!begin_close(?manager) || !finish_close(?manager) ||
         !limited.clean(?memory_state)) { ret 4; }
     ct.zeroize(?key[0], 32);
@@ -791,21 +796,21 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
     val peer:   ip.Endpoint = ip.endpoint(203, 0, 113, 2, 8443);
     var first:  [TOKEN_SIZE]u8;
     var second: [TOKEN_SIZE]u8;
-    if (seal(?manager, PURPOSE_RETRY, peer, test_id(1), test_id(11), 10, 1,
+    if (seal(?manager, PURPOSE_RETRY, peer, test_id(1), test_id(11), clock.instant(10), 1,
         ?first[0], TOKEN_SIZE).status != STATUS_OK) { ret 1; }
-    val held: Result = open(?manager, ?first[0], TOKEN_SIZE, peer, 20);
+    val held: Result = open(?manager, ?first[0], TOKEN_SIZE, peer, clock.instant(20));
     if (held.status != STATUS_OK || cancel(?manager,
         held.claims.reservation).status != STATUS_OK) { ret 2; }
     if (!rotate(?manager, 5, contracts.SecretBytes{data: ?key_two[0], len: 32}) ||
-        open(?manager, ?first[0], TOKEN_SIZE, peer, 21).status != STATUS_OK) { ret 3; }
-    val old: Result = open(?manager, ?first[0], TOKEN_SIZE, peer, 21);
+        open(?manager, ?first[0], TOKEN_SIZE, peer, clock.instant(21)).status != STATUS_OK) { ret 3; }
+    val old: Result = open(?manager, ?first[0], TOKEN_SIZE, peer, clock.instant(21));
     if (old.error != ERROR_REPLAY) { ret 4; }
     var no_destination:  packet.ConnectionId;
     var no_retry_source: packet.ConnectionId;
-    if (seal(?manager, PURPOSE_ADDRESS, peer, no_destination, no_retry_source, 30, 2,
+    if (seal(?manager, PURPOSE_ADDRESS, peer, no_destination, no_retry_source, clock.instant(30), 2,
         ?second[0], TOKEN_SIZE).status != STATUS_OK ||
-        open(?manager, ?second[0], TOKEN_SIZE, peer, 1001).status != STATUS_OK ||
-        open(?manager, ?second[0], TOKEN_SIZE, peer, 1031).error != ERROR_EXPIRED) { ret 5; }
+        open(?manager, ?second[0], TOKEN_SIZE, peer, clock.instant(1001)).status != STATUS_OK ||
+        open(?manager, ?second[0], TOKEN_SIZE, peer, clock.instant(1031)).error != ERROR_EXPIRED) { ret 5; }
     ct.zeroize(?key_one[0], 32);
     ct.zeroize(?key_two[0], 32);
     ret 0;

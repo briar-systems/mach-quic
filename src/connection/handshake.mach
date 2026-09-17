@@ -4,8 +4,8 @@ use quic.connection.ownership;
 use quic.crypto.protection;
 use quic.packet.packet;
 use quic.storage.chunks;
-use quic.storage.pool;
 use quic.storage.ranges;
+use supply: quic.storage.source;
 
 use crypto.contracts;
 use crypto.encoding.keys;
@@ -182,7 +182,7 @@ pub rec Attempt {
     offset:     u64;
     length:     usize;
     generation: u64;
-    chunk:      pool.Ref;
+    chunk:      supply.Ref;
     level:      Level;
     state:      u8;
 }
@@ -192,8 +192,8 @@ pub rec Attempt {
 pub rec Storage {
     attempts:         *Attempt;
     attempt_capacity: usize;
-    chunks:           *pool.Pool;
-    account:          *pool.Account;
+    chunks:           *supply.Provider;
+    account:          *supply.Account;
 }
 
 pub rec Config {
@@ -1329,9 +1329,9 @@ fun storage_valid(adapter: *Adapter, config: Config, storage: Storage) bool {
     ret ownership.all_disjoint(?owned[0], 2);
 }
 
-fun source(adapter: *Adapter, direction: pool.Direction) ranges.Source {
-    ret ranges.Source{pool: adapter.storage.chunks, account: adapter.storage.account,
-        direction: direction};
+fun source(adapter: *Adapter, direction: supply.Lane) ranges.Source {
+    ret ranges.Source{provider: adapter.storage.chunks, account: adapter.storage.account,
+        lane: direction};
 }
 
 fun send_range_cap(adapter: *Adapter) usize {
@@ -1357,8 +1357,8 @@ fun reset_levels(adapter: *Adapter) {
 # published attempt are settled by the caller first
 fun release_level(adapter: *Adapter, index: usize) {
     val state:   *LevelState   = ?adapter.levels[index];
-    var receive: ranges.Source = source(adapter, pool.RECEIVE);
-    var send:    ranges.Source = source(adapter, pool.SEND);
+    var receive: ranges.Source = source(adapter, supply.RECEIVE);
+    var send:    ranges.Source = source(adapter, supply.SEND);
     chunks.release_all(?state.receive, ?receive);
     ranges.clear(?state.present, ?receive);
     chunks.release_all(?state.send, ?send);
@@ -1714,7 +1714,7 @@ pub fun receive(adapter: *Adapter, level: Level, offset: u64, data: *u8,
     if (start < end) {
         val skip:  usize         = (start - offset)::usize;
         val count: usize         = length - skip;
-        var from:  ranges.Source = source(adapter, pool.RECEIVE);
+        var from:  ranges.Source = source(adapter, supply.RECEIVE);
         if (chunks.conflicts(?state.receive, ?state.present, start, ?data[skip], count)) {
             ret failed(ERROR_CONFLICT);
         }
@@ -1762,7 +1762,7 @@ pub fun receive(adapter: *Adapter, level: Level, offset: u64, data: *u8,
         at                       = at + span;
         state.receive_contiguous = at;
     }
-    var from: ranges.Source = source(adapter, pool.RECEIVE);
+    var from: ranges.Source = source(adapter, supply.RECEIVE);
     ranges.drop_prefix(?state.present, contiguous, ?from);
     chunks.release_consumed(?state.receive, ?from, contiguous,
         ranges.empty(?state.present));
@@ -1935,7 +1935,7 @@ fun event_matches(adapter: *Adapter, token: EventToken) bool {
 
 fun append_crypto(adapter: *Adapter, event: *ProviderEvent) bool {
     val state: *LevelState   = ?adapter.levels[level_index(event.level)];
-    var from:  ranges.Source = source(adapter, pool.SEND);
+    var from:  ranges.Source = source(adapter, supply.SEND);
     if (state.discarded) {
         state.send_length = event.offset + event.data.length::u64;
         state.send_acked  = state.send_length;
@@ -1951,10 +1951,10 @@ fun append_crypto(adapter: *Adapter, event: *ProviderEvent) bool {
 
 fun rollback_crypto(adapter: *Adapter, event: *ProviderEvent) {
     val state: *LevelState   = ?adapter.levels[level_index(event.level)];
-    var from:  ranges.Source = source(adapter, pool.SEND);
+    var from:  ranges.Source = source(adapter, supply.SEND);
     # chunks that begin at or above the old end held only the rolled back bytes
     chunks.release_from(?state.send, ?from,
-        chunks.number_of(event.offset + pool.CHUNK::u64 - 1));
+        chunks.number_of(event.offset + supply.BYTES::u64 - 1));
     state.send_length = event.offset;
 }
 
@@ -2103,7 +2103,7 @@ fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
     attempt.generation = next_generation(attempt.generation);
     attempt.offset     = cursor;
     attempt.length     = (limit - cursor)::usize;
-    attempt.chunk      = slot.ref;
+    attempt.chunk      = slot.chunk.ref;
     attempt.level      = level;
     attempt.state      = ATTEMPT_PREPARED;
     result.status      = STATUS_OK;
@@ -2111,7 +2111,7 @@ fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
         generation: attempt.generation};
     result.level  = level;
     result.offset = cursor;
-    result.data   = View{data: ?slot.data[(cursor % pool.CHUNK::u64)::usize],
+    result.data   = View{data: ?slot.data[(cursor % supply.BYTES::u64)::usize],
         length: attempt.length};
     ret result;
 }
@@ -2141,7 +2141,7 @@ fun attempt_for(adapter: *Adapter, token: AttemptToken) *Attempt {
 fun release_attempt(adapter: *Adapter, attempt: *Attempt, acked: bool) {
     val state: *LevelState = ?adapter.levels[level_index(attempt.level)];
     if (attempt.state == ATTEMPT_PUBLISHED && attempt.length > 0) {
-        pool.settle(adapter.storage.chunks, attempt.chunk);
+        supply.settle(adapter.storage.chunks, attempt.chunk);
     }
     var start: u64 = attempt.offset;
     val end:   u64 = attempt.offset + attempt.length::u64;
@@ -2149,7 +2149,7 @@ fun release_attempt(adapter: *Adapter, attempt: *Attempt, acked: bool) {
     attempt.state      = ATTEMPT_FREE;
     attempt.generation = next_generation(attempt.generation);
     if (!acked || start >= end) { ret; }
-    var from: ranges.Source = source(adapter, pool.SEND);
+    var from: ranges.Source = source(adapter, supply.SEND);
     ranges.insert(?state.acked, start, end, ?from);
     var prefix: u64 = ranges.covered_from(?state.acked, state.send_acked);
     if (prefix > state.send_length) { prefix = state.send_length; }
@@ -2177,7 +2177,7 @@ pub fun publish(adapter: *Adapter, token: AttemptToken) Result {
         attempt.offset = attempt.offset + covered;
         attempt.length = attempt.length - covered::usize;
     }
-    if (attempt.length > 0 && !pool.retain(adapter.storage.chunks, attempt.chunk)) {
+    if (attempt.length > 0 && !supply.retain(adapter.storage.chunks, attempt.chunk)) {
         attempt.length = 0;
     }
     attempt.state = ATTEMPT_PUBLISHED;
@@ -2201,7 +2201,7 @@ fun clear_level(adapter: *Adapter, level: Level) {
         val attempt: *Attempt = ?adapter.storage.attempts[i];
         if (attempt.state != ATTEMPT_FREE && attempt.level == level) {
             if (attempt.state == ATTEMPT_PUBLISHED && attempt.length > 0) {
-                pool.settle(adapter.storage.chunks, attempt.chunk);
+                supply.settle(adapter.storage.chunks, attempt.chunk);
             }
             attempt.state      = ATTEMPT_FREE;
             attempt.generation = next_generation(attempt.generation);

@@ -341,7 +341,7 @@ published byte is copied, and the input is borrowed only for this call
 
 ```mach
 pub fun issue_address_token(listener: *Listener, peer: ip.Endpoint,
-now_ns: u64, nonce: u64, output: *u8,
+now: time.Instant, nonce: u64, output: *u8,
 capacity: usize) token.Result;
 ```
 
