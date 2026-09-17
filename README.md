@@ -428,8 +428,10 @@ configuration anchor, persistent TLS secret, and entropy context against the
 adapter and connection storage before initialization. It also validates
 the exact SNI, single ALPN, QUIC transport-parameter extension, client role, and
 QUIC version before starting. Certificate verification uses a separate Unix
-verification time, while the optional handshake deadline and all connection
-timers remain absolute monotonic nanoseconds. TLS Initial, Handshake, and
+verification time. The optional handshake deadline, every public `now`, and
+every reported timer deadline are `std.chrono.time.Instant` readings of the
+monotonic clock, and configured spans are `std.chrono.duration.Duration`.
+`quic.clock` converts them to the u64 nanoseconds the core runs on. TLS Initial, Handshake, and
 Application levels, all three TLS 1.3 suites, both directions, traffic-secret
 generations, peer parameters, early-data disposition, authentication, completion,
 and alerts map without inference. Provider failures retain their exact raw error
