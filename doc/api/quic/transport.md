@@ -499,6 +499,10 @@ pub fun complete_send[T](driver: *Driver[T], token: Token, send_status: SendStat
 count: usize, now: time.Instant) Completion;
 ```
 
+settles a datagram the caller sent through its own adapter. one that went
+out whole is SEND_SENT with its full length, even if the operation was
+cancelled or timed out afterwards, since the peer may acknowledge it
+
 ## fun cancel_send
 
 ```mach
