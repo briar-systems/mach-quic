@@ -474,8 +474,30 @@ input: *transport_api.CoreInput) transport_api.CoreResult;
 ## fun queue_new_token
 
 ```mach
-pub fun queue_new_token(core: *Core, data: *u8, length: usize) bool;
+pub fun queue_new_token(core: *Core, data: *u8, length: usize) transport_api.Status;
 ```
+
+queues a NEW_TOKEN for the client. STATUS_BLOCKED when no chunk is free: the
+connection's account is woken once one is, and the call can be repeated.
+STATUS_ERROR for a call that can never succeed as made, including while an
+earlier token is still unacknowledged
+
+## rec TakenToken
+
+```mach
+pub rec TakenToken;
+```
+
+## fun take_received_token
+
+```mach
+pub fun take_received_token(core: *Core, output: *u8,
+capacity: usize) TakenToken;
+```
+
+copies the client's received token out and releases it. STATUS_EMPTY when
+none is waiting. when `capacity` is too small nothing is released, and
+`length` says how much room the token needs
 
 ## fun probe_path
 
@@ -506,12 +528,6 @@ pub fun on_path_packet_too_big(core: *Core, value: path_api.Handle,
 reported_mtu: u16,
 quote_authenticated: bool,
 now_ns: u64) path_api.MtuResult;
-```
-
-## fun received_token
-
-```mach
-pub fun received_token(core: *Core) View;
 ```
 
 ## fun poll_handshake
