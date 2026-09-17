@@ -512,10 +512,11 @@ limits, an initialized `mach-tls` engine, and a cancellation scope to
 `init_client` or `init_server`.
 
 Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 5,488 bytes and `Connection` at 9,136. On a
+records are `assembly.Storage` at 4,464 bytes and `Connection` at 9,168. On a
 live connection that has gone idle, an established connection with no streams
 holds no chunks at all. With the six H3 control streams open and drained, it
-holds one 4,096-byte chunk of stream records. The scratch pair is paid once per
+holds one 4,096-byte chunk of stream records. A NEW_TOKEN holds a chunk only while it waits, on the server until it is
+acknowledged and on the client until the owner takes it. The scratch pair is paid once per
 pump, not per connection, and TLS engine state is not included.
 
 The reason this belongs in the library rather than in each consumer is that the

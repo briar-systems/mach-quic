@@ -172,10 +172,6 @@ pub rec Storage {
     local_extension_capacity:      usize;
     local_extension_bytes:         *u8;
     local_extension_byte_capacity: usize;
-    received_token:                *u8;
-    received_token_capacity:       usize;
-    send_token:                    *u8;
-    send_token_capacity:           usize;
     negotiation:                   negotiation_api.Storage;
     # the chunk behind the extension tables, local parameter bytes and retry
     # storage, all of which the core lets go once the handshake is confirmed.
@@ -208,13 +204,15 @@ pub rec Secrets {
 }
 
 pub rec Snapshot {
-    state:                  transport_api.ConnectionState;
-    version:                u32;
-    authenticated_packets:  usize;
-    retry_count:            usize;
-    version_restart_count:  usize;
-    active_owners:          usize;
-    received_token_length:  usize;
+    state:                 transport_api.ConnectionState;
+    version:               u32;
+    authenticated_packets: usize;
+    retry_count:           usize;
+    version_restart_count: usize;
+    active_owners:         usize;
+    received_token_length: usize;
+    # a queued NEW_TOKEN has not been acknowledged yet
+    new_token_pending:      bool;
     early_disposition:      u8;
     peer_parameters_ready:  bool;
     peer_authenticated:     bool;
@@ -308,40 +306,44 @@ pub rec Core {
     packet_numbers:             [3]u64;
     expected_packet_numbers:    [3]u64;
     ack_prepared:               [3]bool;
-    received_token_length:      usize;
-    send_token_length:          usize;
-    send_max_udp_payload:       usize;
-    idle_timeout_ns:            u64;
-    next_owner:                 u64;
-    next_owner_slot:            usize;
-    last_received_ns:           u64;
-    last_activity_ns:           u64;
-    last_now_ns:                u64;
-    close_started_ns:           u64;
-    close_deadline_ns:          u64;
-    close_error:                u64;
-    close_frame_type:           u64;
-    close_reason_length:        usize;
-    last_provider_error:        u64;
-    timer_generation:           u64;
-    timer_deadline_ns:          u64;
-    pace_deadline_ns:           u64;
-    timer_recovery_generation:  u64;
-    timer_kind:                 u8;
-    state:                      transport_api.ConnectionState;
-    early_disposition:          u8;
-    role:                       transport_api.Role;
-    authenticated_packets:      usize;
-    retry_count:                usize;
-    version_restart_count:      usize;
-    close_transmissions:        usize;
-    probes_remaining:           u8;
-    probe_space:                u8;
-    probe_owner:                u64;
-    peer_parameters_ready:      bool;
-    retry_source_present:       bool;
-    peer_authenticated:         bool;
-    handshake_confirmed:        bool;
+    # NEW_TOKEN payloads, each in a chunk held only while it is waiting: the
+    # client's until the owner takes it, the server's until it is acknowledged
+    received_token:            supply.Chunk;
+    received_token_length:     usize;
+    send_token:                supply.Chunk;
+    send_token_length:         usize;
+    send_max_udp_payload:      usize;
+    idle_timeout_ns:           u64;
+    next_owner:                u64;
+    next_owner_slot:           usize;
+    last_received_ns:          u64;
+    last_activity_ns:          u64;
+    last_now_ns:               u64;
+    close_started_ns:          u64;
+    close_deadline_ns:         u64;
+    close_error:               u64;
+    close_frame_type:          u64;
+    close_reason_length:       usize;
+    last_provider_error:       u64;
+    timer_generation:          u64;
+    timer_deadline_ns:         u64;
+    pace_deadline_ns:          u64;
+    timer_recovery_generation: u64;
+    timer_kind:                u8;
+    state:                     transport_api.ConnectionState;
+    early_disposition:         u8;
+    role:                      transport_api.Role;
+    authenticated_packets:     usize;
+    retry_count:               usize;
+    version_restart_count:     usize;
+    close_transmissions:       usize;
+    probes_remaining:          u8;
+    probe_space:               u8;
+    probe_owner:               u64;
+    peer_parameters_ready:     bool;
+    retry_source_present:      bool;
+    peer_authenticated:        bool;
+    handshake_confirmed:       bool;
     # the packet being applied was refused for storage and stays unacknowledged
     packet_refused: bool;
     # packets refused that way
@@ -576,10 +578,10 @@ fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
         core.storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
     owned[16] = ownership.bytes(core.storage.local_extension_bytes,
         core.storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
-    owned[17] = ownership.bytes(core.storage.received_token,
-        core.storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
-    owned[18] = ownership.bytes(core.storage.send_token,
-        core.storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
+    owned[17] = ownership.bytes(core.received_token.data,
+        core.received_token.bytes, ownership.ZERO_ALLOWED);
+    owned[18] = ownership.bytes(core.send_token.data, core.send_token.bytes,
+        ownership.ZERO_ALLOWED);
     owned[19] = ownership.bytes(core.storage.negotiation.retry_token,
         core.storage.negotiation.retry_token_capacity, ownership.ZERO_ALLOWED);
     owned[20] = ownership.bytes(core.storage.negotiation.retry_pseudo,
@@ -721,9 +723,7 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.frame_ack_capacity < storage.ack_handshake.capacity - 1 ||
         storage.frame_ack_capacity < storage.ack_application.capacity - 1 ||
         storage.recovery_event_capacity < storage.owner_capacity ||
-        storage.owner_capacity == 0 || !on_demand_valid(storage) ||
-        storage.received_token_capacity == 0 ||
-        storage.send_token_capacity == 0) {
+        storage.owner_capacity == 0 || !on_demand_valid(storage)) {
         ret refuse(result, INIT_STORAGE_CAPACITY);
     }
     var zero_negotiation: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
@@ -779,10 +779,8 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
     ranges[18] = ownership.bytes(storage.local_extension_bytes,
         storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
-    ranges[19] = ownership.bytes(storage.received_token,
-        storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
-    ranges[20] = ownership.bytes(storage.send_token,
-        storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[19] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
+    ranges[20] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
     ranges[21] = ownership.bytes(storage.negotiation.retry_token,
         storage.negotiation.retry_token_capacity, zero_negotiation);
     ranges[22] = ownership.bytes(storage.negotiation.retry_pseudo,
@@ -938,10 +936,8 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
     ranges[18] = ownership.bytes(storage.local_extension_bytes,
         storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
-    ranges[19] = ownership.bytes(storage.received_token,
-        storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
-    ranges[20] = ownership.bytes(storage.send_token,
-        storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[19] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
+    ranges[20] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
     var zero_negotiation: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (config.role == transport_api.SERVER) {
         zero_negotiation = ownership.ZERO_ALLOWED;
@@ -1814,12 +1810,39 @@ fun settle_flight(core: *Core) {
     }
 }
 
+fun token_source(core: *Core, lane: supply.Lane) supply.Source {
+    ret supply.Source{provider: core.storage.chunk_source.provider,
+        account: core.storage.chunk_source.account, lane: lane};
+}
+
+fun take_token(core: *Core, lane: supply.Lane, length: usize,
+    chunk: *supply.Chunk) bool {
+    var from:  supply.Source = token_source(core, lane);
+    val taken: supply.Taken  = supply.take(?from, length);
+    if (!taken.ok) { ret false; }
+    @chunk = taken.chunk;
+    ret true;
+}
+
+fun give_token(core: *Core, lane: supply.Lane, chunk: *supply.Chunk) {
+    if (chunk.data == nil) { ret; }
+    var from: supply.Source = token_source(core, lane);
+    if (supply.give(?from, @chunk)) {
+        var none: supply.Chunk;
+        @chunk = none;
+    }
+}
+
 # a dead core's chunks, given back whatever they hold
 pub fun release_chunks(core: *Core) {
     if (!core_record_valid(core)) { ret; }
-    core.owners         = nil;
-    core.owner_capacity = 0;
-    core.owners_active  = 0;
+    give_token(core, supply.RECEIVE, ?core.received_token);
+    give_token(core, supply.SEND, ?core.send_token);
+    core.received_token_length = 0;
+    core.send_token_length     = 0;
+    core.owners                = nil;
+    core.owner_capacity        = 0;
+    core.owners_active         = 0;
     chunks.give_block(source_of(core), ?core.owner_block);
     var i: usize = 0;
     for (i < 3) {
@@ -1886,6 +1909,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
     if (owner.kind == OWNER_NEW_TOKEN) {
         core.send_token_prepared = false;
         if (event.kind == recovery.EVENT_ACKED) {
+            give_token(core, supply.SEND, ?core.send_token);
             core.send_token_length = 0;
         }
         or {
@@ -2242,11 +2266,19 @@ fun process_frame(core: *Core, secrets: *Secrets,
             core.close_error = FRAME_ENCODING_ERROR;
             ret false;
         }
-        if (value.data.len > core.storage.received_token_capacity) {
-            core.close_error = INTERNAL_ERROR;
-            ret false;
+        # a token the owner has not taken yet is replaced. with no chunk the
+        # packet is refused before it is acknowledged, so the server sends it
+        # again
+        if (core.received_token.bytes < value.data.len) {
+            give_token(core, supply.RECEIVE, ?core.received_token);
+            core.received_token_length = 0;
+            if (!take_token(core, supply.RECEIVE, value.data.len,
+                ?core.received_token)) {
+                core.packet_refused = true;
+                ret true;
+            }
         }
-        memory.copy[u8](core.storage.received_token, value.data.data, value.data.len);
+        memory.copy[u8](core.received_token.data, value.data.data, value.data.len);
         core.received_token_length = value.data.len;
         ret true;
     }
@@ -2777,19 +2809,60 @@ fun receive_unsettled(core: *Core, secrets: *Secrets,
     ret core_result(core, transport_api.STATUS_OK, 0);
 }
 
-pub fun queue_new_token(core: *Core, data: *u8, length: usize) bool {
+# queues a NEW_TOKEN for the client, one at a time
+# ---
+# ret: STATUS_OK once queued. STATUS_EARLY while an earlier token is still
+#      unacknowledged: repeat once `snapshot().new_token_pending` clears.
+#      STATUS_BLOCKED when no chunk is free: repeat once the connection's
+#      account is woken. STATUS_ERROR for a call that can never succeed as made
+pub fun queue_new_token(core: *Core, data: *u8, length: usize) transport_api.Status {
     val input: ownership.Range = ownership.bytes(data, length,
         ownership.ZERO_FORBIDDEN);
     if (!core_record_valid(core) || !core.initialized || core.destroyed || core.closing ||
         core.role != transport_api.SERVER || !core.handshake_confirmed ||
-        length == 0 || !borrowed_disjoint(core, input) ||
-        length > core.storage.send_token_capacity ||
-        core.send_token_queued || core.send_token_prepared) { ret false; }
-    memory.copy[u8](core.storage.send_token, data, length);
+        length == 0 || length > supply.BYTES || !borrowed_disjoint(core, input)) {
+        ret transport_api.STATUS_ERROR;
+    }
+    if (core.send_token_queued || core.send_token_prepared ||
+        core.send_token.data != nil) { ret transport_api.STATUS_EARLY; }
+    if (!take_token(core, supply.SEND, length, ?core.send_token)) {
+        ret transport_api.STATUS_BLOCKED;
+    }
+    memory.copy[u8](core.send_token.data, data, length);
     core.send_token_length = length;
     core.send_token_queued = true;
     wake(core);
-    ret true;
+    ret transport_api.STATUS_OK;
+}
+
+pub rec TakenToken {
+    status: transport_api.Status;
+    length: usize;
+}
+
+# copies the client's received token out and releases it. STATUS_EMPTY when
+# none is waiting. when `capacity` is too small nothing is released, and
+# `length` says how much room the token needs
+pub fun take_received_token(core: *Core, output: *u8,
+    capacity: usize) TakenToken {
+    var result: TakenToken;
+    result.status = transport_api.STATUS_ERROR;
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
+        core.role != transport_api.CLIENT) { ret result; }
+    if (core.received_token_length == 0) {
+        result.status = transport_api.STATUS_EMPTY;
+        ret result;
+    }
+    result.length = core.received_token_length;
+    if (capacity < result.length || !borrowed_disjoint(core,
+        ownership.bytes(output, capacity, ownership.ZERO_FORBIDDEN))) {
+        ret result;
+    }
+    memory.copy[u8](output, core.received_token.data, result.length);
+    give_token(core, supply.RECEIVE, ?core.received_token);
+    core.received_token_length = 0;
+    result.status              = transport_api.STATUS_OK;
+    ret result;
 }
 
 pub fun probe_path(core: *Core, endpoint: path_api.Endpoint,
@@ -2881,17 +2954,6 @@ pub fun on_path_packet_too_big(core: *Core, value: path_api.Handle,
     ret updated;
 }
 
-pub fun received_token(core: *Core) View {
-    var result: View;
-    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
-        core.role != transport_api.CLIENT || core.received_token_length == 0) {
-        ret result;
-    }
-    result.data   = core.storage.received_token;
-    result.length = core.received_token_length;
-    ret result;
-}
-
 pub fun poll_handshake(core: *Core, secrets: *Secrets,
     now_ns: u64) transport_api.CoreResult {
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
@@ -2961,6 +3023,7 @@ pub fun snapshot(core: *Core) Snapshot {
     result.retry_count            = core.retry_count;
     result.version_restart_count  = core.version_restart_count;
     result.received_token_length  = core.received_token_length;
+    result.new_token_pending      = core.send_token.data != nil;
     result.early_disposition      = core.early_disposition;
     result.peer_parameters_ready  = core.peer_parameters_ready;
     result.peer_authenticated     = core.peer_authenticated;
@@ -3257,7 +3320,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
     if (application == handshake_api.APPLICATION && core.send_token_queued &&
         !core.send_token_prepared) {
         output.kind = frame.NEW_TOKEN;
-        output.data = packet.Span{data: core.storage.send_token,
+        output.data = packet.Span{data: core.send_token.data,
             len: core.send_token_length};
         owner.kind               = OWNER_NEW_TOKEN;
         owner.level              = application;

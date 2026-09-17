@@ -176,3 +176,12 @@ pub fun on_ack_packet_acked(tracker: *Tracker, pn_space: u8, largest_acknowledge
 pub fun discard_space(tracker: *Tracker, pn_space: u8) bool;
 ```
 
+## fun detach_space
+
+```mach
+pub fun detach_space(tracker: *Tracker, pn_space: u8) bool;
+```
+
+drops a discarded space's range storage so its holder can release it. the
+space is never read again
+

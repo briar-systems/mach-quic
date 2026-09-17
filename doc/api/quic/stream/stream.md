@@ -204,10 +204,19 @@ packet unacknowledged and the peer retransmits it
 ## val RECORDS_PER_BLOCK
 
 ```mach
-pub val RECORDS_PER_BLOCK:  usize = supply.BYTES / $size_of(Stream)
+pub val RECORDS_PER_BLOCK: usize = supply.BYTES / $size_of(Stream)
 ```
 
 records and attempts left unlent are taken from the pool a chunk at a time
+
+## val RECORDS_PACKED
+
+```mach
+pub val RECORDS_PACKED:     usize = 6
+```
+
+the six h3 control streams an idle connection keeps open fit in one block.
+Stream is laid out to hold this, and a test fails when it no longer does
 
 ## val RECORD_BLOCKS
 
@@ -252,6 +261,9 @@ pub rec Config;
 ```mach
 pub rec Stream;
 ```
+
+laid out so RECORDS_PACKED records fit one chunk: flags share one run and
+nothing repeats a pointer its chunk already holds
 
 ## rec Ready
 
