@@ -102,11 +102,17 @@ pub rec Config;
 pub rec Entry;
 ```
 
+a queued datagram holds its payload in one chunk from the time it is queued
+until it is published, cancelled or released
+
 ## rec Storage
 
 ```mach
 pub rec Storage;
 ```
+
+strides are the largest payload each direction accepts, at most supply.BYTES.
+payload chunks come from `chunks`, charged to `account`
 
 ## fun empty_storage
 

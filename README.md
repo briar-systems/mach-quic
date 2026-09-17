@@ -313,8 +313,11 @@ two-phase ownership boundary, not a best-effort drain.
 
 RFC 9221 DATAGRAM support is negotiated with `max_datagram_frame_size`. Disabled
 mode needs no queue storage. Enabled mode uses caller-owned fixed-capacity send and
-receive queues and copies every payload at admission, so application buffers can
-be released immediately. Send publication frees a datagram only after its frame
+receive entry tables and copies every payload at admission into a chunk from the
+connection's buffer source, so application buffers can be released immediately.
+A payload holds its chunk only until it is published, cancelled or released. When
+no chunk is available, a send reports backpressure and a received DATAGRAM is
+dropped. Send publication frees a datagram only after its frame
 has been copied into a successfully published packet. DATAGRAM frames are never
 given retransmission ownership.
 
