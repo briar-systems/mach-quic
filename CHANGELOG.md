@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-17
+
+### Security
+
+- `storage.source.open_connection` and `open`, and so `assembly.init_client` and `init_server`, now refuse a source that does not declare exactly `supply.LANES` (3) lanes, read through `buffers.source_lanes` (#180). A source that declares none is refused too, so a wrapping source must forward `fn_lanes`.
+
+### Changed
+
+- Dependencies: mach-std v5.4.0. `Source` grew by one word, so `assembly.Connection` is 9,776 bytes again.
+
 ## [0.13.0] - 2026-09-17
 
 ### Security

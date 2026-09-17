@@ -126,10 +126,9 @@ send: usize, receive: usize, tls: usize, reserve: usize) bool;
 ```
 
 opens a connection's account with quic's budgets and reservation in chunks
-and tls's budget in bytes. it supplies exactly LANES budgets, so the source
-must declare exactly LANES lanes, as pool_config does. std reads one budget
-per lane the source declares, and a source with more lanes would take
-whatever lies past these three as its budgets
+and tls's budget in bytes. it supplies exactly LANES budgets, so it refuses
+a source that does not declare exactly LANES lanes, as pool_config does,
+including one that declares none. a wrapping source must forward fn_lanes
 
 ## fun open
 
@@ -138,8 +137,8 @@ pub fun open(provider: *Provider, account: *Account, handle: u64, send: usize,
 receive: usize, reserve: usize) bool;
 ```
 
-opens an account for quic's own chunks alone, with no tls lane. the source
-must declare exactly LANES lanes, as for open_connection
+opens an account for quic's own chunks alone, with no tls lane. it refuses a
+source that does not declare exactly LANES lanes, as open_connection does
 
 ## fun close
 
