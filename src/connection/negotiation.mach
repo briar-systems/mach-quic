@@ -312,10 +312,13 @@ pub fun token(client: *Client) packet.Span {
     ret value;
 }
 
+# wipes and lets go of the retry storage, which the caller may then release
 pub fun finish(client: *Client) bool {
     if (!physical(client) || !client.initialized) { ret false; }
     memory.raw_zero(client.storage.retry_token, client.storage.retry_token_capacity);
     memory.raw_zero(client.storage.retry_pseudo, client.storage.retry_pseudo_capacity);
+    var detached: Storage;
+    client.storage            = detached;
     client.retry_token_length = 0;
     client.initialized        = false;
     ret true;

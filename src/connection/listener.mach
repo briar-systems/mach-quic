@@ -3,6 +3,7 @@
 # pending initials live in a directory that grows with what is in flight and
 # is released with the listener
 
+use quic.clock;
 use quic.connection.admission;
 use quic.connection.ownership;
 use quic.connection.token;
@@ -14,6 +15,7 @@ use quic.wire.varint;
 
 use crypto.contracts;
 use std.allocator;
+use std.chrono.time;
 use std.crypto.ct;
 use std.encoding.binary;
 use std.memory;
@@ -134,7 +136,7 @@ pub rec Request {
     peer:                     ip.Endpoint;
     data:                     *u8;
     length:                   usize;
-    now_ns:                   u64;
+    now:                      time.Instant;
     retry_source:             ConnectionId;
     retry_nonce:              u64;
     version_negotiation_bits: u8;
@@ -706,7 +708,7 @@ fun retry(listener: *Listener, request: *Request, initial: *Initial) Result {
     var encoded_token: [token.TOKEN_SIZE]u8;
     val sealed:        token.Result = token.seal_scoped(listener.token_manager,
         listener.config.source, token.PURPOSE_RETRY, request.peer, initial.destination,
-        retry_source, request.now_ns, request.retry_nonce,
+        retry_source, request.now, request.retry_nonce,
         ?encoded_token[0], token.TOKEN_SIZE);
     if (sealed.status != token.STATUS_OK) {
         result.action = ACTION_ERROR;
@@ -788,8 +790,9 @@ fun external_disjoint(listener: *Listener, value: ownership.Range) bool {
 }
 
 pub fun issue_address_token(listener: *Listener, peer: ip.Endpoint,
-    now_ns: u64, nonce: u64, output: *u8,
+    now: time.Instant, nonce: u64, output: *u8,
     capacity: usize) token.Result {
+    val now_ns: u64 = clock.nanos(now);
     if (!physical(listener) || !listener.initialized || listener.closing ||
         now_ns == 0 || nonce == 0 || capacity < token.TOKEN_SIZE ||
         !external_disjoint(listener, ownership.bytes(output, capacity,
@@ -801,7 +804,7 @@ pub fun issue_address_token(listener: *Listener, peer: ip.Endpoint,
     }
     var empty: packet.ConnectionId;
     ret token.seal_scoped(listener.token_manager, listener.config.source,
-        token.PURPOSE_ADDRESS, peer, empty, empty, now_ns, nonce, output,
+        token.PURPOSE_ADDRESS, peer, empty, empty, now, nonce, output,
         capacity);
 }
 
@@ -827,7 +830,7 @@ pub fun preflight(listener: *Listener, request: *Request) Result {
         request.length, ownership.ZERO_FORBIDDEN);
     val output_range: ownership.Range = ownership.bytes(request.output,
         request.output_capacity, ownership.ZERO_ALLOWED);
-    if (request.length < 7 || request.now_ns == 0 || !input_range.valid ||
+    if (request.length < 7 || clock.nanos(request.now) == 0 || !input_range.valid ||
         !output_range.valid || !external_disjoint(listener, input_range) ||
         !external_disjoint(listener, output_range) ||
         !ownership.disjoint(request_range, input_range) ||
@@ -893,7 +896,7 @@ pub fun preflight(listener: *Listener, request: *Request) Result {
     var has_replay:           bool                = false;
     if (initial.token_length > 0) {
         opened = token.open_scoped(listener.token_manager, listener.config.source,
-            initial.token_data, initial.token_length, request.peer, request.now_ns);
+            initial.token_data, initial.token_length, request.peer, request.now);
         if (opened.status != token.STATUS_OK) {
             result.action = ACTION_DROP;
             # a refusal to remember a valid token is load, not a bad packet
@@ -1202,10 +1205,10 @@ fun pending_of(listener: *Listener, value: Acceptance) *Pending {
 
 fun test_token_config(source: u64) token.Config {
     var config: token.Config;
-    config.source             = source;
-    config.retry_max_age_ns   = 100;
-    config.address_max_age_ns = 1000;
-    config.max_replay         = 1024;
+    config.source          = source;
+    config.retry_max_age   = 100;
+    config.address_max_age = 1000;
+    config.max_replay      = 1024;
     ret config;
 }
 
@@ -1469,7 +1472,7 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
     input[14] = 4;
     var output:  [64]u8;
     var request: Request = Request{peer: ip.endpoint(192, 0, 2, 1, 4433),
-        data:            ?input[0], length: 19, now_ns: 1, output: ?output[0],
+        data:            ?input[0], length: 19, now: clock.instant(1), output: ?output[0],
         output_capacity: 64, version_negotiation_bits: 0x35,
         retry_source:    no_connection_id(), retry_nonce: 0};
     val negotiated: Result = preflight(?listener, ?request);
@@ -1478,10 +1481,10 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
         binary.get_uint(?output[19], 4, binary.BIG)::u32 != packet.VERSION_2 ||
         binary.get_uint(?output[23], 4, binary.BIG)::u32 != packet.VERSION_1) { ret 1; }
     var address_token: [token.TOKEN_SIZE]u8;
-    val issued:        token.Result = issue_address_token(?listener, request.peer, 2,
+    val issued:        token.Result = issue_address_token(?listener, request.peer, clock.instant(2),
         7, ?address_token[0], token.TOKEN_SIZE);
     val opened: token.Result = token.open_scoped(?token_manager, 503,
-        ?address_token[0], issued.count, request.peer, 3);
+        ?address_token[0], issued.count, request.peer, clock.instant(3));
     if (issued.status != token.STATUS_OK || opened.status != token.STATUS_OK ||
         opened.claims.purpose != token.PURPOSE_ADDRESS ||
         opened.claims.original_destination.len != 0 ||
@@ -1492,7 +1495,7 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
     if (!test_initial(?initial[0], original, client_source, nil, 0)) { ret 3; }
     request.data            = ?initial[0];
     request.length          = 1200;
-    request.now_ns          = 4;
+    request.now             = clock.instant(4);
     request.output          = nil;
     request.output_capacity = 0;
     val direct_result: Result   = preflight(?listener, ?request);
@@ -1507,7 +1510,7 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
     }
     if (!test_initial(?initial[0], original, client_source,
         ?address_token[0], issued.count)) { ret 5; }
-    request.now_ns = 5;
+    request.now = clock.instant(5);
     val address_result: Result   = preflight(?listener, ?request);
     val addressed:      Accepted = commit(?listener, address_result.acceptance);
     if (address_result.action != ACTION_ACCEPT ||
@@ -1548,7 +1551,7 @@ test "quic.connection.listener: retry identity, replay, cancellation, and admiss
     if (!test_initial(?initial[0], original, client_source, nil, 0)) { ret 1; }
     val peer:    ip.Endpoint = ip.endpoint(198, 51, 100, 8, 55000);
     var request: Request     = Request{peer: peer, data: ?initial[0], length: 1200,
-        now_ns:                   10, retry_source: no_connection_id(), retry_nonce: 99,
+        now:                      clock.instant(10), retry_source: no_connection_id(), retry_nonce: 99,
         output:                   ?response[0], output_capacity: 256,
         version_negotiation_bits: 0};
     if (!set_retry_source(?request, ?retry_source.data[0],
@@ -1586,8 +1589,8 @@ test "quic.connection.listener: retry identity, replay, cancellation, and admiss
     var retried_initial: [1200]u8;
     if (!test_initial(?retried_initial[0], retry_source, client_source,
         retry_packet.token.data, retry_packet.token.len)) { ret 5; }
-    request.data   = ?retried_initial[0];
-    request.now_ns = 20;
+    request.data = ?retried_initial[0];
+    request.now  = clock.instant(20);
     val reserved: Result = preflight(?listener, ?request);
     if (reserved.action != ACTION_ACCEPT ||
         admission.snapshot(?admission_manager).reserved != 1 ||
@@ -1632,7 +1635,7 @@ test "quic.connection.listener: saturated admission precedes token authenticatio
     val client_source: packet.ConnectionId = test_id(21);
     var encoded_token: [token.TOKEN_SIZE]u8;
     if (token.seal_scoped(?token_manager, listener.config.source,
-        token.PURPOSE_RETRY, peer, original, retry_source, 10, 77,
+        token.PURPOSE_RETRY, peer, original, retry_source, clock.instant(10), 77,
         ?encoded_token[0], token.TOKEN_SIZE).status !=
         token.STATUS_OK) { ret 2; }
     var input: [1200]u8;
@@ -1646,7 +1649,7 @@ test "quic.connection.listener: saturated admission precedes token authenticatio
         admission.STATUS_OK) { ret 4; }
     val replay_generation: u64     = token_manager.generation;
     var request:           Request = Request{peer: peer, data: ?input[0], length: 1200,
-        now_ns:                   20, output: nil, output_capacity: 0,
+        now:                      clock.instant(20), output: nil, output_capacity: 0,
         retry_source:             no_connection_id(), retry_nonce: 0,
         version_negotiation_bits: 0};
     val blocked: Result = preflight(?listener, ?request);
@@ -1728,13 +1731,13 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
     val client_source: packet.ConnectionId = test_id(81);
     var encoded_token: [token.TOKEN_SIZE]u8;
     if (token.seal_scoped(?token_manager, listener.config.source,
-        token.PURPOSE_RETRY, peer, original, retry_source, 10, 91,
+        token.PURPOSE_RETRY, peer, original, retry_source, clock.instant(10), 91,
         ?encoded_token[0], token.TOKEN_SIZE).status != token.STATUS_OK) { ret 2; }
     var input: [1200]u8;
     if (!test_initial(?input[0], retry_source, client_source,
         ?encoded_token[0], token.TOKEN_SIZE)) { ret 2; }
     var request: Request = Request{peer: peer, data: ?input[0], length: 1200,
-        now_ns:                   20, output: nil, output_capacity: 0,
+        now:                      clock.instant(20), output: nil, output_capacity: 0,
         retry_source:             no_connection_id(), retry_nonce: 0,
         version_negotiation_bits: 0};
     val reserved: Result = preflight(?listener, ?request);
@@ -2041,7 +2044,7 @@ fun harness_request(input: *u8, peer: u8, now_ns: u64) Request {
     request.peer                     = ip.endpoint(198, 18, 0, peer, 443);
     request.data                     = input;
     request.length                   = 1200;
-    request.now_ns                   = now_ns;
+    request.now                      = clock.instant(now_ns);
     request.retry_source             = no_connection_id();
     request.retry_nonce              = 0;
     request.version_negotiation_bits = 0;
@@ -2153,7 +2156,7 @@ test "quic.connection.listener: a refused replay growth blocks and releases the 
     var i:      usize       = 0;
     for (i < 9) {
         if (token.seal_scoped(?harness.token_manager, harness.listener.config.source,
-            token.PURPOSE_RETRY, peer, test_id(1), test_id(41), 10, (i + 1)::u64,
+            token.PURPOSE_RETRY, peer, test_id(1), test_id(41), clock.instant(10), (i + 1)::u64,
             ?tokens[i][0], token.TOKEN_SIZE).status != token.STATUS_OK ||
             !test_initial(?inputs[i][0], test_id(41), test_id(21), ?tokens[i][0],
             token.TOKEN_SIZE)) { ret 2; }
@@ -2195,10 +2198,10 @@ test "quic.connection.listener: an acceptance whose retry token expires before c
     var first: [token.TOKEN_SIZE]u8;
     var later: [token.TOKEN_SIZE]u8;
     if (token.seal_scoped(?harness.token_manager, harness.listener.config.source,
-        token.PURPOSE_RETRY, peer, test_id(1), test_id(41), 10, 1, ?first[0],
+        token.PURPOSE_RETRY, peer, test_id(1), test_id(41), clock.instant(10), 1, ?first[0],
         token.TOKEN_SIZE).status != token.STATUS_OK ||
         token.seal_scoped(?harness.token_manager, harness.listener.config.source,
-        token.PURPOSE_RETRY, peer, test_id(1), test_id(41), 150, 2, ?later[0],
+        token.PURPOSE_RETRY, peer, test_id(1), test_id(41), clock.instant(150), 2, ?later[0],
         token.TOKEN_SIZE).status != token.STATUS_OK) { ret 2; }
     var first_input: [1200]u8;
     var later_input: [1200]u8;

@@ -313,8 +313,11 @@ two-phase ownership boundary, not a best-effort drain.
 
 RFC 9221 DATAGRAM support is negotiated with `max_datagram_frame_size`. Disabled
 mode needs no queue storage. Enabled mode uses caller-owned fixed-capacity send and
-receive queues and copies every payload at admission, so application buffers can
-be released immediately. Send publication frees a datagram only after its frame
+receive entry tables and copies every payload at admission into a chunk from the
+connection's buffer source, so application buffers can be released immediately.
+A payload holds its chunk only until it is published, cancelled or released. When
+no chunk is available, a send reports backpressure and a received DATAGRAM is
+dropped. Send publication frees a datagram only after its frame
 has been copied into a successfully published packet. DATAGRAM frames are never
 given retransmission ownership.
 
@@ -428,8 +431,10 @@ configuration anchor, persistent TLS secret, and entropy context against the
 adapter and connection storage before initialization. It also validates
 the exact SNI, single ALPN, QUIC transport-parameter extension, client role, and
 QUIC version before starting. Certificate verification uses a separate Unix
-verification time, while the optional handshake deadline and all connection
-timers remain absolute monotonic nanoseconds. TLS Initial, Handshake, and
+verification time. The optional handshake deadline, every public `now`, and
+every reported timer deadline are `std.chrono.time.Instant` readings of the
+monotonic clock, and configured spans are `std.chrono.duration.Duration`.
+`quic.clock` converts them to the u64 nanoseconds the core runs on. TLS Initial, Handshake, and
 Application levels, all three TLS 1.3 suites, both directions, traffic-secret
 generations, peer parameters, early-data disposition, authentication, completion,
 and alerts map without inference. Provider failures retain their exact raw error
@@ -491,13 +496,54 @@ on its implementation criteria with that one left explicitly undemonstrated.
 
 `connection.assembly` builds a connection and every manager it owns from one
 `Config`. `Connection` is the small secret-welded control record. The caller
-separately owns a public `Storage` whose fixed arrays contain every public
-backing buffer, plus a secret-welded `SecretStorage` whose fixed arrays contain
-the two secret plaintext buffers. Their types enforce every required capacity.
-Both records remain at fixed addresses until release succeeds, and their fresh
-`source` and `leased` headers must be clear on first use. The consumer also
-supplies identities, endpoints, limits, an initialized `mach-tls` engine, and a
-cancellation scope to `init_client` or `init_server`.
+separately owns a public `Storage` holding the connection's fixed state, a
+`std.memory.buffers.Source` for everything taken on demand, and a per-pump
+scratch pair: a public `Scratch` with the per-call packet and event buffers,
+and a secret-welded `SecretScratch` with the two secret plaintext buffers. One
+pair serves every connection on a pump. A connection binds it at init and
+lends it to the core around each call. A call that finds the pair in use,
+through reentry or from another thread, is refused with `ERROR_STATE` before
+the core runs, and the core leaves no secret byte in the pair when a call
+returns. Their types enforce every required capacity. `Storage` and the pair
+remain at fixed addresses until release succeeds, a fresh `Storage` must have
+clear `source` and `leased` headers, and the pair must outlive every
+connection bound to it. The consumer also supplies identities, endpoints,
+limits, a `mach-tls` engine, and a cancellation scope to `init_client` or
+`init_server`.
+
+The engine's memory is the connection's own. Before `init_client` or
+`init_server`, the caller takes `assembly.tls_lease(c)` and initializes the
+engine with it. The lease points into `c`, so `c` must stay at its address
+from then until `release_closed` succeeds. Init opens the connection's one
+account on the source and refuses an engine holding any other lease with
+`STAGE_HANDSHAKE`. tls charges that account on a third lane,
+`supply.TLS`, bounded by `Config.tls_budget` (64 KiB by default). The source
+must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes.
+When tls finds no memory it consumes nothing. The connection stops polling
+it until the source wakes the account's handle, and the caller passes that
+wake to `transport.storage_ready`, which retries the same call. Once the
+handshake has handed everything over, the adapter moves tls's established
+core out of the engine and the engine holds no memory.
+
+Memory per connection is measured two ways, and a test pins both. The fixed
+records are `assembly.Storage` at 4,464 bytes and `Connection` at 9,776,
+which includes tls's established core. On a live connection that has gone
+idle, an established connection with no streams holds no chunks at all, and
+tls holds nothing on its lane. With the six H3 control streams open and drained, it
+holds one 4,096-byte chunk of stream records. While 64 KiB crosses one stream, the sending end
+holds at most five chunks and the receiving end five (four on the send lane,
+one on the receive lane), however large the transfer: a record block, the
+owner table, one packet history and the attempt block while packets are in
+flight, plus one data chunk, since a stream buffers at most one chunk of
+unacknowledged bytes. A NEW_TOKEN holds a chunk only while it waits, on the server until it is
+acknowledged and on the client until the owner takes it. The scratch pair is paid once per
+pump, not per connection. During the handshake the dialer holds at most five
+send-lane chunks and 8,704 tls bytes after any call, and the listener six and
+18,944. The caller's `mach-tls` handshake record, 6,416 bytes for a client and
+6,216 for a server, must stay put until `assembly.tls_released(c)`. From then
+the connection never refers to it again and it may be initialized for another
+connection, so an owner needs one per connection in handshake, not one per
+connection.
 
 The reason this belongs in the library rather than in each consumer is that the
 core requires twelve exact equalities between the encoded local transport
@@ -670,7 +716,8 @@ remain stale.
 
 Initialization has the same ownership boundary. A failed `init_client` or
 `init_server` retires any route that was staged internally, releases core leases,
-detaches the handshake adapter without destroying the caller's TLS provider, and
+detaches the handshake adapter, destroys the caller's TLS engine only if it was
+started (its memory is on the account being closed), and
 closes every manager initialized by that attempt. If rollback retains ownership,
 `InitResult.cleanup_retained` is true and both backing leases remain held.
 `release_closed` retries that unpublished initialization cleanup without requiring

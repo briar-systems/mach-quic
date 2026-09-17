@@ -1,0 +1,55 @@
+# the boundary between std's monotonic clock and quic's internal time
+#
+# callers hand quic `time.Instant` readings and `duration.Duration` spans, and
+# quic hands back instants. inside, time is u64 nanoseconds on the same clock,
+# which keeps the core's arithmetic plain and its records small
+
+use std.chrono.duration;
+use std.chrono.time;
+use std.types.bool.bool;
+
+val NANOS: u64 = 1000000000;
+
+# nanoseconds since the clock's origin. a reading before it counts as 0, and one
+# past the u64 range saturates
+pub fun nanos(at: time.Instant) u64 {
+    if (at.sec < 0 || (at.sec == 0 && at.nsec <= 0)) { ret 0; }
+    val seconds: u64 = at.sec::u64;
+    if (seconds > (0 - 1::u64) / NANOS) { ret 0 - 1::u64; }
+    val whole: u64 = seconds * NANOS;
+    var part:  u64 = 0;
+    if (at.nsec > 0)                 { part = at.nsec::u64; }
+    if (part > (0 - 1::u64) - whole) { ret 0 - 1::u64; }
+    ret whole + part;
+}
+
+# the instant `value` nanoseconds after the clock's origin
+pub fun instant(value: u64) time.Instant {
+    ret time.Instant{sec: (value / NANOS)::i64, nsec: (value % NANOS)::i64};
+}
+
+# a span in nanoseconds, with a negative span counting as none
+pub fun span(value: duration.Duration) u64 {
+    if (value < 0) { ret 0; }
+    ret value::u64;
+}
+
+# `value` nanoseconds as a span, saturating at the largest one
+pub fun duration_of(value: u64) duration.Duration {
+    if (value > 0x7fffffffffffffff) { ret 0x7fffffffffffffff; }
+    ret value::duration.Duration;
+}
+
+pub fun same(left: time.Instant, right: time.Instant) bool {
+    ret nanos(left) == nanos(right);
+}
+
+test "quic.clock: instants and spans round trip through nanoseconds" {
+    val at: time.Instant = time.Instant{sec: 3, nsec: 250};
+    if (nanos(at) != 3000000250 || !same(instant(nanos(at)), at)) { ret 1; }
+    if (nanos(time.Instant{sec: -1, nsec: 5}) != 0 ||
+        nanos(time.Instant{sec: 0x7fffffffffffffff, nsec: 0}) != 0 - 1::u64) { ret 2; }
+    if (span(-5) != 0 || span(7 * duration.MILLISECOND) != 7000000 ||
+        duration_of(0 - 1::u64) != 0x7fffffffffffffff) { ret 3; }
+    ret 0;
+}

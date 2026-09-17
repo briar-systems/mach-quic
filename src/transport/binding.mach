@@ -8,6 +8,7 @@
 
 use core_api: quic.connection.core;
 use quic.connection.ownership;
+use quic.connection.scratch;
 use transport_api: quic.transport;
 
 use std.sync.atomic;
@@ -47,13 +48,15 @@ rec RoutingEntry {
     prepared: bool;
 }
 
-# holds only the pair of pointers the core's operations take. it is the
-# protocol context, so it must stay disjoint from the driver record the
-# transport validates it against
+# holds the pointers the core's operations take and the pump's scratch pair,
+# lent to the core around each call. it is the protocol context, so it must
+# stay disjoint from the driver record the transport validates it against
 pub rec Binding {
     anchor:         u64;
     core:           *core_api.Core;
     secrets:        *core_api.Secrets;
+    scratch:        *scratch.Scratch;
+    secret_scratch: *scratch.SecretScratch;
     routing:        [1]RoutingEntry;
     routing_source: u64;
     initialized:    bool;
@@ -84,7 +87,35 @@ fun retire_routes(binding: *Binding) {
 
 fun bound(binding: *Binding) bool {
     ret binding != nil && binding.initialized && binding.core != nil &&
-        binding.secrets != nil;
+        binding.secrets != nil && binding.scratch != nil &&
+        binding.secret_scratch != nil;
+}
+
+fun lend(binding: *Binding) bool {
+    ret scratch.lend(binding.scratch, binding.secret_scratch,
+        binding.routing_source);
+}
+
+fun give_back(binding: *Binding) {
+    scratch.give_back(binding.scratch, binding.secret_scratch,
+        binding.routing_source);
+}
+
+# the scratch is in use by another call: nothing ran and nothing changed
+fun busy(binding: *Binding) transport_api.CoreResult {
+    var value: transport_api.CoreResult;
+    value.status  = transport_api.STATUS_ERROR;
+    value.state   = binding.core.state;
+    value.refusal = transport_api.ERROR_STATE;
+    ret value;
+}
+
+fun busy_datagram(binding: *Binding) transport_api.CoreDatagram {
+    var value: transport_api.CoreDatagram;
+    value.status  = transport_api.STATUS_ERROR;
+    value.state   = binding.core.state;
+    value.refusal = transport_api.ERROR_STATE;
+    ret value;
 }
 
 fun refused() transport_api.CoreResult {
@@ -114,38 +145,56 @@ fun binding_range(binding: *Binding) ownership.Range {
 }
 
 fun on_receive(binding: *Binding,
-    input: *transport_api.Datagram) transport_api.CoreResult {
+    input: *transport_api.CoreInput) transport_api.CoreResult {
     if (!bound(binding)) { ret refused(); }
-    ret core_api.receive(binding.core, binding.secrets, input);
+    if (!lend(binding))  { ret busy(binding); }
+    val result: transport_api.CoreResult = core_api.receive(binding.core,
+        binding.secrets, input);
+    give_back(binding);
+    ret result;
 }
 
 fun on_timeout(binding: *Binding, generation: u64,
     now_ns: u64) transport_api.CoreResult {
     if (!bound(binding)) { ret refused(); }
-    ret core_api.on_timeout(binding.core, binding.secrets, generation, now_ns);
+    if (!lend(binding))  { ret busy(binding); }
+    val result: transport_api.CoreResult = core_api.on_timeout(binding.core,
+        binding.secrets, generation, now_ns);
+    give_back(binding);
+    ret result;
 }
 
 fun on_generate(binding: *Binding, output: *u8, capacity: usize,
     now_ns: u64) transport_api.CoreDatagram {
     if (!bound(binding)) { ret refused_datagram(); }
-    ret core_api.generate(binding.core, binding.secrets, output, capacity,
-        now_ns);
+    if (!lend(binding))  { ret busy_datagram(binding); }
+    val result: transport_api.CoreDatagram = core_api.generate(binding.core,
+        binding.secrets, output, capacity, now_ns);
+    give_back(binding);
+    ret result;
 }
 
 fun on_complete_send(binding: *Binding, owner: u64,
     status: transport_api.SendStatus, count: usize,
     now_ns: u64) transport_api.CoreResult {
     if (!bound(binding)) { ret refused(); }
-    ret core_api.complete_send(binding.core, binding.secrets, owner, status,
-        count, now_ns);
+    if (!lend(binding))  { ret busy(binding); }
+    val result: transport_api.CoreResult = core_api.complete_send(binding.core,
+        binding.secrets, owner, status, count, now_ns);
+    give_back(binding);
+    ret result;
 }
 
 fun on_begin_close(binding: *Binding, abortive: bool, application_error: u64,
     reason: *u8, reason_length: usize,
     now_ns: u64) transport_api.CoreResult {
     if (!bound(binding)) { ret refused(); }
-    ret core_api.begin_close(binding.core, binding.secrets, abortive,
-        application_error, reason, reason_length, now_ns);
+    if (!lend(binding))  { ret busy(binding); }
+    val result: transport_api.CoreResult = core_api.begin_close(binding.core,
+        binding.secrets, abortive, application_error, reason, reason_length,
+        now_ns);
+    give_back(binding);
+    ret result;
 }
 
 fun on_close_ready(binding: *Binding) bool {
@@ -154,10 +203,16 @@ fun on_close_ready(binding: *Binding) bool {
 }
 
 fun on_finish_close(binding: *Binding) bool {
-    if (!bound(binding))                                       { ret false; }
-    if (!core_api.finish_close(binding.core, binding.secrets)) { ret false; }
+    if (!bound(binding) || !lend(binding)) { ret false; }
+    val finished: bool = core_api.finish_close(binding.core, binding.secrets);
+    give_back(binding);
+    if (!finished) { ret false; }
     retire_routes(binding);
     ret true;
+}
+
+fun on_storage_ready(binding: *Binding) {
+    if (bound(binding)) { core_api.storage_ready(binding.core); }
 }
 
 fun on_timer(binding: *Binding) transport_api.CoreTimer {
@@ -166,16 +221,21 @@ fun on_timer(binding: *Binding) transport_api.CoreTimer {
     ret core_api.timer(binding.core);
 }
 
-# binds an already-initialized core. the core has validated its own ownership
-# set by then, so the binding only refuses a core that is not live
+# binds an already-initialized core and the scratch pair its storage points
+# into. the core has validated its own ownership set by then, so the binding
+# only refuses a core that is not live
 pub fun bind(binding: *Binding, core: *core_api.Core,
-    secrets: *core_api.Secrets) bool {
-    if (binding == nil || core == nil || secrets == nil || binding.initialized ||
-        !core.initialized || core.destroyed || !secrets.initialized ||
-        secrets.destroyed) { ret false; }
+    secrets: *core_api.Secrets, public: *scratch.Scratch,
+    secret: *scratch.SecretScratch) bool {
+    if (binding == nil || core == nil || secrets == nil || public == nil ||
+        secret == nil || binding.initialized || !core.initialized ||
+        core.destroyed || !secrets.initialized || secrets.destroyed ||
+        core.config.source == 0) { ret false; }
     binding.anchor         = 1;
     binding.core           = core;
     binding.secrets        = secrets;
+    binding.scratch        = public;
+    binding.secret_scratch = secret;
     binding.routing_source = core.config.source;
     binding.initialized    = true;
     binding.released       = false;
@@ -223,6 +283,8 @@ pub fun abandon_initialization(binding: *Binding) bool {
     binding.anchor         = 0;
     binding.core           = nil;
     binding.secrets        = nil;
+    binding.scratch        = nil;
+    binding.secret_scratch = nil;
     binding.routing_source = 0;
     binding.initialized    = false;
     binding.released       = true;
@@ -295,6 +357,8 @@ pub fun release_closed(binding: *Binding) bool {
     binding.anchor         = 0;
     binding.core           = nil;
     binding.secrets        = nil;
+    binding.scratch        = nil;
+    binding.secret_scratch = nil;
     binding.routing_source = 0;
     binding.initialized    = false;
     binding.released       = true;
@@ -366,5 +430,6 @@ pub fun protocol(binding: *Binding) transport_api.Protocol[Binding] {
     value.close_ready   = on_close_ready;
     value.finish_close  = on_finish_close;
     value.timer         = on_timer;
+    value.storage_ready = on_storage_ready;
     ret value;
 }

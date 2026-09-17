@@ -27,7 +27,7 @@ pub val ADDRESS_IPV6: u8 = 2
 ## val PATH_FREE
 
 ```mach
-pub val PATH_FREE: u8 = 0
+pub val PATH_FREE:       u8 = 0
 ```
 
 ## val PATH_VALIDATING
@@ -39,19 +39,19 @@ pub val PATH_VALIDATING: u8 = 1
 ## val PATH_VALIDATED
 
 ```mach
-pub val PATH_VALIDATED: u8 = 2
+pub val PATH_VALIDATED:  u8 = 2
 ```
 
 ## val PATH_FAILED
 
 ```mach
-pub val PATH_FAILED: u8 = 3
+pub val PATH_FAILED:     u8 = 3
 ```
 
 ## val CHALLENGE_QUEUED
 
 ```mach
-pub val CHALLENGE_QUEUED: u8 = 1
+pub val CHALLENGE_QUEUED:   u8 = 1
 ```
 
 ## val CHALLENGE_PREPARED
@@ -63,13 +63,13 @@ pub val CHALLENGE_PREPARED: u8 = 2
 ## val CHALLENGE_SENT
 
 ```mach
-pub val CHALLENGE_SENT: u8 = 3
+pub val CHALLENGE_SENT:     u8 = 3
 ```
 
 ## val RESPONSE_QUEUED
 
 ```mach
-pub val RESPONSE_QUEUED: u8 = 1
+pub val RESPONSE_QUEUED:   u8 = 1
 ```
 
 ## val RESPONSE_PREPARED
@@ -81,13 +81,13 @@ pub val RESPONSE_PREPARED: u8 = 2
 ## val MIGRATION_NONE
 
 ```mach
-pub val MIGRATION_NONE: u8 = 0
+pub val MIGRATION_NONE:      u8 = 0
 ```
 
 ## val MIGRATION_PEER
 
 ```mach
-pub val MIGRATION_PEER: u8 = 1
+pub val MIGRATION_PEER:      u8 = 1
 ```
 
 ## val MIGRATION_REBINDING
@@ -99,7 +99,7 @@ pub val MIGRATION_REBINDING: u8 = 2
 ## val MIGRATION_ACTIVE
 
 ```mach
-pub val MIGRATION_ACTIVE: u8 = 3
+pub val MIGRATION_ACTIVE:    u8 = 3
 ```
 
 ## val MIGRATION_PREFERRED
@@ -111,7 +111,7 @@ pub val MIGRATION_PREFERRED: u8 = 4
 ## val MIGRATION_REVERTED
 
 ```mach
-pub val MIGRATION_REVERTED: u8 = 5
+pub val MIGRATION_REVERTED:  u8 = 5
 ```
 
 ## val MTU_TERMINAL_ACKED
@@ -123,7 +123,7 @@ pub val MTU_TERMINAL_ACKED: u8 = 1
 ## val MTU_TERMINAL_LOST
 
 ```mach
-pub val MTU_TERMINAL_LOST: u8 = 2
+pub val MTU_TERMINAL_LOST:  u8 = 2
 ```
 
 ## val VALIDATION_PATH
@@ -135,19 +135,19 @@ pub val VALIDATION_PATH: u8 = 1
 ## val VALIDATION_MTU
 
 ```mach
-pub val VALIDATION_MTU: u8 = 2
+pub val VALIDATION_MTU:  u8 = 2
 ```
 
 ## val STATUS_OK
 
 ```mach
-pub val STATUS_OK: u8 = 1
+pub val STATUS_OK:      u8 = 1
 ```
 
 ## val STATUS_EMPTY
 
 ```mach
-pub val STATUS_EMPTY: u8 = 2
+pub val STATUS_EMPTY:   u8 = 2
 ```
 
 ## val STATUS_BLOCKED
@@ -165,73 +165,73 @@ pub val STATUS_DROPPED: u8 = 4
 ## val STATUS_STALE
 
 ```mach
-pub val STATUS_STALE: u8 = 5
+pub val STATUS_STALE:   u8 = 5
 ```
 
 ## val STATUS_CLOSED
 
 ```mach
-pub val STATUS_CLOSED: u8 = 6
+pub val STATUS_CLOSED:  u8 = 6
 ```
 
 ## val STATUS_ERROR
 
 ```mach
-pub val STATUS_ERROR: u8 = 7
+pub val STATUS_ERROR:   u8 = 7
 ```
 
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: u8 = 0
+pub val ERROR_NONE:               u8 = 0
 ```
 
 ## val ERROR_STATE
 
 ```mach
-pub val ERROR_STATE: u8 = 1
+pub val ERROR_STATE:              u8 = 1
 ```
 
 ## val ERROR_CONFIG
 
 ```mach
-pub val ERROR_CONFIG: u8 = 2
+pub val ERROR_CONFIG:             u8 = 2
 ```
 
 ## val ERROR_CAPACITY
 
 ```mach
-pub val ERROR_CAPACITY: u8 = 3
+pub val ERROR_CAPACITY:           u8 = 3
 ```
 
 ## val ERROR_ADDRESS
 
 ```mach
-pub val ERROR_ADDRESS: u8 = 4
+pub val ERROR_ADDRESS:            u8 = 4
 ```
 
 ## val ERROR_TOKEN
 
 ```mach
-pub val ERROR_TOKEN: u8 = 5
+pub val ERROR_TOKEN:              u8 = 5
 ```
 
 ## val ERROR_TIME
 
 ```mach
-pub val ERROR_TIME: u8 = 6
+pub val ERROR_TIME:               u8 = 6
 ```
 
 ## val ERROR_OVERFLOW
 
 ```mach
-pub val ERROR_OVERFLOW: u8 = 7
+pub val ERROR_OVERFLOW:           u8 = 7
 ```
 
 ## val ERROR_AMPLIFICATION
 
 ```mach
-pub val ERROR_AMPLIFICATION: u8 = 8
+pub val ERROR_AMPLIFICATION:      u8 = 8
 ```
 
 ## val ERROR_MIGRATION_DISABLED
@@ -243,19 +243,19 @@ pub val ERROR_MIGRATION_DISABLED: u8 = 9
 ## val ERROR_HANDSHAKE
 
 ```mach
-pub val ERROR_HANDSHAKE: u8 = 10
+pub val ERROR_HANDSHAKE:          u8 = 10
 ```
 
 ## val ERROR_MTU
 
 ```mach
-pub val ERROR_MTU: u8 = 11
+pub val ERROR_MTU:                u8 = 11
 ```
 
 ## val ERROR_DUPLICATE
 
 ```mach
-pub val ERROR_DUPLICATE: u8 = 12
+pub val ERROR_DUPLICATE:          u8 = 12
 ```
 
 ## rec Address
@@ -598,6 +598,15 @@ pub fun publish_send(manager: *Manager, token: SendToken) OperationResult;
 pub fun on_timeout(manager: *Manager, now_ns: u64) TimeoutResult;
 ```
 
+## fun limit_mtu
+
+```mach
+pub fun limit_mtu(manager: *Manager, maximum: u16) OperationResult;
+```
+
+lowers the send ceiling once the peer's limit is known. every path's search
+ceiling follows it, so no probe is ever prepared above the peer's limit
+
 ## fun prepare_mtu_probe
 
 ```mach
@@ -709,6 +718,13 @@ pub fun begin_close(manager: *Manager) OperationResult;
 
 ```mach
 pub fun finish_close(manager: *Manager) OperationResult;
+```
+
+## fun limit_mtu_scoped
+
+```mach
+pub fun limit_mtu_scoped(manager: *Manager, source: u64,
+maximum: u16) OperationResult;
 ```
 
 ## fun confirm_handshake_scoped

@@ -3,49 +3,49 @@
 ## val NO_ERROR
 
 ```mach
-pub val NO_ERROR: u64 = 0x00
+pub val NO_ERROR:                  u64 = 0x00
 ```
 
 ## val INTERNAL_ERROR
 
 ```mach
-pub val INTERNAL_ERROR: u64 = 0x01
+pub val INTERNAL_ERROR:            u64 = 0x01
 ```
 
 ## val CONNECTION_REFUSED
 
 ```mach
-pub val CONNECTION_REFUSED: u64 = 0x02
+pub val CONNECTION_REFUSED:        u64 = 0x02
 ```
 
 ## val FLOW_CONTROL_ERROR
 
 ```mach
-pub val FLOW_CONTROL_ERROR: u64 = 0x03
+pub val FLOW_CONTROL_ERROR:        u64 = 0x03
 ```
 
 ## val STREAM_LIMIT_ERROR
 
 ```mach
-pub val STREAM_LIMIT_ERROR: u64 = 0x04
+pub val STREAM_LIMIT_ERROR:        u64 = 0x04
 ```
 
 ## val STREAM_STATE_ERROR
 
 ```mach
-pub val STREAM_STATE_ERROR: u64 = 0x05
+pub val STREAM_STATE_ERROR:        u64 = 0x05
 ```
 
 ## val FINAL_SIZE_ERROR
 
 ```mach
-pub val FINAL_SIZE_ERROR: u64 = 0x06
+pub val FINAL_SIZE_ERROR:          u64 = 0x06
 ```
 
 ## val FRAME_ENCODING_ERROR
 
 ```mach
-pub val FRAME_ENCODING_ERROR: u64 = 0x07
+pub val FRAME_ENCODING_ERROR:      u64 = 0x07
 ```
 
 ## val TRANSPORT_PARAMETER_ERROR
@@ -63,49 +63,49 @@ pub val CONNECTION_ID_LIMIT_ERROR: u64 = 0x09
 ## val PROTOCOL_VIOLATION
 
 ```mach
-pub val PROTOCOL_VIOLATION: u64 = 0x0a
+pub val PROTOCOL_VIOLATION:        u64 = 0x0a
 ```
 
 ## val INVALID_TOKEN
 
 ```mach
-pub val INVALID_TOKEN: u64 = 0x0b
+pub val INVALID_TOKEN:             u64 = 0x0b
 ```
 
 ## val APPLICATION_ERROR
 
 ```mach
-pub val APPLICATION_ERROR: u64 = 0x0c
+pub val APPLICATION_ERROR:         u64 = 0x0c
 ```
 
 ## val CRYPTO_BUFFER_EXCEEDED
 
 ```mach
-pub val CRYPTO_BUFFER_EXCEEDED: u64 = 0x0d
+pub val CRYPTO_BUFFER_EXCEEDED:    u64 = 0x0d
 ```
 
 ## val KEY_UPDATE_ERROR
 
 ```mach
-pub val KEY_UPDATE_ERROR: u64 = 0x0e
+pub val KEY_UPDATE_ERROR:          u64 = 0x0e
 ```
 
 ## val AEAD_LIMIT_REACHED
 
 ```mach
-pub val AEAD_LIMIT_REACHED: u64 = 0x0f
+pub val AEAD_LIMIT_REACHED:        u64 = 0x0f
 ```
 
 ## val NO_VIABLE_PATH
 
 ```mach
-pub val NO_VIABLE_PATH: u64 = 0x10
+pub val NO_VIABLE_PATH:            u64 = 0x10
 ```
 
 ## val CRYPTO_ERROR_BASE
 
 ```mach
-pub val CRYPTO_ERROR_BASE: u64 = 0x100
+pub val CRYPTO_ERROR_BASE:         u64 = 0x100
 ```
 
 ## def OwnerKind
@@ -117,31 +117,31 @@ pub def OwnerKind: u8
 ## val OWNER_NONE
 
 ```mach
-pub val OWNER_NONE: OwnerKind = 0
+pub val OWNER_NONE:           OwnerKind = 0
 ```
 
 ## val OWNER_ACK
 
 ```mach
-pub val OWNER_ACK: OwnerKind = 1
+pub val OWNER_ACK:            OwnerKind = 1
 ```
 
 ## val OWNER_CRYPTO
 
 ```mach
-pub val OWNER_CRYPTO: OwnerKind = 2
+pub val OWNER_CRYPTO:         OwnerKind = 2
 ```
 
 ## val OWNER_STREAM
 
 ```mach
-pub val OWNER_STREAM: OwnerKind = 3
+pub val OWNER_STREAM:         OwnerKind = 3
 ```
 
 ## val OWNER_DATAGRAM
 
 ```mach
-pub val OWNER_DATAGRAM: OwnerKind = 4
+pub val OWNER_DATAGRAM:       OwnerKind = 4
 ```
 
 ## val OWNER_PATH_CHALLENGE
@@ -153,7 +153,7 @@ pub val OWNER_PATH_CHALLENGE: OwnerKind = 5
 ## val OWNER_PATH_RESPONSE
 
 ```mach
-pub val OWNER_PATH_RESPONSE: OwnerKind = 6
+pub val OWNER_PATH_RESPONSE:  OwnerKind = 6
 ```
 
 ## val OWNER_CID_RETIREMENT
@@ -165,13 +165,13 @@ pub val OWNER_CID_RETIREMENT: OwnerKind = 7
 ## val OWNER_CLOSE
 
 ```mach
-pub val OWNER_CLOSE: OwnerKind = 8
+pub val OWNER_CLOSE:          OwnerKind = 8
 ```
 
 ## val OWNER_PROBE
 
 ```mach
-pub val OWNER_PROBE: OwnerKind = 9
+pub val OWNER_PROBE:          OwnerKind = 9
 ```
 
 ## val OWNER_HANDSHAKE_DONE
@@ -183,25 +183,25 @@ pub val OWNER_HANDSHAKE_DONE: OwnerKind = 10
 ## val OWNER_NEW_CID
 
 ```mach
-pub val OWNER_NEW_CID: OwnerKind = 11
+pub val OWNER_NEW_CID:        OwnerKind = 11
 ```
 
 ## val OWNER_NEW_TOKEN
 
 ```mach
-pub val OWNER_NEW_TOKEN: OwnerKind = 12
+pub val OWNER_NEW_TOKEN:      OwnerKind = 12
 ```
 
 ## val OWNER_MTU_PROBE
 
 ```mach
-pub val OWNER_MTU_PROBE: OwnerKind = 13
+pub val OWNER_MTU_PROBE:      OwnerKind = 13
 ```
 
 ## val OWNER_FREE
 
 ```mach
-pub val OWNER_FREE: u8 = 0
+pub val OWNER_FREE:     u8 = 0
 ```
 
 ## val OWNER_PREPARED
@@ -213,7 +213,7 @@ pub val OWNER_PREPARED: u8 = 1
 ## val OWNER_SENT
 
 ```mach
-pub val OWNER_SENT: u8 = 2
+pub val OWNER_SENT:     u8 = 2
 ```
 
 ## rec View
@@ -226,6 +226,12 @@ pub rec View;
 
 ```mach
 pub rec Config;
+```
+
+## uni OwnerToken
+
+```mach
+pub uni OwnerToken;
 ```
 
 ## rec Owner
@@ -273,55 +279,55 @@ bisecting its own buffer list by hand
 ## val INIT_OK
 
 ```mach
-pub val INIT_OK: InitReason = 0
+pub val INIT_OK:                 InitReason = 0
 ```
 
 ## val INIT_ARGUMENT
 
 ```mach
-pub val INIT_ARGUMENT: InitReason = 1
+pub val INIT_ARGUMENT:           InitReason = 1
 ```
 
 ## val INIT_STORAGE_CAPACITY
 
 ```mach
-pub val INIT_STORAGE_CAPACITY: InitReason = 2
+pub val INIT_STORAGE_CAPACITY:   InitReason = 2
 ```
 
 ## val INIT_STORAGE_RANGES
 
 ```mach
-pub val INIT_STORAGE_RANGES: InitReason = 3
+pub val INIT_STORAGE_RANGES:     InitReason = 3
 ```
 
 ## val INIT_STORAGE_SECRETS
 
 ```mach
-pub val INIT_STORAGE_SECRETS: InitReason = 4
+pub val INIT_STORAGE_SECRETS:    InitReason = 4
 ```
 
 ## val INIT_STORAGE_BORROWED
 
 ```mach
-pub val INIT_STORAGE_BORROWED: InitReason = 5
+pub val INIT_STORAGE_BORROWED:   InitReason = 5
 ```
 
 ## val INIT_COMPONENT_RANGES
 
 ```mach
-pub val INIT_COMPONENT_RANGES: InitReason = 6
+pub val INIT_COMPONENT_RANGES:   InitReason = 6
 ```
 
 ## val INIT_PROVIDER_RANGES
 
 ```mach
-pub val INIT_PROVIDER_RANGES: InitReason = 7
+pub val INIT_PROVIDER_RANGES:    InitReason = 7
 ```
 
 ## val INIT_PROVIDER_SECRETS
 
 ```mach
-pub val INIT_PROVIDER_SECRETS: InitReason = 8
+pub val INIT_PROVIDER_SECRETS:   InitReason = 8
 ```
 
 ## val INIT_COMPONENT_BORROWED
@@ -333,49 +339,49 @@ pub val INIT_COMPONENT_BORROWED: InitReason = 9
 ## val INIT_PRECONDITION
 
 ```mach
-pub val INIT_PRECONDITION: InitReason = 10
+pub val INIT_PRECONDITION:       InitReason = 10
 ```
 
 ## val INIT_IDENTITY
 
 ```mach
-pub val INIT_IDENTITY: InitReason = 11
+pub val INIT_IDENTITY:           InitReason = 11
 ```
 
 ## val INIT_PARAMETERS
 
 ```mach
-pub val INIT_PARAMETERS: InitReason = 12
+pub val INIT_PARAMETERS:         InitReason = 12
 ```
 
 ## val INIT_RECOVERY
 
 ```mach
-pub val INIT_RECOVERY: InitReason = 13
+pub val INIT_RECOVERY:           InitReason = 13
 ```
 
 ## val INIT_LEASE
 
 ```mach
-pub val INIT_LEASE: InitReason = 14
+pub val INIT_LEASE:              InitReason = 14
 ```
 
 ## val INIT_KEYS
 
 ```mach
-pub val INIT_KEYS: InitReason = 15
+pub val INIT_KEYS:               InitReason = 15
 ```
 
 ## val INIT_PATH
 
 ```mach
-pub val INIT_PATH: InitReason = 16
+pub val INIT_PATH:               InitReason = 16
 ```
 
 ## val INIT_PROVIDER_START
 
 ```mach
-pub val INIT_PROVIDER_START: InitReason = 17
+pub val INIT_PROVIDER_START:     InitReason = 17
 ```
 
 ## rec InitResult
@@ -442,18 +448,58 @@ paths: *path_api.Manager, streams: *stream_api.Manager,
 datagrams: *datagram_api.Queue, now_ns: u64) bool;
 ```
 
+## fun abandon_initialization
+
+```mach
+pub fun abandon_initialization(core: *Core, secrets: *Secrets) bool;
+```
+
+rolls back a successful core init before the assembly becomes observable
+
+## fun release_chunks
+
+```mach
+pub fun release_chunks(core: *Core);
+```
+
+a dead core's chunks, given back whatever they hold
+
 ## fun receive
 
 ```mach
 pub fun receive(core: *Core, secrets: *Secrets,
-input: *transport_api.Datagram) transport_api.CoreResult;
+input: *transport_api.CoreInput) transport_api.CoreResult;
 ```
 
 ## fun queue_new_token
 
 ```mach
-pub fun queue_new_token(core: *Core, data: *u8, length: usize) bool;
+pub fun queue_new_token(core: *Core, data: *u8, length: usize) transport_api.Status;
 ```
+
+queues a NEW_TOKEN for the client, one at a time
+
+ret: STATUS_OK once queued. STATUS_EARLY while an earlier token is still
+     unacknowledged: repeat once `snapshot().new_token_pending` clears.
+     STATUS_BLOCKED when no chunk is free: repeat once the connection's
+     account is woken. STATUS_ERROR for a call that can never succeed as made
+
+## rec TakenToken
+
+```mach
+pub rec TakenToken;
+```
+
+## fun take_received_token
+
+```mach
+pub fun take_received_token(core: *Core, output: *u8,
+capacity: usize) TakenToken;
+```
+
+copies the client's received token out and releases it. STATUS_EMPTY when
+none is waiting. when `capacity` is too small nothing is released, and
+`length` says how much room the token needs
 
 ## fun probe_path
 
@@ -486,18 +532,21 @@ quote_authenticated: bool,
 now_ns: u64) path_api.MtuResult;
 ```
 
-## fun received_token
-
-```mach
-pub fun received_token(core: *Core) View;
-```
-
 ## fun poll_handshake
 
 ```mach
 pub fun poll_handshake(core: *Core, secrets: *Secrets,
 now_ns: u64) transport_api.CoreResult;
 ```
+
+## fun storage_ready
+
+```mach
+pub fun storage_ready(core: *Core);
+```
+
+the connection's account woke: whatever the provider was refused for memory
+is tried again on the next call
 
 ## fun snapshot
 

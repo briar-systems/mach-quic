@@ -9,13 +9,13 @@ pub val MAX: u64 = 4611686018427387903
 ## val STATUS_DONE
 
 ```mach
-pub val STATUS_DONE: u8 = 1
+pub val STATUS_DONE:  u8 = 1
 ```
 
 ## val STATUS_MORE
 
 ```mach
-pub val STATUS_MORE: u8 = 2
+pub val STATUS_MORE:  u8 = 2
 ```
 
 ## val STATUS_ERROR
@@ -27,7 +27,7 @@ pub val STATUS_ERROR: u8 = 3
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: u8 = 0
+pub val ERROR_NONE:        u8 = 0
 ```
 
 ## val ERROR_NON_MINIMAL
@@ -39,13 +39,13 @@ pub val ERROR_NON_MINIMAL: u8 = 1
 ## val ERROR_OVERFLOW
 
 ```mach
-pub val ERROR_OVERFLOW: u8 = 2
+pub val ERROR_OVERFLOW:    u8 = 2
 ```
 
 ## val ERROR_WIDTH
 
 ```mach
-pub val ERROR_WIDTH: u8 = 3
+pub val ERROR_WIDTH:       u8 = 3
 ```
 
 ## rec Decoded
@@ -71,7 +71,7 @@ reads one rfc 9000 variable-length integer transactionally
 ## fun write
 
 ```mach
-pub fun write(b: *binary.Builder, value: u64, encoded_width: u8) result.Result[usize, u8];
+pub fun write(b: *binary.Builder, value: u64, encoded_width: u8) res[usize, u8];
 ```
 
 writes one variable-length integer atomically, using width 0 for canonical

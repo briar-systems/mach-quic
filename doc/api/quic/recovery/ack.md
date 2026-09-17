@@ -3,7 +3,7 @@
 ## val RECEIVE_NEW
 
 ```mach
-pub val RECEIVE_NEW: u8 = 1
+pub val RECEIVE_NEW:       u8 = 1
 ```
 
 ## val RECEIVE_DUPLICATE
@@ -15,7 +15,7 @@ pub val RECEIVE_DUPLICATE: u8 = 2
 ## val RECEIVE_DROPPED
 
 ```mach
-pub val RECEIVE_DROPPED: u8 = 3
+pub val RECEIVE_DROPPED:   u8 = 3
 ```
 
 ## val RECEIVE_DISCARDED
@@ -27,25 +27,25 @@ pub val RECEIVE_DISCARDED: u8 = 4
 ## val RECEIVE_ERROR
 
 ```mach
-pub val RECEIVE_ERROR: u8 = 5
+pub val RECEIVE_ERROR:     u8 = 5
 ```
 
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: u8 = 0
+pub val ERROR_NONE:    u8 = 0
 ```
 
 ## val ERROR_SPACE
 
 ```mach
-pub val ERROR_SPACE: u8 = 1
+pub val ERROR_SPACE:   u8 = 1
 ```
 
 ## val ERROR_NUMBER
 
 ```mach
-pub val ERROR_NUMBER: u8 = 2
+pub val ERROR_NUMBER:  u8 = 2
 ```
 
 ## val ERROR_STORAGE
@@ -57,13 +57,13 @@ pub val ERROR_STORAGE: u8 = 3
 ## val ERROR_OUTPUT
 
 ```mach
-pub val ERROR_OUTPUT: u8 = 4
+pub val ERROR_OUTPUT:  u8 = 4
 ```
 
 ## val ERROR_ECN
 
 ```mach
-pub val ERROR_ECN: u8 = 5
+pub val ERROR_ECN:     u8 = 5
 ```
 
 ## val ECN_NOT_ECT
@@ -75,19 +75,19 @@ pub val ECN_NOT_ECT: u8 = 0
 ## val ECN_ECT0
 
 ```mach
-pub val ECN_ECT0: u8 = 1
+pub val ECN_ECT0:    u8 = 1
 ```
 
 ## val ECN_ECT1
 
 ```mach
-pub val ECN_ECT1: u8 = 2
+pub val ECN_ECT1:    u8 = 2
 ```
 
 ## val ECN_CE
 
 ```mach
-pub val ECN_CE: u8 = 3
+pub val ECN_CE:      u8 = 3
 ```
 
 ## rec Range
@@ -132,6 +132,14 @@ pub rec BuildResult;
 pub fun init(initial: SpaceStorage, handshake: SpaceStorage, application: SpaceStorage, max_ack_delay_ns: u64, ack_delay_exponent: u8) Tracker;
 ```
 
+## fun classify
+
+```mach
+pub fun classify(tracker: *Tracker, pn_space: u8, number: u64) u8;
+```
+
+what on_packet would decide for this number, without recording it
+
 ## fun on_packet
 
 ```mach
@@ -167,4 +175,13 @@ pub fun on_ack_packet_acked(tracker: *Tracker, pn_space: u8, largest_acknowledge
 ```mach
 pub fun discard_space(tracker: *Tracker, pn_space: u8) bool;
 ```
+
+## fun detach_space
+
+```mach
+pub fun detach_space(tracker: *Tracker, pn_space: u8) bool;
+```
+
+drops a discarded space's range storage so its holder can release it. the
+space is never read again
 

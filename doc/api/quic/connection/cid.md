@@ -9,7 +9,7 @@ pub def Status: u8
 ## val STATUS_OK
 
 ```mach
-pub val STATUS_OK: Status = 1
+pub val STATUS_OK:        Status = 1
 ```
 
 ## val STATUS_DUPLICATE
@@ -21,19 +21,19 @@ pub val STATUS_DUPLICATE: Status = 2
 ## val STATUS_STALE
 
 ```mach
-pub val STATUS_STALE: Status = 3
+pub val STATUS_STALE:     Status = 3
 ```
 
 ## val STATUS_BLOCKED
 
 ```mach
-pub val STATUS_BLOCKED: Status = 4
+pub val STATUS_BLOCKED:   Status = 4
 ```
 
 ## val STATUS_ERROR
 
 ```mach
-pub val STATUS_ERROR: Status = 5
+pub val STATUS_ERROR:     Status = 5
 ```
 
 ## def Error
@@ -45,43 +45,43 @@ pub def Error: u8
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: Error = 0
+pub val ERROR_NONE:            Error = 0
 ```
 
 ## val ERROR_STATE
 
 ```mach
-pub val ERROR_STATE: Error = 1
+pub val ERROR_STATE:           Error = 1
 ```
 
 ## val ERROR_CONFIG
 
 ```mach
-pub val ERROR_CONFIG: Error = 2
+pub val ERROR_CONFIG:          Error = 2
 ```
 
 ## val ERROR_CAPACITY
 
 ```mach
-pub val ERROR_CAPACITY: Error = 3
+pub val ERROR_CAPACITY:        Error = 3
 ```
 
 ## val ERROR_LIMIT
 
 ```mach
-pub val ERROR_LIMIT: Error = 4
+pub val ERROR_LIMIT:           Error = 4
 ```
 
 ## val ERROR_SEQUENCE
 
 ```mach
-pub val ERROR_SEQUENCE: Error = 5
+pub val ERROR_SEQUENCE:        Error = 5
 ```
 
 ## val ERROR_DUPLICATE_ID
 
 ```mach
-pub val ERROR_DUPLICATE_ID: Error = 6
+pub val ERROR_DUPLICATE_ID:    Error = 6
 ```
 
 ## val ERROR_DUPLICATE_TOKEN
@@ -93,13 +93,19 @@ pub val ERROR_DUPLICATE_TOKEN: Error = 7
 ## val ERROR_RETIRE_CURRENT
 
 ```mach
-pub val ERROR_RETIRE_CURRENT: Error = 8
+pub val ERROR_RETIRE_CURRENT:  Error = 8
 ```
 
 ## val ERROR_TOKEN
 
 ```mach
-pub val ERROR_TOKEN: Error = 9
+pub val ERROR_TOKEN:           Error = 9
+```
+
+## val ERROR_ZERO_LENGTH
+
+```mach
+pub val ERROR_ZERO_LENGTH:     Error = 10
 ```
 
 ## def EntryState
@@ -111,13 +117,13 @@ pub def EntryState: u8
 ## val ENTRY_FREE
 
 ```mach
-pub val ENTRY_FREE: EntryState = 0
+pub val ENTRY_FREE:          EntryState = 0
 ```
 
 ## val ENTRY_ACTIVE
 
 ```mach
-pub val ENTRY_ACTIVE: EntryState = 1
+pub val ENTRY_ACTIVE:        EntryState = 1
 ```
 
 ## val ENTRY_RETIRE_QUEUED
@@ -129,13 +135,13 @@ pub val ENTRY_RETIRE_QUEUED: EntryState = 2
 ## val ENTRY_RETIRED
 
 ```mach
-pub val ENTRY_RETIRED: EntryState = 3
+pub val ENTRY_RETIRED:       EntryState = 3
 ```
 
 ## val ENTRY_RETIRE_SENT
 
 ```mach
-pub val ENTRY_RETIRE_SENT: EntryState = 4
+pub val ENTRY_RETIRE_SENT:   EntryState = 4
 ```
 
 ## rec Entry
@@ -326,6 +332,21 @@ pub fun select_scoped(manager: *Manager, core_source: u64, value: Handle) Result
 
 ```mach
 pub fun current(manager: *Manager, local: bool) Selected;
+```
+
+## fun local_zero_length
+
+```mach
+pub fun local_zero_length(manager: *Manager) bool;
+```
+
+a peer that chose a zero-length id is addressed by its path alone, so it
+never issues or rotates to another id
+
+## fun peer_zero_length
+
+```mach
+pub fun peer_zero_length(manager: *Manager) bool;
 ```
 
 ## fun rotate_peer

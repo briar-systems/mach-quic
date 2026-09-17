@@ -3,19 +3,19 @@
 ## val ENTRY_FREE
 
 ```mach
-pub val ENTRY_FREE: u8 = 0
+pub val ENTRY_FREE:      u8 = 0
 ```
 
 ## val ENTRY_QUEUED
 
 ```mach
-pub val ENTRY_QUEUED: u8 = 1
+pub val ENTRY_QUEUED:    u8 = 1
 ```
 
 ## val ENTRY_RESERVED
 
 ```mach
-pub val ENTRY_RESERVED: u8 = 2
+pub val ENTRY_RESERVED:  u8 = 2
 ```
 
 ## val ENTRY_DELIVERED
@@ -27,7 +27,7 @@ pub val ENTRY_DELIVERED: u8 = 3
 ## val STATUS_OK
 
 ```mach
-pub val STATUS_OK: u8 = 1
+pub val STATUS_OK:    u8 = 1
 ```
 
 ## val STATUS_EMPTY
@@ -51,13 +51,13 @@ pub val STATUS_ERROR: u8 = 4
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: u8 = 0
+pub val ERROR_NONE:     u8 = 0
 ```
 
 ## val ERROR_STATE
 
 ```mach
-pub val ERROR_STATE: u8 = 1
+pub val ERROR_STATE:    u8 = 1
 ```
 
 ## val ERROR_DISABLED
@@ -69,7 +69,7 @@ pub val ERROR_DISABLED: u8 = 2
 ## val ERROR_LIMIT
 
 ```mach
-pub val ERROR_LIMIT: u8 = 3
+pub val ERROR_LIMIT:    u8 = 3
 ```
 
 ## val ERROR_CAPACITY
@@ -81,7 +81,7 @@ pub val ERROR_CAPACITY: u8 = 4
 ## val ERROR_TOKEN
 
 ```mach
-pub val ERROR_TOKEN: u8 = 5
+pub val ERROR_TOKEN:    u8 = 5
 ```
 
 ## val ERROR_OVERFLOW
@@ -102,11 +102,17 @@ pub rec Config;
 pub rec Entry;
 ```
 
+a queued datagram holds its payload in one chunk from the time it is queued
+until it is published, cancelled or released
+
 ## rec Storage
 
 ```mach
 pub rec Storage;
 ```
+
+strides are the largest payload each direction accepts, at most supply.BYTES.
+payload chunks come from `chunks`, charged to `account`
 
 ## fun empty_storage
 

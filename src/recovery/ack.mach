@@ -209,6 +209,24 @@ fun increment_ecn(space: *Space, ecn: u8) {
     }
 }
 
+# what on_packet would decide for this number, without recording it
+pub fun classify(tracker: *Tracker, pn_space: u8, number: u64) u8 {
+    val i: usize = index(pn_space);
+    if (tracker == nil || !tracker.valid || i >= 3 ||
+        number > packet.MAX_PACKET_NUMBER) { ret RECEIVE_ERROR; }
+    val space: *Space = ?tracker.spaces[i];
+    if (space.discarded)                               { ret RECEIVE_DISCARDED; }
+    if (space.floor_exhausted || number < space.floor) { ret RECEIVE_DROPPED; }
+    var position: usize = 0;
+    for (position < space.count) {
+        val range: Range = space.ranges[position];
+        if (number >= range.start && number <= range.end) { ret RECEIVE_DUPLICATE; }
+        if (number > range.end)                           { brk; }
+        position = position + 1;
+    }
+    ret RECEIVE_NEW;
+}
+
 pub fun on_packet(tracker: *Tracker, pn_space: u8, number: u64, received_at_ns: u64, ack_eliciting: bool, ecn: u8) ReceiveResult {
     val i: usize = index(pn_space);
     if (tracker == nil || !tracker.valid || i >= 3) { ret result(RECEIVE_ERROR, ERROR_SPACE, false); }
@@ -376,6 +394,18 @@ pub fun discard_space(tracker: *Tracker, pn_space: u8) bool {
     tracker.spaces[i].ack_deadline_armed = false;
     tracker.spaces[i].floor_exhausted    = true;
     tracker.spaces[i].discarded          = true;
+    ret true;
+}
+
+# drops a discarded space's range storage so its holder can release it. the
+# space is never read again
+pub fun detach_space(tracker: *Tracker, pn_space: u8) bool {
+    val i: usize = index(pn_space);
+    if (tracker == nil || !tracker.valid || i >= 2 || !tracker.spaces[i].discarded) {
+        ret false;
+    }
+    tracker.spaces[i].ranges   = nil;
+    tracker.spaces[i].capacity = 0;
     ret true;
 }
 

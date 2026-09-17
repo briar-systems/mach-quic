@@ -15,7 +15,7 @@ pub val ROLE_SERVER: u8 = 2
 ## val DIRECTION_BIDIRECTIONAL
 
 ```mach
-pub val DIRECTION_BIDIRECTIONAL: u8 = 1
+pub val DIRECTION_BIDIRECTIONAL:  u8 = 1
 ```
 
 ## val DIRECTION_UNIDIRECTIONAL
@@ -27,31 +27,31 @@ pub val DIRECTION_UNIDIRECTIONAL: u8 = 2
 ## val SEND_STREAM
 
 ```mach
-pub val SEND_STREAM: u8 = 1
+pub val SEND_STREAM:           u8 = 1
 ```
 
 ## val SEND_RESET
 
 ```mach
-pub val SEND_RESET: u8 = 2
+pub val SEND_RESET:            u8 = 2
 ```
 
 ## val SEND_STOP
 
 ```mach
-pub val SEND_STOP: u8 = 3
+pub val SEND_STOP:             u8 = 3
 ```
 
 ## val SEND_MAX_DATA
 
 ```mach
-pub val SEND_MAX_DATA: u8 = 4
+pub val SEND_MAX_DATA:         u8 = 4
 ```
 
 ## val SEND_MAX_STREAM_DATA
 
 ```mach
-pub val SEND_MAX_STREAM_DATA: u8 = 5
+pub val SEND_MAX_STREAM_DATA:  u8 = 5
 ```
 
 ## val SEND_MAX_STREAMS_BIDI
@@ -63,7 +63,7 @@ pub val SEND_MAX_STREAMS_BIDI: u8 = 6
 ## val SEND_MAX_STREAMS_UNI
 
 ```mach
-pub val SEND_MAX_STREAMS_UNI: u8 = 7
+pub val SEND_MAX_STREAMS_UNI:  u8 = 7
 ```
 
 ## val TERMINAL_ACKED
@@ -75,37 +75,37 @@ pub val TERMINAL_ACKED: u8 = 1
 ## val TERMINAL_LOST
 
 ```mach
-pub val TERMINAL_LOST: u8 = 2
+pub val TERMINAL_LOST:  u8 = 2
 ```
 
 ## val STATUS_OK
 
 ```mach
-pub val STATUS_OK: u8 = 1
+pub val STATUS_OK:        u8 = 1
 ```
 
 ## val STATUS_EMPTY
 
 ```mach
-pub val STATUS_EMPTY: u8 = 2
+pub val STATUS_EMPTY:     u8 = 2
 ```
 
 ## val STATUS_BLOCKED
 
 ```mach
-pub val STATUS_BLOCKED: u8 = 3
+pub val STATUS_BLOCKED:   u8 = 3
 ```
 
 ## val STATUS_RESET
 
 ```mach
-pub val STATUS_RESET: u8 = 4
+pub val STATUS_RESET:     u8 = 4
 ```
 
 ## val STATUS_FINISHED
 
 ```mach
-pub val STATUS_FINISHED: u8 = 5
+pub val STATUS_FINISHED:  u8 = 5
 ```
 
 ## val STATUS_CANCELLED
@@ -117,55 +117,55 @@ pub val STATUS_CANCELLED: u8 = 6
 ## val STATUS_STALE
 
 ```mach
-pub val STATUS_STALE: u8 = 7
+pub val STATUS_STALE:     u8 = 7
 ```
 
 ## val STATUS_ERROR
 
 ```mach
-pub val STATUS_ERROR: u8 = 8
+pub val STATUS_ERROR:     u8 = 8
 ```
 
 ## val ERROR_NONE
 
 ```mach
-pub val ERROR_NONE: u8 = 0
+pub val ERROR_NONE:          u8 = 0
 ```
 
 ## val ERROR_STATE
 
 ```mach
-pub val ERROR_STATE: u8 = 1
+pub val ERROR_STATE:         u8 = 1
 ```
 
 ## val ERROR_STREAM_LIMIT
 
 ```mach
-pub val ERROR_STREAM_LIMIT: u8 = 2
+pub val ERROR_STREAM_LIMIT:  u8 = 2
 ```
 
 ## val ERROR_CAPACITY
 
 ```mach
-pub val ERROR_CAPACITY: u8 = 3
+pub val ERROR_CAPACITY:      u8 = 3
 ```
 
 ## val ERROR_DIRECTION
 
 ```mach
-pub val ERROR_DIRECTION: u8 = 4
+pub val ERROR_DIRECTION:     u8 = 4
 ```
 
 ## val ERROR_FLOW_CONTROL
 
 ```mach
-pub val ERROR_FLOW_CONTROL: u8 = 5
+pub val ERROR_FLOW_CONTROL:  u8 = 5
 ```
 
 ## val ERROR_FINAL_SIZE
 
 ```mach
-pub val ERROR_FINAL_SIZE: u8 = 6
+pub val ERROR_FINAL_SIZE:    u8 = 6
 ```
 
 ## val ERROR_DATA_CONFLICT
@@ -177,19 +177,77 @@ pub val ERROR_DATA_CONFLICT: u8 = 7
 ## val ERROR_TOKEN
 
 ```mach
-pub val ERROR_TOKEN: u8 = 8
+pub val ERROR_TOKEN:         u8 = 8
 ```
 
 ## val ERROR_OVERFLOW
 
 ```mach
-pub val ERROR_OVERFLOW: u8 = 9
+pub val ERROR_OVERFLOW:      u8 = 9
 ```
 
 ## val ERROR_CANCELLED
 
 ```mach
-pub val ERROR_CANCELLED: u8 = 10
+pub val ERROR_CANCELLED:     u8 = 10
+```
+
+## val ERROR_STORAGE
+
+```mach
+pub val ERROR_STORAGE: u8 = 11
+```
+
+a receive the connection cannot store right now: the caller refuses the
+packet unacknowledged and the peer retransmits it
+
+## val RECORDS_PER_BLOCK
+
+```mach
+pub val RECORDS_PER_BLOCK: usize = supply.BYTES / $size_of(Stream)
+```
+
+records and attempts left unlent are taken from the pool a chunk at a time
+
+## val RECORDS_PACKED
+
+```mach
+pub val RECORDS_PACKED:     usize = 6
+```
+
+the six h3 control streams an idle connection keeps open fit in one block.
+Stream is laid out to hold this, and a test fails when it no longer does
+
+## val RECORD_BLOCKS
+
+```mach
+pub val RECORD_BLOCKS:      usize = 8
+```
+
+## val ATTEMPTS_PER_BLOCK
+
+```mach
+pub val ATTEMPTS_PER_BLOCK: usize = supply.BYTES / $size_of(Attempt)
+```
+
+## val READY_READABLE
+
+```mach
+pub val READY_READABLE: u8 = 1
+```
+
+news an owner can act on for one stream
+
+## val READY_WRITABLE
+
+```mach
+pub val READY_WRITABLE: u8 = 2
+```
+
+## val READY_RESET
+
+```mach
+pub val READY_RESET:    u8 = 4
 ```
 
 ## rec Config
@@ -204,6 +262,21 @@ pub rec Config;
 pub rec Stream;
 ```
 
+laid out so RECORDS_PACKED records fit one chunk: flags share one run and
+nothing repeats a pointer its chunk already holds
+
+## rec Ready
+
+```mach
+pub rec Ready;
+```
+
+## rec Buffer
+
+```mach
+pub rec Buffer;
+```
+
 ## rec Attempt
 
 ```mach
@@ -215,6 +288,12 @@ pub rec Attempt;
 ```mach
 pub rec Storage;
 ```
+
+streams, attempts: lent for the manager's lifetime, or nil to take them from
+                   the pool while they are in use
+chunks:            where every stream's bytes come from
+account:           whose budget they count against
+send_buffer_limit: bytes a stream may hold written and unacknowledged
 
 ## rec Manager
 
@@ -288,6 +367,22 @@ pub fun initiated_by_server(id: u64) bool;
 pub fun unidirectional(id: u64) bool;
 ```
 
+## fun lent_records
+
+```mach
+pub fun lent_records(storage: Storage) ownership.Range;
+```
+
+the caller-lent record array, empty when records come from the pool
+
+## fun lent_attempts
+
+```mach
+pub fun lent_attempts(storage: Storage) ownership.Range;
+```
+
+the caller-lent attempt array, empty when attempts come from the pool
+
 ## fun initialize
 
 ```mach
@@ -305,6 +400,38 @@ pub fun lease_core(manager: *Manager, source: u64) bool;
 ```mach
 pub fun release_core(manager: *Manager, source: u64) bool;
 ```
+
+## fun attempts_drained
+
+```mach
+pub fun attempts_drained(manager: *Manager) bool;
+```
+
+whether no attempt is reserved or in flight
+
+## fun handle_at
+
+```mach
+pub fun handle_at(manager: *Manager, index: usize) Handle;
+```
+
+the handle of the live stream at `index`, with source 0 when there is none
+
+## fun next_ready
+
+```mach
+pub fun next_ready(manager: *Manager) Ready;
+```
+
+hands the owner the oldest stream with news, O(1)
+
+## fun storage_released
+
+```mach
+pub fun storage_released(manager: *Manager);
+```
+
+the pool gave chunks back, so every stream a refused chunk stopped may write
 
 ## fun open
 

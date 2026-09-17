@@ -4,9 +4,13 @@ use crypto.contracts;
 use crypto.secret;
 use handshake_api: quic.connection.handshake;
 use quic.packet.packet;
+use quic.storage.limited;
+use supply: quic.storage.source;
+use std.memory.buffers;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.size.usize;
+use tls.buffer;
 use tls.cert;
 use tls.client;
 use tls.config;
@@ -31,26 +35,35 @@ pub val ERROR_EVENT:    u64 = handshake_api.PROVIDER_BINDING_EVENT;
 
 pub fun initialize(adapter: *handshake_api.Adapter,
     adapter_config: handshake_api.Config,
-    storage: handshake_api.Storage, value: *client.Client,
-    configuration: Config) bool {
-    ret handshake_api.initialize_tls_client(adapter, adapter_config, storage, value,
+    storage: handshake_api.Storage, value: *client.Handshake,
+    lease: buffer.Lease, configuration: Config) bool {
+    ret handshake_api.initialize_tls_client(adapter, adapter_config, storage, value, lease,
         configuration.verification_time_unix, configuration.deadline_ns,
         configuration.entropy_context_size,
         configuration.entropy_secret_context_size);
 }
 
-var integration_input:        [4096]u8;
-var integration_output:       [4096]u8;
-var integration_hello:        [4096]u8;
-var integration_certificates: [4]cert.Certificate;
-var integration_parameters:   [256]u8;
-var adapter_receive:          [16384]u8;
-var adapter_receive_present:  [16384]bool;
-var adapter_send:             [16384]u8;
-var adapter_send_pending:     [16384]bool;
-var adapter_send_acked:       [16384]bool;
-var adapter_send_inflight:    [16384]u16;
-var adapter_attempts:         [8]handshake_api.Attempt;
+var adapter_chunk_pool:    supply.TestPool;
+var adapter_chunk_account: supply.Account;
+
+# one pool for every adapter these tests build, which may outlive a test
+fun adapter_account() *supply.Account {
+    if (!supply.test_made(?adapter_chunk_pool)) {
+        supply.make_test(?adapter_chunk_pool, 256);
+        supply.open_connection(?adapter_chunk_pool.provider, ?adapter_chunk_account,
+            1, 128, 128, 4 * supply.RECORD, 0);
+    }
+    ret ?adapter_chunk_account;
+}
+
+# the lease every test engine charges: the adapters' shared account, on tls's
+# lane
+fun adapter_lease() buffer.Lease {
+    ret buffer.Lease{source: ?adapter_chunk_pool.provider, account: adapter_account(),
+        lane: supply.TLS};
+}
+
+var adapter_attempts: [8]handshake_api.Attempt;
 
 #[oblivious]
 fun deterministic_entropy(context: ptr, secret_context: *^u8,
@@ -108,43 +121,39 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
     client_config.limits.max_chain_bytes          = 4096;
     client_config.limits.max_ticket_bytes         = 4096;
     var local_parameters: [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
-    var tls_value:        client.Client;
-    if (!client.init(?tls_value, ?client_config, client.Storage{
-        input:                    ?integration_input[0], input_capacity: 4096,
-        output:                   ?integration_output[0], output_capacity: 4096,
-        hello:                    ?integration_hello[0], hello_capacity: 4096,
-        certificates:             ?integration_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?integration_parameters[0],
-        peer_parameters_capacity: 256
-    },
+    var tls_value:        client.Handshake;
+    if (!client.init(?tls_value, ?client_config, adapter_lease(),
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?local_parameters[0], len: 4}},
         client.QUIC_TRANSPORT_PARAMETERS)) { ret 1; }
     val adapter_config: handshake_api.Config = handshake_api.Config{source: 77,
         max_crypto_per_level: 4096, max_event_data: 4096,
         max_peer_identity:    4096};
-    val adapter_storage: handshake_api.Storage = handshake_api.Storage{
-        receive_data:     ?adapter_receive[0],
-        receive_present:  ?adapter_receive_present[0], receive_length: 16384,
-        receive_stride:   4096, send_data: ?adapter_send[0],
-        send_pending:     ?adapter_send_pending[0],
-        send_acked:       ?adapter_send_acked[0],
-        send_inflight:    ?adapter_send_inflight[0], send_length: 16384,
-        send_stride:      4096, attempts: ?adapter_attempts[0],
-        attempt_capacity: 8
-    };
+    val adapter_storage: handshake_api.Storage = handshake_api.Storage{attempts: ?adapter_attempts[0], attempt_capacity: 8,
+        account: adapter_account(), chunks: ?adapter_chunk_pool.provider};
     var overlapping: handshake_api.Storage = adapter_storage;
-    overlapping.receive_data = ?integration_input[0];
+    overlapping.attempts = (?tls_value.random[0])::*handshake_api.Attempt;
     var rejected_adapter: handshake_api.Adapter;
+    var other_lane:       buffer.Lease = adapter_lease();
+    other_lane.lane = supply.RECEIVE;
+    if (initialize(?rejected_adapter, adapter_config, adapter_storage, ?tls_value,
+        other_lane, Config{verification_time_unix: 1800000000, deadline_ns: 1000,
+        entropy_context_size: 1, entropy_secret_context_size: 0}) ||
+        initialize(?rejected_adapter, adapter_config, adapter_storage, ?tls_value,
+        buffer.no_lease(), Config{verification_time_unix: 1800000000,
+        deadline_ns:                 1000, entropy_context_size: 1,
+        entropy_secret_context_size: 0}) || rejected_adapter.initialized) {
+        ret 23;
+    }
     if (initialize(?rejected_adapter, adapter_config, overlapping, ?tls_value,
-        Config{verification_time_unix: 1800000000, deadline_ns: 1000,
+        adapter_lease(), Config{verification_time_unix: 1800000000, deadline_ns: 1000,
         entropy_context_size:        1,
         entropy_secret_context_size: 0}) || rejected_adapter.initialized) {
         ret 21;
     }
     var adapter: handshake_api.Adapter;
     if (!initialize(?adapter, adapter_config, adapter_storage, ?tls_value,
-        Config{verification_time_unix: 1800000000, deadline_ns: 1000,
+        adapter_lease(), Config{verification_time_unix: 1800000000, deadline_ns: 1000,
         entropy_context_size:        1,
         entropy_secret_context_size: 0})) {
         ret 22;
@@ -224,14 +233,7 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
         alert.alert != record.UNEXPECTED_MESSAGE_ALERT::u64 ||
         handshake_api.complete_event(?adapter, alert.token, true).status !=
         handshake_api.STATUS_OK || !handshake_api.destroy(?adapter)) { ret 12; }
-    if (!client.init(?tls_value, ?client_config, client.Storage{
-        input:                    ?integration_input[0], input_capacity: 4096,
-        output:                   ?integration_output[0], output_capacity: 4096,
-        hello:                    ?integration_hello[0], hello_capacity: 4096,
-        certificates:             ?integration_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?integration_parameters[0],
-        peer_parameters_capacity: 256
-    },
+    if (!client.init(?tls_value, ?client_config, adapter_lease(),
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?local_parameters[0], len: 4}},
         client.QUIC_TRANSPORT_PARAMETERS)) { ret 13; }
@@ -239,15 +241,9 @@ test "quic.connection.tls_client: exact client hello ownership survives loss and
     if (!initialize(?deadline_adapter,
         handshake_api.Config{source: 78, max_crypto_per_level: 4096,
         max_event_data: 4096, max_peer_identity: 4096},
-        handshake_api.Storage{receive_data: ?adapter_receive[0],
-        receive_present:  ?adapter_receive_present[0], receive_length: 16384,
-        receive_stride:   4096, send_data: ?adapter_send[0],
-        send_pending:     ?adapter_send_pending[0],
-        send_acked:       ?adapter_send_acked[0],
-        send_inflight:    ?adapter_send_inflight[0], send_length: 16384,
-        send_stride:      4096, attempts: ?adapter_attempts[0],
-        attempt_capacity: 8}, ?tls_value,
-        Config{verification_time_unix: 1800000000, deadline_ns: 10,
+        handshake_api.Storage{attempts: ?adapter_attempts[0], attempt_capacity: 8,
+        account: adapter_account(), chunks: ?adapter_chunk_pool.provider}, ?tls_value,
+        adapter_lease(), Config{verification_time_unix: 1800000000, deadline_ns: 10,
         entropy_context_size:        1,
         entropy_secret_context_size: 0})) { ret 14; }
     start.now_ns = 5;

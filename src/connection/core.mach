@@ -12,6 +12,9 @@ use quic.packet.packet;
 use path_api: quic.path.path;
 use ack_api:  quic.recovery.ack;
 use quic.recovery.recovery;
+use quic.storage.chunks;
+use quic.storage.ranges;
+use supply:        quic.storage.source;
 use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
 use transport_api: quic.transport;
@@ -104,25 +107,30 @@ pub rec Config {
     enable_early_data:          bool;
 }
 
+pub uni OwnerToken {
+    handshake:      handshake_api.AttemptToken;
+    stream:         stream_api.AttemptToken;
+    datagram:       datagram_api.Token;
+    path_challenge: path_api.ChallengeToken;
+    path_response:  path_api.ResponseToken;
+    mtu_probe:      path_api.MtuToken;
+    cid_retirement: cid_api.Handle;
+}
+
 pub rec Owner {
-    owner:                 u64;
-    generation:            u64;
-    packet_number:         u64;
-    bytes:                 usize;
-    space:                 u8;
-    level:                 handshake_api.Level;
-    kind:                  OwnerKind;
-    state:                 u8;
-    ack_generation:        u64;
-    handshake:             handshake_api.AttemptToken;
-    stream:                stream_api.AttemptToken;
-    datagram:              datagram_api.Token;
+    owner:          u64;
+    generation:     u64;
+    packet_number:  u64;
+    bytes:          usize;
+    space:          u8;
+    level:          handshake_api.Level;
+    kind:           OwnerKind;
+    state:          u8;
+    ack_generation: u64;
+    # the token of the one frame this owner carries, read only under its kind
+    token:                 OwnerToken;
     path:                  path_api.Handle;
     path_send:             path_api.SendToken;
-    path_challenge:        path_api.ChallengeToken;
-    path_response:         path_api.ResponseToken;
-    mtu_probe:             path_api.MtuToken;
-    cid_retirement:        cid_api.Handle;
     pacer:                 pacer_api.Schedule;
     ack_largest:           u64;
     send_generation:       u64;
@@ -164,11 +172,14 @@ pub rec Storage {
     local_extension_capacity:      usize;
     local_extension_bytes:         *u8;
     local_extension_byte_capacity: usize;
-    received_token:                *u8;
-    received_token_capacity:       usize;
-    send_token:                    *u8;
-    send_token_capacity:           usize;
     negotiation:                   negotiation_api.Storage;
+    # the chunk behind the extension tables, local parameter bytes and retry
+    # storage, all of which the core lets go once the handshake is confirmed.
+    # nil when the caller lends that storage for the connection's lifetime
+    handshake_block: *chunks.Block;
+    # where the core takes chunks for owners and packet histories that the
+    # caller leaves nil, holding them only while packets are in flight
+    chunk_source: ranges.Source;
 }
 
 pub rec SecretStorage {
@@ -193,17 +204,21 @@ pub rec Secrets {
 }
 
 pub rec Snapshot {
-    state:                  transport_api.ConnectionState;
-    version:                u32;
-    authenticated_packets:  usize;
-    retry_count:            usize;
-    version_restart_count:  usize;
-    active_owners:          usize;
-    received_token_length:  usize;
+    state:                 transport_api.ConnectionState;
+    version:               u32;
+    authenticated_packets: usize;
+    retry_count:           usize;
+    version_restart_count: usize;
+    active_owners:         usize;
+    received_token_length: usize;
+    # a queued NEW_TOKEN has not been acknowledged yet
+    new_token_pending:      bool;
     early_disposition:      u8;
     peer_parameters_ready:  bool;
     peer_authenticated:     bool;
     handshake_confirmed:    bool;
+    handshake_settled:      bool;
+    handshake_waiting:      bool;
     initial_keys_discarded: bool;
     provider_error:         u64;
     closing:                bool;
@@ -271,13 +286,20 @@ fun refuse_overlap(result: *InitResult, reason: InitReason,
 }
 
 pub rec Core {
-    config:                     Config;
-    storage:                    Storage;
-    cids:                       *cid_api.Manager;
-    paths:                      *path_api.Manager;
-    streams:                    *stream_api.Manager;
-    datagrams:                  *datagram_api.Queue;
-    negotiation:                negotiation_api.Client;
+    config:      Config;
+    storage:     Storage;
+    cids:        *cid_api.Manager;
+    paths:       *path_api.Manager;
+    streams:     *stream_api.Manager;
+    datagrams:   *datagram_api.Queue;
+    negotiation: negotiation_api.Client;
+    # the live owner table: lent for the lifetime, or a chunk held while any
+    # owner is active, and nil with no capacity otherwise
+    owners:                     *Owner;
+    owner_capacity:             usize;
+    owners_active:              usize;
+    owner_block:                chunks.Block;
+    history_blocks:             [3]chunks.Block;
     recovery_state:             recovery.Recovery;
     acknowledgements:           ack_api.Tracker;
     peer_parameters:            transport_parameters.Parameters;
@@ -286,42 +308,56 @@ pub rec Core {
     packet_numbers:             [3]u64;
     expected_packet_numbers:    [3]u64;
     ack_prepared:               [3]bool;
-    received_token_length:      usize;
-    send_token_length:          usize;
-    send_max_udp_payload:       usize;
-    idle_timeout_ns:            u64;
-    next_owner:                 u64;
-    next_owner_slot:            usize;
-    last_received_ns:           u64;
-    last_activity_ns:           u64;
-    last_now_ns:                u64;
-    close_started_ns:           u64;
-    close_deadline_ns:          u64;
-    close_error:                u64;
-    close_frame_type:           u64;
-    close_reason_length:        usize;
-    last_provider_error:        u64;
-    timer_generation:           u64;
-    timer_deadline_ns:          u64;
-    pace_deadline_ns:           u64;
-    timer_recovery_generation:  u64;
-    timer_kind:                 u8;
-    state:                      transport_api.ConnectionState;
-    early_disposition:          u8;
-    role:                       transport_api.Role;
-    authenticated_packets:      usize;
-    retry_count:                usize;
-    version_restart_count:      usize;
-    close_transmissions:        usize;
-    probes_remaining:           u8;
-    probe_space:                u8;
-    probe_owner:                u64;
-    peer_parameters_ready:      bool;
-    retry_source_present:       bool;
-    peer_authenticated:         bool;
-    handshake_confirmed:        bool;
+    # NEW_TOKEN payloads, each in a chunk held only while it is waiting: the
+    # client's until the owner takes it, the server's until it is acknowledged
+    received_token:            supply.Chunk;
+    received_token_length:     usize;
+    send_token:                supply.Chunk;
+    send_token_length:         usize;
+    send_max_udp_payload:      usize;
+    idle_timeout_ns:           u64;
+    next_owner:                u64;
+    next_owner_slot:           usize;
+    last_received_ns:          u64;
+    last_activity_ns:          u64;
+    last_now_ns:               u64;
+    close_started_ns:          u64;
+    close_deadline_ns:         u64;
+    close_error:               u64;
+    close_frame_type:          u64;
+    close_reason_length:       usize;
+    last_provider_error:       u64;
+    timer_generation:          u64;
+    timer_deadline_ns:         u64;
+    pace_deadline_ns:          u64;
+    timer_recovery_generation: u64;
+    timer_kind:                u8;
+    state:                     transport_api.ConnectionState;
+    early_disposition:         u8;
+    role:                      transport_api.Role;
+    authenticated_packets:     usize;
+    retry_count:               usize;
+    version_restart_count:     usize;
+    close_transmissions:       usize;
+    probes_remaining:          u8;
+    probe_space:               u8;
+    probe_owner:               u64;
+    peer_parameters_ready:     bool;
+    retry_source_present:      bool;
+    peer_authenticated:        bool;
+    handshake_confirmed:       bool;
+    # the packet being applied was refused for storage and stays unacknowledged
+    packet_refused: bool;
+    # packets refused that way
+    refused_packets: u64;
     # crypto data arrived that the provider has not been polled for
     crypto_received: bool;
+    # the provider is waiting for memory, so polling it waits for a wake
+    handshake_waiting: bool;
+    # the connection's account woke, so the provider is polled once more
+    storage_woken: bool;
+    # the handshake handed everything over and holds no memory
+    handshake_settled: bool;
     # the last generate found nothing to send and nothing has changed since:
     # no core input, no manager revision, no due ack or pacing deadline
     send_idle:              bool;
@@ -520,26 +556,26 @@ fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
     owned[5] = ownership.array(core.storage.recovery_events::*u8,
         core.storage.recovery_event_capacity, $size_of(recovery.Event),
         ownership.ZERO_FORBIDDEN);
-    owned[6] = ownership.array(core.storage.recovery_initial.packets::*u8,
-        core.storage.recovery_initial.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
-    owned[7] = ownership.array(core.storage.recovery_handshake.packets::*u8,
-        core.storage.recovery_handshake.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
-    owned[8] = ownership.array(core.storage.recovery_application.packets::*u8,
-        core.storage.recovery_application.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+    owned[6] = ownership.array(core.recovery_state.spaces[0].packets::*u8,
+        core.recovery_state.spaces[0].capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
+    owned[7] = ownership.array(core.recovery_state.spaces[1].packets::*u8,
+        core.recovery_state.spaces[1].capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
+    owned[8] = ownership.array(core.recovery_state.spaces[2].packets::*u8,
+        core.recovery_state.spaces[2].capacity, $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     owned[9] = ownership.array(core.storage.ack_initial.ranges::*u8,
         core.storage.ack_initial.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     owned[10] = ownership.array(core.storage.ack_handshake.ranges::*u8,
         core.storage.ack_handshake.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     owned[11] = ownership.array(core.storage.ack_application.ranges::*u8,
         core.storage.ack_application.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
-    owned[12] = ownership.array(core.storage.owners::*u8,
-        core.storage.owner_capacity, $size_of(Owner), ownership.ZERO_FORBIDDEN);
+    owned[12] = ownership.array(core.owners::*u8,
+        core.owner_capacity, $size_of(Owner), ownership.ZERO_ALLOWED);
     owned[13] = ownership.array(core.storage.peer_extensions::*u8,
         core.storage.peer_extension_capacity,
         $size_of(transport_parameters.Parameter), ownership.ZERO_ALLOWED);
@@ -550,10 +586,10 @@ fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
         core.storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
     owned[16] = ownership.bytes(core.storage.local_extension_bytes,
         core.storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
-    owned[17] = ownership.bytes(core.storage.received_token,
-        core.storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
-    owned[18] = ownership.bytes(core.storage.send_token,
-        core.storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
+    owned[17] = ownership.bytes(core.received_token.data,
+        core.received_token.bytes, ownership.ZERO_ALLOWED);
+    owned[18] = ownership.bytes(core.send_token.data, core.send_token.bytes,
+        ownership.ZERO_ALLOWED);
     owned[19] = ownership.bytes(core.storage.negotiation.retry_token,
         core.storage.negotiation.retry_token_capacity, ownership.ZERO_ALLOWED);
     owned[20] = ownership.bytes(core.storage.negotiation.retry_pseudo,
@@ -631,6 +667,44 @@ fun welded_keys_disjoint(secrets: *Secrets, data: *^u8,
         key_set_disjoint(data, length, ?secrets.application_receive.next);
 }
 
+# capacity of storage the caller lends for the connection's lifetime. storage
+# left nil is taken from the chunk source when needed
+fun lent_history(storage: recovery.HistoryStorage) usize {
+    if (storage.packets == nil) { ret 0; }
+    ret storage.capacity;
+}
+
+fun lent_only(storage: recovery.HistoryStorage) recovery.HistoryStorage {
+    var lent: recovery.HistoryStorage;
+    if (storage.packets != nil) { lent = storage; }
+    ret lent;
+}
+
+fun lent_owners(storage: *Storage) usize {
+    if (storage.owners == nil) { ret 0; }
+    ret storage.owner_capacity;
+}
+
+fun history_fits(storage: recovery.HistoryStorage) bool {
+    ret storage.packets != nil ||
+        storage.capacity * $size_of(recovery.SentPacket) <= supply.BYTES;
+}
+
+# storage taken on demand must fit one chunk and have a source
+fun on_demand_valid(storage: *Storage) bool {
+    val demanded: bool = storage.owners == nil ||
+        storage.recovery_initial.packets == nil ||
+        storage.recovery_handshake.packets == nil ||
+        storage.recovery_application.packets == nil;
+    if (!demanded) { ret true; }
+    ret storage.chunk_source.provider != nil && storage.chunk_source.account != nil &&
+        (storage.owners != nil ||
+        storage.owner_capacity * $size_of(Owner) <= supply.BYTES) &&
+        history_fits(storage.recovery_initial) &&
+        history_fits(storage.recovery_handshake) &&
+        history_fits(storage.recovery_application);
+}
+
 fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     storage: *Storage, secret_storage: *SecretStorage,
     result: *InitResult) bool {
@@ -657,8 +731,7 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.frame_ack_capacity < storage.ack_handshake.capacity - 1 ||
         storage.frame_ack_capacity < storage.ack_application.capacity - 1 ||
         storage.recovery_event_capacity < storage.owner_capacity ||
-        storage.owner_capacity == 0 || storage.received_token_capacity == 0 ||
-        storage.send_token_capacity == 0) {
+        storage.owner_capacity == 0 || !on_demand_valid(storage)) {
         ret refuse(result, INIT_STORAGE_CAPACITY);
     }
     var zero_negotiation: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
@@ -685,25 +758,25 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.recovery_event_capacity, $size_of(recovery.Event),
         ownership.ZERO_FORBIDDEN);
     ranges[8] = ownership.array(storage.recovery_initial.packets::*u8,
-        storage.recovery_initial.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_initial), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[9] = ownership.array(storage.recovery_handshake.packets::*u8,
-        storage.recovery_handshake.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_handshake), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[10] = ownership.array(storage.recovery_application.packets::*u8,
-        storage.recovery_application.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_application), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[11] = ownership.array(storage.ack_initial.ranges::*u8,
         storage.ack_initial.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     ranges[12] = ownership.array(storage.ack_handshake.ranges::*u8,
         storage.ack_handshake.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     ranges[13] = ownership.array(storage.ack_application.ranges::*u8,
         storage.ack_application.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
-    ranges[14] = ownership.array(storage.owners::*u8, storage.owner_capacity,
-        $size_of(Owner), ownership.ZERO_FORBIDDEN);
+    ranges[14] = ownership.array(storage.owners::*u8, lent_owners(storage),
+        $size_of(Owner), ownership.ZERO_ALLOWED);
     ranges[15] = ownership.array(storage.peer_extensions::*u8,
         storage.peer_extension_capacity, $size_of(transport_parameters.Parameter),
         ownership.ZERO_ALLOWED);
@@ -714,10 +787,8 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
     ranges[18] = ownership.bytes(storage.local_extension_bytes,
         storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
-    ranges[19] = ownership.bytes(storage.received_token,
-        storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
-    ranges[20] = ownership.bytes(storage.send_token,
-        storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[19] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
+    ranges[20] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
     ranges[21] = ownership.bytes(storage.negotiation.retry_token,
         storage.negotiation.retry_token_capacity, zero_negotiation);
     ranges[22] = ownership.bytes(storage.negotiation.retry_pseudo,
@@ -814,6 +885,9 @@ fun validate_local_parameters(config: Config, parameters: *transport_parameters.
     ret true;
 }
 
+# the core's own component ranges, then the handshake provider's
+val COMPONENT_RANGES: usize = 39 + handshake_api.PROVIDER_RANGE_CAPACITY;
+
 fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     storage: *Storage, secret_storage: *SecretStorage,
     handshake: *handshake_api.Adapter,
@@ -823,7 +897,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     result: *InitResult) bool {
     if (handshake == nil || cids == nil || paths == nil || streams == nil ||
         datagrams == nil) { ret refuse(result, INIT_ARGUMENT); }
-    var ranges: [63]ownership.Range;
+    var ranges: [COMPONENT_RANGES]ownership.Range;
     ranges[0] = core_range(core);
     ranges[1] = secrets_range(secrets);
     if (!ranges[0].valid || !ranges[1].valid) {
@@ -844,25 +918,25 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.recovery_event_capacity, $size_of(recovery.Event),
         ownership.ZERO_FORBIDDEN);
     ranges[8] = ownership.array(storage.recovery_initial.packets::*u8,
-        storage.recovery_initial.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_initial), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[9] = ownership.array(storage.recovery_handshake.packets::*u8,
-        storage.recovery_handshake.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_handshake), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[10] = ownership.array(storage.recovery_application.packets::*u8,
-        storage.recovery_application.capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_FORBIDDEN);
+        lent_history(storage.recovery_application), $size_of(recovery.SentPacket),
+        ownership.ZERO_ALLOWED);
     ranges[11] = ownership.array(storage.ack_initial.ranges::*u8,
         storage.ack_initial.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     ranges[12] = ownership.array(storage.ack_handshake.ranges::*u8,
         storage.ack_handshake.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
+        ownership.ZERO_ALLOWED);
     ranges[13] = ownership.array(storage.ack_application.ranges::*u8,
         storage.ack_application.capacity, $size_of(ack_api.Range),
         ownership.ZERO_FORBIDDEN);
-    ranges[14] = ownership.array(storage.owners::*u8, storage.owner_capacity,
-        $size_of(Owner), ownership.ZERO_FORBIDDEN);
+    ranges[14] = ownership.array(storage.owners::*u8, lent_owners(storage),
+        $size_of(Owner), ownership.ZERO_ALLOWED);
     ranges[15] = ownership.array(storage.peer_extensions::*u8,
         storage.peer_extension_capacity, $size_of(transport_parameters.Parameter),
         ownership.ZERO_ALLOWED);
@@ -873,10 +947,8 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
     ranges[18] = ownership.bytes(storage.local_extension_bytes,
         storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
-    ranges[19] = ownership.bytes(storage.received_token,
-        storage.received_token_capacity, ownership.ZERO_FORBIDDEN);
-    ranges[20] = ownership.bytes(storage.send_token,
-        storage.send_token_capacity, ownership.ZERO_FORBIDDEN);
+    ranges[19] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
+    ranges[20] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
     var zero_negotiation: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (config.role == transport_api.SERVER) {
         zero_negotiation = ownership.ZERO_ALLOWED;
@@ -898,79 +970,40 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         ret refuse_overlap(result, INIT_COMPONENT_RANGES, anchored);
     }
 
-    ranges[28] = ownership.bytes(handshake.storage.receive_data,
-        handshake.storage.receive_length, ownership.ZERO_FORBIDDEN);
-    ranges[29] = ownership.array(handshake.storage.receive_present::*u8,
-        handshake.storage.receive_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[30] = ownership.bytes(handshake.storage.send_data,
-        handshake.storage.send_length, ownership.ZERO_FORBIDDEN);
-    ranges[31] = ownership.array(handshake.storage.send_pending::*u8,
-        handshake.storage.send_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[32] = ownership.array(handshake.storage.send_acked::*u8,
-        handshake.storage.send_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[33] = ownership.array(handshake.storage.send_inflight::*u8,
-        handshake.storage.send_length, $size_of(u16),
-        ownership.ZERO_FORBIDDEN);
-    ranges[34] = ownership.array(handshake.storage.attempts::*u8,
+    ranges[28] = ownership.array(handshake.storage.attempts::*u8,
         handshake.storage.attempt_capacity, $size_of(handshake_api.Attempt),
         ownership.ZERO_FORBIDDEN);
-    ranges[35] = ownership.array(cids.storage.local::*u8,
+    ranges[29] = ownership.array(cids.storage.local::*u8,
         cids.storage.local_capacity, $size_of(cid_api.Entry),
         ownership.ZERO_FORBIDDEN);
-    ranges[36] = ownership.array(cids.storage.peer::*u8,
+    ranges[30] = ownership.array(cids.storage.peer::*u8,
         cids.storage.peer_capacity, $size_of(cid_api.Entry),
         ownership.ZERO_FORBIDDEN);
-    ranges[37] = ownership.array(paths.storage.paths::*u8,
+    ranges[31] = ownership.array(paths.storage.paths::*u8,
         paths.storage.path_capacity, $size_of(path_api.Path),
         ownership.ZERO_FORBIDDEN);
-    ranges[38] = ownership.array(paths.storage.challenges::*u8,
+    ranges[32] = ownership.array(paths.storage.challenges::*u8,
         paths.storage.challenge_capacity, $size_of(path_api.Challenge),
         ownership.ZERO_FORBIDDEN);
-    ranges[39] = ownership.array(paths.storage.responses::*u8,
+    ranges[33] = ownership.array(paths.storage.responses::*u8,
         paths.storage.response_capacity, $size_of(path_api.Response),
         ownership.ZERO_FORBIDDEN);
-    ranges[40] = ownership.array(paths.storage.sends::*u8,
+    ranges[34] = ownership.array(paths.storage.sends::*u8,
         paths.storage.send_capacity, $size_of(path_api.SendReservation),
         ownership.ZERO_FORBIDDEN);
-    ranges[41] = ownership.array(streams.storage.streams::*u8,
-        streams.storage.stream_capacity, $size_of(stream_api.Stream),
-        ownership.ZERO_FORBIDDEN);
-    ranges[42] = ownership.array(streams.storage.attempts::*u8,
-        streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
-        ownership.ZERO_FORBIDDEN);
-    ranges[43] = ownership.bytes(streams.storage.send_data,
-        streams.storage.send_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[44] = ownership.array(streams.storage.send_pending::*u8,
-        streams.storage.send_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[45] = ownership.array(streams.storage.send_acked::*u8,
-        streams.storage.send_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[46] = ownership.bytes(streams.storage.send_inflight,
-        streams.storage.send_state_length, ownership.ZERO_FORBIDDEN);
-    ranges[47] = ownership.bytes(streams.storage.receive_data,
-        streams.storage.receive_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[48] = ownership.array(streams.storage.receive_present::*u8,
-        streams.storage.receive_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
+    ranges[35] = stream_api.lent_records(streams.storage);
+    ranges[36] = stream_api.lent_attempts(streams.storage);
     var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
-    ranges[49] = ownership.array(datagrams.storage.send_entries::*u8,
+    ranges[37] = ownership.array(datagrams.storage.send_entries::*u8,
         datagrams.storage.send_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[50] = ownership.bytes(datagrams.storage.send_bytes,
-        datagrams.storage.send_bytes_length, datagram_zero);
-    ranges[51] = ownership.array(datagrams.storage.receive_entries::*u8,
+    ranges[38] = ownership.array(datagrams.storage.receive_entries::*u8,
         datagrams.storage.receive_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[52] = ownership.bytes(datagrams.storage.receive_bytes,
-        datagrams.storage.receive_bytes_length, datagram_zero);
-    if (!handshake_api.provider_ranges(handshake, ?ranges[53],
+    if (!handshake_api.provider_ranges(handshake, ?ranges[39],
         handshake_api.PROVIDER_RANGE_CAPACITY)) {
         ret refuse(result, INIT_PROVIDER_RANGES);
     }
-    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], 63);
+    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], COMPONENT_RANGES);
     if (whole.kind != ownership.OVERLAP_NONE) {
         ret refuse_overlap(result, INIT_COMPONENT_RANGES, whole);
     }
@@ -996,7 +1029,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     var i: usize = 0;
     for (i < 4) {
         val lent: ownership.Disjointness = ownership.disjoint_from(borrowed[i], i,
-            ?ranges[0], 23, 63);
+            ?ranges[0], 23, COMPONENT_RANGES);
         if (lent.kind != ownership.OVERLAP_NONE) {
             ret refuse_overlap(result, INIT_COMPONENT_BORROWED, lent);
         }
@@ -1102,8 +1135,8 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     candidate.idle_timeout_ns      = config.max_idle_timeout_ns;
     candidate.idle_timer_enabled   = config.max_idle_timeout_ns != 0;
 
-    candidate.recovery_state = recovery.init(storage.recovery_initial,
-        storage.recovery_handshake, storage.recovery_application,
+    candidate.recovery_state = recovery.init(lent_only(storage.recovery_initial),
+        lent_only(storage.recovery_handshake), lent_only(storage.recovery_application),
         recovery.default_config());
     if (!candidate.recovery_state.valid || !recovery.set_peer_address_validated(
         ?candidate.recovery_state, config.peer_validated, now_ns).ok) {
@@ -1198,11 +1231,13 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         ret refuse(init_result, INIT_PROVIDER_START);
     }
     var i: usize = 0;
-    for (i < storage.owner_capacity) {
+    for (i < lent_owners(?storage)) {
         storage.owners[i].state      = OWNER_FREE;
         storage.owners[i].generation = next_generation(storage.owners[i].generation);
         i                            = i + 1;
     }
+    candidate.owners              = storage.owners;
+    candidate.owner_capacity      = lent_owners(?storage);
     candidate_secrets.initialized = true;
     candidate.initialized         = true;
     secrets[0]                    = candidate_secrets;
@@ -1280,8 +1315,8 @@ pub fun abandon_initialization(core: *Core, secrets: *Secrets) bool {
         core.retry_count != 0 || core.version_restart_count != 0 ||
         core.next_owner != 1 || core.next_owner_slot != 0) { ret false; }
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state != OWNER_FREE) { ret false; }
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state != OWNER_FREE) { ret false; }
         i = i + 1;
     }
     val selected: path_api.PathResult = path_api.selected(core.paths);
@@ -1448,11 +1483,53 @@ fun discard_initial_keys(core: *Core, secrets: *Secrets) bool {
     if (!initial.ok || !apply_recovery_events(core, secrets,
         initial.event_count, core.last_now_ns, false, false, before)) { ret false; }
     protection.destroy_initial(?secrets.initial_keys);
-    if (!ack_api.discard_space(?core.acknowledgements, packet.SPACE_INITIAL)) {
+    if (!ack_api.discard_space(?core.acknowledgements, packet.SPACE_INITIAL) ||
+        handshake_api.discard_scoped(secrets.handshake, core.config.source,
+        handshake_api.INITIAL).status != handshake_api.STATUS_OK) {
         ret false;
     }
     core.initial_keys_discarded = true;
     ret true;
+}
+
+# the Initial and Handshake ack spaces are discarded for good, and may live in
+# the handshake block
+fun detach_handshake_acks(core: *Core) {
+    ack_api.discard_space(?core.acknowledgements, packet.SPACE_INITIAL);
+    ack_api.discard_space(?core.acknowledgements, packet.SPACE_HANDSHAKE);
+    ack_api.detach_space(?core.acknowledgements, packet.SPACE_INITIAL);
+    ack_api.detach_space(?core.acknowledgements, packet.SPACE_HANDSHAKE);
+    var none: ack_api.SpaceStorage;
+    core.storage.ack_initial   = none;
+    core.storage.ack_handshake = none;
+}
+
+# nothing reads parameter extensions, the encoded local parameters, retry state
+# or the handshake ack spaces once the handshake is confirmed, so their storage
+# is dropped
+fun release_handshake_storage(core: *Core) {
+    if (core.role == transport_api.CLIENT) { negotiation_api.finish(?core.negotiation); }
+    var no_negotiation: negotiation_api.Storage;
+    core.storage.negotiation                   = no_negotiation;
+    core.storage.peer_extensions               = nil;
+    core.storage.peer_extension_capacity       = 0;
+    core.storage.peer_extension_bytes          = nil;
+    core.storage.peer_extension_byte_capacity  = 0;
+    core.storage.local_extensions              = nil;
+    core.storage.local_extension_capacity      = 0;
+    core.storage.local_extension_bytes         = nil;
+    core.storage.local_extension_byte_capacity = 0;
+    core.peer_parameters.extensions            = nil;
+    core.peer_parameters.extension_count       = 0;
+    core.local_parameters.extensions           = nil;
+    core.local_parameters.extension_count      = 0;
+    var no_parameters: View;
+    core.config.local_transport_parameters = no_parameters;
+    detach_handshake_acks(core);
+    if (core.storage.handshake_block != nil) {
+        chunks.give_block(?core.storage.chunk_source, core.storage.handshake_block);
+        core.storage.handshake_block = nil;
+    }
 }
 
 fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
@@ -1478,6 +1555,9 @@ fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
     protection.destroy(?secrets.handshake_send);
     protection.destroy(?secrets.handshake_receive);
     ack_api.discard_space(?core.acknowledgements, packet.SPACE_HANDSHAKE);
+    release_handshake_storage(core);
+    if (handshake_api.discard_scoped(secrets.handshake, core.config.source,
+        handshake_api.HANDSHAKE).status != handshake_api.STATUS_OK) { ret false; }
     core.handshake_confirmed = true;
     core.state               = transport_api.ACTIVE;
     if (core.role == transport_api.SERVER) {
@@ -1524,6 +1604,10 @@ fun pump_handshake(core: *Core, secrets: *Secrets) u64 {
         }
         val completed: handshake_api.Result = handshake_api.complete_event_scoped(
             secrets.handshake, core.config.source, event.token, accepted);
+        # crypto output with no storage yet is offered again once the pool
+        # wakes the connection
+        if (completed.status == handshake_api.STATUS_BLOCKED &&
+            completed.error == handshake_api.ERROR_STORAGE) { ret NO_ERROR; }
         if (completed.status != handshake_api.STATUS_OK) {
             if (!accepted && completed.error == handshake_api.ERROR_REJECTED) {
                 ret rejected_error;
@@ -1668,17 +1752,124 @@ fun receive_keys(core: *Core, secrets: *Secrets,
 
 fun owner_by_id(core: *Core, owner: u64) *Owner {
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state != OWNER_FREE &&
-            core.storage.owners[i].owner == owner) { ret ?core.storage.owners[i]; }
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state != OWNER_FREE &&
+            core.owners[i].owner == owner) { ret ?core.owners[i]; }
         i = i + 1;
     }
     ret nil;
 }
 
-fun free_owner(value: *Owner) {
+fun free_owner(core: *Core, value: *Owner) {
+    if (value.state != OWNER_FREE && core.owners_active > 0) {
+        core.owners_active = core.owners_active - 1;
+    }
     value.state      = OWNER_FREE;
     value.generation = next_generation(value.generation);
+}
+
+fun source_of(core: *Core) *ranges.Source {
+    ret ?core.storage.chunk_source;
+}
+
+# the owner table, taken from the chunk source when none is held
+fun owners_ready(core: *Core) bool {
+    if (core.owners != nil)                                     { ret true; }
+    if (!chunks.take_block(source_of(core), ?core.owner_block)) { ret false; }
+    core.owners         = core.owner_block.data::*Owner;
+    core.owner_capacity = core.storage.owner_capacity;
+    ret true;
+}
+
+fun space_history(core: *Core, space: u8) recovery.HistoryStorage {
+    if (space == packet.SPACE_INITIAL)   { ret core.storage.recovery_initial; }
+    if (space == packet.SPACE_HANDSHAKE) { ret core.storage.recovery_handshake; }
+    ret core.storage.recovery_application;
+}
+
+# a history for `space`, taken from the chunk source when the space has none
+fun history_ready(core: *Core, space: u8) bool {
+    if (recovery.has_history(?core.recovery_state, space)) { ret true; }
+    val block: *chunks.Block = ?core.history_blocks[space_index(space)];
+    if (!chunks.take_block(source_of(core), block)) { ret false; }
+    if (!recovery.lend_history(?core.recovery_state, space, recovery.HistoryStorage{
+        packets:  block.data::*recovery.SentPacket,
+        capacity: space_history(core, space).capacity
+    })) {
+        chunks.give_block(source_of(core), block);
+        ret false;
+    }
+    ret true;
+}
+
+# gives back taken tables once nothing is in them
+fun settle_flight(core: *Core) {
+    if (core.owner_block.data != nil && core.owners_active == 0) {
+        core.owners         = nil;
+        core.owner_capacity = 0;
+        chunks.give_block(source_of(core), ?core.owner_block);
+    }
+    var i: usize = 0;
+    for (i < 3) {
+        val space: u8 = packet.SPACE_INITIAL + i::u8;
+        if (core.history_blocks[i].data != nil &&
+            recovery.tracked(?core.recovery_state, space) == 0) {
+            recovery.reclaim_history(?core.recovery_state, space);
+            chunks.give_block(source_of(core), ?core.history_blocks[i]);
+        }
+        i = i + 1;
+    }
+}
+
+fun token_source(core: *Core, lane: supply.Lane) supply.Source {
+    ret supply.Source{provider: core.storage.chunk_source.provider,
+        account: core.storage.chunk_source.account, lane: lane};
+}
+
+fun take_token(core: *Core, lane: supply.Lane, length: usize,
+    chunk: *supply.Chunk) bool {
+    var from:  supply.Source = token_source(core, lane);
+    val taken: supply.Taken  = supply.take(?from, length);
+    if (!taken.ok) { ret false; }
+    @chunk = taken.chunk;
+    ret true;
+}
+
+fun give_token(core: *Core, lane: supply.Lane, chunk: *supply.Chunk) {
+    if (chunk.data == nil) { ret; }
+    var from: supply.Source = token_source(core, lane);
+    if (supply.give(?from, @chunk)) {
+        var none: supply.Chunk;
+        @chunk = none;
+    }
+}
+
+# a dead core's chunks, given back whatever they hold
+pub fun release_chunks(core: *Core) {
+    if (!core_record_valid(core)) { ret; }
+    give_token(core, supply.RECEIVE, ?core.received_token);
+    give_token(core, supply.SEND, ?core.send_token);
+    core.received_token_length = 0;
+    core.send_token_length     = 0;
+    core.owners                = nil;
+    core.owner_capacity        = 0;
+    core.owners_active         = 0;
+    chunks.give_block(source_of(core), ?core.owner_block);
+    var i: usize = 0;
+    for (i < 3) {
+        if (core.history_blocks[i].data != nil) {
+            var none: recovery.History;
+            none.active                   = false;
+            core.recovery_state.spaces[i] = none;
+            chunks.give_block(source_of(core), ?core.history_blocks[i]);
+        }
+        i = i + 1;
+    }
+    if (core.storage.handshake_block != nil) {
+        detach_handshake_acks(core);
+        chunks.give_block(source_of(core), core.storage.handshake_block);
+        core.storage.handshake_block = nil;
+    }
 }
 
 # settles one owner that recovery has already forgotten. a failing step fails
@@ -1702,11 +1893,11 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
     }
     if (owner.kind == OWNER_CRYPTO) {
         ok = handshake_api.on_terminal_scoped(secrets.handshake, core.config.source,
-            owner.handshake, terminal).status == handshake_api.STATUS_OK && ok;
+            owner.token.handshake, terminal).status == handshake_api.STATUS_OK && ok;
     }
     if (owner.kind == OWNER_STREAM) {
         ok = stream_api.on_terminal_scoped(core.streams, core.config.source,
-            owner.stream, stream_terminal).status == stream_api.STATUS_OK && ok;
+            owner.token.stream, stream_terminal).status == stream_api.STATUS_OK && ok;
     }
     if (owner.kind == OWNER_ACK && event.kind == recovery.EVENT_ACKED) {
         ok = ack_api.on_ack_packet_acked(?core.acknowledgements, owner.space,
@@ -1714,12 +1905,12 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
     }
     if (owner.kind == OWNER_CID_RETIREMENT) {
         ok = cid_api.retirement_terminal_scoped(core.cids, core.config.source,
-            owner.cid_retirement,
+            owner.token.cid_retirement,
             event.kind == recovery.EVENT_ACKED).status == cid_api.STATUS_OK && ok;
     }
     if (owner.kind == OWNER_NEW_CID) {
         ok = cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
-            owner.cid_retirement,
+            owner.token.cid_retirement,
             event.kind == recovery.EVENT_ACKED).status == cid_api.STATUS_OK && ok;
     }
     if (owner.kind == OWNER_HANDSHAKE_DONE &&
@@ -1729,6 +1920,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
     if (owner.kind == OWNER_NEW_TOKEN) {
         core.send_token_prepared = false;
         if (event.kind == recovery.EVENT_ACKED) {
+            give_token(core, supply.SEND, ?core.send_token);
             core.send_token_length = 0;
         }
         or {
@@ -1744,7 +1936,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
         !core.paths.storage.paths[path_handle.index].valid ||
         core.paths.storage.paths[path_handle.index].generation !=
         path_handle.generation) {
-        free_owner(owner);
+        free_owner(core, owner);
         ret false;
     }
     val transport_path: *path_api.Path =
@@ -1775,7 +1967,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
         }
         ok = apply_mtu(core, transport_path,
             path_api.on_mtu_terminal_scoped(core.paths, core.config.source,
-            owner.mtu_probe, mtu_terminal), now_ns) && ok;
+            owner.token.mtu_probe, mtu_terminal), now_ns) && ok;
     }
     or (owner.path_send.source != 0) {
         if (event.kind == recovery.EVENT_ACKED) {
@@ -1795,7 +1987,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
         core.recovery_state.rtt.smoothed_ns).ok && ok;
     ok = path_api.release_recovery_scoped(core.paths, core.config.source,
         path_handle).status == path_api.STATUS_OK && ok;
-    free_owner(owner);
+    free_owner(core, owner);
     ret ok;
 }
 
@@ -1824,20 +2016,20 @@ fun terminal_discarded_owner(core: *Core, secrets: *Secrets,
     owner: *Owner, now_ns: u64) bool {
     if (owner.kind == OWNER_CRYPTO &&
         handshake_api.on_terminal_scoped(secrets.handshake, core.config.source,
-        owner.handshake, handshake_api.TERMINAL_LOST).status !=
+        owner.token.handshake, handshake_api.TERMINAL_LOST).status !=
         handshake_api.STATUS_OK) { ret false; }
     if (owner.kind == OWNER_STREAM &&
         stream_api.on_terminal_scoped(core.streams, core.config.source,
-        owner.stream, stream_api.TERMINAL_LOST).status !=
+        owner.token.stream, stream_api.TERMINAL_LOST).status !=
         stream_api.STATUS_OK) { ret false; }
     if (owner.kind == OWNER_CID_RETIREMENT &&
         cid_api.retirement_terminal_scoped(core.cids, core.config.source,
-        owner.cid_retirement, false).status != cid_api.STATUS_OK) {
+        owner.token.cid_retirement, false).status != cid_api.STATUS_OK) {
         ret false;
     }
     if (owner.kind == OWNER_NEW_CID &&
         cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
-        owner.cid_retirement, false).status != cid_api.STATUS_OK) {
+        owner.token.cid_retirement, false).status != cid_api.STATUS_OK) {
         ret false;
     }
     if (owner.kind == OWNER_HANDSHAKE_DONE) {
@@ -1852,7 +2044,7 @@ fun terminal_discarded_owner(core: *Core, secrets: *Secrets,
         !discard_initial_keys(core, secrets)) {
         ret false;
     }
-    free_owner(owner);
+    free_owner(core, owner);
     ret true;
 }
 
@@ -2010,6 +2202,16 @@ fun frame_allowed(core: *Core, level: handshake_api.Level,
     ret true;
 }
 
+# a frame that would open streams or store bytes the pool refuses leaves its
+# packet unacknowledged, so the peer sends it again
+fun stream_refusal(core: *Core, error: u8) bool {
+    if (error == stream_api.ERROR_STORAGE) {
+        core.packet_refused = true;
+        ret true;
+    }
+    ret stream_failure(core, error);
+}
+
 fun stream_failure(core: *Core, error: u8) bool {
     if (error == stream_api.ERROR_STREAM_LIMIT) {
         core.close_error = STREAM_LIMIT_ERROR;
@@ -2051,6 +2253,10 @@ fun process_frame(core: *Core, secrets: *Secrets,
         val received: handshake_api.Result = handshake_api.receive_scoped(
             secrets.handshake, core.config.source, level, value.offset, value.data.data,
             value.data.len, now_ns);
+        if (received.error == handshake_api.ERROR_STORAGE) {
+            core.packet_refused = true;
+            ret true;
+        }
         if (received.status == handshake_api.STATUS_ERROR) {
             core.close_error = handshake_failure(core, received);
             ret false;
@@ -2071,11 +2277,19 @@ fun process_frame(core: *Core, secrets: *Secrets,
             core.close_error = FRAME_ENCODING_ERROR;
             ret false;
         }
-        if (value.data.len > core.storage.received_token_capacity) {
-            core.close_error = INTERNAL_ERROR;
-            ret false;
+        # a token the owner has not taken yet is replaced. with no chunk the
+        # packet is refused before it is acknowledged, so the server sends it
+        # again
+        if (core.received_token.bytes < value.data.len) {
+            give_token(core, supply.RECEIVE, ?core.received_token);
+            core.received_token_length = 0;
+            if (!take_token(core, supply.RECEIVE, value.data.len,
+                ?core.received_token)) {
+                core.packet_refused = true;
+                ret true;
+            }
         }
-        memory.copy[u8](core.storage.received_token, value.data.data, value.data.len);
+        memory.copy[u8](core.received_token.data, value.data.data, value.data.len);
         core.received_token_length = value.data.len;
         ret true;
     }
@@ -2084,20 +2298,20 @@ fun process_frame(core: *Core, secrets: *Secrets,
             core.streams, core.config.source, value.stream_id, value.offset, value.data.data,
             value.data.len, value.fin);
         if (received.ok) { ret true; }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.RESET_STREAM) {
         val received: stream_api.ReceiveResult = stream_api.receive_reset_scoped(
             core.streams, core.config.source, value.stream_id, value.error_code,
             value.final_size);
         if (received.ok) { ret true; }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.STOP_SENDING) {
         val received: stream_api.ReceiveResult = stream_api.receive_stop_scoped(
             core.streams, core.config.source, value.stream_id, value.error_code);
         if (received.ok) { ret true; }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.MAX_DATA) {
         val received: stream_api.OperationResult = stream_api.update_max_data_scoped(
@@ -2110,7 +2324,7 @@ fun process_frame(core: *Core, secrets: *Secrets,
             stream_api.receive_max_stream_data_scoped(core.streams, core.config.source, value.stream_id,
             value.maximum);
         if (received.ok) { ret true; }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.MAX_STREAMS_BIDI || value.kind == frame.MAX_STREAMS_UNI) {
         var direction: u8 = stream_api.DIRECTION_UNIDIRECTIONAL;
@@ -2133,7 +2347,7 @@ fun process_frame(core: *Core, secrets: *Secrets,
             stream_api.receive_stream_data_blocked_scoped(core.streams, core.config.source,
             value.stream_id, value.maximum);
         if (received.ok) { ret true; }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.STREAMS_BLOCKED_BIDI ||
         value.kind == frame.STREAMS_BLOCKED_UNI) {
@@ -2257,7 +2471,7 @@ fun apply_plaintext(core: *Core, secrets: *Secrets,
             !process_frame(core, secrets, level, space, receive_path,
             receive_destination,
             ?value, decoder.pos - frame_begin, now_ns)) { ret false; }
-        if (core.peer_close_received) { brk; }
+        if (core.peer_close_received || core.packet_refused) { brk; }
     }
     ret true;
 }
@@ -2266,10 +2480,10 @@ fun restart_client(core: *Core, secrets: *Secrets, value: negotiation_api.Result
     now_ns: u64) bool {
     if (value.status != negotiation_api.STATUS_RESTART) { ret false; }
     var owner_index: usize = 0;
-    for (owner_index < core.storage.owner_capacity) {
-        if (core.storage.owners[owner_index].state == OWNER_PREPARED &&
+    for (owner_index < core.owner_capacity) {
+        if (core.owners[owner_index].state == OWNER_PREPARED &&
             !cancel_payload(core, secrets,
-            ?core.storage.owners[owner_index])) { ret false; }
+            ?core.owners[owner_index])) { ret false; }
         owner_index = owner_index + 1;
     }
     val before:  u64                    = core.recovery_state.bytes_in_flight::u64;
@@ -2324,7 +2538,7 @@ fun restart_client(core: *Core, secrets: *Secrets, value: negotiation_api.Result
 }
 
 fun receive_special(core: *Core, secrets: *Secrets,
-    input: *transport_api.Datagram,
+    input: *transport_api.CoreInput,
     value: Envelope) transport_api.CoreResult {
     if (core.role != transport_api.CLIENT || value.offset != 0 ||
         core.authenticated_packets != 0) {
@@ -2349,7 +2563,7 @@ fun receive_special(core: *Core, secrets: *Secrets,
 }
 
 fun receive_protected(core: *Core, secrets: *Secrets,
-    input: *transport_api.Datagram,
+    input: *transport_api.CoreInput,
     value: Envelope) transport_api.CoreResult {
     if (value.kind == packet.PACKET_INITIAL && input.length < 1200) {
         ret core_result(core, transport_api.STATUS_OK, 0);
@@ -2392,6 +2606,21 @@ fun receive_protected(core: *Core, secrets: *Secrets,
             contracts.SecretBuffer{data: secrets.storage.receive_plaintext,
             capacity: secrets.storage.receive_plaintext_capacity});
     }
+    # the decrypted bytes leave the shared secret scratch before anything else
+    # can return: a failed open may still have written up to the packet length
+    var plaintext_index: usize = 0;
+    if (opened.error == protection.OK) {
+        for (plaintext_index < opened.written) {
+            core.storage.receive_decoded[plaintext_index] =
+                secrets.storage.receive_plaintext[plaintext_index]:>u8;
+            plaintext_index = plaintext_index + 1;
+        }
+    }
+    var touched: usize = value.length;
+    if (touched > secrets.storage.receive_plaintext_capacity) {
+        touched = secrets.storage.receive_plaintext_capacity;
+    }
+    ct.zeroize(secrets.storage.receive_plaintext, touched);
     if (opened.error == protection.AUTH_FAILED ||
         opened.error == protection.KEYS_DISCARDED) {
         if (level == handshake_api.APPLICATION && opened.error ==
@@ -2416,12 +2645,6 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         opened.generation) != protection.OK) {
         ret fail(core, KEY_UPDATE_ERROR, input.received_at_ns);
     }
-    var plaintext_index: usize = 0;
-    for (plaintext_index < opened.written) {
-        core.storage.receive_decoded[plaintext_index] =
-            secrets.storage.receive_plaintext[plaintext_index]:>u8;
-        plaintext_index = plaintext_index + 1;
-    }
     if (core.state == transport_api.CLOSING) {
         core.close_queued = true;
         ret core_result(core, transport_api.STATUS_OK, 0);
@@ -2431,13 +2654,17 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     var non_probing:   bool = false;
     if (!scan_plaintext(core, plaintext, opened.written, ?ack_eliciting,
         ?non_probing)) { ret fail(core, FRAME_ENCODING_ERROR, input.received_at_ns); }
-    val received: ack_api.ReceiveResult = ack_api.on_packet(?core.acknowledgements,
-        space, opened.packet_number, input.received_at_ns, ack_eliciting, input.ecn);
-    if (received.status == ack_api.RECEIVE_DUPLICATE ||
-        received.status == ack_api.RECEIVE_DROPPED) {
+    # the packet is recorded for acknowledgement only once its frames were
+    # taken. a packet refused for storage stays unacknowledged, so its sender
+    # retransmits what it carried
+    val seen: u8 = ack_api.classify(?core.acknowledgements, space,
+        opened.packet_number);
+    if (seen == ack_api.RECEIVE_DUPLICATE || seen == ack_api.RECEIVE_DROPPED) {
+        ack_api.on_packet(?core.acknowledgements, space, opened.packet_number,
+            input.received_at_ns, ack_eliciting, input.ecn);
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
-    if (received.status != ack_api.RECEIVE_NEW) {
+    if (seen != ack_api.RECEIVE_NEW) {
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
     if (core.role == transport_api.CLIENT && core.authenticated_packets == 0 &&
@@ -2486,12 +2713,26 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         input.received_at_ns)) {
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
+    core.packet_refused = false;
     if (!apply_plaintext(core, secrets, level, space, observed.handle,
         receive_destination.handle, plaintext, opened.written,
         input.received_at_ns)) {
         var failure: u64 = PROTOCOL_VIOLATION;
         if (core.close_error != NO_ERROR) { failure = core.close_error; }
         ret fail(core, failure, input.received_at_ns);
+    }
+    if (core.packet_refused) {
+        core.packet_refused  = false;
+        core.refused_packets = core.refused_packets + 1;
+    }
+    or {
+        # applying the frames may have discarded this space, and then there is
+        # nothing left to acknowledge
+        val recorded: u8 = ack_api.on_packet(?core.acknowledgements, space,
+            opened.packet_number, input.received_at_ns, ack_eliciting, input.ecn).status;
+        if (recorded != ack_api.RECEIVE_NEW && recorded != ack_api.RECEIVE_DISCARDED) {
+            ret fail(core, INTERNAL_ERROR, input.received_at_ns);
+        }
     }
     if (core.role == transport_api.CLIENT && level == handshake_api.HANDSHAKE &&
         !discard_initial_keys(core, secrets)) {
@@ -2512,9 +2753,16 @@ fun receive_protected(core: *Core, secrets: *Secrets,
 }
 
 pub fun receive(core: *Core, secrets: *Secrets,
-    input: *transport_api.Datagram) transport_api.CoreResult {
+    input: *transport_api.CoreInput) transport_api.CoreResult {
+    val result: transport_api.CoreResult = receive_unsettled(core, secrets, input);
+    if (core_record_valid(core) && core.initialized) { settle_flight(core); }
+    ret result;
+}
+
+fun receive_unsettled(core: *Core, secrets: *Secrets,
+    input: *transport_api.CoreInput) transport_api.CoreResult {
     if (!core_record_valid(core) || !secret_record_valid(secrets) ||
-        !ownership.bytes(input::*u8, $size_of(transport_api.Datagram),
+        !ownership.bytes(input::*u8, $size_of(transport_api.CoreInput),
         ownership.ZERO_FORBIDDEN).valid) {
         ret core_refused(INTERNAL_ERROR);
     }
@@ -2572,19 +2820,60 @@ pub fun receive(core: *Core, secrets: *Secrets,
     ret core_result(core, transport_api.STATUS_OK, 0);
 }
 
-pub fun queue_new_token(core: *Core, data: *u8, length: usize) bool {
+# queues a NEW_TOKEN for the client, one at a time
+# ---
+# ret: STATUS_OK once queued. STATUS_EARLY while an earlier token is still
+#      unacknowledged: repeat once `snapshot().new_token_pending` clears.
+#      STATUS_BLOCKED when no chunk is free: repeat once the connection's
+#      account is woken. STATUS_ERROR for a call that can never succeed as made
+pub fun queue_new_token(core: *Core, data: *u8, length: usize) transport_api.Status {
     val input: ownership.Range = ownership.bytes(data, length,
         ownership.ZERO_FORBIDDEN);
     if (!core_record_valid(core) || !core.initialized || core.destroyed || core.closing ||
         core.role != transport_api.SERVER || !core.handshake_confirmed ||
-        length == 0 || !borrowed_disjoint(core, input) ||
-        length > core.storage.send_token_capacity ||
-        core.send_token_queued || core.send_token_prepared) { ret false; }
-    memory.copy[u8](core.storage.send_token, data, length);
+        length == 0 || length > supply.BYTES || !borrowed_disjoint(core, input)) {
+        ret transport_api.STATUS_ERROR;
+    }
+    if (core.send_token_queued || core.send_token_prepared ||
+        core.send_token.data != nil) { ret transport_api.STATUS_EARLY; }
+    if (!take_token(core, supply.SEND, length, ?core.send_token)) {
+        ret transport_api.STATUS_BLOCKED;
+    }
+    memory.copy[u8](core.send_token.data, data, length);
     core.send_token_length = length;
     core.send_token_queued = true;
     wake(core);
-    ret true;
+    ret transport_api.STATUS_OK;
+}
+
+pub rec TakenToken {
+    status: transport_api.Status;
+    length: usize;
+}
+
+# copies the client's received token out and releases it. STATUS_EMPTY when
+# none is waiting. when `capacity` is too small nothing is released, and
+# `length` says how much room the token needs
+pub fun take_received_token(core: *Core, output: *u8,
+    capacity: usize) TakenToken {
+    var result: TakenToken;
+    result.status = transport_api.STATUS_ERROR;
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
+        core.role != transport_api.CLIENT) { ret result; }
+    if (core.received_token_length == 0) {
+        result.status = transport_api.STATUS_EMPTY;
+        ret result;
+    }
+    result.length = core.received_token_length;
+    if (capacity < result.length || !borrowed_disjoint(core,
+        ownership.bytes(output, capacity, ownership.ZERO_FORBIDDEN))) {
+        ret result;
+    }
+    memory.copy[u8](output, core.received_token.data, result.length);
+    give_token(core, supply.RECEIVE, ?core.received_token);
+    core.received_token_length = 0;
+    result.status              = transport_api.STATUS_OK;
+    ret result;
 }
 
 pub fun probe_path(core: *Core, endpoint: path_api.Endpoint,
@@ -2676,17 +2965,6 @@ pub fun on_path_packet_too_big(core: *Core, value: path_api.Handle,
     ret updated;
 }
 
-pub fun received_token(core: *Core) View {
-    var result: View;
-    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
-        core.role != transport_api.CLIENT || core.received_token_length == 0) {
-        ret result;
-    }
-    result.data   = core.storage.received_token;
-    result.length = core.received_token_length;
-    ret result;
-}
-
 pub fun poll_handshake(core: *Core, secrets: *Secrets,
     now_ns: u64) transport_api.CoreResult {
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
@@ -2703,7 +2981,17 @@ pub fun poll_handshake(core: *Core, secrets: *Secrets,
 }
 
 fun handshake_poll_due(core: *Core) bool {
-    ret !core.handshake_confirmed || core.crypto_received;
+    ret core.storage_woken || (!core.handshake_waiting &&
+        (!core.handshake_confirmed || core.crypto_received ||
+        !core.handshake_settled));
+}
+
+# the connection's account woke: whatever the provider was refused for memory
+# is tried again on the next call
+pub fun storage_ready(core: *Core) {
+    if (!core_record_valid(core) || !core.initialized || core.destroyed) { ret; }
+    core.storage_woken = true;
+    wake(core);
 }
 
 # anything that can create send work outside generate ends an idle stretch
@@ -2739,12 +3027,33 @@ fun still_idle(core: *Core, now_ns: u64) bool {
 
 fun advance_handshake(core: *Core, secrets: *Secrets, now_ns: u64) u64 {
     core.crypto_received = false;
+    core.storage_woken   = false;
     val polled: handshake_api.Result = handshake_api.poll_scoped(
         secrets.handshake, core.config.source, now_ns);
     if (polled.status == handshake_api.STATUS_ERROR) {
         ret handshake_failure(core, polled);
     }
-    ret pump_handshake(core, secrets);
+    core.handshake_waiting = polled.status == handshake_api.STATUS_WAITING;
+    val pumped: u64 = pump_handshake(core, secrets);
+    if (pumped != NO_ERROR) { ret pumped; }
+    ret settle_handshake(core, secrets);
+}
+
+# retires the provider's handshake state once it is complete and drained
+fun settle_handshake(core: *Core, secrets: *Secrets) u64 {
+    if (core.handshake_settled || core.closing) { ret NO_ERROR; }
+    val state: handshake_api.Snapshot = handshake_api.snapshot(secrets.handshake);
+    if (!state.handshake_complete || state.event_active || state.closing) {
+        ret NO_ERROR;
+    }
+    val settled: handshake_api.Result = handshake_api.settle_scoped(
+        secrets.handshake, core.config.source);
+    if (settled.status == handshake_api.STATUS_OK) {
+        core.handshake_settled = true;
+        ret NO_ERROR;
+    }
+    if (settled.status == handshake_api.STATUS_MORE) { ret NO_ERROR; }
+    ret handshake_failure(core, settled);
 }
 
 pub fun snapshot(core: *Core) Snapshot {
@@ -2756,17 +3065,20 @@ pub fun snapshot(core: *Core) Snapshot {
     result.retry_count            = core.retry_count;
     result.version_restart_count  = core.version_restart_count;
     result.received_token_length  = core.received_token_length;
+    result.new_token_pending      = core.send_token.data != nil;
     result.early_disposition      = core.early_disposition;
     result.peer_parameters_ready  = core.peer_parameters_ready;
     result.peer_authenticated     = core.peer_authenticated;
     result.handshake_confirmed    = core.handshake_confirmed;
+    result.handshake_settled      = core.handshake_settled;
+    result.handshake_waiting      = core.handshake_waiting;
     result.initial_keys_discarded = core.initial_keys_discarded;
     result.provider_error         = core.last_provider_error;
     result.closing                = core.closing;
     result.destroyed              = core.destroyed;
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state != OWNER_FREE) {
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state != OWNER_FREE) {
             result.active_owners = result.active_owners + 1;
         }
         i = i + 1;
@@ -2774,30 +3086,39 @@ pub fun snapshot(core: *Core) Snapshot {
     ret result;
 }
 
-fun claim_owner(core: *Core) *Owner {
+# names a new owner. it takes a table slot only once its frame is prepared
+fun claim_owner(core: *Core, claimed: *Owner) bool {
+    if (core.owners != nil && core.owners_active >= core.owner_capacity) { ret false; }
+    var candidate: u64   = core.next_owner;
+    var attempts:  usize = 0;
+    for (attempts <= core.owner_capacity && owner_by_id(core, candidate) != nil) {
+        candidate = next_generation(candidate);
+        attempts  = attempts + 1;
+    }
+    if (owner_by_id(core, candidate) != nil) { ret false; }
+    var clean: Owner;
+    clean.owner     = candidate;
+    clean.state     = OWNER_PREPARED;
+    @claimed        = clean;
+    core.next_owner = next_generation(candidate);
+    ret true;
+}
+
+# puts a prepared owner in the table, with a history ready for its space. nil
+# when storage for either is refused
+fun place_owner(core: *Core, claimed: *Owner) *Owner {
+    val space: u8 = packet.number_space(kind_for_level(claimed.level));
+    if (!owners_ready(core) || !history_ready(core, space)) { ret nil; }
     var slot_offset: usize = 0;
-    for (slot_offset < core.storage.owner_capacity) {
-        val index: usize = (core.next_owner_slot + slot_offset) %
-            core.storage.owner_capacity;
-        if (core.storage.owners[index].state == OWNER_FREE) {
-            var candidate: u64   = core.next_owner;
-            var attempts:  usize = 0;
-            for (attempts <= core.storage.owner_capacity &&
-                owner_by_id(core, candidate) != nil) {
-                candidate = next_generation(candidate);
-                attempts  = attempts + 1;
-            }
-            if (owner_by_id(core, candidate) != nil) { ret nil; }
-            val generation: u64 = next_generation(
-                core.storage.owners[index].generation);
-            var clean: Owner;
-            clean.owner                = candidate;
-            clean.generation           = generation;
-            clean.state                = OWNER_PREPARED;
-            core.storage.owners[index] = clean;
-            core.next_owner            = next_generation(candidate);
-            core.next_owner_slot       = (index + 1) % core.storage.owner_capacity;
-            ret ?core.storage.owners[index];
+    for (slot_offset < core.owner_capacity) {
+        val index: usize = (core.next_owner_slot + slot_offset) % core.owner_capacity;
+        if (core.owners[index].state == OWNER_FREE) {
+            val generation: u64 = next_generation(core.owners[index].generation);
+            core.owners[index]            = @claimed;
+            core.owners[index].generation = generation;
+            core.owners_active            = core.owners_active + 1;
+            core.next_owner_slot          = (index + 1) % core.owner_capacity;
+            ret ?core.owners[index];
         }
         slot_offset = slot_offset + 1;
     }
@@ -2806,8 +3127,8 @@ fun claim_owner(core: *Core) *Owner {
 
 fun has_prepared_owner(core: *Core) bool {
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state == OWNER_PREPARED) { ret true; }
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state == OWNER_PREPARED) { ret true; }
         i = i + 1;
     }
     ret false;
@@ -2819,32 +3140,32 @@ fun cancel_payload(core: *Core, secrets: *Secrets, owner: *Owner) bool {
         core.ack_prepared[space_index(owner.space)] = false;
     }
     if (owner.kind == OWNER_CRYPTO) {
-        ok = handshake_api.cancel_prepared_scoped(secrets.handshake, core.config.source, owner.handshake).status == handshake_api.STATUS_OK;
+        ok = handshake_api.cancel_prepared_scoped(secrets.handshake, core.config.source, owner.token.handshake).status == handshake_api.STATUS_OK;
     }
     if (owner.kind == OWNER_STREAM) {
-        ok = stream_api.cancel_prepared_scoped(core.streams, core.config.source, stream_prepared_token(owner.stream)).status == stream_api.STATUS_OK;
+        ok = stream_api.cancel_prepared_scoped(core.streams, core.config.source, stream_prepared_token(owner.token.stream)).status == stream_api.STATUS_OK;
     }
     if (owner.kind == OWNER_DATAGRAM) {
         ok = datagram_api.cancel_prepared_scoped(core.datagrams, core.config.source,
-            datagram_prepared_token(owner.datagram)).status ==
+            datagram_prepared_token(owner.token.datagram)).status ==
             datagram_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_CHALLENGE) {
         ok = path_api.cancel_challenge_scoped(core.paths, core.config.source,
-            owner.path_challenge).status == path_api.STATUS_OK;
+            owner.token.path_challenge).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_RESPONSE) {
         ok = path_api.cancel_response_scoped(core.paths, core.config.source,
-            owner.path_response).status == path_api.STATUS_OK;
+            owner.token.path_response).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_CID_RETIREMENT) {
         ok = cid_api.retirement_terminal_scoped(core.cids, core.config.source,
-            owner.cid_retirement,
+            owner.token.cid_retirement,
             false).status == cid_api.STATUS_OK;
     }
     if (owner.kind == OWNER_NEW_CID) {
         ok = cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
-            owner.cid_retirement,
+            owner.token.cid_retirement,
             false).status == cid_api.STATUS_OK;
     }
     if (owner.kind == OWNER_CLOSE) { core.close_queued = true; }
@@ -2862,7 +3183,7 @@ fun cancel_payload(core: *Core, secrets: *Secrets, owner: *Owner) bool {
             owner.path_send.source = 0;
         }
         ok = path_api.cancel_mtu_probe_scoped(core.paths, core.config.source,
-            owner.mtu_probe).status == path_api.STATUS_OK && ok;
+            owner.token.mtu_probe).status == path_api.STATUS_OK && ok;
     }
     if (owner.pto_probe && core.probes_remaining < 255) {
         core.probes_remaining = core.probes_remaining + 1;
@@ -2885,7 +3206,7 @@ fun cancel_payload(core: *Core, secrets: *Secrets, owner: *Owner) bool {
                 owner.pacer).ok && ok;
         }
     }
-    free_owner(owner);
+    free_owner(core, owner);
     ret ok;
 }
 
@@ -3015,9 +3336,9 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                 output.offset = prepared.offset;
                 output.data   = packet.Span{data: prepared.data.data,
                     len: prepared.data.length};
-                owner.kind      = OWNER_CRYPTO;
-                owner.level     = level;
-                owner.handshake = prepared.token;
+                owner.kind            = OWNER_CRYPTO;
+                owner.level           = level;
+                owner.token.handshake = prepared.token;
                 if (probing) {
                     owner.pto_probe       = true;
                     core.probes_remaining = core.probes_remaining - 1;
@@ -3043,7 +3364,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
     if (application == handshake_api.APPLICATION && core.send_token_queued &&
         !core.send_token_prepared) {
         output.kind = frame.NEW_TOKEN;
-        output.data = packet.Span{data: core.storage.send_token,
+        output.data = packet.Span{data: core.send_token.data,
             len: core.send_token_length};
         owner.kind               = OWNER_NEW_TOKEN;
         owner.level              = application;
@@ -3065,7 +3386,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             output.stateless_reset_token = advertisement.reset_token;
             owner.kind                   = OWNER_NEW_CID;
             owner.level                  = application;
-            owner.cid_retirement         = advertisement.handle;
+            owner.token.cid_retirement   = advertisement.handle;
             ret true;
         }
         val retirement: cid_api.Result = cid_api.next_retirement(core.cids);
@@ -3073,11 +3394,11 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             if (cid_api.retirement_sent_scoped(core.cids,
                 core.config.source,
                 retirement.handle).status != cid_api.STATUS_OK) { ret false; }
-            output.kind          = frame.RETIRE_CONNECTION_ID;
-            output.sequence      = retirement.handle.sequence;
-            owner.kind           = OWNER_CID_RETIREMENT;
-            owner.level          = application;
-            owner.cid_retirement = retirement.handle;
+            output.kind                = frame.RETIRE_CONNECTION_ID;
+            output.sequence            = retirement.handle.sequence;
+            owner.kind                 = OWNER_CID_RETIREMENT;
+            owner.level                = application;
+            owner.token.cid_retirement = retirement.handle;
             ret true;
         }
 
@@ -3095,7 +3416,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                     output.path_data            = response.data;
                     owner.kind                  = OWNER_PATH_RESPONSE;
                     owner.level                 = application;
-                    owner.path_response         = response.token;
+                    owner.token.path_response   = response.token;
                     owner.include_ping          = response.require_non_probing;
                     owner.minimum_datagram_size = response.minimum_datagram_size;
                     @path                       = response.handle;
@@ -3108,7 +3429,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                     output.path_data            = challenge.data;
                     owner.kind                  = OWNER_PATH_CHALLENGE;
                     owner.level                 = application;
-                    owner.path_challenge        = challenge.token;
+                    owner.token.path_challenge  = challenge.token;
                     owner.minimum_datagram_size = challenge.minimum_datagram_size;
                     @path                       = challenge.handle;
                     ret true;
@@ -3122,7 +3443,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             output.kind                 = frame.PING;
             owner.kind                  = OWNER_MTU_PROBE;
             owner.level                 = application;
-            owner.mtu_probe             = mtu.token;
+            owner.token.mtu_probe       = mtu.token;
             owner.minimum_datagram_size = mtu.size;
             @path                       = mtu.handle;
             ret true;
@@ -3148,21 +3469,17 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             output.kind    = frame.MAX_STREAMS_UNI;
             output.maximum = control.maximum;
         }
-        owner.kind   = OWNER_STREAM;
-        owner.level  = application;
-        owner.stream = control.token;
+        owner.kind         = OWNER_STREAM;
+        owner.level        = application;
+        owner.token.stream = control.token;
         ret true;
     }
     if (control.status == stream_api.STATUS_ERROR) { ret false; }
 
     var stream_index: usize = 0;
     for (stream_index < core.streams.storage.stream_capacity) {
-        val stream: *stream_api.Stream = ?core.streams.storage.streams[stream_index];
-        if (stream.active) {
-            val handle: stream_api.Handle = stream_api.Handle{
-                source:     core.streams.config.source, index: stream_index,
-                generation: stream.generation, id: stream.id
-            };
+        val handle: stream_api.Handle = stream_api.handle_at(core.streams, stream_index);
+        if (handle.source != 0) {
             val prepared: stream_api.Prepared = stream_api.prepare_scoped(core.streams, core.config.source,
                 handle, maximum, core.probes_remaining > 0);
             if (prepared.status == stream_api.STATUS_OK) {
@@ -3186,9 +3503,9 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                     output.stream_id  = prepared.handle.id;
                     output.error_code = prepared.application_error;
                 }
-                owner.kind   = OWNER_STREAM;
-                owner.level  = application;
-                owner.stream = prepared.token;
+                owner.kind         = OWNER_STREAM;
+                owner.level        = application;
+                owner.token.stream = prepared.token;
                 if (core.probes_remaining > 0) {
                     owner.pto_probe       = true;
                     core.probes_remaining = core.probes_remaining - 1;
@@ -3202,11 +3519,11 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
 
     val datagram: datagram_api.Prepared = datagram_api.prepare_scoped(core.datagrams, core.config.source, true);
     if (datagram.status == datagram_api.STATUS_OK) {
-        output.kind    = frame.DATAGRAM_LEN;
-        output.data    = datagram.data;
-        owner.kind     = OWNER_DATAGRAM;
-        owner.level    = application;
-        owner.datagram = datagram.token;
+        output.kind          = frame.DATAGRAM_LEN;
+        output.data          = datagram.data;
+        owner.kind           = OWNER_DATAGRAM;
+        owner.level          = application;
+        owner.token.datagram = datagram.token;
         ret true;
     }
     if (datagram.status == datagram_api.STATUS_ERROR &&
@@ -3307,18 +3624,26 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     var sized: usize =
         core.paths.storage.paths[selected.handle.index].current_mtu::usize;
     if (sized > available) { sized = available; }
-    val owner: *Owner = claim_owner(core);
-    if (owner == nil) {
+    var claimed: Owner;
+    if (!claim_owner(core, ?claimed)) {
         result.status = transport_api.STATUS_BLOCKED;
         ret result;
     }
     var value: frame.Frame;
     var path:  path_api.Handle;
-    if (!prepare_frame(core, secrets, owner, now_ns,
+    if (!prepare_frame(core, secrets, ?claimed, now_ns,
         sized - 96, ?value, ?path)) {
-        free_owner(owner);
         if (!core.closing && core.handshake_confirmed) { mark_idle(core); }
         result.status = transport_api.STATUS_EMPTY;
+        ret result;
+    }
+    # a refused table or history chunk is backpressure: the frame goes back
+    # and the pool wakes the connection once chunks free up
+    val owner: *Owner = place_owner(core, ?claimed);
+    if (owner == nil) {
+        cancel_payload(core, secrets, ?claimed);
+        settle_flight(core);
+        result.status = transport_api.STATUS_BLOCKED;
         ret result;
     }
     if (path_api.configure_transport_scoped(core.paths, core.config.source, path,
@@ -3443,15 +3768,9 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.error  = INTERNAL_ERROR;
         ret result;
     }
-    val packet_size:  usize = header.count + plaintext.len + 16;
-    var secret_index: usize = 0;
-    for (secret_index < plaintext.len) {
-        secrets.storage.send_plaintext[secret_index] =
-            core.storage.send_plaintext[secret_index];
-        secret_index = secret_index + 1;
-    }
-    val ack_eliciting: bool = frame.ack_eliciting(value.kind);
-    val in_flight:     bool = ack_eliciting;
+    val packet_size:   usize = header.count + plaintext.len + 16;
+    val ack_eliciting: bool  = frame.ack_eliciting(value.kind);
+    val in_flight:     bool  = ack_eliciting;
     if (ack_eliciting && history.len >= history.capacity) {
         cancel_payload(core, secrets, owner);
         result.status = transport_api.STATUS_BLOCKED;
@@ -3497,7 +3816,7 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     var reserved: path_api.SendResult;
     if (owner.kind == OWNER_MTU_PROBE) {
         reserved = path_api.reserve_mtu_send_scoped(core.paths, core.config.source, path,
-            packet_size::u64, true, owner.mtu_probe);
+            packet_size::u64, true, owner.token.mtu_probe);
     }
     or {
         reserved = path_api.reserve_send_scoped(core.paths, core.config.source, path,
@@ -3511,6 +3830,14 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         ret result;
     }
     owner.path_send = reserved.token;
+    # the secret plaintext lives only across the seal: the scratch it sits in
+    # is shared with every connection on this pump
+    var secret_index: usize = 0;
+    for (secret_index < plaintext.len) {
+        secrets.storage.send_plaintext[secret_index] =
+            core.storage.send_plaintext[secret_index];
+        secret_index = secret_index + 1;
+    }
     var sealed: protection.Result;
     if (owner.level == handshake_api.APPLICATION) {
         owner.send_generation = secrets.application_send.generation;
@@ -3529,6 +3856,7 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
             len: plaintext.len},
             contracts.Buffer{data: output, capacity: available});
     }
+    ct.zeroize(secrets.storage.send_plaintext, plaintext.len);
     if (sealed.error != protection.OK || sealed.written != packet_size) {
         cancel_payload(core, secrets, owner);
         result.status = transport_api.STATUS_ERROR;
@@ -3601,30 +3929,38 @@ fun publish_payload(core: *Core, secrets: *Secrets, owner: *Owner,
         ret true;
     }
     if (owner.kind == OWNER_CRYPTO) {
-        ret handshake_api.publish_scoped(secrets.handshake, core.config.source, owner.handshake).status == handshake_api.STATUS_OK;
+        ret handshake_api.publish_scoped(secrets.handshake, core.config.source, owner.token.handshake).status == handshake_api.STATUS_OK;
     }
     if (owner.kind == OWNER_STREAM) {
-        ret stream_api.publish_scoped(core.streams, core.config.source, stream_prepared_token(owner.stream)).status == stream_api.STATUS_OK;
+        ret stream_api.publish_scoped(core.streams, core.config.source, stream_prepared_token(owner.token.stream)).status == stream_api.STATUS_OK;
     }
     if (owner.kind == OWNER_DATAGRAM) {
-        ret datagram_api.publish_scoped(core.datagrams, core.config.source, datagram_prepared_token(owner.datagram)).status == datagram_api.STATUS_OK;
+        ret datagram_api.publish_scoped(core.datagrams, core.config.source, datagram_prepared_token(owner.token.datagram)).status == datagram_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_CHALLENGE) {
-        ret path_api.publish_challenge_scoped(core.paths, core.config.source, owner.path_challenge,
+        ret path_api.publish_challenge_scoped(core.paths, core.config.source, owner.token.path_challenge,
             now_ns).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_RESPONSE) {
         ret path_api.publish_response_scoped(core.paths, core.config.source,
-            owner.path_response).status == path_api.STATUS_OK;
+            owner.token.path_response).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_MTU_PROBE) {
         ret path_api.publish_mtu_probe_scoped(core.paths, core.config.source,
-            owner.mtu_probe).status == path_api.STATUS_OK;
+            owner.token.mtu_probe).status == path_api.STATUS_OK;
     }
     ret true;
 }
 
 pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
+    status: transport_api.SendStatus, count: usize,
+    now_ns: u64) transport_api.CoreResult {
+    val result: transport_api.CoreResult = complete_send_unsettled(core, secrets, owner_id, status, count, now_ns);
+    if (core_record_valid(core) && core.initialized) { settle_flight(core); }
+    ret result;
+}
+
+fun complete_send_unsettled(core: *Core, secrets: *Secrets, owner_id: u64,
     status: transport_api.SendStatus, count: usize,
     now_ns: u64) transport_api.CoreResult {
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
@@ -3687,7 +4023,7 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
             owner.packet_number, now_ns).ok) {
             ret fail(core, INTERNAL_ERROR, now_ns);
         }
-        free_owner(owner);
+        free_owner(core, owner);
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
     val recovery_path: path_api.Handle = path_api.Handle{
@@ -3825,9 +4161,9 @@ fun compute_timer(core: *Core) transport_api.CoreTimer {
 fun terminal_drain(core: *Core, secrets: *Secrets, now_ns: u64) bool {
     var ok: bool  = true;
     var i:  usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state == OWNER_PREPARED) {
-            ok = cancel_payload(core, secrets, ?core.storage.owners[i]) && ok;
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state == OWNER_PREPARED) {
+            ok = cancel_payload(core, secrets, ?core.owners[i]) && ok;
         }
         i = i + 1;
     }
@@ -3858,6 +4194,13 @@ fun apply_path_timeout(core: *Core, value: path_api.TimeoutResult,
 }
 
 pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
+    now_ns: u64) transport_api.CoreResult {
+    val result: transport_api.CoreResult = on_timeout_unsettled(core, secrets, generation, now_ns);
+    if (core_record_valid(core) && core.initialized) { settle_flight(core); }
+    ret result;
+}
+
+fun on_timeout_unsettled(core: *Core, secrets: *Secrets, generation: u64,
     now_ns: u64) transport_api.CoreResult {
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
         !secrets.initialized || core.destroyed || secrets.destroyed ||
@@ -3944,6 +4287,14 @@ pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
 pub fun begin_close(core: *Core, secrets: *Secrets, abortive: bool,
     application_error: u64, reason: *u8,
     reason_length: usize, now_ns: u64) transport_api.CoreResult {
+    val result: transport_api.CoreResult = begin_close_unsettled(core, secrets, abortive, application_error, reason, reason_length, now_ns);
+    if (core_record_valid(core) && core.initialized) { settle_flight(core); }
+    ret result;
+}
+
+fun begin_close_unsettled(core: *Core, secrets: *Secrets, abortive: bool,
+    application_error: u64, reason: *u8,
+    reason_length: usize, now_ns: u64) transport_api.CoreResult {
     val reason_range: ownership.Range = ownership.bytes(reason, reason_length,
         ownership.ZERO_ALLOWED);
     if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
@@ -4007,8 +4358,8 @@ pub fun close_ready(core: *Core) bool {
         ret false;
     }
     var i: usize = 0;
-    for (i < core.storage.owner_capacity) {
-        if (core.storage.owners[i].state != OWNER_FREE) { ret false; }
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state != OWNER_FREE) { ret false; }
         i = i + 1;
     }
     ret true;
@@ -4040,6 +4391,7 @@ pub fun finish_close(core: *Core, secrets: *Secrets) bool {
         datagram_api.finish_close_scoped(core.datagrams, core.config.source).status != datagram_api.STATUS_OK) {
         ret false;
     }
+    release_chunks(core);
     secrets.initialized = false;
     secrets.destroyed   = true;
     core.initialized    = false;

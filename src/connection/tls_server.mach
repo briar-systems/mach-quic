@@ -8,10 +8,14 @@ use handshake_api:    quic.connection.handshake;
 use quic.connection.ownership;
 use quic.crypto.protection;
 use quic.packet.packet;
+use quic.storage.limited;
+use supply: quic.storage.source;
+use std.memory.buffers;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
+use tls.buffer;
 use tls.cert;
 use tls.cert.credentials;
 use tls.client;
@@ -30,39 +34,36 @@ pub rec Config {
 
 pub fun initialize(adapter: *handshake_api.Adapter,
     adapter_config: handshake_api.Config,
-    storage: handshake_api.Storage, value: *server.Server,
-    configuration: Config) bool {
+    storage: handshake_api.Storage, value: *server.Handshake,
+    lease: buffer.Lease, configuration: Config) bool {
     ret handshake_api.initialize_tls_server(adapter, adapter_config, storage,
-        value, configuration.verification_time_unix, configuration.deadline_ns,
+        value, lease, configuration.verification_time_unix, configuration.deadline_ns,
         configuration.entropy_context_size,
         configuration.entropy_secret_context_size);
 }
 
-var listener_input:        [8192]u8;
-var listener_output:       [8192]u8;
-var listener_hello:        [8192]u8;
-var listener_certificates: [4]cert.Certificate;
-var listener_parameters:   [256]u8;
-var dialer_input:          [8192]u8;
-var dialer_output:         [8192]u8;
-var dialer_hello:          [8192]u8;
-var dialer_certificates:   [4]cert.Certificate;
-var dialer_parameters:     [256]u8;
+var adapter_chunk_pool:    supply.TestPool;
+var adapter_chunk_account: supply.Account;
 
-var listener_receive:         [16384]u8;
-var listener_receive_present: [16384]bool;
-var listener_send:            [16384]u8;
-var listener_send_pending:    [16384]bool;
-var listener_send_acked:      [16384]bool;
-var listener_send_inflight:   [16384]u16;
-var listener_attempts:        [8]handshake_api.Attempt;
-var dialer_receive:           [16384]u8;
-var dialer_receive_present:   [16384]bool;
-var dialer_send:              [16384]u8;
-var dialer_send_pending:      [16384]bool;
-var dialer_send_acked:        [16384]bool;
-var dialer_send_inflight:     [16384]u16;
-var dialer_attempts:          [8]handshake_api.Attempt;
+# one pool for every adapter these tests build, which may outlive a test
+fun adapter_account() *supply.Account {
+    if (!supply.test_made(?adapter_chunk_pool)) {
+        supply.make_test(?adapter_chunk_pool, 256);
+        supply.open_connection(?adapter_chunk_pool.provider, ?adapter_chunk_account,
+            1, 128, 128, 4 * supply.RECORD, 0);
+    }
+    ret ?adapter_chunk_account;
+}
+
+# the lease every test engine charges: the adapters' shared account, on tls's
+# lane
+fun adapter_lease() buffer.Lease {
+    ret buffer.Lease{source: ?adapter_chunk_pool.provider, account: adapter_account(),
+        lane: supply.TLS};
+}
+
+var listener_attempts: [8]handshake_api.Attempt;
+var dialer_attempts:   [8]handshake_api.Attempt;
 
 var listener_transport: [5]u8 = [5]u8{0x0a, 0x0b, 0x0c, 0x0d, 0x0e};
 var dialer_transport:   [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
@@ -92,25 +93,13 @@ fun adapter_config(source: u64) handshake_api.Config {
 }
 
 fun listener_storage() handshake_api.Storage {
-    ret handshake_api.Storage{receive_data: ?listener_receive[0],
-        receive_present:  ?listener_receive_present[0], receive_length: 16384,
-        receive_stride:   4096, send_data: ?listener_send[0],
-        send_pending:     ?listener_send_pending[0],
-        send_acked:       ?listener_send_acked[0],
-        send_inflight:    ?listener_send_inflight[0], send_length: 16384,
-        send_stride:      4096, attempts: ?listener_attempts[0],
-        attempt_capacity: 8};
+    ret handshake_api.Storage{attempts: ?listener_attempts[0], attempt_capacity: 8,
+        account: adapter_account(), chunks: ?adapter_chunk_pool.provider};
 }
 
 fun dialer_storage() handshake_api.Storage {
-    ret handshake_api.Storage{receive_data: ?dialer_receive[0],
-        receive_present:  ?dialer_receive_present[0], receive_length: 16384,
-        receive_stride:   4096, send_data: ?dialer_send[0],
-        send_pending:     ?dialer_send_pending[0],
-        send_acked:       ?dialer_send_acked[0],
-        send_inflight:    ?dialer_send_inflight[0], send_length: 16384,
-        send_stride:      4096, attempts: ?dialer_attempts[0],
-        attempt_capacity: 8};
+    ret handshake_api.Storage{attempts: ?dialer_attempts[0], attempt_capacity: 8,
+        account: adapter_account(), chunks: ?adapter_chunk_pool.provider};
 }
 
 # crypto leaves the sender the way a real driver takes it: prepared, published,
@@ -300,15 +289,8 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
     listener_config.limits.max_chain_bytes          = 4096;
     listener_config.limits.max_ticket_bytes         = 4096;
 
-    var listener_engine: server.Server;
-    if (!server.init(?listener_engine, ?listener_config, server.Storage{
-        input:                    ?listener_input[0], input_capacity: 8192,
-        output:                   ?listener_output[0], output_capacity: 8192,
-        hello:                    ?listener_hello[0], hello_capacity: 8192,
-        certificates:             ?listener_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?listener_parameters[0],
-        peer_parameters_capacity: 256
-    },
+    var listener_engine: server.Handshake;
+    if (!server.init(?listener_engine, ?listener_config, adapter_lease(),
         server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
@@ -348,15 +330,8 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
     dialer_config.limits.max_chain_bytes          = 4096;
     dialer_config.limits.max_ticket_bytes         = 4096;
 
-    var dialer_engine: client.Client;
-    if (!client.init(?dialer_engine, ?dialer_config, client.Storage{
-        input:                    ?dialer_input[0], input_capacity: 8192,
-        output:                   ?dialer_output[0], output_capacity: 8192,
-        hello:                    ?dialer_hello[0], hello_capacity: 8192,
-        certificates:             ?dialer_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?dialer_parameters[0],
-        peer_parameters_capacity: 256
-    },
+    var dialer_engine: client.Handshake;
+    if (!client.init(?dialer_engine, ?dialer_config, adapter_lease(),
         client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?dialer_transport[0], len: 4}},
         client.QUIC_TRANSPORT_PARAMETERS)) { ret 5; }
@@ -367,9 +342,9 @@ test "quic.connection.tls_server: a real client and server complete a QUIC hands
         deadline_ns:                 0, entropy_context_size: 1,
         entropy_secret_context_size: 0};
     if (!initialize(?listener_adapter, adapter_config(81), listener_storage(),
-        ?listener_engine, binding)) { ret 6; }
+        ?listener_engine, adapter_lease(), binding)) { ret 6; }
     if (!handshake_api.initialize_tls_client(?dialer_adapter,
-        adapter_config(82), dialer_storage(), ?dialer_engine,
+        adapter_config(82), dialer_storage(), ?dialer_engine, adapter_lease(),
         test_credentials.VERIFICATION_TIME, 0, 1, 0)) { ret 7; }
     if (listener_adapter.tls_role != handshake_api.SERVER ||
         dialer_adapter.tls_role != handshake_api.CLIENT) { ret 8; }
@@ -527,15 +502,8 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
     listener_config.limits.max_chain_bytes          = 4096;
     listener_config.limits.max_ticket_bytes         = 4096;
 
-    var listener_engine: server.Server;
-    if (!server.init(?listener_engine, ?listener_config, server.Storage{
-        input:                    ?alert_input[0], input_capacity: 8192,
-        output:                   ?alert_output[0], output_capacity: 8192,
-        hello:                    ?alert_hello[0], hello_capacity: 8192,
-        certificates:             ?alert_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?alert_parameters[0],
-        peer_parameters_capacity: 256
-    },
+    var listener_engine: server.Handshake;
+    if (!server.init(?listener_engine, ?listener_config, adapter_lease(),
         server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
@@ -544,18 +512,27 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
         deadline_ns:                 0, entropy_context_size: 1,
         entropy_secret_context_size: 0};
 
-    # adapter storage that aliases the listener's own handshake input is not a
-    # binding the ownership check may accept
+    # adapter storage that aliases the listener's own record is not a binding
+    # the ownership check may accept
     var overlapping: handshake_api.Storage = listener_storage();
-    overlapping.receive_data = ?alert_input[0];
+    overlapping.attempts = (?listener_engine.random[0])::*handshake_api.Attempt;
     var rejected: handshake_api.Adapter;
     if (initialize(?rejected, adapter_config(84), overlapping, ?listener_engine,
-        binding) || rejected.initialized ||
+        adapter_lease(), binding) || rejected.initialized ||
         rejected.tls_role != 0) { ret 16; }
+
+    # an engine charging any lease but the one the adapter was handed is refused
+    var other_lane: buffer.Lease = adapter_lease();
+    other_lane.lane = supply.SEND;
+    if (initialize(?rejected, adapter_config(84), listener_storage(),
+        ?listener_engine, other_lane, binding) ||
+        initialize(?rejected, adapter_config(84), listener_storage(),
+        ?listener_engine, buffer.no_lease(), binding) ||
+        rejected.initialized) { ret 18; }
 
     var adapter: handshake_api.Adapter;
     if (!initialize(?adapter, adapter_config(83), listener_storage(),
-        ?listener_engine, binding)) { ret 5; }
+        ?listener_engine, adapter_lease(), binding)) { ret 5; }
     var start: handshake_api.Start;
     start.role                       = handshake_api.SERVER;
     start.version                    = packet.VERSION_1;
@@ -599,7 +576,7 @@ test "quic.connection.tls_server: a terminal alert keeps its identity through th
     # a listener that has failed is no longer bindable
     var second: handshake_api.Adapter;
     if (initialize(?second, adapter_config(85), dialer_storage(),
-        ?listener_engine, binding) || second.initialized ||
+        ?listener_engine, adapter_lease(), binding) || second.initialized ||
         second.tls_role != 0) { ret 17; }
 
     if (!handshake_api.destroy(?adapter) || adapter.tls_role != 0) { ret 11; }
@@ -667,22 +644,15 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
     listener_config.limits.max_chain_bytes          = 4096;
     listener_config.limits.max_ticket_bytes         = 4096;
 
-    var listener_engine: server.Server;
-    if (!server.init(?listener_engine, ?listener_config, server.Storage{
-        input:                    ?ranges_input[0], input_capacity: 8192,
-        output:                   ?ranges_output[0], output_capacity: 8192,
-        hello:                    ?ranges_hello[0], hello_capacity: 8192,
-        certificates:             ?ranges_certificates[0], certificate_capacity: 4,
-        peer_parameters:          ?ranges_parameters[0],
-        peer_parameters_capacity: 256
-    },
+    var listener_engine: server.Handshake;
+    if (!server.init(?listener_engine, ?listener_config, adapter_lease(),
         server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
         data: contracts.Bytes{data: ?listener_transport[0], len: 5}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 4; }
 
     var adapter: handshake_api.Adapter;
     if (!initialize(?adapter, adapter_config(86), listener_storage(),
-        ?listener_engine, Config{verification_time_unix: test_credentials.VERIFICATION_TIME,
+        ?listener_engine, adapter_lease(), Config{verification_time_unix: test_credentials.VERIFICATION_TIME,
         deadline_ns:                 0, entropy_context_size: 1,
         entropy_secret_context_size: 0})) { ret 5; }
 
@@ -695,8 +665,8 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
     # the provider record itself is reported, and the configuration copy that
     # lives inside it is not reported beside it
     val record: ownership.Range = ownership.anchored_record[
-        server.Server, u8](?listener_engine.state,
-        $offset_of(server.Server, state));
+        server.Handshake, u8](?listener_engine.state,
+        $offset_of(server.Handshake, state));
     val configuration: ownership.Range = ownership.anchored_record[
         config.ServerConfig, config.Limits](
         ?listener_engine.configuration.limits,
@@ -714,8 +684,9 @@ test "quic.connection.tls_server: reported provider ranges are internally disjoi
     # the adapter's own storage is disjoint from everything it reports
     i = 0;
     for (i < handshake_api.PROVIDER_RANGE_CAPACITY) {
-        if (!ownership.disjoint(reported[i], ownership.bytes(
-            ?listener_receive[0], 16384, ownership.ZERO_FORBIDDEN))) { ret 10; }
+        if (!ownership.disjoint(reported[i], ownership.array(
+            (?listener_attempts[0])::*u8, 8, $size_of(handshake_api.Attempt),
+            ownership.ZERO_FORBIDDEN))) { ret 10; }
         i = i + 1;
     }
 

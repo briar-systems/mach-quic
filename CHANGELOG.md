@@ -1,5 +1,58 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.12.0] - 2026-09-17
+
+### Security
+
+- Secret packet plaintext no longer outlives the call that sealed or opened it (#137). Before, the last packet's plaintext stayed in the connection's secret buffers until close. The core now wipes exactly the bytes it wrote on every exit path.
+
+### Changed
+
+- **Breaking.** Stream bytes live in pool chunks taken on demand, not in fixed per-stream rings (#137). `assembly.init_client` and `init_server` take a `std.memory.buffers.Source` by value, and each connection opens one account on it through `source_open_account`. Budgets come from the stream windows, and `Config.chunk_reserve` is held from init. `assembly.Storage` drops from 552,392 to 166,728 bytes.
+- **Breaking.** CRYPTO bytes live in the same chunks (#137). Initial and Handshake levels are released when their keys are discarded, even with retransmissions in flight, and 1-RTT CRYPTO is released once it is acknowledged. `handshake.Storage` is now its attempts plus the pool and account. `assembly.CRYPTO_LENGTH` and `CRYPTO_STRIDE` are replaced by `CRYPTO_PER_LEVEL`. `assembly.Storage` drops from 166,728 to 52,168 bytes, and an idle connection holds no chunks.
+- **Breaking.** The encoded local transport parameters, both extension tables, and the client's Retry token and pseudo-packet move out of `assembly.Storage` into one pool chunk. The core releases that chunk when the handshake is confirmed, and `release_closed` releases it if the connection closes first (#137). `assembly.Storage` drops to 48,328 bytes. Parsed peer and local parameters keep their values, but their extension lists are dropped at confirmation.
+- `core.Owner` holds only the token of the frame it carries, in a `core.OwnerToken` union, so it shrinks from 440 to 240 bytes (#137).
+- **Breaking.** The core takes its owner table and each space's packet history from the pool only while packets are in flight (#137). They are released once nothing is tracked, so an idle connection holds neither. `core.Storage` leaves `owners` and history `packets` nil to ask for that, and names the source in `chunk_source`. Storage that is lent keeps working as before. A refused chunk is backpressure: `generate` puts the frame back and returns `STATUS_BLOCKED`. `assembly.Storage` drops to 35,144 bytes, and `core.release_chunks` gives back what a dead core still holds.
+- **Breaking.** Stream records and attempts come from the pool while streams are live and attempts are in use, five records per chunk and every attempt in one chunk (#137). `stream.Storage.streams` and `attempts` may be nil to ask for that. A frame that would open peer streams with no record chunk available is refused before acknowledgement, as are RESET_STREAM, STOP_SENDING, MAX_STREAM_DATA and STREAM_DATA_BLOCKED frames that open streams. Record and attempt generations come from manager-wide counters, so a reused chunk never revives a stale handle or token. `assembly.Storage` drops to 23,240 bytes.
+- **Breaking.** Per-call buffers move out of each connection into a scratch pair shared by every connection on a pump (#137). `assembly.SecretStorage` is replaced by `assembly.Scratch` and `assembly.SecretScratch`, and `init_client` and `init_server` take `scratch: *Scratch, secret_scratch: *SecretScratch` in its place. A connection binds the pair at init and lends it to the core around each call. A call that finds it in use is refused with `ERROR_STATE` before the core runs, and init reports `STAGE_SCRATCH`. `assembly.Storage` drops from 13,832 to 6,512 bytes, and the 3,008-byte secret pair is paid once per pump rather than once per connection.
+- **Breaking.** NEW_TOKEN payloads live in chunks held only while a token waits, rather than in two 512-byte arrays for the connection's lifetime (#137).
+  - `core.queue_new_token` returns a `transport.Status`. `STATUS_EARLY` means an earlier token is still unacknowledged: repeat once the new `core.Snapshot.new_token_pending` clears. `STATUS_BLOCKED` means no chunk was free: the connection's account is woken once one is, and the call can be repeated. The token is released when its frame is acknowledged.
+  - `core.received_token` is replaced by `core.take_received_token(core, output, capacity)`, which copies the token out and releases its chunk. It returns `STATUS_EMPTY` when none is waiting, and a `length` to size the buffer when `capacity` is too small.
+  - A NEW_TOKEN that finds no chunk is refused before its packet is acknowledged, so the server sends it again. Tokens are no longer capped at 512 bytes.
+  - `core.Storage` loses its token fields, and `assembly.Storage` drops from 5,488 to 4,464 bytes.
+- The Initial and Handshake ACK range tables move into the handshake chunk and are released at confirmation, holding 8 ranges each instead of 32 (#137). A space that fragments further evicts its oldest ranges as before. `ack.detach_space` drops a discarded space's storage. `assembly.Storage` drops from 6,512 to 5,488 bytes.
+- A stream record shrinks from 728 to 648 bytes, so six fit one chunk and an idle connection's six H3 control streams hold one record chunk instead of two (#137). `chunks.Slot`, `chunks.Chunks`, `chunks.Reserved` and `ranges.RangeSet` no longer repeat the data pointer their `supply.Chunk` already holds, and the stream flags share one run. `stream.RECORDS_PACKED` names the packing, and a test fails if the record outgrows it.
+- `transport.CoreResult` and `CoreDatagram` carry a `refusal` error. A protocol that refuses a call without changing state reports it there, and the transport returns it instead of `ERROR_PROTOCOL` (#137).
+- **Breaking.** Application DATAGRAM payloads live in chunks taken when a datagram is queued and released when it is published, cancelled or released (#137). `datagram.Storage` loses its byte arrays and names the chunk source and account instead, and a stride may be up to `supply.BYTES`. A send with no chunk returns `STATUS_BLOCKED`, and a received DATAGRAM with no chunk is dropped, as RFC 9221 allows. Connections that negotiate datagrams get `DATAGRAM_CAPACITY` more chunks on each lane. `assembly.Storage` drops from 23,240 to 13,832 bytes.
+- **Breaking.** mach-quic requires mach-std 5.0.0 and mach 5.2.0 or later (#137). Connection storage comes from any `std.memory.buffers.Source`, and `quic.storage.source` is the only module that calls it. `quic.storage.pool` is removed. quic's own budgets are counted in chunks of `supply.BYTES` on the send and receive lanes.
+- **Breaking.** Public time is `std.chrono.time.Instant` and configured spans are `std.chrono.duration.Duration` (#137). `transport.Datagram.received_at`, every `now` taken by `receive_native`, `generate`, `complete_send`, `cancel_send`, `complete_native`, `on_timeout` and `begin_close`, `transport.Timer.deadline`, `assembly.init_client`, `init_server` and `finish`, `listener.Request.now`, `listener.issue_address_token`, and `token.seal` and `open` take or report instants. `assembly.Config.max_idle_timeout` and `drain_timeout` and `token.Config.retry_max_age` and `address_max_age` are durations, and `assembly.Config.tls_deadline` is an `opt[time.Instant]`. The core keeps u64 nanoseconds, and `quic.clock` converts at the boundary. Protocol cores receive `transport.CoreInput`, which carries `received_at_ns`.
+- Per-byte send and receive state is replaced by bounded interval sets. A peer that fragments a stream or CRYPTO level past its interval cap, or whose data finds no storage, has its packet refused before it is acknowledged, so the data is sent again rather than lost (#137). `stream.Manager.receive_storage_refusals`, `handshake.Adapter.receive_storage_refusals` and `core.refused_packets` count these refusals.
+- CRYPTO output that finds no storage waits: `handshake.complete_event` returns `STATUS_BLOCKED` with `ERROR_STORAGE`, and `next_event` offers the same event again (#137).
+
+- **Breaking.** Dependencies: mach-std v5.0.1, mach-crypto v0.13.1, mach-tls v0.7.0 (#137).
+- **Breaking.** mach-tls 0.7.0 takes its memory from the connection's buffer source (#137).
+  - Before `init_client` or `init_server`, initialize the engine with `assembly.tls_lease(c)`. It points into `c`, so `c` must not move or be copied from then until `release_closed` succeeds. Init refuses an engine holding any other lease with `STAGE_HANDSHAKE`.
+  - tls charges the connection's single account on a new lane, `supply.TLS`, bounded by `assembly.Config.tls_budget` (default `assembly.TLS_BUDGET`, 64 KiB). `supply.LANES` is 3. A source must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes. quic itself still takes only 4,096-byte chunks.
+  - `supply.open_connection` opens an account with the tls budget, and `supply.pool_config` takes its global budget in bytes. `supply.chunk_class` is replaced by `supply.classes`.
+  - `connection.tls_client.initialize`, `tls_server.initialize` and `handshake.initialize_tls_client` and `initialize_tls_server` take the lease after the engine.
+  - A failed init that already started the engine destroys it, since its memory is on the account being closed. Initialize it again to reuse it.
+  - The tls handshake record must stay put only until `assembly.tls_released(c)`, after which the connection no longer refers to it and it may be reused. Owners need one record per connection in handshake, not per connection.
+  - `assembly.Connection` grows from 9,168 to 9,776 bytes. It now holds tls's established core, which the adapter moves out of the engine once the handshake has handed everything over, so an established connection holds no tls memory.
+- **Breaking.** `transport.Protocol` gains `storage_ready`, which `transport.storage_ready` calls. A core refused memory retries once it is called (#137).
+- A handshake provider may return `handshake.STATUS_WAITING` from start, ingest or poll when it is refused memory and consumed nothing (#137). The adapter keeps the bytes it could not hand over and stops polling until the connection is woken. It then repeats the same call and feeds every level in order. `core.Snapshot` reports `handshake_waiting` and `handshake_settled`.
+- A small request, such as a datagram payload or a NEW_TOKEN, gets the smallest class that fits, and the account is charged what it got. Budgets are bytes, so they stay exact, and entry tables cap how many payloads wait (#137).
+
+### Added
+
+- A third guard pins what a handshake holds after any driver call (#137). The dialer holds five send-lane chunks and 8,704 bytes on the tls lane, and the listener six and 18,944. The tls handshake records are 6,416 bytes (client) and 6,216 (server).
+- A second guard pins what a 64 KiB transfer on one stream holds, sampled after every driver call (#137): five send-lane chunks on the sending end, and four send-lane plus one receive-lane on the receiving end. After the bytes are read, each end holds one record chunk.
+- A size guard pins what an idle connection costs (#137): `assembly.Storage` at 4,464 bytes and `Connection` at 9,776, no chunks and no tls memory held by an established idle connection, and one record chunk once the six H3 control streams are open and drained.
+- `transport.ready_stream`, which reports streams that became readable, writable or reset in O(1) per call, oldest first, and `transport.storage_ready` for when the pool wakes a connection (#137, mach-http#103).
+- `quic.storage.chunks`, the chunk lists shared by stream and CRYPTO buffers (#137).
+- `handshake.discard` releases a level once its keys are gone, and the core calls it at both RFC 9001 discard points (#137).
+
 ## [0.11.0] - 2026-09-17
 
 ### Security
