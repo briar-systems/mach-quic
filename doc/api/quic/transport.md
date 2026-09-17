@@ -547,8 +547,10 @@ accept_stream has returned it
 pub fun storage_ready[T](driver: *Driver[T]);
 ```
 
-the connection's chunk pool woke this connection: writes it refused for
-storage are reported writable again
+the connection's buffer source woke this connection's account: writes it
+refused for storage are reported writable again, and the core retries
+whatever it was refused, including a tls call waiting for memory. the caller
+then drives the connection as for any other input
 
 ## fun accept_stream
 

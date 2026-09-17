@@ -50,10 +50,37 @@ pub val SEND:    Lane = 0
 pub val RECEIVE: Lane = 1
 ```
 
+## val TLS
+
+```mach
+pub val TLS:     Lane = 2
+```
+
 ## val LANES
 
 ```mach
-pub val LANES:   u8   = 2
+pub val LANES:   u8   = 3
+```
+
+## val CLASS_COUNT
+
+```mach
+pub val CLASS_COUNT: usize = 3
+```
+
+the chunk sizes a connection asks a source for: quic's BYTES, and the sizes
+mach-tls requests for handshake messages and records
+
+## val SMALL
+
+```mach
+pub val SMALL:       usize = 512
+```
+
+## val RECORD
+
+```mach
+pub val RECORD:      usize = 17408
 ```
 
 ## rec Source
@@ -70,25 +97,36 @@ one connection's view of its provider, charged to one lane
 pub rec Taken;
 ```
 
-## fun chunk_class
+## fun classes
 
 ```mach
-pub fun chunk_class(high_water: usize) buffers.ClassConfig;
+pub fun classes(output: *buffers.ClassConfig, high_water: usize);
 ```
 
-one class of BYTES chunks, enough for everything quic asks for
+the CLASS_COUNT plain classes a connection asks for, smallest first
 
-high_water: released chunks the pool keeps for reuse
+output: CLASS_COUNT entries
+high_water: released chunks each class keeps for reuse
 
 ## fun pool_config
 
 ```mach
 pub fun pool_config(classes: *buffers.ClassConfig, class_count: usize,
-chunks: usize) buffers.Config;
+bytes: usize) buffers.Config;
 ```
 
-a pool configuration over `class_count` classes with room for `chunks`
-chunks of BYTES across every account
+a pool configuration over `class_count` classes with room for `bytes`
+across every account
+
+## fun open_connection
+
+```mach
+pub fun open_connection(provider: *Provider, account: *Account, handle: u64,
+send: usize, receive: usize, tls: usize, reserve: usize) bool;
+```
+
+opens a connection's account with quic's budgets and reservation in chunks
+and tls's budget in bytes
 
 ## fun open
 
@@ -97,7 +135,7 @@ pub fun open(provider: *Provider, account: *Account, handle: u64, send: usize,
 receive: usize, reserve: usize) bool;
 ```
 
-opens a connection's account with budgets and a reservation in chunks
+opens an account for quic's own chunks alone, with no tls lane
 
 ## fun close
 
@@ -119,7 +157,9 @@ whole chunks the account holds on a lane
 pub fun take(from: *Source, bytes: usize) Taken;
 ```
 
-a chunk of at least `bytes`, registering the account for a wake on refusal
+a chunk with room for `bytes`, registering the account for a wake on
+refusal. it is always a whole BYTES chunk, the unit quic's budgets count, so a
+source with smaller classes never hands quic a chunk its arithmetic misses
 
 ## fun give
 
@@ -160,11 +200,14 @@ the handles of accounts woken since the last call, oldest first
 ## fun test_pool
 
 ```mach
-pub fun test_pool(pool: *buffers.Pool, class: *buffers.ClassConfig,
+pub fun test_pool(pool: *buffers.Pool, configs: *buffers.ClassConfig,
 memory: *limited.Limited, chunks: usize) bool;
 ```
 
-a pool of `chunks` BYTES chunks over `memory`, for tests
+a pool with room for `chunks` BYTES chunks and a few tls records over
+`memory`, for tests
+
+configs: CLASS_COUNT entries
 
 ## rec TestPool
 
