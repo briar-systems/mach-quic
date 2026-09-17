@@ -888,7 +888,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     result: *InitResult) bool {
     if (handshake == nil || cids == nil || paths == nil || streams == nil ||
         datagrams == nil) { ret refuse(result, INIT_ARGUMENT); }
-    var ranges: [51]ownership.Range;
+    var ranges: [49]ownership.Range;
     ranges[0] = core_range(core);
     ranges[1] = secrets_range(secrets);
     if (!ranges[0].valid || !ranges[1].valid) {
@@ -990,17 +990,13 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
     ranges[37] = ownership.array(datagrams.storage.send_entries::*u8,
         datagrams.storage.send_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[38] = ownership.bytes(datagrams.storage.send_bytes,
-        datagrams.storage.send_bytes_length, datagram_zero);
-    ranges[39] = ownership.array(datagrams.storage.receive_entries::*u8,
+    ranges[38] = ownership.array(datagrams.storage.receive_entries::*u8,
         datagrams.storage.receive_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[40] = ownership.bytes(datagrams.storage.receive_bytes,
-        datagrams.storage.receive_bytes_length, datagram_zero);
-    if (!handshake_api.provider_ranges(handshake, ?ranges[41],
+    if (!handshake_api.provider_ranges(handshake, ?ranges[39],
         handshake_api.PROVIDER_RANGE_CAPACITY)) {
         ret refuse(result, INIT_PROVIDER_RANGES);
     }
-    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], 51);
+    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], 49);
     if (whole.kind != ownership.OVERLAP_NONE) {
         ret refuse_overlap(result, INIT_COMPONENT_RANGES, whole);
     }
@@ -1026,7 +1022,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     var i: usize = 0;
     for (i < 4) {
         val lent: ownership.Disjointness = ownership.disjoint_from(borrowed[i], i,
-            ?ranges[0], 23, 51);
+            ?ranges[0], 23, 49);
         if (lent.kind != ownership.OVERLAP_NONE) {
             ret refuse_overlap(result, INIT_COMPONENT_BORROWED, lent);
         }
