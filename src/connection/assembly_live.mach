@@ -272,6 +272,13 @@ fun connection_config(role: transport.Role) assembly.Config {
     ret value;
 }
 
+# when set, every driver call in carry records what both ends hold after it
+var observed: *Peak;
+
+fun watch() {
+    if (observed != nil) { observe(observed); }
+}
+
 # one generated datagram, completed on the sender and delivered to the peer,
 # exactly as an owner's scheduling loop would move it
 fun carry(source: *assembly.Connection, sink: *assembly.Connection,
@@ -295,6 +302,7 @@ fun carry(source: *assembly.Connection, sink: *assembly.Connection,
             fault_step = 2;
             ret 2;
         }
+        watch();
         clock[0] = clock[0] + 1000;
         val completed: transport.Completion =
             transport.complete_send[binding.Binding](?source.driver,
@@ -306,6 +314,7 @@ fun carry(source: *assembly.Connection, sink: *assembly.Connection,
             fault_error  = completed.error::u64;
             ret 3;
         }
+        watch();
         var input: transport.Datagram;
         input.local       = sink_local;
         input.peer        = sink_peer;
@@ -322,6 +331,7 @@ fun carry(source: *assembly.Connection, sink: *assembly.Connection,
             fault_error  = received.error::u64;
             ret 4;
         }
+        watch();
         moved[0] = moved[0] + 1;
         guard    = guard + 1;
     }
@@ -2257,8 +2267,15 @@ fun observe(peak: *Peak) {
 }
 
 # sends `total` bytes on one stream from the dialer, reading as they arrive,
-# and reports the most chunks either end held at any point
+# and reports the most chunks either end held after any driver call
 fun active_transfer(total: usize, peak: *Peak, clock: *u64, moved: *usize) i32 {
+    observed = peak;
+    val result: i32 = transfer_observed(total, peak, clock, moved);
+    observed = nil;
+    ret result;
+}
+
+fun transfer_observed(total: usize, peak: *Peak, clock: *u64, moved: *usize) i32 {
     val opened: transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
     if (opened.status != transport.STATUS_OK) { ret 30; }
@@ -2312,10 +2329,14 @@ fun active_transfer(total: usize, peak: *Peak, clock: *u64, moved: *usize) i32 {
     ret 0;
 }
 
-# the most chunks each end holds while 64 KiB crosses one stream, sampled
-# before and after every pump round, so it bounds what an owner observes
-# between calls rather than the instant inside one
-val GUARD_ACTIVE_DIALER_SEND:      usize = 2;
+# the most chunks each end holds while 64 KiB crosses one stream, sampled after
+# every driver call, which is what an owner can observe between calls. both
+# ends hold the same four send-lane blocks while their own packets are in
+# flight: a record block, the owner table, the application packet history and
+# the attempt block (stream data for the sender, MAX_STREAM_DATA for the
+# receiver). on top of that the sender holds one data chunk on the send lane,
+# never more because of STREAM_STRIDE, and the receiver one on the receive lane
+val GUARD_ACTIVE_DIALER_SEND:      usize = 5;
 val GUARD_ACTIVE_DIALER_RECEIVE:   usize = 0;
 val GUARD_ACTIVE_LISTENER_SEND:    usize = 4;
 val GUARD_ACTIVE_LISTENER_RECEIVE: usize = 1;

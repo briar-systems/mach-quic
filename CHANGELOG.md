@@ -31,6 +31,7 @@
 
 ### Added
 
+- A second guard pins what a 64 KiB transfer on one stream holds, sampled after every driver call (#137): five send-lane chunks on the sending end, and four send-lane plus one receive-lane on the receiving end. After the bytes are read, each end holds one record chunk.
 - A size guard pins what an idle connection costs (#137): `assembly.Storage` at 4,464 bytes and `Connection` at 9,168, no chunks held by an established idle connection, and one record chunk once the six H3 control streams are open and drained.
 - `transport.ready_stream`, which reports streams that became readable, writable or reset in O(1) per call, oldest first, and `transport.storage_ready` for when the pool wakes a connection (#137, mach-http#103).
 - `quic.storage.chunks`, the chunk lists shared by stream and CRYPTO buffers (#137).
