@@ -511,6 +511,13 @@ connection bound to it. The consumer also supplies identities, endpoints,
 limits, an initialized `mach-tls` engine, and a cancellation scope to
 `init_client` or `init_server`.
 
+Memory per connection is measured two ways, and a test pins both. The fixed
+records are `assembly.Storage` at 6,512 bytes and `Connection` at 9,136. On a
+live connection that has gone idle, an established connection with no streams
+holds no chunks at all. With the six H3 control streams open and drained, it
+holds one 4,096-byte chunk of stream records. The scratch pair is paid once per
+pump, not per connection, and TLS engine state is not included.
+
 The reason this belongs in the library rather than in each consumer is that the
 core requires twelve exact equalities between the encoded local transport
 parameters and the manager configurations those parameters describe — the

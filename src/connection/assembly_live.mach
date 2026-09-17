@@ -33,6 +33,7 @@ use std.crypto.ct;
 use std.memory;
 use std.memory.buffers;
 use std.net.ip;
+use std.print;
 use std.sync.cancel;
 use std.system.os;
 use std.types.bool.bool;
@@ -2093,4 +2094,96 @@ test "quic.connection.assembly: a full window survives 5% loss and reordering wi
 
 test "quic.connection.assembly: a full window survives 10% loss and reordering without storage refusals" {
     ret lossy_transfer(100, 29);
+}
+
+# what a connection costs while idle, measured two ways that never stand in
+# for each other: the fixed records every connection carries, and the chunks a
+# live idle connection holds. a failure means that cost moved. decide it
+# deliberately, and update these numbers, the changelog and the readme together
+val GUARD_STORAGE_BYTES:    usize = 6512;
+val GUARD_CONNECTION_BYTES: usize = 9136;
+# established, no streams
+val GUARD_IDLE_CHUNKS: usize = 0;
+# established, the six h3 control streams open and drained: one record block
+val GUARD_H3_SEND_CHUNKS:    usize = 1;
+val GUARD_H3_RECEIVE_CHUNKS: usize = 0;
+
+fun settle(clock: *u64, moved: *usize) i32 {
+    var i: usize = 0;
+    for (i < 20) {
+        clock[0] = next_deadline(clock[0]);
+        if (!fire_due(?dialer, clock[0]) || !fire_due(?listener, clock[0])) { ret 1; }
+        if (pump(clock, moved, 4) != 0)                                     { ret refusal(); }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+fun holds(c: *assembly.Connection, send: usize, receive: usize) bool {
+    ret supply.held(?c.account, supply.SEND) == send &&
+        supply.held(?c.account, supply.RECEIVE) == receive;
+}
+
+test "quic.connection.assembly: an idle connection costs what was measured" {
+    if ($size_of(assembly.Storage) != GUARD_STORAGE_BYTES ||
+        $size_of(assembly.Connection) != GUARD_CONNECTION_BYTES) {
+        print.eprintlnf("assembly.Storage is {} bytes (guard {}), Connection {} (guard {})",
+            $size_of(assembly.Storage), GUARD_STORAGE_BYTES,
+            $size_of(assembly.Connection), GUARD_CONNECTION_BYTES);
+        ret 1;
+    }
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0) { ret established; }
+    val settled: i32 = settle(?clock, ?moved);
+    if (settled != 0) { ret settled; }
+    if (!holds(?dialer, GUARD_IDLE_CHUNKS, GUARD_IDLE_CHUNKS) ||
+        !holds(?listener, GUARD_IDLE_CHUNKS, GUARD_IDLE_CHUNKS)) {
+        print.eprintln("an idle established connection holds chunks it did not before");
+        ret 2;
+    }
+    var byte: [1]u8 = [1]u8{0x07};
+    var i:    usize = 0;
+    for (i < assembly.H3_CRITICAL_STREAMS_PER_PEER) {
+        val dialed: transport.OpenResult = transport.open_stream[binding.Binding](
+            ?dialer.driver, transport.UNIDIRECTIONAL);
+        val served: transport.OpenResult = transport.open_stream[binding.Binding](
+            ?listener.driver, transport.UNIDIRECTIONAL);
+        if (dialed.status != transport.STATUS_OK || served.status != transport.STATUS_OK ||
+            transport.write_stream[binding.Binding](?dialer.driver, dialed.stream,
+            ?byte[0], 1).count != 1 ||
+            transport.write_stream[binding.Binding](?listener.driver, served.stream,
+            ?byte[0], 1).count != 1) { ret 3; }
+        i = i + 1;
+    }
+    val carried: i32 = settle(?clock, ?moved);
+    if (carried != 0) { ret carried; }
+    var sink: [4]u8;
+    i = 0;
+    for (i < assembly.H3_CRITICAL_STREAMS_PER_PEER) {
+        val at_dialer: transport.OpenResult =
+            transport.accept_stream[binding.Binding](?dialer.driver);
+        val at_listener: transport.OpenResult =
+            transport.accept_stream[binding.Binding](?listener.driver);
+        if (at_dialer.status != transport.STATUS_OK ||
+            at_listener.status != transport.STATUS_OK ||
+            transport.read_stream[binding.Binding](?dialer.driver, at_dialer.stream,
+            ?sink[0], 4).count != 1 ||
+            transport.read_stream[binding.Binding](?listener.driver,
+            at_listener.stream, ?sink[0], 4).count != 1) { ret 4; }
+        i = i + 1;
+    }
+    val drained: i32 = settle(?clock, ?moved);
+    if (drained != 0)                                                               { ret drained; }
+    if (dialer.streams.active_streams != 6 || listener.streams.active_streams != 6) { ret 5; }
+    if (!holds(?dialer, GUARD_H3_SEND_CHUNKS, GUARD_H3_RECEIVE_CHUNKS) ||
+        !holds(?listener, GUARD_H3_SEND_CHUNKS, GUARD_H3_RECEIVE_CHUNKS)) {
+        print.eprintlnf("an idle h3 connection holds send {} receive {} chunks (guard {} and {})",
+            supply.held(?dialer.account, supply.SEND),
+            supply.held(?dialer.account, supply.RECEIVE),
+            GUARD_H3_SEND_CHUNKS, GUARD_H3_RECEIVE_CHUNKS);
+        ret 6;
+    }
+    ret 0;
 }
