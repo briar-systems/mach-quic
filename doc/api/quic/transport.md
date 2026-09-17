@@ -280,6 +280,10 @@ pub rec CoreTimer;
 pub rec CoreResult;
 ```
 
+a protocol that refuses a call without changing any state reports
+STATUS_ERROR with its current state and names the caller-facing error in
+`refusal`. ERROR_NONE there means a protocol failure
+
 ## rec CoreDatagram
 
 ```mach

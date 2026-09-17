@@ -1,0 +1,82 @@
+# the buffers a connection needs only while one of its calls runs
+#
+# every connection on a pump shares one pair. a connection binds the pair at
+# init and lends it to the core around each call. a second call while one is
+# running, whether reentry or another thread, is refused rather than allowed to
+# corrupt the first. the core leaves no secret byte behind when a call returns
+
+use quic.frame.frame;
+use quic.recovery.recovery;
+
+use std.sync.atomic;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+# the largest UDP payload a connection handles
+pub val PAYLOAD:    usize = 1500;
+pub val ACK_RANGES: usize = 32;
+pub val EVENTS:     usize = 32;
+
+pub rec Scratch {
+    holder:           i64;
+    receive_header:   [PAYLOAD]u8;
+    receive_decoded:  [PAYLOAD]u8;
+    send_plaintext:   [PAYLOAD]u8;
+    frame_ack_ranges: [ACK_RANGES]frame.AckRange;
+    recovery_events:  [EVENTS]recovery.Event;
+}
+
+pub rec SecretScratch {
+    holder:            i64;
+    receive_plaintext: [PAYLOAD]^u8;
+    send_plaintext:    [PAYLOAD]^u8;
+}
+
+# claims both halves for `holder`, or neither
+pub fun lend(public: *Scratch, secret: *SecretScratch, holder: u64) bool {
+    if (public == nil || secret == nil || holder == 0) { ret false; }
+    val claimant: i64 = holder:~i64;
+    var free:     i64 = 0;
+    if (!atomic.cas(?public.holder, ?free, claimant)) { ret false; }
+    free = 0;
+    if (!atomic.cas(?secret.holder, ?free, claimant)) {
+        atomic.store(?public.holder, 0);
+        ret false;
+    }
+    ret true;
+}
+
+# returns both halves. a holder that does not match leaves them untouched
+pub fun give_back(public: *Scratch, secret: *SecretScratch, holder: u64) {
+    if (public == nil || secret == nil || holder == 0) { ret; }
+    var held: i64 = holder:~i64;
+    atomic.cas(?secret.holder, ?held, 0);
+    held = holder:~i64;
+    atomic.cas(?public.holder, ?held, 0);
+}
+
+pub fun idle(public: *Scratch, secret: *SecretScratch) bool {
+    ret public != nil && secret != nil && atomic.load(?public.holder) == 0 &&
+        atomic.load(?secret.holder) == 0;
+}
+
+test "quic.connection.scratch: a pair is lent to one holder at a time" {
+    var public: Scratch;
+    var secret: SecretScratch;
+    if (!idle(?public, ?secret) || !lend(?public, ?secret, 7) ||
+        lend(?public, ?secret, 7) || lend(?public, ?secret, 8)) { ret 1; }
+    give_back(?public, ?secret, 8);
+    if (idle(?public, ?secret)) { ret 2; }
+    give_back(?public, ?secret, 7);
+    if (!idle(?public, ?secret)) { ret 3; }
+    # a half held elsewhere refuses the whole pair and leaves the other free
+    secret.holder = 9;
+    if (lend(?public, ?secret, 7) || public.holder != 0) { ret 4; }
+    secret.holder = 0;
+    if (lend(?public, ?secret, 0) || !lend(?public, ?secret, 0 - 1::u64)) { ret 5; }
+    give_back(?public, ?secret, 0 - 1::u64);
+    if (!idle(?public, ?secret)) { ret 6; }
+    ret 0;
+}

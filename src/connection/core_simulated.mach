@@ -459,6 +459,16 @@ fun initialize(fixture: *Fixture, role: u8, validated: bool,
     ret initialize_with_fault(fixture, role, validated, now_ns, FAULT_NONE);
 }
 
+# nothing secret outlives a call in the plaintext scratch
+fun secret_clear(data: *^u8, length: usize) bool {
+    var i: usize = 0;
+    for (i < length) {
+        if (data[i]:>u8 != 0) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
 test "quic.connection.core: Initial send ownership is padded and transactional" {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
@@ -468,6 +478,7 @@ test "quic.connection.core: Initial send ownership is padded and transactional" 
     if (generated.status != transport.STATUS_OK || generated.count != 1200 ||
         generated.owner == 0 || fixture.adapter_attempts[0].state !=
         handshake.ATTEMPT_PREPARED) { ret 40 + generated.error::i32; }
+    if (!secret_clear(?fixture.secret_send[0], 1200)) { ret 2; }
     if (core.generate(?fixture.engine, ?fixture.secrets, ?output[0], 1200,
         2).status != transport.STATUS_BLOCKED) { ret 3; }
     if (core.complete_send(?fixture.engine, ?fixture.secrets, generated.owner,

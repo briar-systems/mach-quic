@@ -107,11 +107,15 @@ pub rec CoreInput {
 pub rec Timer     { source: u64; deadline: time.Instant; generation: u64; armed: bool; }
 pub rec CoreTimer { deadline_ns: u64; generation: u64; armed: bool; }
 
+# a protocol that refuses a call without changing any state reports
+# STATUS_ERROR with its current state and names the caller-facing error in
+# `refusal`. ERROR_NONE there means a protocol failure
 pub rec CoreResult {
     status:         Status;
     error:          u64;
     provider_error: u64;
     state:          ConnectionState;
+    refusal:        Error;
 }
 
 pub rec CoreDatagram {
@@ -127,6 +131,13 @@ pub rec CoreDatagram {
     owner:                 u64;
     ecn:                   u8;
     has_local_destination: bool;
+    refusal:               Error;
+}
+
+# the caller-facing error for a protocol's STATUS_ERROR
+fun core_error(refusal: Error) Error {
+    if (refusal == ERROR_NONE) { ret ERROR_PROTOCOL; }
+    ret refusal;
 }
 
 # callbacks are serialized and may not call back into the same driver.
@@ -749,7 +760,7 @@ fun normalize_core[T](driver: *Driver[T], core: CoreResult) OperationResult {
     }
     result.status = core.status;
     result.state  = driver.state;
-    if (core.status == STATUS_ERROR) { result.error = ERROR_PROTOCOL; }
+    if (core.status == STATUS_ERROR) { result.error = core_error(core.refusal); }
     ret result;
 }
 
@@ -1167,7 +1178,7 @@ pub fun generate[T](driver: *Driver[T], scope: *cancel.Scope, buffer: *u8,
         release_slot[T](driver, slot);
         result.status         = core.status;
         result.protocol_error = core.error;
-        if (core.status == STATUS_ERROR) { result.error = ERROR_PROTOCOL; }
+        if (core.status == STATUS_ERROR) { result.error = core_error(core.refusal); }
         mutex.unlock(?driver.lock);
         ret result;
     }

@@ -12,9 +12,9 @@ use handshake_api: quic.connection.handshake;
 use listener_api:  quic.connection.listener;
 use quic.connection.negotiation;
 use quic.connection.ownership;
+use scratch_api:    quic.connection.scratch;
 use tls_client_api: quic.connection.tls_client;
 use tls_server_api: quic.connection.tls_server;
-use quic.frame.frame;
 use quic.packet.packet;
 use path_api: quic.path.path;
 use ack_api:  quic.recovery.ack;
@@ -43,8 +43,8 @@ use std.types.bool.true;
 use std.types.option.opt;
 use std.types.size.usize;
 
-# the exact capacities required of caller-owned public and secret backing
-pub val MAX_UDP_PAYLOAD: usize = 1500;
+# the largest UDP payload a connection handles, which its scratch is sized for
+pub val MAX_UDP_PAYLOAD: usize = scratch_api.PAYLOAD;
 # crypto bytes a level may carry, each level holding at most one chunk
 pub val CRYPTO_PER_LEVEL:             usize = 4096;
 pub val H3_CRITICAL_STREAMS_PER_PEER: usize = 3;
@@ -74,6 +74,8 @@ pub val STAGE_CORE:           Stage = 8;
 pub val STAGE_BINDING:        Stage = 9;
 pub val STAGE_DRIVER:         Stage = 10;
 pub val STAGE_STORAGE:        Stage = 11;
+# the scratch pair was in use by another call when the core started
+pub val STAGE_SCRATCH: Stage = 12;
 
 # `core` carries the reason code the core itself reported, so a refusal at
 # STAGE_CORE names which ownership or precondition check rejected
@@ -174,12 +176,7 @@ pub fun default_config(source: u64, local: ip.Endpoint,
 pub rec Storage {
     sends:                    [SEND_CAPACITY]transport_api.SendSlot;
     supported_versions:       [2]u32;
-    receive_header:           [MAX_UDP_PAYLOAD]u8;
-    receive_decoded:          [MAX_UDP_PAYLOAD]u8;
-    send_plaintext:           [MAX_UDP_PAYLOAD]u8;
     close_reason:             [256]u8;
-    frame_ack_ranges:         [32]frame.AckRange;
-    recovery_events:          [32]recovery.Event;
     ack_initial:              [32]ack_api.Range;
     ack_handshake:            [32]ack_api.Range;
     ack_application:          [32]ack_api.Range;
@@ -199,14 +196,11 @@ pub rec Storage {
     leased:                   bool;
 }
 
-# secret storage is allocated only through classification-preserving ownership
-pub rec SecretStorage {
-    receive_plaintext: [MAX_UDP_PAYLOAD]^u8;
-    send_plaintext:    [MAX_UDP_PAYLOAD]^u8;
-    source:            u64;
-    generation:        u64;
-    leased:            bool;
-}
+# per-call buffers, one pair per pump shared by every connection on it. a
+# connection binds its pair at init, and the pair must outlive the connection.
+# the secret half is allocated only through classification-preserving ownership
+pub def Scratch:       scratch_api.Scratch;
+pub def SecretScratch: scratch_api.SecretScratch;
 
 pub rec Connection {
     core:           core_api.Core;
@@ -219,18 +213,18 @@ pub rec Connection {
     binding:        binding_api.Binding;
     driver:         transport_api.Driver[binding_api.Binding];
     storage:        *Storage;
-    secret_storage: *SecretStorage;
+    scratch:        *Scratch;
+    secret_scratch: *SecretScratch;
     # every chunk comes from the caller's buffer source, counted against this
     # connection's account
     provider: supply.Provider;
     account:  supply.Account;
     # handshake-only state, held until the core confirms the handshake
-    handshake_block:           chunks_api.Block;
-    storage_generation:        u64;
-    secret_storage_generation: u64;
-    local_parameter_length:    usize;
-    initialized:               bool;
-    released:                  bool;
+    handshake_block:        chunks_api.Block;
+    storage_generation:     u64;
+    local_parameter_length: usize;
+    initialized:            bool;
+    released:               bool;
 }
 
 fun staged(stage: Stage) InitResult {
@@ -404,17 +398,20 @@ fun local_parameter_bytes(c: *Connection) *u8 {
 
 fun public_core_storage(c: *Connection) core_api.Storage {
     val storage: *Storage = c.storage;
+    val work:    *Scratch = c.scratch;
     val block:   *u8      = c.handshake_block.data;
     ret core_api.Storage{
-        receive_header:           ?storage.receive_header[0],
+        receive_header:           ?work.receive_header[0],
         receive_header_capacity:  MAX_UDP_PAYLOAD,
-        receive_decoded:          ?storage.receive_decoded[0],
+        receive_decoded:          ?work.receive_decoded[0],
         receive_decoded_capacity: MAX_UDP_PAYLOAD,
-        send_plaintext:           ?storage.send_plaintext[0],
+        send_plaintext:           ?work.send_plaintext[0],
         send_plaintext_capacity:  MAX_UDP_PAYLOAD,
         close_reason:             ?storage.close_reason[0], close_reason_capacity: 256,
-        frame_ack_ranges:         ?storage.frame_ack_ranges[0], frame_ack_capacity: 32,
-        recovery_events:          ?storage.recovery_events[0], recovery_event_capacity: 32,
+        frame_ack_ranges:         ?work.frame_ack_ranges[0],
+        frame_ack_capacity:       scratch_api.ACK_RANGES,
+        recovery_events:          ?work.recovery_events[0],
+        recovery_event_capacity:  scratch_api.EVENTS,
         recovery_initial:         recovery.HistoryStorage{capacity: HISTORY_CAPACITY},
         recovery_handshake:       recovery.HistoryStorage{capacity: HISTORY_CAPACITY},
         recovery_application:     recovery.HistoryStorage{capacity: HISTORY_CAPACITY},
@@ -480,7 +477,7 @@ fun public_datagram_storage(c: *Connection) datagram_api.Storage {
     };
 }
 
-fun private_core_storage(storage: *SecretStorage) core_api.SecretStorage {
+fun private_core_storage(storage: *SecretScratch) core_api.SecretStorage {
     ret core_api.SecretStorage{
         receive_plaintext:          ?storage.receive_plaintext[0],
         receive_plaintext_capacity: MAX_UDP_PAYLOAD,
@@ -499,33 +496,30 @@ fun connection_range(c: *Connection) ownership.Range {
         $offset_of(Connection, local_parameter_length));
 }
 
-fun secret_storage_range(storage: *SecretStorage) ownership.Range {
-    if (storage == nil) {
+fun secret_scratch_range(value: *SecretScratch) ownership.Range {
+    if (value == nil) {
         var empty: ownership.Range;
         ret empty;
     }
-    ret ownership.anchored_record[SecretStorage, u64](?storage.source,
-        $offset_of(SecretStorage, source));
+    ret ownership.anchored_record[SecretScratch, i64](?value.holder,
+        $offset_of(SecretScratch, holder));
 }
 
-fun capacities_valid(storage: *Storage, secret_storage: *SecretStorage) bool {
-    ret !storage.leased && storage.source == 0 &&
-        !secret_storage.leased && secret_storage.source == 0;
+fun capacities_valid(storage: *Storage) bool {
+    ret !storage.leased && storage.source == 0;
 }
 
 fun storage_ranges_valid(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage,
+    work: *Scratch, secret_work: *SecretScratch,
     scope: *cancel.Scope) bool {
-    var ranges: [5]ownership.Range;
+    var ranges: [6]ownership.Range;
     ranges[0] = connection_range(c);
     ranges[1] = ownership.record[Storage](storage);
-    ranges[2] = secret_storage_range(secret_storage);
-    ranges[3] = ownership.record[cancel.Scope](scope);
-    ranges[4] = ownership.record[Config](config);
-    if (!ownership.all_disjoint(?ranges[0], 5) ||
-        !ownership.secret_disjoint(?secret_storage.receive_plaintext[0],
-        MAX_UDP_PAYLOAD, ?secret_storage.send_plaintext[0],
-        MAX_UDP_PAYLOAD)) { ret false; }
+    ranges[2] = ownership.record[Scratch](work);
+    ranges[3] = secret_scratch_range(secret_work);
+    ranges[4] = ownership.record[cancel.Scope](scope);
+    ranges[5] = ownership.record[Config](config);
+    if (!ownership.all_disjoint(?ranges[0], 6)) { ret false; }
     var borrowed: [7]ownership.Range;
     borrowed[0] = ownership.bytes(config.local_source,
         config.local_source_length, ownership.ZERO_ALLOWED);
@@ -583,20 +577,18 @@ fun chunk_budget(window: u64) usize {
 }
 
 fun backing_lease_valid(c: *Connection) bool {
-    ret c != nil && c.storage != nil && c.secret_storage != nil &&
-        c.storage.leased && c.secret_storage.leased &&
-        c.storage.source != 0 && c.storage.source == c.secret_storage.source &&
-        c.storage.generation == c.storage_generation &&
-        c.secret_storage.generation == c.secret_storage_generation;
+    ret c != nil && c.storage != nil && c.scratch != nil &&
+        c.secret_scratch != nil && c.storage.leased && c.storage.source != 0 &&
+        c.storage.generation == c.storage_generation;
 }
 
 fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage, chunks: buffers.Source,
+    work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
     scope: *cancel.Scope) bool {
     if (c == nil || config == nil || chunks.ctx == nil || c.storage != nil ||
-        c.secret_storage != nil || c.account.open ||
-        !storage_ranges_valid(c, config, storage, secret_storage, scope) ||
-        !capacities_valid(storage, secret_storage)) { ret false; }
+        c.scratch != nil || c.secret_scratch != nil || c.account.open ||
+        !storage_ranges_valid(c, config, storage, work, secret_work, scope) ||
+        !capacities_valid(storage)) { ret false; }
     # the reservation is admission: a pool that cannot back it refuses the
     # connection before anything else is leased
     c.provider = chunks;
@@ -615,17 +607,14 @@ fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
         c.provider = no_provider;
         ret false;
     }
-    storage.generation          = next_generation(storage.generation);
-    secret_storage.generation   = next_generation(secret_storage.generation);
-    storage.source              = config.source;
-    secret_storage.source       = config.source;
-    storage.leased              = true;
-    secret_storage.leased       = true;
-    c.storage                   = storage;
-    c.secret_storage            = secret_storage;
-    c.storage_generation        = storage.generation;
-    c.secret_storage_generation = secret_storage.generation;
-    c.released                  = false;
+    storage.generation   = next_generation(storage.generation);
+    storage.source       = config.source;
+    storage.leased       = true;
+    c.storage            = storage;
+    c.scratch            = work;
+    c.secret_scratch     = secret_work;
+    c.storage_generation = storage.generation;
+    c.released           = false;
     ret true;
 }
 
@@ -638,18 +627,16 @@ fun release_backing(c: *Connection) bool {
     if (c.handshake_block.data != nil ||
         (c.account.open && !supply.close(?c.provider, ?c.account))) { ret false; }
     var no_provider: supply.Provider;
-    c.provider                  = no_provider;
-    c.storage.source            = 0;
-    c.storage.leased            = false;
-    c.secret_storage.source     = 0;
-    c.secret_storage.leased     = false;
-    c.storage                   = nil;
-    c.secret_storage            = nil;
-    c.storage_generation        = 0;
-    c.secret_storage_generation = 0;
-    c.local_parameter_length    = 0;
-    c.initialized               = false;
-    c.released                  = true;
+    c.provider               = no_provider;
+    c.storage.source         = 0;
+    c.storage.leased         = false;
+    c.storage                = nil;
+    c.scratch                = nil;
+    c.secret_scratch         = nil;
+    c.storage_generation     = 0;
+    c.local_parameter_length = 0;
+    c.initialized            = false;
+    c.released               = true;
     ret true;
 }
 
@@ -779,7 +766,7 @@ fun core_storage(c: *Connection) core_api.Storage {
 }
 
 fun secret_storage(c: *Connection) core_api.SecretStorage {
-    ret private_core_storage(c.secret_storage);
+    ret private_core_storage(c.secret_scratch);
 }
 
 fun datagram_storage(c: *Connection) datagram_api.Storage {
@@ -890,6 +877,9 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
     if (!encoded.ok) { ret staged(STAGE_PARAMETERS); }
     c.local_parameter_length = encoded.count;
     var value: InitResult;
+    if (!scratch_api.lend(c.scratch, c.secret_scratch, config.source)) {
+        ret staged(STAGE_SCRATCH);
+    }
     if (role == transport_api.CLIENT) {
         value.core = core_api.init_client_result(?c.core, ?c.secrets,
             core_configuration(c, config, role), core_storage(c),
@@ -902,11 +892,13 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
             secret_storage(c), ?c.handshake, ?c.cids, ?c.paths, ?c.streams,
             ?c.datagrams, clock.nanos(now));
     }
+    scratch_api.give_back(c.scratch, c.secret_scratch, config.source);
     if (!value.core.ok) {
         value.stage = STAGE_CORE;
         ret value;
     }
-    if (!binding_api.bind(?c.binding, ?c.core, ?c.secrets) ||
+    if (!binding_api.bind(?c.binding, ?c.core, ?c.secrets, c.scratch,
+        c.secret_scratch) ||
         !binding_api.prepare_initial_route(?c.binding, config.local_source,
         config.local_source_length) ||
         !binding_api.publish_initial_route(?c.binding)) {
@@ -948,8 +940,13 @@ fun abandon_manager_initialization(c: *Connection) bool {
     }
     if (c.binding.initialized &&
         !binding_api.abandon_initialization(?c.binding)) { ret false; }
-    if (c.core.initialized &&
-        !core_api.abandon_initialization(?c.core, ?c.secrets)) { ret false; }
+    if (c.core.initialized) {
+        val source: u64 = c.core.config.source;
+        if (!scratch_api.lend(c.scratch, c.secret_scratch, source)) { ret false; }
+        val abandoned: bool = core_api.abandon_initialization(?c.core, ?c.secrets);
+        scratch_api.give_back(c.scratch, c.secret_scratch, source);
+        if (!abandoned) { ret false; }
+    }
     if (c.handshake.initialized &&
         !handshake_api.abandon_initialization(?c.handshake)) { ret false; }
     if (c.datagrams.valid) {
@@ -1043,7 +1040,7 @@ fun release_ready(c: *Connection) bool {
 pub fun release_closed(c: *Connection) bool {
     if (c == nil) { ret false; }
     if (!c.initialized) {
-        if (c.storage != nil || c.secret_storage != nil) {
+        if (c.storage != nil || c.scratch != nil) {
             ret abandon_manager_initialization(c);
         }
         ret c.released;
@@ -1072,7 +1069,7 @@ pub fun release_closed(c: *Connection) bool {
 
 pub fun reusable(c: *Connection) bool {
     ret c != nil && !c.initialized && c.released &&
-        c.storage == nil && c.secret_storage == nil &&
+        c.storage == nil && c.scratch == nil && c.secret_scratch == nil &&
         !c.driver.initialized && !c.binding.initialized &&
         !c.core.initialized && !c.secrets.initialized &&
         !c.handshake.initialized && !c.cids.initialized &&
@@ -1080,7 +1077,8 @@ pub fun reusable(c: *Connection) bool {
 }
 
 pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage, chunks: buffers.Source, tls: *client.Client,
+    work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
+    tls: *client.Client,
     scope: *cancel.Scope, now: time.Instant) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
@@ -1088,7 +1086,7 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
         ret staged(STAGE_CONFIG);
     }
     if (c.initialized) { ret staged(STAGE_CONFIG); }
-    if (c.storage != nil || c.secret_storage != nil) {
+    if (c.storage != nil || c.scratch != nil) {
         var retained: InitResult = staged(STAGE_STORAGE);
         retained.cleanup_retained = true;
         ret retained;
@@ -1097,8 +1095,9 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
         ret staged(STAGE_CONFIG);
     }
     if (!ownership.record[Storage](storage).valid ||
-        !secret_storage_range(secret_storage).valid ||
-        !acquire_backing(c, config, storage, secret_storage, chunks, scope)) {
+        !ownership.record[Scratch](work).valid ||
+        !secret_scratch_range(secret_work).valid ||
+        !acquire_backing(c, config, storage, work, secret_work, chunks, scope)) {
         ret staged(STAGE_STORAGE);
     }
     val built: Stage = build_managers(c, config, transport_api.CLIENT);
@@ -1114,7 +1113,8 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
 }
 
 pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage, chunks: buffers.Source, tls: *server.Server,
+    work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
+    tls: *server.Server,
     scope: *cancel.Scope, now: time.Instant) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
@@ -1122,7 +1122,7 @@ pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
         ret staged(STAGE_CONFIG);
     }
     if (c.initialized) { ret staged(STAGE_CONFIG); }
-    if (c.storage != nil || c.secret_storage != nil) {
+    if (c.storage != nil || c.scratch != nil) {
         var retained: InitResult = staged(STAGE_STORAGE);
         retained.cleanup_retained = true;
         ret retained;
@@ -1131,8 +1131,9 @@ pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
         ret staged(STAGE_CONFIG);
     }
     if (!ownership.record[Storage](storage).valid ||
-        !secret_storage_range(secret_storage).valid ||
-        !acquire_backing(c, config, storage, secret_storage, chunks, scope)) {
+        !ownership.record[Scratch](work).valid ||
+        !secret_scratch_range(secret_work).valid ||
+        !acquire_backing(c, config, storage, work, secret_work, chunks, scope)) {
         ret staged(STAGE_STORAGE);
     }
     val built: Stage = build_managers(c, config, transport_api.SERVER);
