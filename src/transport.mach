@@ -1244,19 +1244,25 @@ pub fun cancel_send[T](driver: *Driver[T], token: Token, now_ns: u64) Completion
 
 pub fun submit_native[T](driver: *Driver[T], network: *net_async.Driver, socket: *udp.Socket,
     scope: *cancel.Scope, token: Token) res[io_runtime.Token, io_error.Error] {
+    # these refusals are the adapter's own, so each names its kind and carries
+    # no native code
     if (callback_reentry[T](driver)) {
-        ret res[io_runtime.Token, io_error.Error].err{io_error.from_code(os.EBUSY, io_error.OP_SEND)};
+        ret res[io_runtime.Token, io_error.Error].err{io_error.make(io_error.BUSY, io_error.OP_SEND)};
     }
     if (driver == nil || !driver.initialized || network == nil || socket == nil || scope == nil) {
-        ret res[io_runtime.Token, io_error.Error].err{io_error.from_code(os.EINVAL, io_error.OP_SEND)};
+        ret res[io_runtime.Token, io_error.Error].err{io_error.make(io_error.INVALID, io_error.OP_SEND)};
     }
     mutex.lock(?driver.lock);
     apply_cancellation[T](driver);
     val slot: *SendSlot = slot_for[T](driver, token);
     if (slot == nil || slot.state != SLOT_PREPARED ||
-        !source_scope(scope, driver.operation_scope) || !scope_active(scope)) {
+        !source_scope(scope, driver.operation_scope)) {
         mutex.unlock(?driver.lock);
-        ret res[io_runtime.Token, io_error.Error].err{io_error.from_code(os.EBADF, io_error.OP_SEND)};
+        ret res[io_runtime.Token, io_error.Error].err{io_error.make(io_error.INVALID, io_error.OP_SEND)};
+    }
+    if (!scope_active(scope)) {
+        mutex.unlock(?driver.lock);
+        ret res[io_runtime.Token, io_error.Error].err{io_error.make(io_error.CANCELLED, io_error.OP_SEND)};
     }
     val submitted: res[io_runtime.Token, io_error.Error] = net_async.submit_send_batch(
         network, scope, socket, ?slot.packet, 1, token_context(token));
