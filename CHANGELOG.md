@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.0] - 2026-09-17
+
+### Changed
+
+- **Breaking.** Dependencies: mach-std v4.0.1, mach-crypto v0.11.0, mach-tls v0.5.0 (#134). They require mach 5.2.0 or later.
+- `transport.submit_native` builds its own refusals with `io.error.make` and names their kind (`BUSY` for callback reentry, `INVALID` for a missing argument or a stale token, `CANCELLED` for an inactive scope), with `code` 0. Before, it borrowed errnos through `io.error.from_code`, which std 4 removes.
+- A native send batch that std refuses whole (std 4.0.1) settles that send as failed, and the connection keeps sending. The batch always carries one packet, so the refusal never splits it.
+
 ## [0.9.3] - 2026-09-17
 
 ### Fixed
