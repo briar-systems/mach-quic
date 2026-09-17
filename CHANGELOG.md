@@ -25,6 +25,7 @@
 
 ### Added
 
+- A size guard pins what an idle connection costs (#137): `assembly.Storage` at 6,512 bytes and `Connection` at 9,136, no chunks held by an established idle connection, and one record chunk once the six H3 control streams are open and drained.
 - `transport.ready_stream`, which reports streams that became readable, writable or reset in O(1) per call, oldest first, and `transport.storage_ready` for when the pool wakes a connection (#137, mach-http#103).
 - `quic.storage.chunks`, the chunk lists shared by stream and CRYPTO buffers (#137).
 - `handshake.discard` releases a level once its keys are gone, and the core calls it at both RFC 9001 discard points (#137).
