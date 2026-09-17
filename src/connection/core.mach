@@ -106,25 +106,30 @@ pub rec Config {
     enable_early_data:          bool;
 }
 
+pub uni OwnerToken {
+    handshake:      handshake_api.AttemptToken;
+    stream:         stream_api.AttemptToken;
+    datagram:       datagram_api.Token;
+    path_challenge: path_api.ChallengeToken;
+    path_response:  path_api.ResponseToken;
+    mtu_probe:      path_api.MtuToken;
+    cid_retirement: cid_api.Handle;
+}
+
 pub rec Owner {
-    owner:                 u64;
-    generation:            u64;
-    packet_number:         u64;
-    bytes:                 usize;
-    space:                 u8;
-    level:                 handshake_api.Level;
-    kind:                  OwnerKind;
-    state:                 u8;
-    ack_generation:        u64;
-    handshake:             handshake_api.AttemptToken;
-    stream:                stream_api.AttemptToken;
-    datagram:              datagram_api.Token;
+    owner:          u64;
+    generation:     u64;
+    packet_number:  u64;
+    bytes:          usize;
+    space:          u8;
+    level:          handshake_api.Level;
+    kind:           OwnerKind;
+    state:          u8;
+    ack_generation: u64;
+    # the token of the one frame this owner carries, read only under its kind
+    token:                 OwnerToken;
     path:                  path_api.Handle;
     path_send:             path_api.SendToken;
-    path_challenge:        path_api.ChallengeToken;
-    path_response:         path_api.ResponseToken;
-    mtu_probe:             path_api.MtuToken;
-    cid_retirement:        cid_api.Handle;
     pacer:                 pacer_api.Schedule;
     ack_largest:           u64;
     send_generation:       u64;
@@ -1717,11 +1722,11 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
     }
     if (owner.kind == OWNER_CRYPTO) {
         ok = handshake_api.on_terminal_scoped(secrets.handshake, core.config.source,
-            owner.handshake, terminal).status == handshake_api.STATUS_OK && ok;
+            owner.token.handshake, terminal).status == handshake_api.STATUS_OK && ok;
     }
     if (owner.kind == OWNER_STREAM) {
         ok = stream_api.on_terminal_scoped(core.streams, core.config.source,
-            owner.stream, stream_terminal).status == stream_api.STATUS_OK && ok;
+            owner.token.stream, stream_terminal).status == stream_api.STATUS_OK && ok;
     }
     if (owner.kind == OWNER_ACK && event.kind == recovery.EVENT_ACKED) {
         ok = ack_api.on_ack_packet_acked(?core.acknowledgements, owner.space,
@@ -1729,12 +1734,12 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
     }
     if (owner.kind == OWNER_CID_RETIREMENT) {
         ok = cid_api.retirement_terminal_scoped(core.cids, core.config.source,
-            owner.cid_retirement,
+            owner.token.cid_retirement,
             event.kind == recovery.EVENT_ACKED).status == cid_api.STATUS_OK && ok;
     }
     if (owner.kind == OWNER_NEW_CID) {
         ok = cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
-            owner.cid_retirement,
+            owner.token.cid_retirement,
             event.kind == recovery.EVENT_ACKED).status == cid_api.STATUS_OK && ok;
     }
     if (owner.kind == OWNER_HANDSHAKE_DONE &&
@@ -1790,7 +1795,7 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
         }
         ok = apply_mtu(core, transport_path,
             path_api.on_mtu_terminal_scoped(core.paths, core.config.source,
-            owner.mtu_probe, mtu_terminal), now_ns) && ok;
+            owner.token.mtu_probe, mtu_terminal), now_ns) && ok;
     }
     or (owner.path_send.source != 0) {
         if (event.kind == recovery.EVENT_ACKED) {
@@ -1839,20 +1844,20 @@ fun terminal_discarded_owner(core: *Core, secrets: *Secrets,
     owner: *Owner, now_ns: u64) bool {
     if (owner.kind == OWNER_CRYPTO &&
         handshake_api.on_terminal_scoped(secrets.handshake, core.config.source,
-        owner.handshake, handshake_api.TERMINAL_LOST).status !=
+        owner.token.handshake, handshake_api.TERMINAL_LOST).status !=
         handshake_api.STATUS_OK) { ret false; }
     if (owner.kind == OWNER_STREAM &&
         stream_api.on_terminal_scoped(core.streams, core.config.source,
-        owner.stream, stream_api.TERMINAL_LOST).status !=
+        owner.token.stream, stream_api.TERMINAL_LOST).status !=
         stream_api.STATUS_OK) { ret false; }
     if (owner.kind == OWNER_CID_RETIREMENT &&
         cid_api.retirement_terminal_scoped(core.cids, core.config.source,
-        owner.cid_retirement, false).status != cid_api.STATUS_OK) {
+        owner.token.cid_retirement, false).status != cid_api.STATUS_OK) {
         ret false;
     }
     if (owner.kind == OWNER_NEW_CID &&
         cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
-        owner.cid_retirement, false).status != cid_api.STATUS_OK) {
+        owner.token.cid_retirement, false).status != cid_api.STATUS_OK) {
         ret false;
     }
     if (owner.kind == OWNER_HANDSHAKE_DONE) {
@@ -2860,32 +2865,32 @@ fun cancel_payload(core: *Core, secrets: *Secrets, owner: *Owner) bool {
         core.ack_prepared[space_index(owner.space)] = false;
     }
     if (owner.kind == OWNER_CRYPTO) {
-        ok = handshake_api.cancel_prepared_scoped(secrets.handshake, core.config.source, owner.handshake).status == handshake_api.STATUS_OK;
+        ok = handshake_api.cancel_prepared_scoped(secrets.handshake, core.config.source, owner.token.handshake).status == handshake_api.STATUS_OK;
     }
     if (owner.kind == OWNER_STREAM) {
-        ok = stream_api.cancel_prepared_scoped(core.streams, core.config.source, stream_prepared_token(owner.stream)).status == stream_api.STATUS_OK;
+        ok = stream_api.cancel_prepared_scoped(core.streams, core.config.source, stream_prepared_token(owner.token.stream)).status == stream_api.STATUS_OK;
     }
     if (owner.kind == OWNER_DATAGRAM) {
         ok = datagram_api.cancel_prepared_scoped(core.datagrams, core.config.source,
-            datagram_prepared_token(owner.datagram)).status ==
+            datagram_prepared_token(owner.token.datagram)).status ==
             datagram_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_CHALLENGE) {
         ok = path_api.cancel_challenge_scoped(core.paths, core.config.source,
-            owner.path_challenge).status == path_api.STATUS_OK;
+            owner.token.path_challenge).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_RESPONSE) {
         ok = path_api.cancel_response_scoped(core.paths, core.config.source,
-            owner.path_response).status == path_api.STATUS_OK;
+            owner.token.path_response).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_CID_RETIREMENT) {
         ok = cid_api.retirement_terminal_scoped(core.cids, core.config.source,
-            owner.cid_retirement,
+            owner.token.cid_retirement,
             false).status == cid_api.STATUS_OK;
     }
     if (owner.kind == OWNER_NEW_CID) {
         ok = cid_api.advertisement_terminal_scoped(core.cids, core.config.source,
-            owner.cid_retirement,
+            owner.token.cid_retirement,
             false).status == cid_api.STATUS_OK;
     }
     if (owner.kind == OWNER_CLOSE) { core.close_queued = true; }
@@ -2903,7 +2908,7 @@ fun cancel_payload(core: *Core, secrets: *Secrets, owner: *Owner) bool {
             owner.path_send.source = 0;
         }
         ok = path_api.cancel_mtu_probe_scoped(core.paths, core.config.source,
-            owner.mtu_probe).status == path_api.STATUS_OK && ok;
+            owner.token.mtu_probe).status == path_api.STATUS_OK && ok;
     }
     if (owner.pto_probe && core.probes_remaining < 255) {
         core.probes_remaining = core.probes_remaining + 1;
@@ -3056,9 +3061,9 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                 output.offset = prepared.offset;
                 output.data   = packet.Span{data: prepared.data.data,
                     len: prepared.data.length};
-                owner.kind      = OWNER_CRYPTO;
-                owner.level     = level;
-                owner.handshake = prepared.token;
+                owner.kind            = OWNER_CRYPTO;
+                owner.level           = level;
+                owner.token.handshake = prepared.token;
                 if (probing) {
                     owner.pto_probe       = true;
                     core.probes_remaining = core.probes_remaining - 1;
@@ -3106,7 +3111,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             output.stateless_reset_token = advertisement.reset_token;
             owner.kind                   = OWNER_NEW_CID;
             owner.level                  = application;
-            owner.cid_retirement         = advertisement.handle;
+            owner.token.cid_retirement   = advertisement.handle;
             ret true;
         }
         val retirement: cid_api.Result = cid_api.next_retirement(core.cids);
@@ -3114,11 +3119,11 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             if (cid_api.retirement_sent_scoped(core.cids,
                 core.config.source,
                 retirement.handle).status != cid_api.STATUS_OK) { ret false; }
-            output.kind          = frame.RETIRE_CONNECTION_ID;
-            output.sequence      = retirement.handle.sequence;
-            owner.kind           = OWNER_CID_RETIREMENT;
-            owner.level          = application;
-            owner.cid_retirement = retirement.handle;
+            output.kind                = frame.RETIRE_CONNECTION_ID;
+            output.sequence            = retirement.handle.sequence;
+            owner.kind                 = OWNER_CID_RETIREMENT;
+            owner.level                = application;
+            owner.token.cid_retirement = retirement.handle;
             ret true;
         }
 
@@ -3136,7 +3141,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                     output.path_data            = response.data;
                     owner.kind                  = OWNER_PATH_RESPONSE;
                     owner.level                 = application;
-                    owner.path_response         = response.token;
+                    owner.token.path_response   = response.token;
                     owner.include_ping          = response.require_non_probing;
                     owner.minimum_datagram_size = response.minimum_datagram_size;
                     @path                       = response.handle;
@@ -3149,7 +3154,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                     output.path_data            = challenge.data;
                     owner.kind                  = OWNER_PATH_CHALLENGE;
                     owner.level                 = application;
-                    owner.path_challenge        = challenge.token;
+                    owner.token.path_challenge  = challenge.token;
                     owner.minimum_datagram_size = challenge.minimum_datagram_size;
                     @path                       = challenge.handle;
                     ret true;
@@ -3163,7 +3168,7 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             output.kind                 = frame.PING;
             owner.kind                  = OWNER_MTU_PROBE;
             owner.level                 = application;
-            owner.mtu_probe             = mtu.token;
+            owner.token.mtu_probe       = mtu.token;
             owner.minimum_datagram_size = mtu.size;
             @path                       = mtu.handle;
             ret true;
@@ -3189,9 +3194,9 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
             output.kind    = frame.MAX_STREAMS_UNI;
             output.maximum = control.maximum;
         }
-        owner.kind   = OWNER_STREAM;
-        owner.level  = application;
-        owner.stream = control.token;
+        owner.kind         = OWNER_STREAM;
+        owner.level        = application;
+        owner.token.stream = control.token;
         ret true;
     }
     if (control.status == stream_api.STATUS_ERROR) { ret false; }
@@ -3227,9 +3232,9 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                     output.stream_id  = prepared.handle.id;
                     output.error_code = prepared.application_error;
                 }
-                owner.kind   = OWNER_STREAM;
-                owner.level  = application;
-                owner.stream = prepared.token;
+                owner.kind         = OWNER_STREAM;
+                owner.level        = application;
+                owner.token.stream = prepared.token;
                 if (core.probes_remaining > 0) {
                     owner.pto_probe       = true;
                     core.probes_remaining = core.probes_remaining - 1;
@@ -3243,11 +3248,11 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
 
     val datagram: datagram_api.Prepared = datagram_api.prepare_scoped(core.datagrams, core.config.source, true);
     if (datagram.status == datagram_api.STATUS_OK) {
-        output.kind    = frame.DATAGRAM_LEN;
-        output.data    = datagram.data;
-        owner.kind     = OWNER_DATAGRAM;
-        owner.level    = application;
-        owner.datagram = datagram.token;
+        output.kind          = frame.DATAGRAM_LEN;
+        output.data          = datagram.data;
+        owner.kind           = OWNER_DATAGRAM;
+        owner.level          = application;
+        owner.token.datagram = datagram.token;
         ret true;
     }
     if (datagram.status == datagram_api.STATUS_ERROR &&
@@ -3538,7 +3543,7 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     var reserved: path_api.SendResult;
     if (owner.kind == OWNER_MTU_PROBE) {
         reserved = path_api.reserve_mtu_send_scoped(core.paths, core.config.source, path,
-            packet_size::u64, true, owner.mtu_probe);
+            packet_size::u64, true, owner.token.mtu_probe);
     }
     or {
         reserved = path_api.reserve_send_scoped(core.paths, core.config.source, path,
@@ -3642,25 +3647,25 @@ fun publish_payload(core: *Core, secrets: *Secrets, owner: *Owner,
         ret true;
     }
     if (owner.kind == OWNER_CRYPTO) {
-        ret handshake_api.publish_scoped(secrets.handshake, core.config.source, owner.handshake).status == handshake_api.STATUS_OK;
+        ret handshake_api.publish_scoped(secrets.handshake, core.config.source, owner.token.handshake).status == handshake_api.STATUS_OK;
     }
     if (owner.kind == OWNER_STREAM) {
-        ret stream_api.publish_scoped(core.streams, core.config.source, stream_prepared_token(owner.stream)).status == stream_api.STATUS_OK;
+        ret stream_api.publish_scoped(core.streams, core.config.source, stream_prepared_token(owner.token.stream)).status == stream_api.STATUS_OK;
     }
     if (owner.kind == OWNER_DATAGRAM) {
-        ret datagram_api.publish_scoped(core.datagrams, core.config.source, datagram_prepared_token(owner.datagram)).status == datagram_api.STATUS_OK;
+        ret datagram_api.publish_scoped(core.datagrams, core.config.source, datagram_prepared_token(owner.token.datagram)).status == datagram_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_CHALLENGE) {
-        ret path_api.publish_challenge_scoped(core.paths, core.config.source, owner.path_challenge,
+        ret path_api.publish_challenge_scoped(core.paths, core.config.source, owner.token.path_challenge,
             now_ns).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_PATH_RESPONSE) {
         ret path_api.publish_response_scoped(core.paths, core.config.source,
-            owner.path_response).status == path_api.STATUS_OK;
+            owner.token.path_response).status == path_api.STATUS_OK;
     }
     if (owner.kind == OWNER_MTU_PROBE) {
         ret path_api.publish_mtu_probe_scoped(core.paths, core.config.source,
-            owner.mtu_probe).status == path_api.STATUS_OK;
+            owner.token.mtu_probe).status == path_api.STATUS_OK;
     }
     ret true;
 }
