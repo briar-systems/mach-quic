@@ -96,6 +96,15 @@ pub val STATUS_CLOSED:  Status = 6
 pub val STATUS_ERROR:   Status = 7
 ```
 
+## val STATUS_WAITING
+
+```mach
+pub val STATUS_WAITING: Status = 8
+```
+
+a provider refused for memory and consumed nothing. the adapter repeats the
+same call once the connection's account wakes
+
 ## def Error
 
 ```mach
@@ -575,13 +584,15 @@ initialization rollback is private ownership, so no event may have escaped
 pub fun abandon_initialization(adapter: *Adapter) bool;
 ```
 
-detaches an unexposed adapter without consuming the caller's tls provider
+detaches an unexposed adapter. a tls engine it never started is left as it
+was. one it started holds memory on the connection's account, which is about
+to close, so it is destroyed and the caller initializes it again to reuse it
 
 ## fun initialize_tls_client
 
 ```mach
 pub fun initialize_tls_client(adapter: *Adapter, config: Config, storage: Storage,
-value: *tls_client_api.Client,
+value: *tls_client_api.Handshake, lease: tls_buffer.Lease,
 verification_time_unix: i64,
 deadline_ns: u64,
 entropy_context_size: usize,
@@ -592,7 +603,7 @@ entropy_secret_context_size: usize) bool;
 
 ```mach
 pub fun initialize_tls_server(adapter: *Adapter, config: Config, storage: Storage,
-value: *tls_server_api.Server,
+value: *tls_server_api.Handshake, lease: tls_buffer.Lease,
 verification_time_unix: i64,
 deadline_ns: u64,
 entropy_context_size: usize,
@@ -602,7 +613,7 @@ entropy_secret_context_size: usize) bool;
 ## val PROVIDER_RANGE_CAPACITY
 
 ```mach
-pub val PROVIDER_RANGE_CAPACITY: usize = 10
+pub val PROVIDER_RANGE_CAPACITY: usize = 3
 ```
 
 ## fun provider_ranges
@@ -710,6 +721,22 @@ now_ns: u64) Result;
 
 ```mach
 pub fun poll(adapter: *Adapter, now_ns: u64) Result;
+```
+
+## fun settle
+
+```mach
+pub fun settle(adapter: *Adapter) Result;
+```
+
+retires the handshake once it has nothing left to hand over, so only the
+established core and none of the handshake's memory remains. STATUS_MORE
+means not yet, and the caller asks again after the next poll
+
+## fun settle_scoped
+
+```mach
+pub fun settle_scoped(adapter: *Adapter, source: u64) Result;
 ```
 
 ## fun close

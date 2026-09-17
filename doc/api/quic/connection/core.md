@@ -539,6 +539,15 @@ pub fun poll_handshake(core: *Core, secrets: *Secrets,
 now_ns: u64) transport_api.CoreResult;
 ```
 
+## fun storage_ready
+
+```mach
+pub fun storage_ready(core: *Core);
+```
+
+the connection's account woke: whatever the provider was refused for memory
+is tried again on the next call
+
 ## fun snapshot
 
 ```mach

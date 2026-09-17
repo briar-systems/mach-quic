@@ -59,7 +59,7 @@ pub val ERROR_EVENT:    u64 = handshake_api.PROVIDER_BINDING_EVENT
 ```mach
 pub fun initialize(adapter: *handshake_api.Adapter,
 adapter_config: handshake_api.Config,
-storage: handshake_api.Storage, value: *client.Client,
-configuration: Config) bool;
+storage: handshake_api.Storage, value: *client.Handshake,
+lease: buffer.Lease, configuration: Config) bool;
 ```
 

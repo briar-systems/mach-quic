@@ -283,13 +283,13 @@ fun sound(set: *RangeSet) bool {
 rec Fixture {
     memory:   limited.Limited;
     pool:     buffers.Pool;
-    class:    buffers.ClassConfig;
+    classes:  [supply.CLASS_COUNT]buffers.ClassConfig;
     provider: supply.Provider;
     account:  supply.Account;
 }
 
 fun test_pool(fixture: *Fixture) bool {
-    if (!supply.test_pool(?fixture.pool, ?fixture.class, ?fixture.memory, 8)) { ret false; }
+    if (!supply.test_pool(?fixture.pool, ?fixture.classes[0], ?fixture.memory, 8)) { ret false; }
     fixture.provider = buffers.source(?fixture.pool);
     ret supply.open(?fixture.provider, ?fixture.account, 1, 4, 4, 0);
 }

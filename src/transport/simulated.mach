@@ -39,6 +39,7 @@ rec Core {
     streams:           *stream_api.Manager;
     datagrams:         *datagram_api.Queue;
     outbound:          usize;
+    storage_wakes:     usize;
     next_owner:        u64;
     active_owners:     [64]bool;
     active_count:      usize;
@@ -247,6 +248,10 @@ fun core_begin_close(core: *Core, abortive: bool, application_error: u64,
     ret core_result(transport_api.STATUS_OK, transport_api.DRAINING);
 }
 
+fun core_storage_ready(core: *Core) {
+    core.storage_wakes = core.storage_wakes + 1;
+}
+
 fun core_ready(core: *Core) bool {
     ret core.closing && core.active_count == 0 && core.outbound == 0;
 }
@@ -301,11 +306,12 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     fixture.core               = candidate;
     if (!operation_ok(cancel.make_root(?fixture.scope, opt[time.Instant].none{}))) { ret false; }
     val protocol: transport_api.Protocol[Core] = transport_api.Protocol[Core]{
-        context:      ?fixture.core, context_range: core_range,
-        receive:      core_receive, timeout: core_timeout,
-        generate:     core_generate, complete_send: core_complete,
-        begin_close:  core_begin_close, close_ready: core_ready,
-        finish_close: core_finish, timer: core_timer
+        context:       ?fixture.core, context_range: core_range,
+        receive:       core_receive, timeout: core_timeout,
+        generate:      core_generate, complete_send: core_complete,
+        begin_close:   core_begin_close, close_ready: core_ready,
+        finish_close:  core_finish, timer: core_timer,
+        storage_ready: core_storage_ready
     };
     val config: transport_api.Config = transport_api.Config{source: source,
         max_udp_payload: 1500, max_close_reason: 64};

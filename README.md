@@ -508,13 +508,28 @@ returns. Their types enforce every required capacity. `Storage` and the pair
 remain at fixed addresses until release succeeds, a fresh `Storage` must have
 clear `source` and `leased` headers, and the pair must outlive every
 connection bound to it. The consumer also supplies identities, endpoints,
-limits, an initialized `mach-tls` engine, and a cancellation scope to
-`init_client` or `init_server`.
+limits, a `mach-tls` engine, and a cancellation scope to `init_client` or
+`init_server`.
+
+The engine's memory is the connection's own. Before `init_client` or
+`init_server`, the caller takes `assembly.tls_lease(c)` and initializes the
+engine with it. The lease points into `c`, so `c` must stay at its address
+from then until `release_closed` succeeds. Init opens the connection's one
+account on the source and refuses an engine holding any other lease with
+`STAGE_HANDSHAKE`. tls charges that account on a third lane,
+`supply.TLS`, bounded by `Config.tls_budget` (64 KiB by default). The source
+must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes.
+When tls finds no memory it consumes nothing. The connection stops polling
+it until the source wakes the account's handle, and the caller passes that
+wake to `transport.storage_ready`, which retries the same call. Once the
+handshake has handed everything over, the adapter moves tls's established
+core out of the engine and the engine holds no memory.
 
 Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 4,464 bytes and `Connection` at 9,168. On a
-live connection that has gone idle, an established connection with no streams
-holds no chunks at all. With the six H3 control streams open and drained, it
+records are `assembly.Storage` at 4,464 bytes and `Connection` at 9,776,
+which includes tls's established core. On a live connection that has gone
+idle, an established connection with no streams holds no chunks at all, and
+tls holds nothing on its lane. With the six H3 control streams open and drained, it
 holds one 4,096-byte chunk of stream records. While 64 KiB crosses one stream, the sending end
 holds at most five chunks and the receiving end five (four on the send lane,
 one on the receive lane), however large the transfer: a record block, the
@@ -522,7 +537,11 @@ owner table, one packet history and the attempt block while packets are in
 flight, plus one data chunk, since a stream buffers at most one chunk of
 unacknowledged bytes. A NEW_TOKEN holds a chunk only while it waits, on the server until it is
 acknowledged and on the client until the owner takes it. The scratch pair is paid once per
-pump, not per connection, and TLS engine state is not included.
+pump, not per connection. During the handshake the dialer holds at most five
+send-lane chunks and 8,704 tls bytes after any call, and the listener six and
+18,944. The caller's `mach-tls` handshake record, 6,416 bytes for a client and
+6,216 for a server, holds nothing once the handshake is finished and can be
+reused.
 
 The reason this belongs in the library rather than in each consumer is that the
 core requires twelve exact equalities between the encoded local transport
@@ -695,7 +714,8 @@ remain stale.
 
 Initialization has the same ownership boundary. A failed `init_client` or
 `init_server` retires any route that was staged internally, releases core leases,
-detaches the handshake adapter without destroying the caller's TLS provider, and
+detaches the handshake adapter, destroys the caller's TLS engine only if it was
+started (its memory is on the account being closed), and
 closes every manager initialized by that attempt. If rollback retains ownership,
 `InitResult.cleanup_retained` is true and both backing leases remain held.
 `release_closed` retries that unpublished initialization cleanup without requiring

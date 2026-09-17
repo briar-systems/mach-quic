@@ -211,6 +211,10 @@ fun on_finish_close(binding: *Binding) bool {
     ret true;
 }
 
+fun on_storage_ready(binding: *Binding) {
+    if (bound(binding)) { core_api.storage_ready(binding.core); }
+}
+
 fun on_timer(binding: *Binding) transport_api.CoreTimer {
     var idle: transport_api.CoreTimer;
     if (!bound(binding)) { ret idle; }
@@ -426,5 +430,6 @@ pub fun protocol(binding: *Binding) transport_api.Protocol[Binding] {
     value.close_ready   = on_close_ready;
     value.finish_close  = on_finish_close;
     value.timer         = on_timer;
+    value.storage_ready = on_storage_ready;
     ret value;
 }
