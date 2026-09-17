@@ -63,8 +63,21 @@ val MAX_STREAM_COUNT: u64 = 1 << 60;
 val RANGE_WINDOW_DIVISOR: u64   = 1024;
 val RANGE_FLOOR:          usize = 32;
 
-val CHUNK_SHIFT:  u64   = 12;
-val CHUNK_INLINE: usize = 2;
+val CHUNK_SHIFT: u64 = 12;
+
+# no stream, for the intrusive lists below
+val NO_STREAM: usize = 0xffffffffffffffff;
+
+# news an owner can act on for one stream
+pub val READY_READABLE: u8 = 1;
+pub val READY_WRITABLE: u8 = 2;
+pub val READY_RESET:    u8 = 4;
+
+# why a stream's last write stopped short
+val BLOCKED_STREAM:     u8    = 1;
+val BLOCKED_CONNECTION: u8    = 2;
+val BLOCKED_STORAGE:    u8    = 4;
+val CHUNK_INLINE:       usize = 2;
 
 pub rec Config {
     source:                            u64;
@@ -129,6 +142,23 @@ pub rec Stream {
     # the intervals present above receive_read
     send:    Buffer;
     receive: Buffer;
+    # the ready queue: news not yet handed to the owner, oldest stream first
+    ready_bits: u8;
+    ready_prev: usize;
+    ready_next: usize;
+    # the causes of the last short write, and the list of streams waiting on
+    # connection credit or storage, which a single event can release together
+    blocked:      u8;
+    blocked_prev: usize;
+    blocked_next: usize;
+}
+
+pub rec Ready {
+    status:   u8;
+    handle:   Handle;
+    readable: bool;
+    writable: bool;
+    reset:    bool;
 }
 
 # one chunk of a stream's bytes, numbered by offset >> 12
@@ -204,6 +234,10 @@ pub rec Manager {
     # bumped whenever send work may have appeared outside a core call, so an
     # idle core notices without scanning
     send_revision: u64;
+    ready_head:    usize;
+    ready_tail:    usize;
+    blocked_head:  usize;
+    blocked_tail:  usize;
     # acknowledgements that could not be recorded, so their bytes go again
     ack_record_refusals: u64;
     # received frames refused for storage before their packet was acknowledged
@@ -402,6 +436,10 @@ pub fun initialize(manager: *Manager, config: Config, storage: Storage) bool {
     candidate.peer_bidi_advertised = config.peer_bidirectional_limit;
     candidate.peer_uni_advertised  = config.peer_unidirectional_limit;
     candidate.accept_sequence      = 1;
+    candidate.ready_head           = NO_STREAM;
+    candidate.ready_tail           = NO_STREAM;
+    candidate.blocked_head         = NO_STREAM;
+    candidate.blocked_tail         = NO_STREAM;
     candidate.valid                = true;
     manager[0]                     = candidate;
     ret true;
@@ -756,6 +794,10 @@ fun initialize_stream(manager: *Manager, index: usize, id: u64, local: bool, acc
     stream.receive_advertised      = stream.receive_limit;
     stream.accept_sequence         = manager.accept_sequence;
     manager.accept_sequence        = manager.accept_sequence + 1;
+    stream.ready_prev              = NO_STREAM;
+    stream.ready_next              = NO_STREAM;
+    stream.blocked_prev            = NO_STREAM;
+    stream.blocked_next            = NO_STREAM;
     stream.send.ranges             = ranges.make(ranges.SPILL_CAPACITY);
     stream.receive.ranges          = ranges.make(receive_cap(stream.receive_limit));
     manager.storage.streams[index] = stream;
@@ -767,6 +809,127 @@ fun create_error(code: u8) CreateResult {
     result.status = STATUS_ERROR;
     result.error  = code;
     ret result;
+}
+
+fun at_stream(manager: *Manager, index: usize) *Stream {
+    ret ?manager.storage.streams[index];
+}
+
+# queues news for a stream the owner already knows. a stream still waiting for
+# accept is skipped, since accept names it; a queued stream just gains bits
+fun push_ready(manager: *Manager, index: usize, bits: u8) {
+    val stream: *Stream = at_stream(manager, index);
+    if (!stream.active || !stream.accepted) { ret; }
+    if (stream.ready_bits != 0) {
+        stream.ready_bits = stream.ready_bits | bits;
+        ret;
+    }
+    stream.ready_bits = bits;
+    stream.ready_prev = manager.ready_tail;
+    stream.ready_next = NO_STREAM;
+    if (manager.ready_tail == NO_STREAM) { manager.ready_head = index; }
+    or                                   { at_stream(manager, manager.ready_tail).ready_next = index; }
+    manager.ready_tail = index;
+}
+
+fun unlink_ready(manager: *Manager, index: usize) {
+    val stream: *Stream = at_stream(manager, index);
+    if (stream.ready_bits == 0)         { ret; }
+    if (stream.ready_prev == NO_STREAM) { manager.ready_head = stream.ready_next; }
+    or                                  { at_stream(manager, stream.ready_prev).ready_next = stream.ready_next; }
+    if (stream.ready_next == NO_STREAM) { manager.ready_tail = stream.ready_prev; }
+    or                                  { at_stream(manager, stream.ready_next).ready_prev = stream.ready_prev; }
+    stream.ready_prev = NO_STREAM;
+    stream.ready_next = NO_STREAM;
+    stream.ready_bits = 0;
+}
+
+fun listed_blocked(stream: *Stream) bool {
+    ret (stream.blocked & (BLOCKED_CONNECTION | BLOCKED_STORAGE)) != 0;
+}
+
+# records why a write stopped short, listing the stream when a shared event
+# can end it
+fun note_blocked(manager: *Manager, index: usize, causes: u8) {
+    val stream: *Stream = at_stream(manager, index);
+    val listed: bool    = listed_blocked(stream);
+    stream.blocked = stream.blocked | causes;
+    if (listed || !listed_blocked(stream)) { ret; }
+    stream.blocked_prev = manager.blocked_tail;
+    stream.blocked_next = NO_STREAM;
+    if (manager.blocked_tail == NO_STREAM) { manager.blocked_head = index; }
+    or                                     { at_stream(manager, manager.blocked_tail).blocked_next = index; }
+    manager.blocked_tail = index;
+}
+
+# clears causes, and reports the stream writable once none of the given ones
+# is left
+fun clear_blocked(manager: *Manager, index: usize, causes: u8) {
+    val stream: *Stream = at_stream(manager, index);
+    if ((stream.blocked & causes) == 0) { ret; }
+    val listed: bool = listed_blocked(stream);
+    stream.blocked = stream.blocked & ~causes;
+    if (listed && !listed_blocked(stream)) {
+        if (stream.blocked_prev == NO_STREAM) { manager.blocked_head = stream.blocked_next; }
+        or                                    { at_stream(manager, stream.blocked_prev).blocked_next = stream.blocked_next; }
+        if (stream.blocked_next == NO_STREAM) { manager.blocked_tail = stream.blocked_prev; }
+        or                                    { at_stream(manager, stream.blocked_next).blocked_prev = stream.blocked_prev; }
+        stream.blocked_prev = NO_STREAM;
+        stream.blocked_next = NO_STREAM;
+    }
+    push_ready(manager, index, READY_WRITABLE);
+}
+
+# reports every listed stream blocked on `cause`. the walk is over blocked
+# streams only, once per event that can release them
+fun release_blocked(manager: *Manager, cause: u8) {
+    var index: usize = manager.blocked_head;
+    for (index != NO_STREAM) {
+        val next: usize = at_stream(manager, index).blocked_next;
+        clear_blocked(manager, index, cause);
+        index = next;
+    }
+}
+
+fun unlink_everywhere(manager: *Manager, index: usize) {
+    unlink_ready(manager, index);
+    val stream: *Stream = at_stream(manager, index);
+    if (listed_blocked(stream)) {
+        clear_blocked(manager, index, BLOCKED_CONNECTION | BLOCKED_STORAGE);
+        unlink_ready(manager, index);
+    }
+    stream.blocked = 0;
+}
+
+fun readable_news(stream: *Stream) bool {
+    ret ranges.covered_from(?stream.receive.ranges, stream.receive_read) > stream.receive_read ||
+        (stream.final_known && stream.receive_read == stream.final_size && !stream.receive_closed);
+}
+
+# hands the owner the oldest stream with news, O(1)
+pub fun next_ready(manager: *Manager) Ready {
+    var result: Ready;
+    if (!manager_record_valid(manager) || !manager.valid ||
+        manager.ready_head == NO_STREAM) {
+        result.status = STATUS_EMPTY;
+        ret result;
+    }
+    val index:  usize   = manager.ready_head;
+    val stream: *Stream = at_stream(manager, index);
+    val bits:   u8      = stream.ready_bits;
+    unlink_ready(manager, index);
+    result.status   = STATUS_OK;
+    result.handle   = handle(manager, index);
+    result.readable = (bits & READY_READABLE) != 0;
+    result.writable = (bits & READY_WRITABLE) != 0;
+    result.reset    = (bits & READY_RESET) != 0;
+    ret result;
+}
+
+# the pool gave chunks back, so every stream a refused chunk stopped may write
+pub fun storage_released(manager: *Manager) {
+    if (!manager_record_valid(manager) || !manager.valid) { ret; }
+    release_blocked(manager, BLOCKED_STORAGE);
 }
 
 pub fun open(manager: *Manager, direction: u8) CreateResult {
@@ -871,6 +1034,12 @@ pub fun accept(manager: *Manager) CreateResult {
         ret empty;
     }
     manager.storage.streams[chosen].accepted = true;
+    # news that arrived before accept was skipped, so it is queued now
+    val accepted: *Stream = at_stream(manager, chosen);
+    var news:     u8      = 0;
+    if (readable_news(accepted))                           { news = news | READY_READABLE; }
+    if (accepted.reset_received || accepted.stop_received) { news = news | READY_RESET; }
+    if (news != 0)                                         { push_ready(manager, chosen, news); }
     var result: CreateResult;
     result.status = STATUS_OK;
     result.handle = handle(manager, chosen);
@@ -891,6 +1060,7 @@ pub fun update_max_data(manager: *Manager, maximum: u64) OperationResult {
     if (maximum > manager.send_max_data) {
         manager.send_max_data = maximum;
         manager.send_revision = manager.send_revision + 1;
+        release_blocked(manager, BLOCKED_CONNECTION);
     }
     var result: OperationResult;
     result.status = STATUS_OK;
@@ -939,6 +1109,7 @@ pub fun update_max_stream_data(manager: *Manager, value: Handle, maximum: u64) O
     if (maximum > stream.send_limit) {
         stream.send_limit     = maximum;
         manager.send_revision = manager.send_revision + 1;
+        clear_blocked(manager, value.index, BLOCKED_STREAM);
     }
     var result: OperationResult;
     result.status = STATUS_OK;
@@ -972,8 +1143,11 @@ pub fun receive_max_stream_data(manager: *Manager, id: u64, maximum: u64) Receiv
         new_streams = manager.active_streams - before;
     }
     val stream: *Stream = ?manager.storage.streams[index];
-    if (!stream.can_send)            { ret receive_error(ERROR_DIRECTION); }
-    if (maximum > stream.send_limit) { stream.send_limit = maximum; }
+    if (!stream.can_send) { ret receive_error(ERROR_DIRECTION); }
+    if (maximum > stream.send_limit) {
+        stream.send_limit = maximum;
+        clear_blocked(manager, index, BLOCKED_STREAM);
+    }
     var result: ReceiveResult;
     result.ok          = true;
     result.handle      = handle(manager, index);
@@ -1054,6 +1228,13 @@ pub fun write(manager: *Manager, value: Handle, data: *u8, length: usize) WriteR
     }
     count = written;
     if (count > 0) { manager.send_revision = manager.send_revision + 1; }
+    if (count < length) {
+        var causes: u8 = 0;
+        if (stream_allowance <= count::u64)            { causes = causes | BLOCKED_STREAM; }
+        if (connection_allowance <= count::u64)        { causes = causes | BLOCKED_CONNECTION; }
+        if (chunk_short || storage_allowance <= count) { causes = causes | BLOCKED_STORAGE; }
+        note_blocked(manager, value.index, causes);
+    }
     stream.send_write         = stream.send_write + count::u64;
     manager.send_committed    = manager.send_committed + count::u64;
     result.count              = count;
@@ -1500,6 +1681,9 @@ fun reclaim_send(manager: *Manager, index: usize) {
         ranges.clear(?stream.send.ranges, ?from);
     }
     chunk_release_below(manager, ?stream.send.chunks, pool.SEND, stream.send_base);
+    if (stream.send_write - stream.send_base < manager.storage.send_buffer_limit::u64) {
+        clear_blocked(manager, index, BLOCKED_STORAGE);
+    }
     if (stream.fin_acked && stream.send_base == stream.send_write) { stream.send_closed = true; }
     if (stream.reset_acked && stream.active_attempts == 0)         { stream.send_closed = true; }
 }
@@ -1833,6 +2017,9 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
         stream.final_size  = ending;
         if (stream.receive_cancelled || stream.receive_read == ending) { stream.receive_closed = true; }
     }
+    if (!stream.receive_cancelled && readable_news(stream)) {
+        push_ready(manager, index, READY_READABLE);
+    }
     var result: ReceiveResult;
     result.ok               = true;
     result.handle           = handle(manager, index);
@@ -1892,8 +2079,9 @@ pub fun receive_reset(manager: *Manager, id: u64, error_code: u64, final_size: u
     stream.final_size      = final_size;
     stream.receive_highest = final_size;
     if (!stream.reset_received) { stream.receive_error = error_code; }
-    stream.reset_received     = true;
-    stream.stop_pending       = false;
+    stream.reset_received = true;
+    stream.stop_pending   = false;
+    push_ready(manager, index, READY_RESET);
     manager.receive_committed = manager.receive_committed + delta;
     if (stream.receive_cancelled) {
         grant_connection(manager, delta);
@@ -1953,6 +2141,7 @@ pub fun receive_stop(manager: *Manager, id: u64, error_code: u64) ReceiveResult 
     if (!stream.stop_received && !stream.send_closed) {
         stream.stop_received = true;
         if (!stream.send_cancelled) { cancel_send_inner(stream, error_code); }
+        push_ready(manager, index, READY_RESET);
     }
     var result: ReceiveResult;
     result.ok     = true;
@@ -2072,6 +2261,7 @@ pub fun release(manager: *Manager, value: Handle) OperationResult {
     val peer: bool = !stream.local;
     val uni:  bool = stream.unidirectional;
     reconcile_uncredited(manager, stream);
+    unlink_everywhere(manager, value.index);
     buffer_release(manager, ?stream.send, pool.SEND);
     buffer_release(manager, ?stream.receive, pool.RECEIVE);
     stream.active     = false;
@@ -2134,6 +2324,10 @@ pub fun finish_close(manager: *Manager) OperationResult {
         i = i + 1;
     }
     manager.active_streams = 0;
+    manager.ready_head     = NO_STREAM;
+    manager.ready_tail     = NO_STREAM;
+    manager.blocked_head   = NO_STREAM;
+    manager.blocked_tail   = NO_STREAM;
     manager.core_lease     = 0;
     manager.valid          = false;
     var result: OperationResult;

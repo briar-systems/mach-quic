@@ -192,6 +192,18 @@ pub rec OperationResult {
 
 pub rec Stream { source: u64; index: usize; generation: u64; id: u64; }
 
+# a stream with news for its owner. readable: bytes or a fin can be read.
+# writable: a short write may now make progress. reset: the peer reset the
+# stream or asked it to stop sending
+pub rec ReadyStream {
+    status:   Status;
+    error:    Error;
+    stream:   Stream;
+    readable: bool;
+    writable: bool;
+    reset:    bool;
+}
+
 pub rec OpenResult {
     status:               Status;
     error:                Error;
@@ -1404,6 +1416,41 @@ pub fun open_stream[T](driver: *Driver[T], direction: Direction) OpenResult {
     result.storage_blocked      = opened.storage_blocked;
     mutex.unlock(?driver.lock);
     ret result;
+}
+
+# the oldest stream with news since it was last reported, O(1). reports may
+# repeat or be spurious, never lost. a peer stream is reported only once
+# accept_stream has returned it
+pub fun ready_stream[T](driver: *Driver[T]) ReadyStream {
+    var result: ReadyStream;
+    if (callback_reentry[T](driver) || driver == nil || !driver.initialized) {
+        result.status = STATUS_ERROR;
+        result.error  = ERROR_STATE;
+        ret result;
+    }
+    mutex.lock(?driver.lock);
+    val ready: stream_api.Ready = stream_api.next_ready(driver.streams);
+    mutex.unlock(?driver.lock);
+    if (ready.status != stream_api.STATUS_OK) {
+        result.status = STATUS_EMPTY;
+        ret result;
+    }
+    result.status   = STATUS_OK;
+    result.stream   = public_stream(ready.handle);
+    result.readable = ready.readable;
+    result.writable = ready.writable;
+    result.reset    = ready.reset;
+    ret result;
+}
+
+# the connection's chunk pool woke this connection: writes it refused for
+# storage are reported writable again
+pub fun storage_ready[T](driver: *Driver[T]) {
+    if (callback_reentry[T](driver) || driver == nil || !driver.initialized) { ret; }
+    mutex.lock(?driver.lock);
+    stream_api.storage_released(driver.streams);
+    driver.streams.send_revision = driver.streams.send_revision + 1;
+    mutex.unlock(?driver.lock);
 }
 
 pub fun accept_stream[T](driver: *Driver[T]) OpenResult {

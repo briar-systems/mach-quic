@@ -607,3 +607,89 @@ test "quic.stream.simulated: a send reserved across a ring lap never claims the 
         manager.active_attempts != 0) { ret 10; }
     ret 0;
 }
+
+fun ready_manager(records: *stream.Stream, attempts: *stream.Attempt, limit: usize) stream.Manager {
+    var limits: stream.Config = config(31, 4, 8);
+    limits.receive_max_data                  = 32;
+    limits.receive_local_bidirectional_limit = 8;
+    limits.receive_peer_bidirectional_limit  = 8;
+    limits.receive_unidirectional_limit      = 8;
+    limits.send_local_bidirectional_limit    = 2;
+    ret initialize_manager(limits, stream.Storage{
+        streams:  records, stream_capacity: 4,
+        attempts: attempts, attempt_capacity: 8,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: limit
+    });
+}
+
+test "quic.stream.simulated: the ready queue reports each kind of news once, oldest first" {
+    var records:  [4]stream.Stream;
+    var attempts: [8]stream.Attempt;
+    var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 8);
+    var bytes:    [8]u8          = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    if (stream.next_ready(?manager).status != stream.STATUS_EMPTY) { ret 1; }
+    # data for a peer stream is not news until accept names the stream
+    if (!stream.receive_stream(?manager, 1, 0, ?bytes[0], 2, false).ok ||
+        stream.next_ready(?manager).status != stream.STATUS_EMPTY) { ret 2; }
+    val peer:  stream.CreateResult = stream.accept(?manager);
+    val first: stream.Ready        = stream.next_ready(?manager);
+    if (peer.status != stream.STATUS_OK || first.status != stream.STATUS_OK ||
+        first.handle.id != 1 || !first.readable || first.writable || first.reset ||
+        stream.next_ready(?manager).status != stream.STATUS_EMPTY) { ret 3; }
+    # a local stream blocked on its own credit is reported when credit arrives
+    val local: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    if (stream.write(?manager, local.handle, ?bytes[0], 4).count != 2 ||
+        stream.next_ready(?manager).status != stream.STATUS_EMPTY) { ret 4; }
+    # news for two streams comes out in order, and a second report for a queued
+    # stream only adds to it
+    if (!stream.receive_stream(?manager, 1, 2, ?bytes[2], 2, false).ok ||
+        !stream.receive_max_stream_data(?manager, local.handle.id, 8).ok ||
+        !stream.receive_stream(?manager, 1, 4, nil, 0, true).ok) { ret 5; }
+    val second: stream.Ready = stream.next_ready(?manager);
+    val third:  stream.Ready = stream.next_ready(?manager);
+    if (second.handle.id != 1 || !second.readable || third.handle.id != local.handle.id ||
+        !third.writable || third.readable ||
+        stream.next_ready(?manager).status != stream.STATUS_EMPTY) { ret 6; }
+    # a reset is news too
+    if (!stream.receive_reset(?manager, 5, 9, 0).ok) { ret 7; }
+    val reset_peer: stream.CreateResult = stream.accept(?manager);
+    val reset:      stream.Ready        = stream.next_ready(?manager);
+    if (reset_peer.handle.id != 5 || !reset.reset || reset.handle.id != 5) { ret 8; }
+    ret 0;
+}
+
+test "quic.stream.simulated: a connection credit or buffer release reports every blocked stream" {
+    var records:  [4]stream.Stream;
+    var attempts: [8]stream.Attempt;
+    var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 4);
+    manager.send_max_data                         = 4;
+    manager.config.send_local_bidirectional_limit = 8;
+    var bytes: [8]u8               = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    val a:     stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    val b:     stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    records[a.handle.index].send_limit = 8;
+    records[b.handle.index].send_limit = 8;
+    # a takes the whole connection credit, and b gets nothing
+    val wrote_a: stream.WriteResult = stream.write(?manager, a.handle, ?bytes[0], 8);
+    val wrote_b: stream.WriteResult = stream.write(?manager, b.handle, ?bytes[0], 8);
+    if (wrote_a.count != 4 || !wrote_a.connection_blocked || !wrote_a.storage_blocked ||
+        wrote_b.count != 0 || !wrote_b.connection_blocked) { ret 1; }
+    # one MAX_DATA reports both, and a stream still short of buffer stays listed
+    if (stream.update_max_data(?manager, 32).status != stream.STATUS_OK) { ret 2; }
+    val first:  stream.Ready = stream.next_ready(?manager);
+    val second: stream.Ready = stream.next_ready(?manager);
+    if (first.handle.id != a.handle.id || !first.writable ||
+        second.handle.id != b.handle.id || !second.writable ||
+        stream.next_ready(?manager).status != stream.STATUS_EMPTY) { ret 3; }
+    # an acknowledgement that frees a's buffer reports a again
+    val sent: stream.Prepared = stream.prepare(?manager, a.handle, 8, false);
+    if (!sent.ok || stream.publish(?manager, sent).status != stream.STATUS_OK ||
+        stream.on_terminal(?manager, sent.token, stream.TERMINAL_ACKED).status !=
+        stream.STATUS_OK) { ret 4; }
+    val freed: stream.Ready = stream.next_ready(?manager);
+    if (freed.status != stream.STATUS_OK || freed.handle.id != a.handle.id ||
+        !freed.writable) { ret 5; }
+    # a pool wake reports streams a refused chunk stopped
+    stream.storage_released(?manager);
+    ret 0;
+}
