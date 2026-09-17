@@ -487,7 +487,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val core_scope: *cancel.Scope = embedded_scope(
         ?dialer_storage.receive_header[0], assembly.MAX_UDP_PAYLOAD);
     val handshake_scope: *cancel.Scope = embedded_scope(
-        ?dialer_storage.crypto_receive[0], assembly.CRYPTO_LENGTH);
+        (?dialer_storage.crypto_attempts[0])::*u8, 8 * $size_of(handshake.Attempt));
     val cid_scope: *cancel.Scope = embedded_scope(
         (?dialer_storage.local_cids[0])::*u8,
         assembly.CONNECTION_ID_CAPACITY * $size_of(cid_api.Entry));
@@ -1963,6 +1963,23 @@ fun lossy_transfer(loss: u64, seed: u64) i32 {
     if (finished != 10) { ret 24; }
     if (lossy.dropped == 0 || listener.streams.receive_storage_refusals != 0 ||
         listener.core.refused_packets != 0) { ret 25; }
+    # once the last acknowledgements land, neither side holds a chunk: crypto
+    # levels are discarded or drained, and every stream byte is delivered
+    lossy.loss = 0;
+    rounds     = 0;
+    for (rounds < 64) {
+        if (!lossy_carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+            dialer_endpoint(), clock, ?lossy) ||
+            !lossy_carry(?listener, ?dialer, ?listener_scope, dialer_endpoint(),
+            listener_endpoint(), clock, ?lossy)) { ret 26; }
+        clock = next_deadline(clock);
+        if (!fire_due(?dialer, clock) || !fire_due(?listener, clock)) { ret 27; }
+        rounds = rounds + 1;
+    }
+    if (dialer.account.used[0] != 0 || dialer.account.used[1] != 0 ||
+        listener.account.used[0] != 0 || listener.account.used[1] != 0) {
+        ret 28;
+    }
     ret 0;
 }
 

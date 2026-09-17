@@ -827,7 +827,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     result: *InitResult) bool {
     if (handshake == nil || cids == nil || paths == nil || streams == nil ||
         datagrams == nil) { ret refuse(result, INIT_ARGUMENT); }
-    var ranges: [57]ownership.Range;
+    var ranges: [51]ownership.Range;
     ranges[0] = core_range(core);
     ranges[1] = secrets_range(secrets);
     if (!ranges[0].valid || !ranges[1].valid) {
@@ -902,64 +902,48 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         ret refuse_overlap(result, INIT_COMPONENT_RANGES, anchored);
     }
 
-    ranges[28] = ownership.bytes(handshake.storage.receive_data,
-        handshake.storage.receive_length, ownership.ZERO_FORBIDDEN);
-    ranges[29] = ownership.array(handshake.storage.receive_present::*u8,
-        handshake.storage.receive_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[30] = ownership.bytes(handshake.storage.send_data,
-        handshake.storage.send_length, ownership.ZERO_FORBIDDEN);
-    ranges[31] = ownership.array(handshake.storage.send_pending::*u8,
-        handshake.storage.send_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[32] = ownership.array(handshake.storage.send_acked::*u8,
-        handshake.storage.send_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[33] = ownership.array(handshake.storage.send_inflight::*u8,
-        handshake.storage.send_length, $size_of(u16),
-        ownership.ZERO_FORBIDDEN);
-    ranges[34] = ownership.array(handshake.storage.attempts::*u8,
+    ranges[28] = ownership.array(handshake.storage.attempts::*u8,
         handshake.storage.attempt_capacity, $size_of(handshake_api.Attempt),
         ownership.ZERO_FORBIDDEN);
-    ranges[35] = ownership.array(cids.storage.local::*u8,
+    ranges[29] = ownership.array(cids.storage.local::*u8,
         cids.storage.local_capacity, $size_of(cid_api.Entry),
         ownership.ZERO_FORBIDDEN);
-    ranges[36] = ownership.array(cids.storage.peer::*u8,
+    ranges[30] = ownership.array(cids.storage.peer::*u8,
         cids.storage.peer_capacity, $size_of(cid_api.Entry),
         ownership.ZERO_FORBIDDEN);
-    ranges[37] = ownership.array(paths.storage.paths::*u8,
+    ranges[31] = ownership.array(paths.storage.paths::*u8,
         paths.storage.path_capacity, $size_of(path_api.Path),
         ownership.ZERO_FORBIDDEN);
-    ranges[38] = ownership.array(paths.storage.challenges::*u8,
+    ranges[32] = ownership.array(paths.storage.challenges::*u8,
         paths.storage.challenge_capacity, $size_of(path_api.Challenge),
         ownership.ZERO_FORBIDDEN);
-    ranges[39] = ownership.array(paths.storage.responses::*u8,
+    ranges[33] = ownership.array(paths.storage.responses::*u8,
         paths.storage.response_capacity, $size_of(path_api.Response),
         ownership.ZERO_FORBIDDEN);
-    ranges[40] = ownership.array(paths.storage.sends::*u8,
+    ranges[34] = ownership.array(paths.storage.sends::*u8,
         paths.storage.send_capacity, $size_of(path_api.SendReservation),
         ownership.ZERO_FORBIDDEN);
-    ranges[41] = ownership.array(streams.storage.streams::*u8,
+    ranges[35] = ownership.array(streams.storage.streams::*u8,
         streams.storage.stream_capacity, $size_of(stream_api.Stream),
         ownership.ZERO_FORBIDDEN);
-    ranges[42] = ownership.array(streams.storage.attempts::*u8,
+    ranges[36] = ownership.array(streams.storage.attempts::*u8,
         streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
         ownership.ZERO_FORBIDDEN);
     var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
-    ranges[43] = ownership.array(datagrams.storage.send_entries::*u8,
+    ranges[37] = ownership.array(datagrams.storage.send_entries::*u8,
         datagrams.storage.send_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[44] = ownership.bytes(datagrams.storage.send_bytes,
+    ranges[38] = ownership.bytes(datagrams.storage.send_bytes,
         datagrams.storage.send_bytes_length, datagram_zero);
-    ranges[45] = ownership.array(datagrams.storage.receive_entries::*u8,
+    ranges[39] = ownership.array(datagrams.storage.receive_entries::*u8,
         datagrams.storage.receive_capacity, $size_of(datagram_api.Entry), datagram_zero);
-    ranges[46] = ownership.bytes(datagrams.storage.receive_bytes,
+    ranges[40] = ownership.bytes(datagrams.storage.receive_bytes,
         datagrams.storage.receive_bytes_length, datagram_zero);
-    if (!handshake_api.provider_ranges(handshake, ?ranges[47],
+    if (!handshake_api.provider_ranges(handshake, ?ranges[41],
         handshake_api.PROVIDER_RANGE_CAPACITY)) {
         ret refuse(result, INIT_PROVIDER_RANGES);
     }
-    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], 57);
+    val whole: ownership.Disjointness = ownership.disjointness(?ranges[0], 51);
     if (whole.kind != ownership.OVERLAP_NONE) {
         ret refuse_overlap(result, INIT_COMPONENT_RANGES, whole);
     }
@@ -985,7 +969,7 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     var i: usize = 0;
     for (i < 4) {
         val lent: ownership.Disjointness = ownership.disjoint_from(borrowed[i], i,
-            ?ranges[0], 23, 57);
+            ?ranges[0], 23, 51);
         if (lent.kind != ownership.OVERLAP_NONE) {
             ret refuse_overlap(result, INIT_COMPONENT_BORROWED, lent);
         }
@@ -1437,7 +1421,9 @@ fun discard_initial_keys(core: *Core, secrets: *Secrets) bool {
     if (!initial.ok || !apply_recovery_events(core, secrets,
         initial.event_count, core.last_now_ns, false, false, before)) { ret false; }
     protection.destroy_initial(?secrets.initial_keys);
-    if (!ack_api.discard_space(?core.acknowledgements, packet.SPACE_INITIAL)) {
+    if (!ack_api.discard_space(?core.acknowledgements, packet.SPACE_INITIAL) ||
+        handshake_api.discard_scoped(secrets.handshake, core.config.source,
+        handshake_api.INITIAL).status != handshake_api.STATUS_OK) {
         ret false;
     }
     core.initial_keys_discarded = true;
@@ -1467,6 +1453,8 @@ fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
     protection.destroy(?secrets.handshake_send);
     protection.destroy(?secrets.handshake_receive);
     ack_api.discard_space(?core.acknowledgements, packet.SPACE_HANDSHAKE);
+    if (handshake_api.discard_scoped(secrets.handshake, core.config.source,
+        handshake_api.HANDSHAKE).status != handshake_api.STATUS_OK) { ret false; }
     core.handshake_confirmed = true;
     core.state               = transport_api.ACTIVE;
     if (core.role == transport_api.SERVER) {
@@ -1513,6 +1501,10 @@ fun pump_handshake(core: *Core, secrets: *Secrets) u64 {
         }
         val completed: handshake_api.Result = handshake_api.complete_event_scoped(
             secrets.handshake, core.config.source, event.token, accepted);
+        # crypto output with no storage yet is offered again once the pool
+        # wakes the connection
+        if (completed.status == handshake_api.STATUS_BLOCKED &&
+            completed.error == handshake_api.ERROR_STORAGE) { ret NO_ERROR; }
         if (completed.status != handshake_api.STATUS_OK) {
             if (!accepted && completed.error == handshake_api.ERROR_REJECTED) {
                 ret rejected_error;
@@ -2040,6 +2032,10 @@ fun process_frame(core: *Core, secrets: *Secrets,
         val received: handshake_api.Result = handshake_api.receive_scoped(
             secrets.handshake, core.config.source, level, value.offset, value.data.data,
             value.data.len, now_ns);
+        if (received.error == handshake_api.ERROR_STORAGE) {
+            core.packet_refused = true;
+            ret true;
+        }
         if (received.status == handshake_api.STATUS_ERROR) {
             core.close_error = handshake_failure(core, received);
             ret false;
