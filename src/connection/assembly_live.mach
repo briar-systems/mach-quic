@@ -10,6 +10,7 @@ use quic.connection.core;
 use test_credentials: quic.connection.credentials_simulated;
 use quic.connection.handshake;
 use listener_api: quic.connection.listener;
+use quic.connection.scratch;
 use quic.connection.token;
 use quic.crypto.protection;
 use packet_api: quic.packet.packet;
@@ -53,19 +54,20 @@ fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
-var front_memory:            allocator_testing.Testing;
-var dialer:                  assembly.Connection;
-var listener:                assembly.Connection;
-var dialer_storage:          assembly.Storage;
-var listener_storage:        assembly.Storage;
-var copied_storage:          assembly.Storage;
-var dialer_secret_storage:   assembly.SecretStorage;
-var listener_secret_storage: assembly.SecretStorage;
-var dialer_tls:              client.Client;
-var listener_tls:            server.Server;
-var dialer_tls_two:          client.Client;
-var listener_tls_two:        server.Server;
-var rollback_tls:            client.Client;
+var front_memory:     allocator_testing.Testing;
+var dialer:           assembly.Connection;
+var listener:         assembly.Connection;
+var dialer_storage:   assembly.Storage;
+var listener_storage: assembly.Storage;
+var copied_storage:   assembly.Storage;
+# both ends run on this test's one pump, so they share its scratch pair
+var pump_scratch:     assembly.Scratch;
+var pump_secret:      assembly.SecretScratch;
+var dialer_tls:       client.Client;
+var listener_tls:     server.Server;
+var dialer_tls_two:   client.Client;
+var listener_tls_two: server.Server;
+var rollback_tls:     client.Client;
 
 var dialer_input:             [8192]u8;
 var dialer_output:            [8192]u8;
@@ -84,28 +86,27 @@ var wire:                [1500]u8;
 var dialer_scope:        cancel.Scope;
 var listener_scope:      cancel.Scope;
 
-var secret_storage_delegate:         secret.ArrayAllocator[assembly.SecretStorage];
+var secret_storage_delegate:         secret.ArrayAllocator[assembly.SecretScratch];
 var secret_storage_deallocations:    usize;
 var secret_storage_zeroed_releases:  usize;
 var secret_storage_nonzero_releases: usize;
 
 fun secret_storage_allocate(context: ptr, secret_context: *^u8, count: usize,
     bytes: usize, alignment: usize,
-    output: **assembly.SecretStorage) i64 {
+    output: **assembly.SecretScratch) i64 {
     ret secret_storage_delegate.allocate_fn(secret_storage_delegate.context,
         secret_storage_delegate.secret_context, count, bytes, alignment,
         output);
 }
 
 fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
-    data: *assembly.SecretStorage, count: usize,
+    data: *assembly.SecretScratch, count: usize,
     bytes: usize, alignment: usize) i64 {
     secret_storage_deallocations = secret_storage_deallocations + 1;
     var zeroed: bool  = true;
     var i:      usize = 0;
     for (i < count) {
-        if (data[i].source != 0 || data[i].generation != 0 || data[i].leased ||
-            data[i].receive_plaintext[0]:>u8 != 0 ||
+        if (data[i].holder != 0 || data[i].receive_plaintext[0]:>u8 != 0 ||
             data[i].receive_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:>u8 != 0 ||
             data[i].send_plaintext[0]:>u8 != 0 ||
             data[i].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1]:>u8 != 0) {
@@ -492,7 +493,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         ret 7;
     }
     val core_scope: *cancel.Scope = embedded_scope(
-        ?dialer_storage.receive_header[0], assembly.MAX_UDP_PAYLOAD);
+        ?pump_scratch.receive_header[0], assembly.MAX_UDP_PAYLOAD);
     val handshake_scope: *cancel.Scope = embedded_scope(
         (?dialer_storage.crypto_attempts[0])::*u8, 8 * $size_of(handshake.Attempt));
     val cid_scope: *cancel.Scope = embedded_scope(
@@ -501,16 +502,16 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     val path_scope: *cancel.Scope = embedded_scope(
         (?dialer_storage.path_values[0])::*u8, 2 * $size_of(path_api.Path));
     val core_overlap: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
+        ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, core_scope, instants.instant(1000));
     val handshake_overlap: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
+        ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, handshake_scope, instants.instant(1000));
     val cid_overlap: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
+        ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, cid_scope, instants.instant(1000));
     val path_overlap: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
+        ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, path_scope, instants.instant(1000));
     if (core_scope == nil || handshake_scope == nil || cid_scope == nil ||
         path_scope == nil || core_overlap.stage != assembly.STAGE_STORAGE ||
@@ -519,55 +520,54 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         path_overlap.stage != assembly.STAGE_STORAGE ||
         core_overlap.cleanup_retained || handshake_overlap.cleanup_retained ||
         cid_overlap.cleanup_retained || path_overlap.cleanup_retained ||
-        dialer.storage != nil || dialer.secret_storage != nil ||
+        dialer.storage != nil || dialer.scratch != nil ||
         dialer_storage.leased || dialer_storage.source != 0 ||
-        dialer_secret_storage.leased || dialer_secret_storage.source != 0) {
+        !scratch.idle(?pump_scratch, ?pump_secret)) {
         ret 236;
     }
     val misaligned: *assembly.Storage =
         ((?dialer_storage)::usize + 1)::*assembly.Storage;
     val malformed: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, misaligned, ?dialer_secret_storage, test_chunks(),
+        ?dialer_config, misaligned, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, ?dialer_scope, instants.instant(1000));
     val missing: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, nil, ?dialer_secret_storage, test_chunks(),
+        ?dialer_config, nil, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, ?dialer_scope, instants.instant(1000));
     if (malformed.stage != assembly.STAGE_STORAGE ||
         missing.stage != assembly.STAGE_STORAGE ||
         malformed.cleanup_retained || missing.cleanup_retained ||
-        dialer_storage.leased || dialer_secret_storage.leased) { ret 237; }
+        dialer_storage.leased || !scratch.idle(?pump_scratch, ?pump_secret)) { ret 237; }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
+        ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, ?dialer_scope, instants.instant(1000));
     if (!dialed.ok)                         { ret 170 + dialed.stage::i32; }
     if (dialed.core.reason != core.INIT_OK) { ret 180 + dialed.core.reason::i32; }
     val dialer_storage_generation: u64 = dialer_storage.generation;
-    val dialer_secret_generation:  u64 = dialer_secret_storage.generation;
     copied_storage = dialer_storage;
     var competing:     assembly.Connection;
     val public_reused: assembly.InitResult = assembly.init_client(?competing,
-        ?dialer_config, ?dialer_storage, ?listener_secret_storage, test_chunks(),
+        ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, ?dialer_scope, instants.instant(1000));
-    val secret_reused: assembly.InitResult = assembly.init_client(?competing,
-        ?dialer_config, ?listener_storage, ?dialer_secret_storage, test_chunks(),
-        ?dialer_tls, ?dialer_scope, instants.instant(1000));
+    # the scratch pair may be shared, but never laid over a connection's storage
+    val scratch_overlap: assembly.InitResult = assembly.init_client(?competing,
+        ?dialer_config, ?listener_storage, (?listener_storage)::*assembly.Scratch,
+        ?pump_secret, test_chunks(), ?dialer_tls, ?dialer_scope,
+        instants.instant(1000));
     val copied_reused: assembly.InitResult = assembly.init_client(?competing,
-        ?dialer_config, ?copied_storage, ?listener_secret_storage, test_chunks(),
+        ?dialer_config, ?copied_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, ?dialer_scope, instants.instant(1000));
     if (public_reused.stage != assembly.STAGE_STORAGE ||
-        secret_reused.stage != assembly.STAGE_STORAGE ||
+        scratch_overlap.stage != assembly.STAGE_STORAGE ||
         copied_reused.stage != assembly.STAGE_STORAGE ||
-        public_reused.cleanup_retained || secret_reused.cleanup_retained ||
+        public_reused.cleanup_retained || scratch_overlap.cleanup_retained ||
         copied_reused.cleanup_retained ||
-        competing.storage != nil || competing.secret_storage != nil ||
-        !dialer_storage.leased || !dialer_secret_storage.leased ||
-        !copied_storage.leased ||
-        ?copied_storage.receive_header[0] == ?dialer_storage.receive_header[0] ||
+        competing.storage != nil || competing.scratch != nil ||
+        !dialer_storage.leased || dialer.scratch != ?pump_scratch ||
+        dialer.secret_scratch != ?pump_secret || !copied_storage.leased ||
+        ?copied_storage.close_reason[0] == ?dialer_storage.close_reason[0] ||
         dialer_storage.source != dialer_config.source ||
-        dialer_secret_storage.source != dialer_config.source ||
         dialer_storage.generation != dialer_storage_generation ||
-        dialer_secret_storage.generation != dialer_secret_generation ||
-        listener_storage.leased || listener_secret_storage.leased) { ret 238; }
+        listener_storage.leased || !scratch.idle(?pump_scratch, ?pump_secret)) { ret 238; }
     copied_storage.source = 0;
     copied_storage.leased = false;
 
@@ -685,7 +685,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         len:  listener_encoded}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 14; }
     val served: assembly.InitResult = assembly.init_server(?listener,
-        ?listener_config, ?listener_storage, ?listener_secret_storage, test_chunks(),
+        ?listener_config, ?listener_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?listener_tls, ?listener_scope,
         instants.instant(clock));
     if (!served.ok)                         { ret 140 + served.stage::i32; }
@@ -921,7 +921,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !operation_ok(cancel.make_root(?dialer_scope, opt[time.Instant].none{})) ||
         !operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{}))) { ret 224; }
     val redialed: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
+        ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls_two, ?dialer_scope,
         instants.instant(clock + 1000));
     if (!redialed.ok || redialed.core.reason != core.INIT_OK) { ret 225; }
@@ -969,7 +969,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 228; }
     cancel.cancel(?listener_scope);
     val refused_two: assembly.InitResult = assembly.init_server(?listener,
-        ?listener_config_two, ?listener_storage, ?listener_secret_storage, test_chunks(),
+        ?listener_config_two, ?listener_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?listener_tls_two,
         ?listener_scope, instants.instant(clock + 2000));
     if (refused_two.ok || refused_two.stage != assembly.STAGE_DRIVER ||
@@ -994,7 +994,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         server.QUIC_TRANSPORT_PARAMETERS) ||
         !operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{}))) { ret 235; }
     val reserved_two: assembly.InitResult = assembly.init_server(?listener,
-        ?listener_config_two, ?listener_storage, ?listener_secret_storage, test_chunks(),
+        ?listener_config_two, ?listener_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?listener_tls_two,
         ?listener_scope, instants.instant(clock + 2000));
     if (!reserved_two.ok || reserved_two.core.reason != core.INIT_OK) { ret 229; }
@@ -1068,55 +1068,50 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         client.QUIC_TRANSPORT_PARAMETERS) ||
         !operation_ok(cancel.make_root(?dialer_scope, opt[time.Instant].none{}))) { ret 239; }
     val retained: assembly.InitResult = assembly.init_client(?dialer,
-        ?rollback_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
+        ?rollback_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
     val retained_storage_generation: u64 = dialer_storage.generation;
-    val retained_secret_generation:  u64 = dialer_secret_storage.generation;
     if (retained.ok || retained.stage != assembly.STAGE_CORE ||
         retained.core.reason != core.INIT_PROVIDER_START ||
         !retained.cleanup_retained || rollback_probe.calls != 1 ||
         dialer.initialized || dialer.released || assembly.reusable(?dialer) ||
-        dialer.storage != ?dialer_storage ||
-        dialer.secret_storage != ?dialer_secret_storage ||
-        !dialer_storage.leased || !dialer_secret_storage.leased ||
+        dialer.storage != ?dialer_storage || dialer.scratch != ?pump_scratch ||
+        !dialer_storage.leased || !scratch.idle(?pump_scratch, ?pump_secret) ||
         dialer_storage.source != rollback_config.source ||
-        dialer_secret_storage.source != rollback_config.source ||
         dialer.streams.active_attempts != 1 ||
         dialer.handshake_block.data == nil) { ret 240; }
     val repeated: assembly.InitResult = assembly.init_client(?dialer,
-        ?rollback_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
+        ?rollback_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
     val public_retained: assembly.InitResult = assembly.init_client(?competing,
-        ?rollback_config, ?dialer_storage, ?listener_secret_storage, test_chunks(),
+        ?rollback_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
-    val secret_retained: assembly.InitResult = assembly.init_client(?competing,
-        ?rollback_config, ?listener_storage, ?dialer_secret_storage, test_chunks(),
+    val scratch_retained: assembly.InitResult = assembly.init_client(?competing,
+        ?rollback_config, ?listener_storage, (?listener_storage)::*assembly.Scratch,
+        ?pump_secret, test_chunks(),
         ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
     if (repeated.stage != assembly.STAGE_STORAGE ||
         !repeated.cleanup_retained ||
         public_retained.stage != assembly.STAGE_STORAGE ||
-        secret_retained.stage != assembly.STAGE_STORAGE ||
-        public_retained.cleanup_retained || secret_retained.cleanup_retained ||
-        competing.storage != nil || competing.secret_storage != nil ||
-        listener_storage.leased || listener_secret_storage.leased ||
-        dialer_storage.generation != retained_storage_generation ||
-        dialer_secret_storage.generation != retained_secret_generation) {
+        scratch_retained.stage != assembly.STAGE_STORAGE ||
+        public_retained.cleanup_retained || scratch_retained.cleanup_retained ||
+        competing.storage != nil || competing.scratch != nil ||
+        listener_storage.leased ||
+        dialer_storage.generation != retained_storage_generation) {
         ret 241;
     }
     dialer.streams.active_attempts = 0;
     # a connection torn down before its handshake gives the block back
     if (!assembly.release_closed(?dialer) || !assembly.reusable(?dialer) ||
         dialer.handshake_block.data != nil || dialer.account.open ||
-        dialer.storage != nil || dialer.secret_storage != nil ||
-        dialer_storage.leased || dialer_storage.source != 0 ||
-        dialer_secret_storage.leased || dialer_secret_storage.source != 0 ||
-        dialer_storage.generation != retained_storage_generation ||
-        dialer_secret_storage.generation != retained_secret_generation) {
+        dialer.storage != nil || dialer.scratch != nil ||
+        dialer.secret_scratch != nil || dialer_storage.leased ||
+        dialer_storage.source != 0 || !scratch.idle(?pump_scratch, ?pump_secret) ||
+        dialer_storage.generation != retained_storage_generation) {
         ret 242;
     }
     if (!assembly.release_closed(?dialer) ||
         dialer_storage.generation != retained_storage_generation ||
-        dialer_secret_storage.generation != retained_secret_generation ||
         !client.destroy(?rollback_tls) || !operation_ok(cancel.destroy(?dialer_scope))) {
         ret 243;
     }
@@ -1131,13 +1126,13 @@ test "quic.connection.assembly: public storage supports ordinary dynamic pools" 
     if (storage == nil || storage::usize % $align_of(assembly.Storage) != 0) {
         ret 1;
     }
-    storage[0].source                                       = 71;
-    storage[1].source                                       = 72;
-    storage[0].receive_header[0]                            = 0xA5;
-    storage[1].receive_header[assembly.MAX_UDP_PAYLOAD - 1] = 0x5A;
+    storage[0].source            = 71;
+    storage[1].source            = 72;
+    storage[0].close_reason[0]   = 0xA5;
+    storage[1].close_reason[255] = 0x5A;
     if (storage[0].source != 71 || storage[1].source != 72 ||
         ?storage[0] == ?storage[1] ||
-        ?storage[0].receive_header[0] == ?storage[1].receive_header[0] ||
+        ?storage[0].close_reason[0] == ?storage[1].close_reason[0] ||
         os.deallocate(storage::ptr, bytes) != 0) { ret 2; }
     ret 0;
 }
@@ -1146,50 +1141,48 @@ test "quic.connection.assembly: typed secret pools retain wiped deallocation for
     var control_owner: secret.ArrayAllocator[assembly.Connection] =
         secret.system_array_allocator[assembly.Connection]();
     secret_storage_delegate =
-        secret.system_array_allocator[assembly.SecretStorage]();
+        secret.system_array_allocator[assembly.SecretScratch]();
     secret_storage_deallocations    = 0;
     secret_storage_zeroed_releases  = 0;
     secret_storage_nonzero_releases = 0;
-    var storage_owner: secret.ArrayAllocator[assembly.SecretStorage] =
-        secret.ArrayAllocator[assembly.SecretStorage]{context: nil,
+    var storage_owner: secret.ArrayAllocator[assembly.SecretScratch] =
+        secret.ArrayAllocator[assembly.SecretScratch]{context: nil,
         secret_context: nil, allocate_fn: secret_storage_allocate,
         deallocate_fn:  secret_storage_deallocate, initialized: true};
     var controls: secret.SecretArray[assembly.Connection] =
         secret.empty_array[assembly.Connection]();
-    var storage: secret.SecretArray[assembly.SecretStorage] =
-        secret.empty_array[assembly.SecretStorage]();
+    var storage: secret.SecretArray[assembly.SecretScratch] =
+        secret.empty_array[assembly.SecretScratch]();
     if (secret.init_array[assembly.Connection](?controls, ?control_owner, 2) !=
         contracts.OK ||
-        secret.init_array[assembly.SecretStorage](?storage, ?storage_owner, 2) !=
+        secret.init_array[assembly.SecretScratch](?storage, ?storage_owner, 2) !=
         contracts.OK) { ret 1; }
     val control_data: *assembly.Connection =
         secret.array_data[assembly.Connection](?controls);
-    val storage_data: *assembly.SecretStorage =
-        secret.array_data[assembly.SecretStorage](?storage);
+    val storage_data: *assembly.SecretScratch =
+        secret.array_data[assembly.SecretScratch](?storage);
     if (control_data == nil || storage_data == nil) { ret 2; }
     control_data[0].local_parameter_length                       = 77;
     control_data[0].secrets.initial_keys.client.secret[0]        = 0xA5;
-    storage_data[0].source                                       = 41;
-    storage_data[0].generation                                   = 9;
-    storage_data[0].leased                                       = true;
+    storage_data[0].holder                                       = 41;
     storage_data[0].receive_plaintext[0]                         = 0x5A;
     storage_data[1].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1] = 0xC3;
     if (secret.destroy_array[assembly.Connection](?controls) != contracts.OK ||
-        secret.destroy_array[assembly.SecretStorage](?storage) !=
+        secret.destroy_array[assembly.SecretScratch](?storage) !=
         contracts.DEALLOCATION_FAILED ||
-        !secret.array_cleanup_pending[assembly.SecretStorage](?storage) ||
-        secret.array_active[assembly.SecretStorage](?storage) ||
-        secret.array_data[assembly.SecretStorage](?storage) != nil ||
+        !secret.array_cleanup_pending[assembly.SecretScratch](?storage) ||
+        secret.array_active[assembly.SecretScratch](?storage) ||
+        secret.array_data[assembly.SecretScratch](?storage) != nil ||
         storage.data == nil || storage.data[0].receive_plaintext[0]:>u8 != 0 ||
         secret_storage_deallocations != 1 ||
         secret_storage_zeroed_releases != 1 ||
         secret_storage_nonzero_releases != 0) { ret 3; }
-    if (secret.destroy_array[assembly.SecretStorage](?storage) != contracts.OK ||
+    if (secret.destroy_array[assembly.SecretScratch](?storage) != contracts.OK ||
         secret_storage_deallocations != 2 ||
         secret_storage_zeroed_releases != 2 ||
         secret_storage_nonzero_releases != 0 ||
         secret.destroy_array[assembly.Connection](?controls) != contracts.OK ||
-        secret.destroy_array[assembly.SecretStorage](?storage) != contracts.OK) {
+        secret.destroy_array[assembly.SecretScratch](?storage) != contracts.OK) {
         ret 4;
     }
     ret 0;
@@ -1306,7 +1299,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
         ret 6;
     }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
-        ?dialer_config, ?dialer_storage, ?dialer_secret_storage, test_chunks(),
+        ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, ?dialer_scope, instants.instant(clock[0]));
     if (!dialed.ok || dialed.core.reason != core.INIT_OK) { ret 7; }
 
@@ -1347,7 +1340,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
         len:  listener_encoded}},
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 10; }
     val served: assembly.InitResult = assembly.init_server(?listener,
-        ?listener_config, ?listener_storage, ?listener_secret_storage, test_chunks(),
+        ?listener_config, ?listener_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?listener_tls, ?listener_scope, instants.instant(clock[0]));
     # handshake-only state is held until the handshake is confirmed
     if (!served.ok || served.core.reason != core.INIT_OK ||
@@ -1594,6 +1587,59 @@ fun send_byte(source: *assembly.Connection, sink: *assembly.Connection,
         ?byte[0], 1).count != 1) { ret transport.STATUS_ERROR; }
     clock[0] = clock[0] + 1000;
     ret hop(source, sink, source_scope, sink_local, sink_peer, clock[0]);
+}
+
+fun secret_clear(data: *^u8, length: usize) bool {
+    var i: usize = 0;
+    for (i < length) {
+        if (data[i]:>u8 != 0) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+test "quic.connection.assembly: connections sharing a scratch pair cannot run at once" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    # both ends used the pair for the whole handshake and left nothing in it
+    if (!scratch.idle(?pump_scratch, ?pump_secret) ||
+        !secret_clear(?pump_secret.receive_plaintext[0], assembly.MAX_UDP_PAYLOAD) ||
+        !secret_clear(?pump_secret.send_plaintext[0], assembly.MAX_UDP_PAYLOAD)) {
+        ret 20;
+    }
+    val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    var byte: [1]u8 = [1]u8{0x42};
+    if (opened.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?dialer.driver, opened.stream,
+        ?byte[0], 1).count != 1) { ret 21; }
+    # a call on the listener holds the pair, so the dialer's call is refused
+    # before its core runs, with nothing sent and no state changed
+    if (!scratch.lend(?pump_scratch, ?pump_secret, listener.core.config.source)) {
+        ret 22;
+    }
+    val before:  transport.ConnectionState = dialer.core.state;
+    val packets: u64                       = dialer.core.packet_numbers[2];
+    clock = clock + 1000;
+    val refused: transport.Generated = transport.generate[binding.Binding](
+        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, instants.instant(clock), 0);
+    scratch.give_back(?pump_scratch, ?pump_secret, listener.core.config.source);
+    if (refused.status != transport.STATUS_ERROR ||
+        refused.error != transport.ERROR_STATE || refused.count != 0 ||
+        dialer.core.state != before || dialer.core.packet_numbers[2] != packets ||
+        transport.snapshot[binding.Binding](?dialer.driver).state != transport.ACTIVE) {
+        ret 23;
+    }
+    # once the pair is free the same work goes out
+    clock = clock + 1000;
+    if (hop(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        dialer_endpoint(), clock) != transport.STATUS_OK ||
+        dialer.core.packet_numbers[2] != packets + 1 ||
+        !scratch.idle(?pump_scratch, ?pump_secret)) { ret 25; }
+    ret 0;
 }
 
 test "quic.connection.assembly: a peer key update moves our send keys before we acknowledge it" {
