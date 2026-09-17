@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-17
+
 ### Security
 
 - `storage.source.open_connection` and `open`, and so `assembly.init_client` and `init_server`, require a source that declares exactly `supply.LANES` (3) lanes, and now say so (#180). They pass three budgets, and std reads one per declared lane, so a caller's pool with more lanes gave the extra lanes whatever followed the three on the stack as their budgets. A refusal follows once mach-std can report a source's lane count.
