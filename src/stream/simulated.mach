@@ -1,9 +1,30 @@
+use quic.storage.limited;
+use quic.storage.pool;
 use quic.stream.stream;
 
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
+
+var chunk_memory:  limited.Limited;
+var chunk_pool:    pool.Pool;
+var chunk_account: pool.Account;
+
+# every manager a test builds draws on one pool and account
+fun test_chunks() *pool.Pool {
+    if (!chunk_pool.valid) {
+        limited.make(?chunk_memory, 1 << 24);
+        pool.make(?chunk_pool, limited.allocator_of(?chunk_memory), pool.default_config(512));
+        pool.open_account(?chunk_pool, ?chunk_account, 1, 256, 256, 0);
+    }
+    ret ?chunk_pool;
+}
+
+fun test_account() *pool.Account {
+    test_chunks();
+    ret ?chunk_account;
+}
 
 fun initialize_manager(config: stream.Config,
     storage: stream.Storage) stream.Manager {
@@ -32,22 +53,12 @@ fun config(source: u64, streams: u64, data: u64) stream.Config {
 }
 
 test "quic.stream.simulated: stream creation, implicit peer streams, and ordered delivery" {
-    var records:         [6]stream.Stream;
-    var send_data:       [96]u8;
-    var send_pending:    [96]bool;
-    var send_acked:      [96]bool;
-    var send_inflight:   [96]u8;
-    var receive_data:    [96]u8;
-    var receive_present: [96]bool;
-    var attempts:        [12]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 6,
-        send_data:       ?send_data[0], send_data_length: 96,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 96, send_stride: 16,
-        receive_data:    ?receive_data[0], receive_data_length: 96,
-        receive_present: ?receive_present[0], receive_state_length: 96, receive_stride: 16,
-        attempts:        ?attempts[0], attempt_capacity: 12
+    var records:  [6]stream.Stream;
+    var attempts: [12]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 6,
+        attempts: ?attempts[0], attempt_capacity: 12,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 16
     };
     var limits: stream.Config = config(11, 2, 64);
     limits.receive_local_bidirectional_limit = 16;
@@ -77,22 +88,12 @@ test "quic.stream.simulated: stream creation, implicit peer streams, and ordered
 }
 
 test "quic.stream.simulated: final size, overlap, and connection flow failures are transactional" {
-    var records:         [3]stream.Stream;
-    var send_data:       [48]u8;
-    var send_pending:    [48]bool;
-    var send_acked:      [48]bool;
-    var send_inflight:   [48]u8;
-    var receive_data:    [48]u8;
-    var receive_present: [48]bool;
-    var attempts:        [6]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 3,
-        send_data:       ?send_data[0], send_data_length: 48,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 48, send_stride: 16,
-        receive_data:    ?receive_data[0], receive_data_length: 48,
-        receive_present: ?receive_present[0], receive_state_length: 48, receive_stride: 16,
-        attempts:        ?attempts[0], attempt_capacity: 6
+    var records:  [3]stream.Stream;
+    var attempts: [6]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 3,
+        attempts: ?attempts[0], attempt_capacity: 6,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 16
     };
     var limits: stream.Config = config(12, 3, 8);
     limits.receive_local_bidirectional_limit = 16;
@@ -119,22 +120,12 @@ test "quic.stream.simulated: final size, overlap, and connection flow failures a
 }
 
 test "quic.stream.simulated: exact send budgets and duplicate transmissions retain ownership" {
-    var records:         [2]stream.Stream;
-    var send_data:       [8]u8;
-    var send_pending:    [8]bool;
-    var send_acked:      [8]bool;
-    var send_inflight:   [8]u8;
-    var receive_data:    [16]u8;
-    var receive_present: [16]bool;
-    var attempts:        [8]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 2,
-        send_data:       ?send_data[0], send_data_length: 8,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 8, send_stride: 4,
-        receive_data:    ?receive_data[0], receive_data_length: 16,
-        receive_present: ?receive_present[0], receive_state_length: 16, receive_stride: 8,
-        attempts:        ?attempts[0], attempt_capacity: 8
+    var records:  [2]stream.Stream;
+    var attempts: [8]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 2,
+        attempts: ?attempts[0], attempt_capacity: 8,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 4
     };
     var limits: stream.Config = config(13, 2, 6);
     limits.send_local_bidirectional_limit = 4;
@@ -150,10 +141,13 @@ test "quic.stream.simulated: exact send budgets and duplicate transmissions reta
         stream.publish(?manager, first).status != stream.STATUS_OK) { ret 1; }
     val duplicate: stream.Prepared = stream.prepare(?manager, opened.handle, 4, true);
     if (!duplicate.ok || stream.publish(?manager, duplicate).status != stream.STATUS_OK) { ret 1; }
+    # the acknowledged bytes are delivered, but their chunk stays while the
+    # duplicate still references it in flight
     if (stream.on_terminal(?manager, first.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
-        records[opened.handle.index].send_used != 4) { ret 1; }
+        records[opened.handle.index].send_base != 4 || test_account().used[0] != 1) { ret 1; }
+    # the stream keeps its partly used chunk for the bytes it writes next
     if (stream.on_terminal(?manager, duplicate.token, stream.TERMINAL_LOST).status != stream.STATUS_OK ||
-        records[opened.handle.index].send_used != 0) { ret 1; }
+        records[opened.handle.index].send_base != 4 || test_account().used[0] != 1) { ret 1; }
 
     if (stream.update_max_stream_data(?manager, opened.handle, 8).status != stream.STATUS_OK) { ret 1; }
     val second_write: stream.WriteResult = stream.write(?manager, opened.handle, ?data[4], 4);
@@ -166,27 +160,18 @@ test "quic.stream.simulated: exact send budgets and duplicate transmissions reta
     if (!stream.snapshot(?manager, opened.handle).send_closed) { ret 1; }
     if (!stream.receive_stream(?manager, 0, 0, nil, 0, true).ok ||
         !stream.snapshot(?manager, opened.handle).receive_closed) { ret 1; }
-    if (stream.release(?manager, opened.handle).status != stream.STATUS_OK) { ret 1; }
+    if (stream.release(?manager, opened.handle).status != stream.STATUS_OK ||
+        test_account().used[0] != 0) { ret 1; }
     ret 0;
 }
 
 test "quic.stream.simulated: reset, stop-sending, and cancellation close both directions" {
-    var records:         [2]stream.Stream;
-    var send_data:       [16]u8;
-    var send_pending:    [16]bool;
-    var send_acked:      [16]bool;
-    var send_inflight:   [16]u8;
-    var receive_data:    [16]u8;
-    var receive_present: [16]bool;
-    var attempts:        [8]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 2,
-        send_data:       ?send_data[0], send_data_length: 16,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 16, send_stride: 8,
-        receive_data:    ?receive_data[0], receive_data_length: 16,
-        receive_present: ?receive_present[0], receive_state_length: 16, receive_stride: 8,
-        attempts:        ?attempts[0], attempt_capacity: 8
+    var records:  [2]stream.Stream;
+    var attempts: [8]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 2,
+        attempts: ?attempts[0], attempt_capacity: 8,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 8
     };
     var limits: stream.Config = config(14, 2, 16);
     limits.receive_local_bidirectional_limit = 8;
@@ -228,22 +213,12 @@ test "quic.stream.simulated: reset, stop-sending, and cancellation close both di
 }
 
 test "quic.stream.simulated: connection and stream flow budgets remain independent" {
-    var records:         [4]stream.Stream;
-    var send_data:       [32]u8;
-    var send_pending:    [32]bool;
-    var send_acked:      [32]bool;
-    var send_inflight:   [32]u8;
-    var receive_data:    [32]u8;
-    var receive_present: [32]bool;
-    var attempts:        [8]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 4,
-        send_data:       ?send_data[0], send_data_length: 32,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 32, send_stride: 8,
-        receive_data:    ?receive_data[0], receive_data_length: 32,
-        receive_present: ?receive_present[0], receive_state_length: 32, receive_stride: 8,
-        attempts:        ?attempts[0], attempt_capacity: 8
+    var records:  [4]stream.Stream;
+    var attempts: [8]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 4,
+        attempts: ?attempts[0], attempt_capacity: 8,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 8
     };
     var limits: stream.Config = config(16, 4, 5);
     limits.send_local_bidirectional_limit    = 3;
@@ -291,22 +266,12 @@ test "quic.stream.simulated: connection and stream flow budgets remain independe
 }
 
 test "quic.stream.simulated: unidirectional streams enforce ownership and ordered delivery" {
-    var records:         [2]stream.Stream;
-    var send_data:       [16]u8;
-    var send_pending:    [16]bool;
-    var send_acked:      [16]bool;
-    var send_inflight:   [16]u8;
-    var receive_data:    [16]u8;
-    var receive_present: [16]bool;
-    var attempts:        [4]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 2,
-        send_data:       ?send_data[0], send_data_length: 16,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 16, send_stride: 8,
-        receive_data:    ?receive_data[0], receive_data_length: 16,
-        receive_present: ?receive_present[0], receive_state_length: 16, receive_stride: 8,
-        attempts:        ?attempts[0], attempt_capacity: 4
+    var records:  [2]stream.Stream;
+    var attempts: [4]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 2,
+        attempts: ?attempts[0], attempt_capacity: 4,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 8
     };
     var limits: stream.Config = config(17, 2, 16);
     limits.receive_local_bidirectional_limit = 8;
@@ -340,22 +305,12 @@ test "quic.stream.simulated: unidirectional streams enforce ownership and ordere
 }
 
 test "quic.stream.simulated: close preserves reserved stream publication" {
-    var records:         [1]stream.Stream;
-    var send_data:       [4]u8;
-    var send_pending:    [4]bool;
-    var send_acked:      [4]bool;
-    var send_inflight:   [4]u8;
-    var receive_data:    [4]u8;
-    var receive_present: [4]bool;
-    var attempts:        [1]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 1,
-        send_data:       ?send_data[0], send_data_length: 4,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 4, send_stride: 4,
-        receive_data:    ?receive_data[0], receive_data_length: 4,
-        receive_present: ?receive_present[0], receive_state_length: 4, receive_stride: 4,
-        attempts:        ?attempts[0], attempt_capacity: 1
+    var records:  [1]stream.Stream;
+    var attempts: [1]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 1,
+        attempts: ?attempts[0], attempt_capacity: 1,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 4
     };
     var manager: stream.Manager      = initialize_manager(config(18, 1, 4), storage);
     val opened:  stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
@@ -373,22 +328,12 @@ test "quic.stream.simulated: close preserves reserved stream publication" {
 }
 
 test "quic.stream.simulated: flow-control frames create only permitted peer stream halves" {
-    var records:         [4]stream.Stream;
-    var send_data:       [32]u8;
-    var send_pending:    [32]bool;
-    var send_acked:      [32]bool;
-    var send_inflight:   [32]u8;
-    var receive_data:    [32]u8;
-    var receive_present: [32]bool;
-    var attempts:        [4]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 4,
-        send_data:       ?send_data[0], send_data_length: 32,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 32, send_stride: 8,
-        receive_data:    ?receive_data[0], receive_data_length: 32,
-        receive_present: ?receive_present[0], receive_state_length: 32, receive_stride: 8,
-        attempts:        ?attempts[0], attempt_capacity: 4
+    var records:  [4]stream.Stream;
+    var attempts: [4]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 4,
+        attempts: ?attempts[0], attempt_capacity: 4,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 8
     };
     var limits: stream.Config = config(19, 3, 16);
     limits.send_peer_bidirectional_limit     = 4;
@@ -411,22 +356,12 @@ test "quic.stream.simulated: flow-control frames create only permitted peer stre
 }
 
 test "quic.stream.simulated: stream exhaustion and two-phase teardown are bounded" {
-    var records:         [2]stream.Stream;
-    var send_data:       [16]u8;
-    var send_pending:    [16]bool;
-    var send_acked:      [16]bool;
-    var send_inflight:   [16]u8;
-    var receive_data:    [16]u8;
-    var receive_present: [16]bool;
-    var attempts:        [4]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 2,
-        send_data:       ?send_data[0], send_data_length: 16,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 16, send_stride: 8,
-        receive_data:    ?receive_data[0], receive_data_length: 16,
-        receive_present: ?receive_present[0], receive_state_length: 16, receive_stride: 8,
-        attempts:        ?attempts[0], attempt_capacity: 4
+    var records:  [2]stream.Stream;
+    var attempts: [4]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 2,
+        attempts: ?attempts[0], attempt_capacity: 4,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 8
     };
     var limits: stream.Config = config(15, 3, 16);
     limits.receive_max_data                  = 16;
@@ -450,22 +385,12 @@ test "quic.stream.simulated: stream exhaustion and two-phase teardown are bounde
 }
 
 test "quic.stream.simulated: consumed credit frames survive loss and stream release" {
-    var records:         [1]stream.Stream;
-    var send_data:       [8]u8;
-    var send_pending:    [8]bool;
-    var send_acked:      [8]bool;
-    var send_inflight:   [8]u8;
-    var receive_data:    [8]u8;
-    var receive_present: [8]bool;
-    var attempts:        [4]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 1,
-        send_data:       ?send_data[0], send_data_length: 8,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 8, send_stride: 8,
-        receive_data:    ?receive_data[0], receive_data_length: 8,
-        receive_present: ?receive_present[0], receive_state_length: 8,
-        receive_stride:  8, attempts: ?attempts[0], attempt_capacity: 4
+    var records:  [1]stream.Stream;
+    var attempts: [4]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 1,
+        attempts: ?attempts[0], attempt_capacity: 4,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 8
     };
     var limits: stream.Config = config(20, 1, 8);
     limits.receive_local_bidirectional_limit = 8;
@@ -516,18 +441,11 @@ test "quic.stream.simulated: consumed credit frames survive loss and stream rele
     ret 0;
 }
 
-fun credit_storage(records: *stream.Stream, send_data: *u8,
-    send_pending: *bool, send_acked: *bool, send_inflight: *u8,
-    receive_data: *u8, receive_present: *bool,
-    attempts: *stream.Attempt) stream.Storage {
+fun credit_storage(records: *stream.Stream, attempts: *stream.Attempt) stream.Storage {
     ret stream.Storage{
-        streams:         records, stream_capacity: 1,
-        send_data:       send_data, send_data_length: 8,
-        send_pending:    send_pending, send_acked: send_acked,
-        send_inflight:   send_inflight, send_state_length: 8, send_stride: 8,
-        receive_data:    receive_data, receive_data_length: 8,
-        receive_present: receive_present, receive_state_length: 8,
-        receive_stride:  8, attempts: attempts, attempt_capacity: 4
+        streams:  records, stream_capacity: 1,
+        attempts: attempts, attempt_capacity: 4,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 8
     };
 }
 
@@ -541,18 +459,10 @@ fun credit_limits(source: u64) stream.Config {
 }
 
 test "quic.stream.simulated: cancellation reconciles delivered bytes exactly once" {
-    var records:         [1]stream.Stream;
-    var send_data:       [8]u8;
-    var send_pending:    [8]bool;
-    var send_acked:      [8]bool;
-    var send_inflight:   [8]u8;
-    var receive_data:    [8]u8;
-    var receive_present: [8]bool;
-    var attempts:        [4]stream.Attempt;
-    var manager:         stream.Manager = initialize_manager(credit_limits(30),
-        credit_storage(?records[0], ?send_data[0], ?send_pending[0],
-        ?send_acked[0], ?send_inflight[0], ?receive_data[0],
-        ?receive_present[0], ?attempts[0]));
+    var records:  [1]stream.Stream;
+    var attempts: [4]stream.Attempt;
+    var manager:  stream.Manager = initialize_manager(credit_limits(30),
+        credit_storage(?records[0], ?attempts[0]));
     var input: [6]u8 = [6]u8{1, 2, 3, 4, 5, 6};
     if (!stream.receive_stream(?manager, 1, 0, ?input[0], 6, false).ok) { ret 1; }
     val accepted: stream.CreateResult = stream.accept(?manager);
@@ -572,18 +482,10 @@ test "quic.stream.simulated: cancellation reconciles delivered bytes exactly onc
 }
 
 test "quic.stream.simulated: reset acknowledgement reconciles delivered bytes once" {
-    var records:         [1]stream.Stream;
-    var send_data:       [8]u8;
-    var send_pending:    [8]bool;
-    var send_acked:      [8]bool;
-    var send_inflight:   [8]u8;
-    var receive_data:    [8]u8;
-    var receive_present: [8]bool;
-    var attempts:        [4]stream.Attempt;
-    var manager:         stream.Manager = initialize_manager(credit_limits(31),
-        credit_storage(?records[0], ?send_data[0], ?send_pending[0],
-        ?send_acked[0], ?send_inflight[0], ?receive_data[0],
-        ?receive_present[0], ?attempts[0]));
+    var records:  [1]stream.Stream;
+    var attempts: [4]stream.Attempt;
+    var manager:  stream.Manager = initialize_manager(credit_limits(31),
+        credit_storage(?records[0], ?attempts[0]));
     var input: [4]u8 = [4]u8{1, 2, 3, 4};
     if (!stream.receive_stream(?manager, 1, 0, ?input[0], 4, false).ok) { ret 1; }
     val accepted: stream.CreateResult = stream.accept(?manager);
@@ -601,18 +503,10 @@ test "quic.stream.simulated: reset acknowledgement reconciles delivered bytes on
 }
 
 test "quic.stream.simulated: release reconciles bytes the caller never returned" {
-    var records:         [1]stream.Stream;
-    var send_data:       [8]u8;
-    var send_pending:    [8]bool;
-    var send_acked:      [8]bool;
-    var send_inflight:   [8]u8;
-    var receive_data:    [8]u8;
-    var receive_present: [8]bool;
-    var attempts:        [4]stream.Attempt;
-    var manager:         stream.Manager = initialize_manager(credit_limits(32),
-        credit_storage(?records[0], ?send_data[0], ?send_pending[0],
-        ?send_acked[0], ?send_inflight[0], ?receive_data[0],
-        ?receive_present[0], ?attempts[0]));
+    var records:  [1]stream.Stream;
+    var attempts: [4]stream.Attempt;
+    var manager:  stream.Manager = initialize_manager(credit_limits(32),
+        credit_storage(?records[0], ?attempts[0]));
     var input: [4]u8 = [4]u8{1, 2, 3, 4};
     if (!stream.receive_stream(?manager, 1, 0, ?input[0], 4, true).ok) { ret 1; }
     val accepted: stream.CreateResult = stream.accept(?manager);
@@ -635,22 +529,12 @@ test "quic.stream.simulated: release reconciles bytes the caller never returned"
 }
 
 test "quic.stream.simulated: a closing manager releases a stream whose fin was never acknowledged" {
-    var records:         [1]stream.Stream;
-    var send_data:       [4]u8;
-    var send_pending:    [4]bool;
-    var send_acked:      [4]bool;
-    var send_inflight:   [4]u8;
-    var receive_data:    [4]u8;
-    var receive_present: [4]bool;
-    var attempts:        [1]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 1,
-        send_data:       ?send_data[0], send_data_length: 4,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 4, send_stride: 4,
-        receive_data:    ?receive_data[0], receive_data_length: 4,
-        receive_present: ?receive_present[0], receive_state_length: 4, receive_stride: 4,
-        attempts:        ?attempts[0], attempt_capacity: 1
+    var records:  [1]stream.Stream;
+    var attempts: [1]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 1,
+        attempts: ?attempts[0], attempt_capacity: 1,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 4
     };
     var manager: stream.Manager      = initialize_manager(config(18, 1, 4), storage);
     val opened:  stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
@@ -669,22 +553,12 @@ test "quic.stream.simulated: a closing manager releases a stream whose fin was n
 
 # rfc 9000 2.2: every byte is sent at least once before it counts as delivered
 test "quic.stream.simulated: a send reserved across a ring lap never claims the next lap" {
-    var records:         [2]stream.Stream;
-    var send_data:       [32]u8;
-    var send_pending:    [32]bool;
-    var send_acked:      [32]bool;
-    var send_inflight:   [32]u8;
-    var receive_data:    [32]u8;
-    var receive_present: [32]bool;
-    var attempts:        [6]stream.Attempt;
-    val storage:         stream.Storage = stream.Storage{
-        streams:         ?records[0], stream_capacity: 2,
-        send_data:       ?send_data[0], send_data_length: 32,
-        send_pending:    ?send_pending[0], send_acked: ?send_acked[0],
-        send_inflight:   ?send_inflight[0], send_state_length: 32, send_stride: 16,
-        receive_data:    ?receive_data[0], receive_data_length: 32,
-        receive_present: ?receive_present[0], receive_state_length: 32, receive_stride: 16,
-        attempts:        ?attempts[0], attempt_capacity: 6
+    var records:  [2]stream.Stream;
+    var attempts: [6]stream.Attempt;
+    val storage:  stream.Storage = stream.Storage{
+        streams:  ?records[0], stream_capacity: 2,
+        attempts: ?attempts[0], attempt_capacity: 6,
+        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 16
     };
     var limits: stream.Config = config(21, 2, 64);
     limits.receive_max_data                  = 32;
@@ -729,7 +603,7 @@ test "quic.stream.simulated: a send reserved across a ring lap never claims the 
     if (stream.on_terminal(?manager, reserved.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
         records[0].send_base != 16) { ret 9; }
     if (stream.on_terminal(?manager, next.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
-        records[0].send_base != 32 || records[0].send_used != 0 ||
+        records[0].send_base != 32 || test_account().used[0] != 1 ||
         manager.active_attempts != 0) { ret 10; }
     ret 0;
 }

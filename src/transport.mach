@@ -532,7 +532,7 @@ fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
         scope == nil || storage == nil) { ret false; }
     var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
-    var ranges: [18]ownership.Range;
+    var ranges: [12]ownership.Range;
     ranges[0] = driver_extent[T](driver);
     ranges[1] = ownership.array(storage.sends::*u8, storage.send_capacity,
         $size_of(SendSlot), ownership.ZERO_FORBIDDEN);
@@ -543,35 +543,20 @@ fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
     ranges[4] = ownership.array(streams.storage.attempts::*u8,
         streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
         ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.bytes(streams.storage.send_data,
-        streams.storage.send_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[6] = ownership.array(streams.storage.send_pending::*u8,
-        streams.storage.send_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[7] = ownership.array(streams.storage.send_acked::*u8,
-        streams.storage.send_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[8] = ownership.bytes(streams.storage.send_inflight,
-        streams.storage.send_state_length, ownership.ZERO_FORBIDDEN);
-    ranges[9] = ownership.bytes(streams.storage.receive_data,
-        streams.storage.receive_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[10] = ownership.array(streams.storage.receive_present::*u8,
-        streams.storage.receive_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[11] = ownership.record[datagram_api.Queue](datagrams);
-    ranges[12] = ownership.array(datagrams.storage.send_entries::*u8,
+    ranges[5] = ownership.record[datagram_api.Queue](datagrams);
+    ranges[6] = ownership.array(datagrams.storage.send_entries::*u8,
         datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
         datagram_zero);
-    ranges[13] = ownership.bytes(datagrams.storage.send_bytes,
+    ranges[7] = ownership.bytes(datagrams.storage.send_bytes,
         datagrams.storage.send_bytes_length, datagram_zero);
-    ranges[14] = ownership.array(datagrams.storage.receive_entries::*u8,
+    ranges[8] = ownership.array(datagrams.storage.receive_entries::*u8,
         datagrams.storage.receive_capacity, $size_of(datagram_api.Entry),
         datagram_zero);
-    ranges[15] = ownership.bytes(datagrams.storage.receive_bytes,
+    ranges[9] = ownership.bytes(datagrams.storage.receive_bytes,
         datagrams.storage.receive_bytes_length, datagram_zero);
-    ranges[16] = ownership.record[cancel.Scope](scope);
-    ranges[17] = protocol.context_range(protocol.context);
-    ret ownership.all_disjoint(?ranges[0], 18);
+    ranges[10] = ownership.record[cancel.Scope](scope);
+    ranges[11] = protocol.context_range(protocol.context);
+    ret ownership.all_disjoint(?ranges[0], 12);
 }
 
 fun borrowed_disjoint[T](driver: *Driver[T], borrowed: ownership.Range) bool {
@@ -591,7 +576,7 @@ fun borrowed_all_disjoint[T](driver: *Driver[T], borrowed: *ownership.Range,
     if (!driver.datagrams.config.enabled) {
         datagram_zero = ownership.ZERO_ALLOWED;
     }
-    var ranges: [18]ownership.Range;
+    var ranges: [12]ownership.Range;
     ranges[0] = driver_extent[T](driver);
     ranges[1] = ownership.array(driver.storage.sends::*u8,
         driver.storage.send_capacity, $size_of(SendSlot),
@@ -603,38 +588,23 @@ fun borrowed_all_disjoint[T](driver: *Driver[T], borrowed: *ownership.Range,
     ranges[4] = ownership.array(driver.streams.storage.attempts::*u8,
         driver.streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
         ownership.ZERO_FORBIDDEN);
-    ranges[5] = ownership.bytes(driver.streams.storage.send_data,
-        driver.streams.storage.send_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[6] = ownership.array(driver.streams.storage.send_pending::*u8,
-        driver.streams.storage.send_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[7] = ownership.array(driver.streams.storage.send_acked::*u8,
-        driver.streams.storage.send_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[8] = ownership.bytes(driver.streams.storage.send_inflight,
-        driver.streams.storage.send_state_length, ownership.ZERO_FORBIDDEN);
-    ranges[9] = ownership.bytes(driver.streams.storage.receive_data,
-        driver.streams.storage.receive_data_length, ownership.ZERO_FORBIDDEN);
-    ranges[10] = ownership.array(driver.streams.storage.receive_present::*u8,
-        driver.streams.storage.receive_state_length, $size_of(bool),
-        ownership.ZERO_FORBIDDEN);
-    ranges[11] = ownership.record[datagram_api.Queue](driver.datagrams);
-    ranges[12] = ownership.array(driver.datagrams.storage.send_entries::*u8,
+    ranges[5] = ownership.record[datagram_api.Queue](driver.datagrams);
+    ranges[6] = ownership.array(driver.datagrams.storage.send_entries::*u8,
         driver.datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
         datagram_zero);
-    ranges[13] = ownership.bytes(driver.datagrams.storage.send_bytes,
+    ranges[7] = ownership.bytes(driver.datagrams.storage.send_bytes,
         driver.datagrams.storage.send_bytes_length, datagram_zero);
-    ranges[14] = ownership.array(driver.datagrams.storage.receive_entries::*u8,
+    ranges[8] = ownership.array(driver.datagrams.storage.receive_entries::*u8,
         driver.datagrams.storage.receive_capacity, $size_of(datagram_api.Entry),
         datagram_zero);
-    ranges[15] = ownership.bytes(driver.datagrams.storage.receive_bytes,
+    ranges[9] = ownership.bytes(driver.datagrams.storage.receive_bytes,
         driver.datagrams.storage.receive_bytes_length, datagram_zero);
-    ranges[16] = ownership.record[cancel.Scope](driver.operation_scope);
-    ranges[17] = driver.protocol.context_range(driver.protocol.context);
+    ranges[10] = ownership.record[cancel.Scope](driver.operation_scope);
+    ranges[11] = driver.protocol.context_range(driver.protocol.context);
     b          = 0;
     for (b < count) {
         var i: usize = 0;
-        for (i < 18) {
+        for (i < 12) {
             if (!ownership.disjoint(borrowed[b], ranges[i])) { ret false; }
             i = i + 1;
         }

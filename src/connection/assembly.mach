@@ -18,6 +18,7 @@ use quic.packet.packet;
 use path_api: quic.path.path;
 use ack_api:  quic.recovery.ack;
 use quic.recovery.recovery;
+use quic.storage.pool;
 use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
 use transport_api: quic.transport;
@@ -129,10 +130,12 @@ pub rec Config {
     tls_deadline_ns:             u64;
     entropy_context_size:        usize;
     entropy_secret_context_size: usize;
-    peer_validated:              bool;
-    retry_source_present:        bool;
-    server_acceptance_applied:   bool;
-    enable_early_data:           bool;
+    # chunks the pool sets aside for this connection alone
+    chunk_reserve:             usize;
+    peer_validated:            bool;
+    retry_source_present:      bool;
+    server_acceptance_applied: bool;
+    enable_early_data:         bool;
 }
 
 pub fun default_config(source: u64, local: ip.Endpoint,
@@ -153,6 +156,7 @@ pub fun default_config(source: u64, local: ip.Endpoint,
     value.max_datagram_frame_size     = 0;
     value.entropy_context_size        = 1;
     value.entropy_secret_context_size = 0;
+    value.chunk_reserve               = 4;
     ret value;
 }
 
@@ -197,12 +201,6 @@ pub rec Storage {
     path_sends:               [8]path_api.SendReservation;
     stream_values:            [STREAM_CAPACITY]stream_api.Stream;
     stream_attempts:          [STREAM_ATTEMPT_CAPACITY]stream_api.Attempt;
-    stream_send:              [STREAM_WINDOW]u8;
-    stream_send_pending:      [STREAM_WINDOW]bool;
-    stream_send_acked:        [STREAM_WINDOW]bool;
-    stream_send_inflight:     [STREAM_WINDOW]u8;
-    stream_receive:           [STREAM_WINDOW]u8;
-    stream_receive_present:   [STREAM_WINDOW]bool;
     datagram_send_entries:    [DATAGRAM_CAPACITY]datagram_api.Entry;
     datagram_receive_entries: [DATAGRAM_CAPACITY]datagram_api.Entry;
     datagram_send_bytes:      [DATAGRAM_CAPACITY * DATAGRAM_STRIDE]u8;
@@ -222,17 +220,20 @@ pub rec SecretStorage {
 }
 
 pub rec Connection {
-    core:                      core_api.Core;
-    secrets:                   core_api.Secrets;
-    handshake:                 handshake_api.Adapter;
-    cids:                      cid_api.Manager;
-    paths:                     path_api.Manager;
-    streams:                   stream_api.Manager;
-    datagrams:                 datagram_api.Queue;
-    binding:                   binding_api.Binding;
-    driver:                    transport_api.Driver[binding_api.Binding];
-    storage:                   *Storage;
-    secret_storage:            *SecretStorage;
+    core:           core_api.Core;
+    secrets:        core_api.Secrets;
+    handshake:      handshake_api.Adapter;
+    cids:           cid_api.Manager;
+    paths:          path_api.Manager;
+    streams:        stream_api.Manager;
+    datagrams:      datagram_api.Queue;
+    binding:        binding_api.Binding;
+    driver:         transport_api.Driver[binding_api.Binding];
+    storage:        *Storage;
+    secret_storage: *SecretStorage;
+    # stream bytes come from the caller's pool, counted against this account
+    chunks:                    *pool.Pool;
+    account:                   pool.Account;
     storage_generation:        u64;
     secret_storage_generation: u64;
     local_parameter_length:    usize;
@@ -458,20 +459,13 @@ fun public_path_storage(storage: *Storage) path_api.Storage {
         sends:      ?storage.path_sends[0], send_capacity: 8};
 }
 
-fun public_stream_storage(storage: *Storage) stream_api.Storage {
-    ret stream_api.Storage{streams: ?storage.stream_values[0],
-        stream_capacity:      STREAM_CAPACITY, send_data: ?storage.stream_send[0],
-        send_data_length:     STREAM_WINDOW,
-        send_pending:         ?storage.stream_send_pending[0],
-        send_acked:           ?storage.stream_send_acked[0],
-        send_inflight:        ?storage.stream_send_inflight[0],
-        send_state_length:    STREAM_WINDOW, send_stride: STREAM_STRIDE,
-        receive_data:         ?storage.stream_receive[0],
-        receive_data_length:  STREAM_WINDOW,
-        receive_present:      ?storage.stream_receive_present[0],
-        receive_state_length: STREAM_WINDOW, receive_stride: STREAM_STRIDE,
-        attempts:             ?storage.stream_attempts[0],
-        attempt_capacity:     STREAM_ATTEMPT_CAPACITY};
+fun public_stream_storage(c: *Connection) stream_api.Storage {
+    ret stream_api.Storage{streams: ?c.storage.stream_values[0],
+        stream_capacity:   STREAM_CAPACITY,
+        attempts:          ?c.storage.stream_attempts[0],
+        attempt_capacity:  STREAM_ATTEMPT_CAPACITY,
+        chunks:            c.chunks, account: ?c.account,
+        send_buffer_limit: STREAM_STRIDE};
 }
 
 fun public_datagram_storage(storage: *Storage) datagram_api.Storage {
@@ -559,6 +553,15 @@ fun storage_ranges_valid(c: *Connection, config: *Config, storage: *Storage,
     ret true;
 }
 
+# a stream direction never holds more than its window in chunks, one partly
+# filled chunk at each end, and a spill each for its chunk list and its ranges
+val SPILLS_PER_STREAM: usize = 2;
+
+fun chunk_budget(window: u64) usize {
+    val chunks: usize = ((window + pool.CHUNK::u64 - 1) / pool.CHUNK::u64)::usize;
+    ret STREAM_CAPACITY * (chunks + 1 + SPILLS_PER_STREAM);
+}
+
 fun backing_lease_valid(c: *Connection) bool {
     ret c != nil && c.storage != nil && c.secret_storage != nil &&
         c.storage.leased && c.secret_storage.leased &&
@@ -568,12 +571,18 @@ fun backing_lease_valid(c: *Connection) bool {
 }
 
 fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage,
+    secret_storage: *SecretStorage, chunks: *pool.Pool,
     scope: *cancel.Scope) bool {
-    if (c == nil || config == nil || c.storage != nil ||
-        c.secret_storage != nil ||
+    if (c == nil || config == nil || chunks == nil || c.storage != nil ||
+        c.secret_storage != nil || c.account.open ||
         !storage_ranges_valid(c, config, storage, secret_storage, scope) ||
         !capacities_valid(storage, secret_storage)) { ret false; }
+    # the reservation is admission: a pool that cannot back it refuses the
+    # connection before anything else is leased
+    if (!pool.open_account(chunks, ?c.account, config.source,
+        chunk_budget(STREAM_STRIDE::u64), chunk_budget(config.receive_stream_data),
+        config.chunk_reserve)) { ret false; }
+    c.chunks                    = chunks;
     storage.generation          = next_generation(storage.generation);
     secret_storage.generation   = next_generation(secret_storage.generation);
     storage.source              = config.source;
@@ -589,7 +598,9 @@ fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
 }
 
 fun release_backing(c: *Connection) bool {
-    if (!backing_lease_valid(c)) { ret false; }
+    if (!backing_lease_valid(c))                                     { ret false; }
+    if (c.account.open && !pool.close_account(c.chunks, ?c.account)) { ret false; }
+    c.chunks                    = nil;
     c.storage.source            = 0;
     c.storage.leased            = false;
     c.secret_storage.source     = 0;
@@ -792,7 +803,7 @@ fun build_managers(c: *Connection, config: *Config,
     val peer_id: packet.ConnectionId = connection_id(config.peer_destination,
         config.peer_destination_length);
     if (!stream_api.initialize(?c.streams, stream_configuration(config, role),
-        public_stream_storage(c.storage))) {
+        public_stream_storage(c))) {
         ret STAGE_STREAMS;
     }
     if (!cid_api.initialize(?c.cids, cid_api.Config{source: config.source,
@@ -1024,7 +1035,7 @@ pub fun reusable(c: *Connection) bool {
 }
 
 pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage, tls: *client.Client,
+    secret_storage: *SecretStorage, chunks: *pool.Pool, tls: *client.Client,
     scope: *cancel.Scope, now_ns: u64) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
@@ -1042,7 +1053,7 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     }
     if (!ownership.record[Storage](storage).valid ||
         !secret_storage_range(secret_storage).valid ||
-        !acquire_backing(c, config, storage, secret_storage, scope)) {
+        !acquire_backing(c, config, storage, secret_storage, chunks, scope)) {
         ret staged(STAGE_STORAGE);
     }
     val built: Stage = build_managers(c, config, transport_api.CLIENT);
@@ -1058,7 +1069,7 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
 }
 
 pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
-    secret_storage: *SecretStorage, tls: *server.Server,
+    secret_storage: *SecretStorage, chunks: *pool.Pool, tls: *server.Server,
     scope: *cancel.Scope, now_ns: u64) InitResult {
     if (!connection_range(c).valid ||
         !ownership.record[Config](config).valid ||
@@ -1076,7 +1087,7 @@ pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
     }
     if (!ownership.record[Storage](storage).valid ||
         !secret_storage_range(secret_storage).valid ||
-        !acquire_backing(c, config, storage, secret_storage, scope)) {
+        !acquire_backing(c, config, storage, secret_storage, chunks, scope)) {
         ret staged(STAGE_STORAGE);
     }
     val built: Stage = build_managers(c, config, transport_api.SERVER);
