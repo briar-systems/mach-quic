@@ -1,5 +1,6 @@
 use quic.connection.ownership;
 use quic.packet.packet;
+use quic.storage.chunks;
 use quic.storage.limited;
 use quic.storage.pool;
 use quic.storage.ranges;
@@ -63,8 +64,6 @@ val MAX_STREAM_COUNT: u64 = 1 << 60;
 val RANGE_WINDOW_DIVISOR: u64   = 1024;
 val RANGE_FLOOR:          usize = 32;
 
-val CHUNK_SHIFT: u64 = 12;
-
 # no stream, for the intrusive lists below
 val NO_STREAM: usize = 0xffffffffffffffff;
 
@@ -74,10 +73,9 @@ pub val READY_WRITABLE: u8 = 2;
 pub val READY_RESET:    u8 = 4;
 
 # why a stream's last write stopped short
-val BLOCKED_STREAM:     u8    = 1;
-val BLOCKED_CONNECTION: u8    = 2;
-val BLOCKED_STORAGE:    u8    = 4;
-val CHUNK_INLINE:       usize = 2;
+val BLOCKED_STREAM:     u8 = 1;
+val BLOCKED_CONNECTION: u8 = 2;
+val BLOCKED_STORAGE:    u8 = 4;
 
 pub rec Config {
     source:                            u64;
@@ -161,25 +159,8 @@ pub rec Ready {
     reset:    bool;
 }
 
-# one chunk of a stream's bytes, numbered by offset >> 12
-pub rec ChunkSlot {
-    number: u64;
-    ref:    pool.Ref;
-    data:   *u8;
-}
-
-pub val CHUNK_SPILL_CAPACITY: usize = pool.CHUNK / 32;
-
-# a stream direction's chunks, sorted by number: two inline, more in a spill
-pub rec Chunks {
-    inline:     [CHUNK_INLINE]ChunkSlot;
-    spill:      pool.Ref;
-    spill_data: *ChunkSlot;
-    count:      usize;
-}
-
 pub rec Buffer {
-    chunks: Chunks;
+    chunks: chunks.Chunks;
     ranges: ranges.RangeSet;
 }
 
@@ -513,242 +494,10 @@ fun source(manager: *Manager, direction: pool.Direction) ranges.Source {
         direction: direction};
 }
 
-fun chunk_items(chunks: *Chunks) *ChunkSlot {
-    if (chunks.spill_data != nil) { ret chunks.spill_data; }
-    ret ?chunks.inline[0];
-}
-
-# the position of the first chunk numbered at least `number`
-fun chunk_locate(chunks: *Chunks, number: u64) usize {
-    val items: *ChunkSlot = chunk_items(chunks);
-    var low:   usize      = 0;
-    var high:  usize      = chunks.count;
-    for (low < high) {
-        val middle: usize = low + (high - low) / 2;
-        if (items[middle].number < number) { low = middle + 1; }
-        or                                 { high = middle; }
-    }
-    ret low;
-}
-
-fun chunk_find(chunks: *Chunks, number: u64) *ChunkSlot {
-    val at: usize = chunk_locate(chunks, number);
-    if (at < chunks.count && chunk_items(chunks)[at].number == number) {
-        ret ?chunk_items(chunks)[at];
-    }
-    ret nil;
-}
-
-# the chunk holding `offset`, taken from the pool when it is not there yet
-fun chunk_ensure(manager: *Manager, chunks: *Chunks, direction: pool.Direction,
-    offset: u64) *ChunkSlot {
-    val number:   u64        = offset >> CHUNK_SHIFT;
-    val existing: *ChunkSlot = chunk_find(chunks, number);
-    if (existing != nil) { ret existing; }
-    val at: usize = chunk_locate(chunks, number);
-    if (chunks.count >= CHUNK_SPILL_CAPACITY) { ret nil; }
-    val got: pool.Acquired = pool.acquire(manager.storage.chunks, manager.storage.account,
-        direction);
-    if (got.status != pool.STATUS_OK) { ret nil; }
-    if (chunks.count >= CHUNK_INLINE && chunks.spill_data == nil) {
-        val spilled: pool.Acquired = pool.acquire(manager.storage.chunks,
-            manager.storage.account, direction);
-        if (spilled.status != pool.STATUS_OK) {
-            pool.release(manager.storage.chunks, manager.storage.account, direction, got.ref);
-            ret nil;
-        }
-        val spill: *ChunkSlot = spilled.data::*ChunkSlot;
-        memory.copy[ChunkSlot](spill, ?chunks.inline[0], chunks.count);
-        chunks.spill      = spilled.ref;
-        chunks.spill_data = spill;
-    }
-    ret chunk_insert(chunks, ChunkSlot{number: number, ref: got.ref, data: got.data});
-}
-
-# places a slot in order. the caller has made room, spilling first when needed
-fun chunk_insert(chunks: *Chunks, slot: ChunkSlot) *ChunkSlot {
-    val at:    usize      = chunk_locate(chunks, slot.number);
-    val items: *ChunkSlot = chunk_items(chunks);
-    if (at < chunks.count) {
-        memory.move[ChunkSlot](?items[at + 1], ?items[at], chunks.count - at);
-    }
-    items[at]    = slot;
-    chunks.count = chunks.count + 1;
-    ret ?items[at];
-}
-
-val RESERVE_CAPACITY: usize = 4;
-
-# the chunks one received frame needs, taken before anything else changes so a
-# refusal leaves the stream as it was
-rec Reserved {
-    slots:      [RESERVE_CAPACITY]ChunkSlot;
-    count:      usize;
-    spill:      pool.Ref;
-    spill_data: *ChunkSlot;
-}
-
-fun reserve_cancel(manager: *Manager, reserved: *Reserved) {
-    var i: usize = 0;
-    for (i < reserved.count) {
-        pool.release(manager.storage.chunks, manager.storage.account, pool.RECEIVE,
-            reserved.slots[i].ref);
-        i = i + 1;
-    }
-    if (reserved.spill_data != nil) {
-        pool.release(manager.storage.chunks, manager.storage.account, pool.RECEIVE,
-            reserved.spill);
-    }
-    reserved.count      = 0;
-    reserved.spill_data = nil;
-}
-
-# takes the chunks [first, last] that `chunks` lacks, plus a spill if the list
-# will outgrow its inline slots. `chunks` is nil for a stream not yet open
-fun reserve_receive(manager: *Manager, chunks: *Chunks, first: u64, last: u64,
-    reserved: *Reserved) bool {
-    reserved.count      = 0;
-    reserved.spill_data = nil;
-    var number: u64 = first;
-    for (number <= last) {
-        if (chunks == nil || chunk_find(chunks, number) == nil) {
-            if (reserved.count == RESERVE_CAPACITY) {
-                reserve_cancel(manager, reserved);
-                ret false;
-            }
-            val got: pool.Acquired = pool.acquire(manager.storage.chunks,
-                manager.storage.account, pool.RECEIVE);
-            if (got.status != pool.STATUS_OK) {
-                reserve_cancel(manager, reserved);
-                ret false;
-            }
-            reserved.slots[reserved.count] = ChunkSlot{number: number, ref: got.ref,
-                data: got.data};
-            reserved.count = reserved.count + 1;
-        }
-        number = number + 1;
-    }
-    var held:    usize = 0;
-    var spilled: bool  = false;
-    if (chunks != nil) {
-        held    = chunks.count;
-        spilled = chunks.spill_data != nil;
-    }
-    if (held + reserved.count > CHUNK_SPILL_CAPACITY) {
-        reserve_cancel(manager, reserved);
-        ret false;
-    }
-    if (held + reserved.count > CHUNK_INLINE && !spilled) {
-        val got: pool.Acquired = pool.acquire(manager.storage.chunks,
-            manager.storage.account, pool.RECEIVE);
-        if (got.status != pool.STATUS_OK) {
-            reserve_cancel(manager, reserved);
-            ret false;
-        }
-        reserved.spill      = got.ref;
-        reserved.spill_data = got.data::*ChunkSlot;
-    }
-    ret true;
-}
-
-fun reserve_commit(chunks: *Chunks, reserved: *Reserved) {
-    if (reserved.spill_data != nil) {
-        memory.copy[ChunkSlot](reserved.spill_data, ?chunks.inline[0], chunks.count);
-        chunks.spill      = reserved.spill;
-        chunks.spill_data = reserved.spill_data;
-    }
-    var i: usize = 0;
-    for (i < reserved.count) {
-        chunk_insert(chunks, reserved.slots[i]);
-        i = i + 1;
-    }
-}
-
-# copies bytes into a direction's chunks, which already exist
-fun buffer_write(chunks: *Chunks, offset: u64, input: *u8, length: usize) {
-    var done: usize = 0;
-    for (done < length) {
-        val at:    u64        = offset + done::u64;
-        val slot:  *ChunkSlot = chunk_find(chunks, at >> CHUNK_SHIFT);
-        val start: usize      = (at % pool.CHUNK::u64)::usize;
-        var span:  usize      = pool.CHUNK - start;
-        if (span > length - done) { span = length - done; }
-        memory.copy[u8](?slot.data[start], ?input[done], span);
-        done = done + span;
-    }
-}
-
-# whether any byte of the input differs from a byte already held at its offset
-fun receive_conflicts(stream: *Stream, offset: u64, input: *u8, length: usize) bool {
-    val end:   u64   = offset + length::u64;
-    var index: usize = ranges.index_after(?stream.receive.ranges, offset);
-    for (index < ranges.count(?stream.receive.ranges)) {
-        val held: ranges.Interval = ranges.at(?stream.receive.ranges, index);
-        if (held.start >= end) { brk; }
-        var at: u64 = held.start;
-        if (at < offset) { at = offset; }
-        var stop: u64 = held.end;
-        if (stop > end) { stop = end; }
-        for (at < stop) {
-            val slot:  *ChunkSlot = chunk_find(?stream.receive.chunks, at >> CHUNK_SHIFT);
-            val start: usize      = (at % pool.CHUNK::u64)::usize;
-            var span:  u64        = (pool.CHUNK - start)::u64;
-            if (span > stop - at) { span = stop - at; }
-            if (!memory.equal[u8](?slot.data[start], ?input[(at - offset)::usize], span::usize)) {
-                ret true;
-            }
-            at = at + span;
-        }
-        index = index + 1;
-    }
-    ret false;
-}
-
-# releases, in order, the chunks that lie wholly below `limit` and that nothing
-# references in flight, stopping at the first that is still referenced
-fun chunk_release_below(manager: *Manager, chunks: *Chunks,
-    direction: pool.Direction, limit: u64) {
-    val items:    *ChunkSlot = chunk_items(chunks);
-    var released: usize      = 0;
-    for (released < chunks.count) {
-        val slot: ChunkSlot = items[released];
-        if ((slot.number + 1) << CHUNK_SHIFT > limit ||
-            pool.in_flight(manager.storage.chunks, slot.ref)) { brk; }
-        if (pool.release(manager.storage.chunks, manager.storage.account, direction,
-            slot.ref) != pool.ERROR_NONE) { brk; }
-        released = released + 1;
-    }
-    if (released > 0) {
-        memory.move[ChunkSlot](?items[0], ?items[released], chunks.count - released);
-        chunks.count = chunks.count - released;
-    }
-    if (chunks.spill_data != nil && chunks.count <= 1) {
-        memory.copy[ChunkSlot](?chunks.inline[0], chunks.spill_data, chunks.count);
-        if (pool.release(manager.storage.chunks, manager.storage.account, direction,
-            chunks.spill) == pool.ERROR_NONE) {
-            chunks.spill_data = nil;
-        }
-    }
-}
-
 fun buffer_release(manager: *Manager, buffer: *Buffer, direction: pool.Direction) {
-    chunk_release_below(manager, ?buffer.chunks, direction, 0 - 1::u64);
     var from: ranges.Source = source(manager, direction);
+    chunks.release_all(?buffer.chunks, ?from);
     ranges.clear(?buffer.ranges, ?from);
-}
-
-# copies `length` bytes of the direction's buffer starting at `offset`
-fun buffer_read(chunks: *Chunks, offset: u64, output: *u8, length: usize) {
-    var done: usize = 0;
-    for (done < length) {
-        val at:    u64        = offset + done::u64;
-        val slot:  *ChunkSlot = chunk_find(chunks, at >> CHUNK_SHIFT);
-        val start: usize      = (at % pool.CHUNK::u64)::usize;
-        var span:  usize      = pool.CHUNK - start;
-        if (span > length - done) { span = length - done; }
-        memory.copy[u8](?output[done], ?slot.data[start], span);
-        done = done + span;
-    }
 }
 
 fun receive_cap(limit: u64) usize {
@@ -1210,12 +959,13 @@ pub fun write(manager: *Manager, value: Handle, data: *u8, length: usize) WriteR
     if (count::u64 > connection_allowance)           { count = connection_allowance::usize; }
     if (count::u64 > varint.MAX - stream.send_write) { count = (varint.MAX - stream.send_write)::usize; }
     # bytes go into chunks taken on demand; a refused chunk ends the write there
-    val wanted:      usize = count;
-    var chunk_short: bool  = false;
-    var written:     usize = 0;
+    val wanted:      usize         = count;
+    var chunk_short: bool          = false;
+    var written:     usize         = 0;
+    var from:        ranges.Source = source(manager, pool.SEND);
     for (written < wanted) {
-        val offset: u64        = stream.send_write + written::u64;
-        val slot:   *ChunkSlot = chunk_ensure(manager, ?stream.send.chunks, pool.SEND, offset);
+        val offset: u64          = stream.send_write + written::u64;
+        val slot:   *chunks.Slot = chunks.ensure(?stream.send.chunks, ?from, offset);
         if (slot == nil) {
             chunk_short = true;
             brk;
@@ -1507,9 +1257,9 @@ pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: b
         if (cursor < stream.send_write) {
             var limit: u64 = ranges.gap_end(?stream.send.ranges, cursor, stream.send_write);
             if (!probe) { limit = next_inflight_start(manager, value.index, cursor, limit); }
-            val room: u64 = pool.CHUNK::u64 - cursor % pool.CHUNK::u64;
+            val room: u64 = chunks.room(cursor);
             if (limit - cursor > room) { limit = cursor + room; }
-            val slot: *ChunkSlot = chunk_find(?stream.send.chunks, cursor >> CHUNK_SHIFT);
+            val slot: *chunks.Slot = chunks.find(?stream.send.chunks, chunks.number_of(cursor));
             if (slot != nil) {
                 offset      = cursor;
                 length      = minimum_size(maximum_bytes, (limit - cursor)::usize);
@@ -1680,7 +1430,7 @@ fun reclaim_send(manager: *Manager, index: usize) {
         stream.send_base = stream.send_write;
         ranges.clear(?stream.send.ranges, ?from);
     }
-    chunk_release_below(manager, ?stream.send.chunks, pool.SEND, stream.send_base);
+    chunks.release_below(?stream.send.chunks, ?from, stream.send_base);
     if (stream.send_write - stream.send_base < manager.storage.send_buffer_limit::u64) {
         clear_blocked(manager, index, BLOCKED_STORAGE);
     }
@@ -1950,12 +1700,11 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
         copy_offset = copy_offset + skipped;
         copy_start  = skipped::usize;
     }
-    val copy_length: usize = length - copy_start;
-    val storing:     bool  = !discarding && copy_length > 0;
-    var reserved:    Reserved;
+    val copy_length: usize         = length - copy_start;
+    val storing:     bool          = !discarding && copy_length > 0;
+    var reserved:    chunks.Reserved;
+    var from:        ranges.Source = source(manager, pool.RECEIVE);
     if (storing) {
-        val first: u64 = copy_offset >> CHUNK_SHIFT;
-        val last:  u64 = (ending - 1) >> CHUNK_SHIFT;
         if (!provisional) {
             val current: *Stream = ?manager.storage.streams[index];
             # a frame that would fragment the stream past its cap is refused
@@ -1965,22 +1714,23 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
                 manager.receive_storage_refusals = manager.receive_storage_refusals + 1;
                 ret receive_error(ERROR_STORAGE);
             }
-            if (receive_conflicts(current, copy_offset, ?data[copy_start], copy_length)) {
+            if (chunks.conflicts(?current.receive.chunks, ?current.receive.ranges,
+                copy_offset, ?data[copy_start], copy_length)) {
                 ret receive_error(ERROR_DATA_CONFLICT);
             }
-            if (!reserve_receive(manager, ?current.receive.chunks, first, last, ?reserved)) {
+            if (!chunks.reserve(?current.receive.chunks, ?from, copy_offset, copy_length,
+                ?reserved)) {
                 manager.receive_storage_refusals = manager.receive_storage_refusals + 1;
                 ret receive_error(ERROR_STORAGE);
             }
-            var from: ranges.Source = source(manager, pool.RECEIVE);
             if (ranges.insert(?current.receive.ranges, copy_offset, ending, ?from) !=
                 ranges.STATUS_OK) {
-                reserve_cancel(manager, ?reserved);
+                chunks.cancel(?from, ?reserved);
                 manager.receive_storage_refusals = manager.receive_storage_refusals + 1;
                 ret receive_error(ERROR_STORAGE);
             }
         }
-        or (!reserve_receive(manager, nil, first, last, ?reserved)) {
+        or (!chunks.reserve(nil, ?from, copy_offset, copy_length, ?reserved)) {
             manager.receive_storage_refusals = manager.receive_storage_refusals + 1;
             ret receive_error(ERROR_STORAGE);
         }
@@ -1990,7 +1740,7 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
         val before:  usize        = manager.active_streams;
         val created: CreateResult = peer_open(manager, id);
         if (created.status != STATUS_OK) {
-            if (storing) { reserve_cancel(manager, ?reserved); }
+            if (storing) { chunks.cancel(?from, ?reserved); }
             ret receive_error(created.error);
         }
         index       = created.handle.index;
@@ -1998,13 +1748,12 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
     }
     val stream: *Stream = ?manager.storage.streams[index];
     if (storing) {
-        reserve_commit(?stream.receive.chunks, ?reserved);
+        chunks.commit(?stream.receive.chunks, ?reserved);
         if (provisional) {
             # an empty set takes one interval inline, so this cannot refuse
-            var from: ranges.Source = source(manager, pool.RECEIVE);
             ranges.insert(?stream.receive.ranges, copy_offset, ending, ?from);
         }
-        buffer_write(?stream.receive.chunks, copy_offset, ?data[copy_start], copy_length);
+        chunks.write(?stream.receive.chunks, copy_offset, ?data[copy_start], copy_length);
     }
     if (ending > stream.receive_highest) { stream.receive_highest = ending; }
     manager.receive_committed = manager.receive_committed + delta;
@@ -2181,14 +1930,13 @@ pub fun read(manager: *Manager, value: Handle, output: *u8, capacity: usize) Rea
     if (available > capacity::u64) { available = capacity::u64; }
     val count: usize = available::usize;
     if (count > 0) {
-        buffer_read(?stream.receive.chunks, stream.receive_read, output, count);
+        chunks.read(?stream.receive.chunks, stream.receive_read, output, count);
     }
     stream.receive_read = stream.receive_read + count::u64;
     if (count > 0) {
         var from: ranges.Source = source(manager, pool.RECEIVE);
         ranges.drop_prefix(?stream.receive.ranges, stream.receive_read, ?from);
-        chunk_release_below(manager, ?stream.receive.chunks, pool.RECEIVE,
-            stream.receive_read);
+        chunks.release_below(?stream.receive.chunks, ?from, stream.receive_read);
     }
     stream.receive_uncredited = stream.receive_uncredited + count::u64;
     if (stream.final_known && stream.receive_read == stream.final_size) {
