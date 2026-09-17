@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- An acknowledged MTU probe, or a black-hole MTU reduction, no longer fails a connection whose congestion window has grown past ten datagrams (#129). The pacer was reconfigured with the live window as its burst, which the pacer refuses above its cap. The burst now derives from the datagram size at every call site.
+- A failure while settling one recovery event no longer strands the owners of the events after it (#130). The connection still fails, but every owner is released and every event settled. A draining connection reaches CLOSED even when a step fails, so `finish_close` completes.
+
 ## [0.9.1] - 2026-09-16
 
 ### Fixed
