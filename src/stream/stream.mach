@@ -1430,7 +1430,8 @@ fun reclaim_send(manager: *Manager, index: usize) {
         stream.send_base = stream.send_write;
         ranges.clear(?stream.send.ranges, ?from);
     }
-    chunks.release_below(?stream.send.chunks, ?from, stream.send_base);
+    chunks.release_consumed(?stream.send.chunks, ?from, stream.send_base,
+        stream.send_base == stream.send_write);
     if (stream.send_write - stream.send_base < manager.storage.send_buffer_limit::u64) {
         clear_blocked(manager, index, BLOCKED_STORAGE);
     }
@@ -1936,7 +1937,8 @@ pub fun read(manager: *Manager, value: Handle, output: *u8, capacity: usize) Rea
     if (count > 0) {
         var from: ranges.Source = source(manager, pool.RECEIVE);
         ranges.drop_prefix(?stream.receive.ranges, stream.receive_read, ?from);
-        chunks.release_below(?stream.receive.chunks, ?from, stream.receive_read);
+        chunks.release_consumed(?stream.receive.chunks, ?from, stream.receive_read,
+            ranges.empty(?stream.receive.ranges));
     }
     stream.receive_uncredited = stream.receive_uncredited + count::u64;
     if (stream.final_known && stream.receive_read == stream.final_size) {

@@ -145,9 +145,10 @@ test "quic.stream.simulated: exact send budgets and duplicate transmissions reta
     # duplicate still references it in flight
     if (stream.on_terminal(?manager, first.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
         records[opened.handle.index].send_base != 4 || test_account().used[0] != 1) { ret 1; }
-    # the stream keeps its partly used chunk for the bytes it writes next
+    # everything written is delivered and nothing is in flight, so the partly
+    # used chunk goes too and the next write takes a fresh one
     if (stream.on_terminal(?manager, duplicate.token, stream.TERMINAL_LOST).status != stream.STATUS_OK ||
-        records[opened.handle.index].send_base != 4 || test_account().used[0] != 1) { ret 1; }
+        records[opened.handle.index].send_base != 4 || test_account().used[0] != 0) { ret 1; }
 
     if (stream.update_max_stream_data(?manager, opened.handle, 8).status != stream.STATUS_OK) { ret 1; }
     val second_write: stream.WriteResult = stream.write(?manager, opened.handle, ?data[4], 4);
@@ -603,7 +604,7 @@ test "quic.stream.simulated: a send reserved across a ring lap never claims the 
     if (stream.on_terminal(?manager, reserved.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
         records[0].send_base != 16) { ret 9; }
     if (stream.on_terminal(?manager, next.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
-        records[0].send_base != 32 || test_account().used[0] != 1 ||
+        records[0].send_base != 32 || test_account().used[0] != 0 ||
         manager.active_attempts != 0) { ret 10; }
     ret 0;
 }

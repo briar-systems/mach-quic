@@ -316,6 +316,15 @@ pub fun release_from(chunks: *Chunks, from: *ranges.Source, number: u64) {
     shrink(chunks, from);
 }
 
+# releases what lies below a consumed prefix. once nothing past the prefix is
+# held, the partly used chunk at its end goes too, since later bytes take a
+# fresh chunk at their own number
+pub fun release_consumed(chunks: *Chunks, from: *ranges.Source, prefix: u64,
+    drained: bool) {
+    if (drained) { release_all(chunks, from); }
+    or           { release_below(chunks, from, prefix); }
+}
+
 # releases every chunk nothing retains. a retained chunk stays until settled
 pub fun release_all(chunks: *Chunks, from: *ranges.Source) {
     release_below(chunks, from, 0 - 1::u64);
