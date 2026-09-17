@@ -984,12 +984,8 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ranges[34] = ownership.array(paths.storage.sends::*u8,
         paths.storage.send_capacity, $size_of(path_api.SendReservation),
         ownership.ZERO_FORBIDDEN);
-    ranges[35] = ownership.array(streams.storage.streams::*u8,
-        streams.storage.stream_capacity, $size_of(stream_api.Stream),
-        ownership.ZERO_FORBIDDEN);
-    ranges[36] = ownership.array(streams.storage.attempts::*u8,
-        streams.storage.attempt_capacity, $size_of(stream_api.Attempt),
-        ownership.ZERO_FORBIDDEN);
+    ranges[35] = stream_api.lent_records(streams.storage);
+    ranges[36] = stream_api.lent_attempts(streams.storage);
     var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
     if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
     ranges[37] = ownership.array(datagrams.storage.send_entries::*u8,
@@ -2160,6 +2156,16 @@ fun frame_allowed(core: *Core, level: handshake_api.Level,
     ret true;
 }
 
+# a frame that would open streams or store bytes the pool refuses leaves its
+# packet unacknowledged, so the peer sends it again
+fun stream_refusal(core: *Core, error: u8) bool {
+    if (error == stream_api.ERROR_STORAGE) {
+        core.packet_refused = true;
+        ret true;
+    }
+    ret stream_failure(core, error);
+}
+
 fun stream_failure(core: *Core, error: u8) bool {
     if (error == stream_api.ERROR_STREAM_LIMIT) {
         core.close_error = STREAM_LIMIT_ERROR;
@@ -2238,24 +2244,20 @@ fun process_frame(core: *Core, secrets: *Secrets,
             core.streams, core.config.source, value.stream_id, value.offset, value.data.data,
             value.data.len, value.fin);
         if (received.ok) { ret true; }
-        if (received.error == stream_api.ERROR_STORAGE) {
-            core.packet_refused = true;
-            ret true;
-        }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.RESET_STREAM) {
         val received: stream_api.ReceiveResult = stream_api.receive_reset_scoped(
             core.streams, core.config.source, value.stream_id, value.error_code,
             value.final_size);
         if (received.ok) { ret true; }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.STOP_SENDING) {
         val received: stream_api.ReceiveResult = stream_api.receive_stop_scoped(
             core.streams, core.config.source, value.stream_id, value.error_code);
         if (received.ok) { ret true; }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.MAX_DATA) {
         val received: stream_api.OperationResult = stream_api.update_max_data_scoped(
@@ -2268,7 +2270,7 @@ fun process_frame(core: *Core, secrets: *Secrets,
             stream_api.receive_max_stream_data_scoped(core.streams, core.config.source, value.stream_id,
             value.maximum);
         if (received.ok) { ret true; }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.MAX_STREAMS_BIDI || value.kind == frame.MAX_STREAMS_UNI) {
         var direction: u8 = stream_api.DIRECTION_UNIDIRECTIONAL;
@@ -2291,7 +2293,7 @@ fun process_frame(core: *Core, secrets: *Secrets,
             stream_api.receive_stream_data_blocked_scoped(core.streams, core.config.source,
             value.stream_id, value.maximum);
         if (received.ok) { ret true; }
-        ret stream_failure(core, received.error);
+        ret stream_refusal(core, received.error);
     }
     if (value.kind == frame.STREAMS_BLOCKED_BIDI ||
         value.kind == frame.STREAMS_BLOCKED_UNI) {
@@ -3349,12 +3351,8 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
 
     var stream_index: usize = 0;
     for (stream_index < core.streams.storage.stream_capacity) {
-        val stream: *stream_api.Stream = ?core.streams.storage.streams[stream_index];
-        if (stream.active) {
-            val handle: stream_api.Handle = stream_api.Handle{
-                source:     core.streams.config.source, index: stream_index,
-                generation: stream.generation, id: stream.id
-            };
+        val handle: stream_api.Handle = stream_api.handle_at(core.streams, stream_index);
+        if (handle.source != 0) {
             val prepared: stream_api.Prepared = stream_api.prepare_scoped(core.streams, core.config.source,
                 handle, maximum, core.probes_remaining > 0);
             if (prepared.status == stream_api.STATUS_OK) {

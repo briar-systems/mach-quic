@@ -67,6 +67,11 @@ val RANGE_FLOOR:          usize = 32;
 # no stream, for the intrusive lists below
 val NO_STREAM: usize = 0xffffffffffffffff;
 
+# records and attempts left unlent are taken from the pool a chunk at a time
+pub val RECORDS_PER_BLOCK:  usize = pool.CHUNK / $size_of(Stream);
+pub val RECORD_BLOCKS:      usize = 8;
+pub val ATTEMPTS_PER_BLOCK: usize = pool.CHUNK / $size_of(Attempt);
+
 # news an owner can act on for one stream
 pub val READY_READABLE: u8 = 1;
 pub val READY_WRITABLE: u8 = 2;
@@ -177,6 +182,8 @@ pub rec Attempt {
     fin:               bool;
 }
 
+# streams, attempts: lent for the manager's lifetime, or nil to take them from
+#                    the pool while they are in use
 # chunks:            where every stream's bytes come from
 # account:           whose budget they count against
 # send_buffer_limit: bytes a stream may hold written and unacknowledged
@@ -223,9 +230,18 @@ pub rec Manager {
     ack_record_refusals: u64;
     # received frames refused for storage before their packet was acknowledged
     receive_storage_refusals: u64;
-    core_lease:               u64;
-    valid:                    bool;
-    closing:                  bool;
+    # records and attempts taken from the pool, and how many are in use
+    record_blocks: [RECORD_BLOCKS]chunks.Block;
+    record_live:   [RECORD_BLOCKS]usize;
+    attempt_block: chunks.Block;
+    attempts_live: usize;
+    # generations are the manager's, so a record or attempt taken again from a
+    # fresh chunk never matches a token issued before
+    stream_generation:  u64;
+    attempt_generation: u64;
+    core_lease:         u64;
+    valid:              bool;
+    closing:            bool;
 }
 
 pub rec Handle {
@@ -372,12 +388,33 @@ fun valid_config(config: Config, storage: Storage) bool {
     if (storage.stream_capacity == 0 || storage.attempt_capacity == 0 ||
         storage.chunks == nil || storage.account == nil || !storage.account.open ||
         storage.account.pool != storage.chunks || storage.send_buffer_limit == 0) { ret false; }
+    if ((storage.streams == nil &&
+        storage.stream_capacity > RECORDS_PER_BLOCK * RECORD_BLOCKS) ||
+        (storage.attempts == nil && storage.attempt_capacity > ATTEMPTS_PER_BLOCK)) {
+        ret false;
+    }
     var ranges: [2]ownership.Range;
-    ranges[0] = ownership.array(storage.streams::*u8, storage.stream_capacity,
-        $size_of(Stream), ownership.ZERO_FORBIDDEN);
-    ranges[1] = ownership.array(storage.attempts::*u8, storage.attempt_capacity,
-        $size_of(Attempt), ownership.ZERO_FORBIDDEN);
+    ranges[0] = lent_records(storage);
+    ranges[1] = lent_attempts(storage);
     ret ownership.all_disjoint(?ranges[0], 2);
+}
+
+# the caller-lent record array, empty when records come from the pool
+pub fun lent_records(storage: Storage) ownership.Range {
+    if (storage.streams == nil) {
+        ret ownership.array(nil::*u8, 0, $size_of(Stream), ownership.ZERO_ALLOWED);
+    }
+    ret ownership.array(storage.streams::*u8, storage.stream_capacity,
+        $size_of(Stream), ownership.ZERO_FORBIDDEN);
+}
+
+# the caller-lent attempt array, empty when attempts come from the pool
+pub fun lent_attempts(storage: Storage) ownership.Range {
+    if (storage.attempts == nil) {
+        ret ownership.array(nil::*u8, 0, $size_of(Attempt), ownership.ZERO_ALLOWED);
+    }
+    ret ownership.array(storage.attempts::*u8, storage.attempt_capacity,
+        $size_of(Attempt), ownership.ZERO_FORBIDDEN);
 }
 
 fun next_generation(value: u64) u64 {
@@ -390,24 +427,22 @@ pub fun initialize(manager: *Manager, config: Config, storage: Storage) bool {
     var ranges: [3]ownership.Range;
     ranges[0] = ownership.bytes((?manager.config)::*u8, $size_of(Manager),
         ownership.ZERO_FORBIDDEN);
-    ranges[1] = ownership.array(storage.streams::*u8, storage.stream_capacity,
-        $size_of(Stream), ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(storage.attempts::*u8, storage.attempt_capacity,
-        $size_of(Attempt), ownership.ZERO_FORBIDDEN);
+    ranges[1] = lent_records(storage);
+    ranges[2] = lent_attempts(storage);
     if (!ownership.all_disjoint(?ranges[0], 3) || manager.valid ||
         !valid_config(config, storage)) { ret false; }
     var candidate: Manager;
     candidate.config  = config;
     candidate.storage = storage;
     var i: usize = 0;
-    for (i < storage.stream_capacity) {
-        storage.streams[i].generation = 1;
+    for (storage.streams != nil && i < storage.stream_capacity) {
+        storage.streams[i].generation = 0;
         storage.streams[i].active     = false;
         i                             = i + 1;
     }
     i = 0;
-    for (i < storage.attempt_capacity) {
-        storage.attempts[i].generation = 1;
+    for (storage.attempts != nil && i < storage.attempt_capacity) {
+        storage.attempts[i].generation = 0;
         storage.attempts[i].state      = ATTEMPT_FREE;
         i                              = i + 1;
     }
@@ -450,42 +485,167 @@ fun borrowed_disjoint(manager: *Manager, borrowed: ownership.Range) bool {
     if (!manager_record_valid(manager) || !borrowed.valid ||
         !ownership.disjoint(borrowed, ownership.bytes((?manager.config)::*u8,
         $size_of(Manager), ownership.ZERO_FORBIDDEN))) { ret false; }
-    ret ownership.disjoint(borrowed, ownership.array(manager.storage.streams::*u8,
-        manager.storage.stream_capacity, $size_of(Stream),
-        ownership.ZERO_FORBIDDEN)) &&
-        ownership.disjoint(borrowed, ownership.array(manager.storage.attempts::*u8,
-        manager.storage.attempt_capacity, $size_of(Attempt),
-        ownership.ZERO_FORBIDDEN));
+    ret ownership.disjoint(borrowed, lent_records(manager.storage)) &&
+        ownership.disjoint(borrowed, lent_attempts(manager.storage));
+}
+
+# the record at `index`, or nil when its chunk is not held
+fun record(manager: *Manager, index: usize) *Stream {
+    if (index >= manager.storage.stream_capacity) { ret nil; }
+    if (manager.storage.streams != nil)           { ret ?manager.storage.streams[index]; }
+    val block: *u8 = manager.record_blocks[index / RECORDS_PER_BLOCK].data;
+    if (block == nil) { ret nil; }
+    ret ?(block::*Stream)[index % RECORDS_PER_BLOCK];
+}
+
+# the record at `index` when it holds a live stream
+fun live(manager: *Manager, index: usize) *Stream {
+    val stream: *Stream = record(manager, index);
+    if (stream == nil || !stream.active) { ret nil; }
+    ret stream;
+}
+
+fun record_source(manager: *Manager) ranges.Source {
+    ret source(manager, pool.SEND);
+}
+
+# records the block at `block` can hold within the capacity
+fun block_records(manager: *Manager, block: usize) usize {
+    val first: usize = block * RECORDS_PER_BLOCK;
+    if (first >= manager.storage.stream_capacity) { ret 0; }
+    ret minimum_size(RECORDS_PER_BLOCK, manager.storage.stream_capacity - first);
+}
+
+# holds enough free records for `count` new streams, or takes nothing
+fun ensure_records(manager: *Manager, count: usize) bool {
+    if (manager.storage.streams != nil) { ret true; }
+    var free:  usize = 0;
+    var block: usize = 0;
+    for (block < RECORD_BLOCKS) {
+        if (manager.record_blocks[block].data != nil) {
+            free = free + block_records(manager, block) - manager.record_live[block];
+        }
+        block = block + 1;
+    }
+    var from:  ranges.Source = record_source(manager);
+    var taken: [RECORD_BLOCKS]bool;
+    block = 0;
+    for (free < count && block < RECORD_BLOCKS) {
+        if (manager.record_blocks[block].data == nil && block_records(manager, block) > 0) {
+            if (!chunks.take_block(?from, ?manager.record_blocks[block])) { brk; }
+            taken[block] = true;
+            free         = free + block_records(manager, block);
+        }
+        block = block + 1;
+    }
+    if (free >= count) { ret true; }
+    block = 0;
+    for (block < RECORD_BLOCKS) {
+        if (taken[block]) { chunks.give_block(?from, ?manager.record_blocks[block]); }
+        block = block + 1;
+    }
+    ret false;
+}
+
+fun record_taken(manager: *Manager, index: usize) {
+    if (manager.storage.streams != nil) { ret; }
+    val block: usize = index / RECORDS_PER_BLOCK;
+    manager.record_live[block] = manager.record_live[block] + 1;
+}
+
+# a record that no longer holds a stream, whose chunk goes back once empty
+fun record_dropped(manager: *Manager, index: usize) {
+    if (manager.storage.streams != nil) { ret; }
+    val block: usize = index / RECORDS_PER_BLOCK;
+    if (manager.record_live[block] > 0) {
+        manager.record_live[block] = manager.record_live[block] - 1;
+    }
+    if (manager.record_live[block] == 0) {
+        var from: ranges.Source = record_source(manager);
+        chunks.give_block(?from, ?manager.record_blocks[block]);
+    }
+}
+
+# the attempt at `index`, or nil when its chunk is not held
+fun attempt_at(manager: *Manager, index: usize) *Attempt {
+    if (index >= manager.storage.attempt_capacity) { ret nil; }
+    if (manager.storage.attempts != nil)           { ret ?manager.storage.attempts[index]; }
+    val block: *u8 = manager.attempt_block.data;
+    if (block == nil) { ret nil; }
+    ret ?(block::*Attempt)[index];
+}
+
+fun attempt_free(manager: *Manager, index: usize) bool {
+    val attempt: *Attempt = attempt_at(manager, index);
+    ret attempt == nil || attempt.state == ATTEMPT_FREE;
+}
+
+# the first free attempt index, or the capacity when none is
+fun free_attempt_index(manager: *Manager) usize {
+    var index: usize = 0;
+    for (index < manager.storage.attempt_capacity && !attempt_free(manager, index)) {
+        index = index + 1;
+    }
+    ret index;
+}
+
+# takes the free attempt at `index` under a new generation, or nil when its
+# chunk is refused
+fun occupy_attempt(manager: *Manager, index: usize) *Attempt {
+    if (manager.storage.attempts == nil && manager.attempt_block.data == nil) {
+        var from: ranges.Source = record_source(manager);
+        if (!chunks.take_block(?from, ?manager.attempt_block)) { ret nil; }
+    }
+    val attempt: *Attempt = attempt_at(manager, index);
+    var clean:   Attempt;
+    manager.attempt_generation = next_generation(manager.attempt_generation);
+    clean.generation           = manager.attempt_generation;
+    @attempt                   = clean;
+    manager.attempts_live      = manager.attempts_live + 1;
+    ret attempt;
 }
 
 fun handle(manager: *Manager, index: usize) Handle {
     var value: Handle;
     value.source     = manager.config.source;
     value.index      = index;
-    value.generation = manager.storage.streams[index].generation;
-    value.id         = manager.storage.streams[index].id;
+    value.generation = record(manager, index).generation;
+    value.id         = record(manager, index).id;
     ret value;
 }
 
 fun valid_handle(manager: *Manager, value: Handle) bool {
     if (!manager_record_valid(manager) || !manager.valid || value.source != manager.config.source ||
         value.index >= manager.storage.stream_capacity) { ret false; }
-    val stream: *Stream = ?manager.storage.streams[value.index];
-    ret stream.active && stream.generation == value.generation && stream.id == value.id;
+    val stream: *Stream = live(manager, value.index);
+    ret stream != nil && stream.generation == value.generation && stream.id == value.id;
 }
 
 fun stream_index(manager: *Manager, id: u64) usize {
     var i: usize = 0;
     for (i < manager.storage.stream_capacity) {
-        if (manager.storage.streams[i].active && manager.storage.streams[i].id == id) { ret i; }
+        val stream: *Stream = live(manager, i);
+        if (stream != nil && stream.id == id) { ret i; }
         i = i + 1;
     }
     ret manager.storage.stream_capacity;
 }
 
+# a free record for one new stream, taking a chunk when needed
+fun free_index_ready(manager: *Manager) usize {
+    if (manager.active_streams >= manager.storage.stream_capacity ||
+        !ensure_records(manager, 1)) { ret manager.storage.stream_capacity; }
+    ret free_index(manager);
+}
+
+# the first record held and free, or the capacity
 fun free_index(manager: *Manager) usize {
     var i: usize = 0;
-    for (i < manager.storage.stream_capacity && manager.storage.streams[i].active) { i = i + 1; }
+    for (i < manager.storage.stream_capacity) {
+        val stream: *Stream = record(manager, i);
+        if (stream != nil && !stream.active) { brk; }
+        i = i + 1;
+    }
     ret i;
 }
 
@@ -526,31 +686,32 @@ fun receive_limit(config: Config, local: bool, uni: bool) u64 {
 }
 
 fun initialize_stream(manager: *Manager, index: usize, id: u64, local: bool, accepted: bool) {
-    val generation: u64 = manager.storage.streams[index].generation;
-    var stream:     Stream;
-    stream.id                      = id;
-    stream.generation              = generation;
-    stream.active                  = true;
-    stream.local                   = local;
-    stream.unidirectional          = unidirectional(id);
-    stream.accepted                = accepted;
-    stream.can_send                = !stream.unidirectional || local;
-    stream.can_receive             = !stream.unidirectional || !local;
-    stream.send_closed             = !stream.can_send;
-    stream.receive_closed          = !stream.can_receive;
-    stream.send_limit              = send_limit(manager.config, local, stream.unidirectional);
-    stream.receive_limit           = receive_limit(manager.config, local, stream.unidirectional);
-    stream.receive_advertised      = stream.receive_limit;
-    stream.accept_sequence         = manager.accept_sequence;
-    manager.accept_sequence        = manager.accept_sequence + 1;
-    stream.ready_prev              = NO_STREAM;
-    stream.ready_next              = NO_STREAM;
-    stream.blocked_prev            = NO_STREAM;
-    stream.blocked_next            = NO_STREAM;
-    stream.send.ranges             = ranges.make(ranges.SPILL_CAPACITY);
-    stream.receive.ranges          = ranges.make(receive_cap(stream.receive_limit));
-    manager.storage.streams[index] = stream;
-    manager.active_streams         = manager.active_streams + 1;
+    manager.stream_generation = next_generation(manager.stream_generation);
+    var stream: Stream;
+    stream.id                 = id;
+    stream.generation         = manager.stream_generation;
+    stream.active             = true;
+    stream.local              = local;
+    stream.unidirectional     = unidirectional(id);
+    stream.accepted           = accepted;
+    stream.can_send           = !stream.unidirectional || local;
+    stream.can_receive        = !stream.unidirectional || !local;
+    stream.send_closed        = !stream.can_send;
+    stream.receive_closed     = !stream.can_receive;
+    stream.send_limit         = send_limit(manager.config, local, stream.unidirectional);
+    stream.receive_limit      = receive_limit(manager.config, local, stream.unidirectional);
+    stream.receive_advertised = stream.receive_limit;
+    stream.accept_sequence    = manager.accept_sequence;
+    manager.accept_sequence   = manager.accept_sequence + 1;
+    stream.ready_prev         = NO_STREAM;
+    stream.ready_next         = NO_STREAM;
+    stream.blocked_prev       = NO_STREAM;
+    stream.blocked_next       = NO_STREAM;
+    stream.send.ranges        = ranges.make(ranges.SPILL_CAPACITY);
+    stream.receive.ranges     = ranges.make(receive_cap(stream.receive_limit));
+    @record(manager, index)   = stream;
+    record_taken(manager, index);
+    manager.active_streams = manager.active_streams + 1;
 }
 
 fun create_error(code: u8) CreateResult {
@@ -560,8 +721,26 @@ fun create_error(code: u8) CreateResult {
     ret result;
 }
 
+# whether no attempt is reserved or in flight
+pub fun attempts_drained(manager: *Manager) bool {
+    if (!manager_record_valid(manager) || manager.active_attempts != 0) { ret false; }
+    var i: usize = 0;
+    for (i < manager.storage.attempt_capacity) {
+        if (!attempt_free(manager, i)) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# the handle of the live stream at `index`, with source 0 when there is none
+pub fun handle_at(manager: *Manager, index: usize) Handle {
+    var none: Handle;
+    if (!manager_record_valid(manager) || live(manager, index) == nil) { ret none; }
+    ret handle(manager, index);
+}
+
 fun at_stream(manager: *Manager, index: usize) *Stream {
-    ret ?manager.storage.streams[index];
+    ret record(manager, index);
 }
 
 # queues news for a stream the owner already knows. a stream still waiting for
@@ -699,7 +878,7 @@ pub fun open(manager: *Manager, direction: u8) CreateResult {
         blocked.stream_limit_blocked = true;
         ret blocked;
     }
-    val index: usize = free_index(manager);
+    val index: usize = free_index_ready(manager);
     if (index == manager.storage.stream_capacity) {
         var blocked: CreateResult = create_error(ERROR_CAPACITY);
         blocked.status          = STATUS_BLOCKED;
@@ -742,6 +921,11 @@ fun peer_open(manager: *Manager, id: u64) CreateResult {
     if (needed > manager.storage.stream_capacity::u64 - manager.active_streams::u64) {
         ret create_error(ERROR_CAPACITY);
     }
+    # records for every stream the frame opens, or the frame is refused
+    if (!ensure_records(manager, needed::usize)) {
+        manager.receive_storage_refusals = manager.receive_storage_refusals + 1;
+        ret create_error(ERROR_STORAGE);
+    }
     var created:   u64 = 0;
     var requested: Handle;
     var initiator: u64 = 0;
@@ -769,8 +953,8 @@ pub fun accept(manager: *Manager) CreateResult {
     var sequence: u64   = 0;
     var i:        usize = 0;
     for (i < manager.storage.stream_capacity) {
-        val stream: Stream = manager.storage.streams[i];
-        if (stream.active && !stream.local && !stream.accepted &&
+        val stream: *Stream = live(manager, i);
+        if (stream != nil && !stream.local && !stream.accepted &&
             (chosen == manager.storage.stream_capacity || stream.accept_sequence < sequence)) {
             chosen   = i;
             sequence = stream.accept_sequence;
@@ -782,7 +966,7 @@ pub fun accept(manager: *Manager) CreateResult {
         empty.status = STATUS_EMPTY;
         ret empty;
     }
-    manager.storage.streams[chosen].accepted = true;
+    record(manager, chosen).accepted = true;
     # news that arrived before accept was skipped, so it is queued now
     val accepted: *Stream = at_stream(manager, chosen);
     var news:     u8      = 0;
@@ -852,7 +1036,7 @@ pub fun apply_peer_limits(manager: *Manager, max_data: u64,
 
 pub fun update_max_stream_data(manager: *Manager, value: Handle, maximum: u64) OperationResult {
     if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     if (!stream.can_send)     { ret operation_error(ERROR_DIRECTION); }
     if (maximum > varint.MAX) { ret operation_error(ERROR_OVERFLOW); }
     if (maximum > stream.send_limit) {
@@ -891,7 +1075,7 @@ pub fun receive_max_stream_data(manager: *Manager, id: u64, maximum: u64) Receiv
         index       = created.handle.index;
         new_streams = manager.active_streams - before;
     }
-    val stream: *Stream = ?manager.storage.streams[index];
+    val stream: *Stream = record(manager, index);
     if (!stream.can_send) { ret receive_error(ERROR_DIRECTION); }
     if (maximum > stream.send_limit) {
         stream.send_limit = maximum;
@@ -930,7 +1114,7 @@ pub fun write(manager: *Manager, value: Handle, data: *u8, length: usize) WriteR
         result.error  = ERROR_TOKEN;
         ret result;
     }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     if (!stream.can_send) {
         result.status = STATUS_ERROR;
         result.error  = ERROR_DIRECTION;
@@ -998,7 +1182,7 @@ pub fun write(manager: *Manager, value: Handle, data: *u8, length: usize) WriteR
 
 pub fun finish(manager: *Manager, value: Handle) OperationResult {
     if (!valid_handle(manager, value) || manager.closing) { ret operation_error(ERROR_TOKEN); }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     if (!stream.can_send)                              { ret operation_error(ERROR_DIRECTION); }
     if (stream.send_cancelled || stream.stop_received) { ret operation_error(ERROR_CANCELLED); }
     if (!stream.send_finished) {
@@ -1021,7 +1205,7 @@ fun cancel_send_inner(stream: *Stream, error_code: u64) {
 pub fun cancel_send(manager: *Manager, value: Handle, error_code: u64) OperationResult {
     if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
     if (error_code > varint.MAX)       { ret operation_error(ERROR_OVERFLOW); }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     if (!stream.can_send) { ret operation_error(ERROR_DIRECTION); }
     if (!stream.send_closed && !stream.send_cancelled) {
         cancel_send_inner(stream, error_code);
@@ -1059,13 +1243,13 @@ fun reconcile_uncredited(manager: *Manager, stream: *Stream) {
 }
 
 fun clear_receive(manager: *Manager, index: usize) {
-    buffer_release(manager, ?manager.storage.streams[index].receive, pool.RECEIVE);
+    buffer_release(manager, ?record(manager, index).receive, pool.RECEIVE);
 }
 
 pub fun cancel_receive(manager: *Manager, value: Handle, error_code: u64) OperationResult {
     if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
     if (error_code > varint.MAX)       { ret operation_error(ERROR_OVERFLOW); }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     if (!stream.can_receive) { ret operation_error(ERROR_DIRECTION); }
     if (!stream.receive_closed && !stream.receive_cancelled) {
         val discarded: u64 = stream.receive_highest - stream.receive_read;
@@ -1088,21 +1272,26 @@ fun attempt_token(manager: *Manager, index: usize) AttemptToken {
     var value: AttemptToken;
     value.source     = manager.config.source;
     value.index      = index;
-    value.generation = manager.storage.attempts[index].generation;
+    value.generation = attempt_at(manager, index).generation;
     ret value;
 }
 
 fun valid_attempt(manager: *Manager, value: AttemptToken, state: u8) bool {
     if (!manager_record_valid(manager) || !manager.valid || value.source != manager.config.source ||
         value.index >= manager.storage.attempt_capacity) { ret false; }
-    val attempt: Attempt = manager.storage.attempts[value.index];
-    ret attempt.generation == value.generation && attempt.state == state;
+    val attempt: *Attempt = attempt_at(manager, value.index);
+    ret attempt != nil && attempt.generation == value.generation && attempt.state == state;
 }
 
 fun free_attempt(manager: *Manager, index: usize) {
-    val attempt: *Attempt = ?manager.storage.attempts[index];
+    val attempt: *Attempt = attempt_at(manager, index);
     attempt.state      = ATTEMPT_FREE;
-    attempt.generation = next_generation(attempt.generation);
+    attempt.generation = 0;
+    if (manager.attempts_live > 0) { manager.attempts_live = manager.attempts_live - 1; }
+    if (manager.attempts_live == 0 && manager.attempt_block.data != nil) {
+        var from: ranges.Source = record_source(manager);
+        chunks.give_block(?from, ?manager.attempt_block);
+    }
 }
 
 fun prepared_error(status: u8, code: u8) Prepared {
@@ -1130,8 +1319,8 @@ pub fun prepare_control(manager: *Manager) Prepared {
     or {
         var i: usize = 0;
         for (i < manager.storage.stream_capacity) {
-            val stream: *Stream = ?manager.storage.streams[i];
-            if (stream.active && stream.max_stream_data_pending) {
+            val stream: *Stream = live(manager, i);
+            if (stream != nil && stream.max_stream_data_pending) {
                 kind         = SEND_MAX_STREAM_DATA;
                 maximum      = stream.receive_limit;
                 stream_index = i;
@@ -1153,19 +1342,16 @@ pub fun prepare_control(manager: *Manager) Prepared {
         empty.status = STATUS_EMPTY;
         ret empty;
     }
-    var attempt_index: usize = 0;
-    for (attempt_index < manager.storage.attempt_capacity &&
-        manager.storage.attempts[attempt_index].state != ATTEMPT_FREE) {
-        attempt_index = attempt_index + 1;
-    }
+    val attempt_index: usize = free_attempt_index(manager);
     if (attempt_index == manager.storage.attempt_capacity) {
         ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY);
     }
-    val attempt: *Attempt = ?manager.storage.attempts[attempt_index];
+    val attempt: *Attempt = occupy_attempt(manager, attempt_index);
+    if (attempt == nil) { ret prepared_error(STATUS_BLOCKED, ERROR_STORAGE); }
     attempt.stream_index      = stream_index;
     attempt.stream_generation = 0;
     if (stream_index < manager.storage.stream_capacity) {
-        attempt.stream_generation = manager.storage.streams[stream_index].generation;
+        attempt.stream_generation = record(manager, stream_index).generation;
     }
     attempt.maximum          = maximum;
     attempt.kind             = kind;
@@ -1188,8 +1374,8 @@ pub fun prepare_control(manager: *Manager) Prepared {
 fun inflight_end(manager: *Manager, index: usize, offset: u64) u64 {
     var i: usize = 0;
     for (i < manager.storage.attempt_capacity) {
-        val attempt: *Attempt = ?manager.storage.attempts[i];
-        if (attempt.state == ATTEMPT_ACTIVE && attempt.kind == SEND_STREAM &&
+        val attempt: *Attempt = attempt_at(manager, i);
+        if (attempt != nil && attempt.state == ATTEMPT_ACTIVE && attempt.kind == SEND_STREAM &&
             attempt.stream_index == index && attempt.length > 0 &&
             attempt.offset <= offset && offset < attempt.offset + attempt.length::u64) {
             ret attempt.offset + attempt.length::u64;
@@ -1205,8 +1391,8 @@ fun next_inflight_start(manager: *Manager, index: usize, offset: u64, limit: u64
     var nearest: u64   = limit;
     var i:       usize = 0;
     for (i < manager.storage.attempt_capacity) {
-        val attempt: *Attempt = ?manager.storage.attempts[i];
-        if (attempt.state == ATTEMPT_ACTIVE && attempt.kind == SEND_STREAM &&
+        val attempt: *Attempt = attempt_at(manager, i);
+        if (attempt != nil && attempt.state == ATTEMPT_ACTIVE && attempt.kind == SEND_STREAM &&
             attempt.stream_index == index && attempt.length > 0 &&
             attempt.offset > offset && attempt.offset < nearest) {
             nearest = attempt.offset;
@@ -1219,12 +1405,9 @@ fun next_inflight_start(manager: *Manager, index: usize, offset: u64, limit: u64
 pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: bool) Prepared {
     if (!valid_handle(manager, value) || manager.closing ||
         manager.core_lease != 0) { ret prepared_error(STATUS_ERROR, ERROR_TOKEN); }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     if (stream.has_prepared) { ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY); }
-    var attempt_index: usize = 0;
-    for (attempt_index < manager.storage.attempt_capacity && manager.storage.attempts[attempt_index].state != ATTEMPT_FREE) {
-        attempt_index = attempt_index + 1;
-    }
+    val attempt_index: usize = free_attempt_index(manager);
     if (attempt_index == manager.storage.attempt_capacity) { ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY); }
     var kind:        u8    = 0;
     var offset:      u64   = 0;
@@ -1282,7 +1465,8 @@ pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: b
         empty.status = STATUS_EMPTY;
         ret empty;
     }
-    val attempt: *Attempt = ?manager.storage.attempts[attempt_index];
+    val attempt: *Attempt = occupy_attempt(manager, attempt_index);
+    if (attempt == nil) { ret prepared_error(STATUS_BLOCKED, ERROR_STORAGE); }
     attempt.stream_index      = value.index;
     attempt.stream_generation = value.generation;
     attempt.offset            = offset;
@@ -1319,7 +1503,7 @@ pub fun cancel_prepared(manager: *Manager, prepared: Prepared) OperationResult {
         stale.status = STATUS_STALE;
         ret stale;
     }
-    val attempt: Attempt = manager.storage.attempts[prepared.token.index];
+    val attempt: Attempt = @attempt_at(manager, prepared.token.index);
     if (attempt.kind >= SEND_MAX_DATA && attempt.kind <= SEND_MAX_STREAMS_UNI) {
         if (!manager.control_prepared) { ret operation_error(ERROR_STATE); }
         manager.control_prepared = false;
@@ -1329,7 +1513,7 @@ pub fun cancel_prepared(manager: *Manager, prepared: Prepared) OperationResult {
         ret cancelled;
     }
     if (attempt.stream_index < manager.storage.stream_capacity) {
-        val stream: *Stream = ?manager.storage.streams[attempt.stream_index];
+        val stream: *Stream = record(manager, attempt.stream_index);
         if (stream.active && stream.generation == attempt.stream_generation) { stream.has_prepared = false; }
     }
     free_attempt(manager, prepared.token.index);
@@ -1347,14 +1531,14 @@ pub fun publish(manager: *Manager, prepared: Prepared) OperationResult {
         stale.status = STATUS_STALE;
         ret stale;
     }
-    val attempt: *Attempt = ?manager.storage.attempts[prepared.token.index];
+    val attempt: *Attempt = attempt_at(manager, prepared.token.index);
     if (attempt.kind >= SEND_MAX_DATA && attempt.kind <= SEND_MAX_STREAMS_UNI) {
         if (!manager.control_prepared) { ret operation_error(ERROR_STATE); }
         if (attempt.kind == SEND_MAX_STREAM_DATA) {
             if (attempt.stream_index >= manager.storage.stream_capacity) {
                 ret operation_error(ERROR_TOKEN);
             }
-            val controlled: *Stream = ?manager.storage.streams[attempt.stream_index];
+            val controlled: *Stream = record(manager, attempt.stream_index);
             if (!controlled.active ||
                 controlled.generation != attempt.stream_generation) {
                 ret operation_error(ERROR_TOKEN);
@@ -1377,7 +1561,7 @@ pub fun publish(manager: *Manager, prepared: Prepared) OperationResult {
         ret published;
     }
     if (attempt.stream_index >= manager.storage.stream_capacity) { ret operation_error(ERROR_TOKEN); }
-    val stream: *Stream = ?manager.storage.streams[attempt.stream_index];
+    val stream: *Stream = record(manager, attempt.stream_index);
     if (!stream.active || stream.generation != attempt.stream_generation || !stream.has_prepared) {
         ret operation_error(ERROR_TOKEN);
     }
@@ -1420,7 +1604,7 @@ pub fun publish(manager: *Manager, prepared: Prepared) OperationResult {
 }
 
 fun reclaim_send(manager: *Manager, index: usize) {
-    val stream: *Stream       = ?manager.storage.streams[index];
+    val stream: *Stream       = record(manager, index);
     var from:   ranges.Source = source(manager, pool.SEND);
     var base:   u64           = ranges.covered_from(?stream.send.ranges, stream.send_base);
     if (base > stream.send_write) { base = stream.send_write; }
@@ -1447,7 +1631,7 @@ pub fun on_terminal(manager: *Manager, value: AttemptToken, terminal: u8) Operat
         stale.status = STATUS_STALE;
         ret stale;
     }
-    val attempt: Attempt = manager.storage.attempts[value.index];
+    val attempt: Attempt = @attempt_at(manager, value.index);
     if (attempt.kind >= SEND_MAX_DATA && attempt.kind <= SEND_MAX_STREAMS_UNI) {
         if (attempt.kind == SEND_MAX_DATA) {
             if (terminal == TERMINAL_ACKED &&
@@ -1461,7 +1645,7 @@ pub fun on_terminal(manager: *Manager, value: AttemptToken, terminal: u8) Operat
             if (attempt.stream_index >= manager.storage.stream_capacity) {
                 ret operation_error(ERROR_TOKEN);
             }
-            val controlled: *Stream = ?manager.storage.streams[attempt.stream_index];
+            val controlled: *Stream = record(manager, attempt.stream_index);
             if (!controlled.active ||
                 controlled.generation != attempt.stream_generation) {
                 ret operation_error(ERROR_TOKEN);
@@ -1503,7 +1687,7 @@ pub fun on_terminal(manager: *Manager, value: AttemptToken, terminal: u8) Operat
         ret completed;
     }
     if (attempt.stream_index >= manager.storage.stream_capacity) { ret operation_error(ERROR_TOKEN); }
-    val stream: *Stream = ?manager.storage.streams[attempt.stream_index];
+    val stream: *Stream = record(manager, attempt.stream_index);
     if (!stream.active || stream.generation != attempt.stream_generation) { ret operation_error(ERROR_TOKEN); }
     if (attempt.kind == SEND_STREAM) {
         if (attempt.length > 0) {
@@ -1607,7 +1791,7 @@ pub fun receive_stream_data_blocked(manager: *Manager, id: u64, maximum: u64) Re
         index       = created.handle.index;
         new_streams = manager.active_streams - before;
     }
-    val stream: Stream = manager.storage.streams[index];
+    val stream: Stream = @record(manager, index);
     if (!stream.can_receive) { ret receive_error(ERROR_DIRECTION); }
     var result: ReceiveResult;
     result.ok                      = true;
@@ -1674,7 +1858,7 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
     var current_limit:       u64  = receive_limit(manager.config, false, unidirectional(id));
     var discarding:          bool = false;
     if (!provisional) {
-        val current: Stream = manager.storage.streams[index];
+        val current: Stream = @record(manager, index);
         if (!current.can_receive) { ret receive_error(ERROR_DIRECTION); }
         current_final_known = current.final_known;
         current_final_size  = current.final_size;
@@ -1707,7 +1891,7 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
     var from:        ranges.Source = source(manager, pool.RECEIVE);
     if (storing) {
         if (!provisional) {
-            val current: *Stream = ?manager.storage.streams[index];
+            val current: *Stream = record(manager, index);
             # a frame that would fragment the stream past its cap is refused
             # before its packet is acknowledged, so the peer sends it again
             if (ranges.count_after_insert(?current.receive.ranges, copy_offset, ending) >
@@ -1747,7 +1931,7 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
         index       = created.handle.index;
         new_streams = manager.active_streams - before;
     }
-    val stream: *Stream = ?manager.storage.streams[index];
+    val stream: *Stream = record(manager, index);
     if (storing) {
         chunks.commit(?stream.receive.chunks, ?reserved);
         if (provisional) {
@@ -1801,7 +1985,7 @@ pub fun receive_reset(manager: *Manager, id: u64, error_code: u64, final_size: u
     var current_highest:     u64  = 0;
     var current_limit:       u64  = receive_limit(manager.config, false, unidirectional(id));
     if (!provisional) {
-        val current: Stream = manager.storage.streams[index];
+        val current: Stream = @record(manager, index);
         if (!current.can_receive) { ret receive_error(ERROR_DIRECTION); }
         current_final_known = current.final_known;
         current_final_size  = current.final_size;
@@ -1824,7 +2008,7 @@ pub fun receive_reset(manager: *Manager, id: u64, error_code: u64, final_size: u
         index       = created.handle.index;
         new_streams = manager.active_streams - before;
     }
-    val stream: *Stream = ?manager.storage.streams[index];
+    val stream: *Stream = record(manager, index);
     stream.final_known     = true;
     stream.final_size      = final_size;
     stream.receive_highest = final_size;
@@ -1849,7 +2033,7 @@ pub fun receive_reset(manager: *Manager, id: u64, error_code: u64, final_size: u
 
 pub fun acknowledge_reset(manager: *Manager, value: Handle) OperationResult {
     if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     if (!stream.reset_received) { ret operation_error(ERROR_STATE); }
     val discarded: u64 = stream.final_size - stream.receive_read;
     grant_connection(manager, discarded);
@@ -1886,7 +2070,7 @@ pub fun receive_stop(manager: *Manager, id: u64, error_code: u64) ReceiveResult 
         if (created.status != STATUS_OK) { ret receive_error(created.error); }
         index = created.handle.index;
     }
-    val stream: *Stream = ?manager.storage.streams[index];
+    val stream: *Stream = record(manager, index);
     if (!stream.can_send) { ret receive_error(ERROR_DIRECTION); }
     if (!stream.stop_received && !stream.send_closed) {
         stream.stop_received = true;
@@ -1909,7 +2093,7 @@ pub fun read(manager: *Manager, value: Handle, output: *u8, capacity: usize) Rea
         result.error  = ERROR_TOKEN;
         ret result;
     }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     if (!stream.can_receive) {
         result.status = STATUS_ERROR;
         result.error  = ERROR_DIRECTION;
@@ -1958,7 +2142,7 @@ pub fun read(manager: *Manager, value: Handle, output: *u8, capacity: usize) Rea
 
 pub fun credit(manager: *Manager, value: Handle, count: u64) OperationResult {
     if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     if (!stream.can_receive)               { ret operation_error(ERROR_DIRECTION); }
     if (count > stream.receive_uncredited) { ret operation_error(ERROR_STATE); }
     stream.receive_uncredited = stream.receive_uncredited - count;
@@ -1976,7 +2160,7 @@ pub fun snapshot(manager: *Manager, value: Handle) Snapshot {
         result.error = ERROR_TOKEN;
         ret result;
     }
-    val stream: Stream = manager.storage.streams[value.index];
+    val stream: Stream = @record(manager, value.index);
     result.ok                 = true;
     result.id                 = stream.id;
     result.send_offset        = stream.send_write;
@@ -1995,7 +2179,7 @@ pub fun snapshot(manager: *Manager, value: Handle) Snapshot {
 
 pub fun release(manager: *Manager, value: Handle) OperationResult {
     if (!valid_handle(manager, value)) { ret operation_error(ERROR_TOKEN); }
-    val stream: *Stream = ?manager.storage.streams[value.index];
+    val stream: *Stream = record(manager, value.index);
     # once the manager is closing no acknowledgement can arrive, so a stream
     # is releasable as soon as nothing of it is still in flight
     val unsettled: bool = stream.active_attempts != 0 || stream.has_prepared;
@@ -2015,7 +2199,8 @@ pub fun release(manager: *Manager, value: Handle) OperationResult {
     buffer_release(manager, ?stream.send, pool.SEND);
     buffer_release(manager, ?stream.receive, pool.RECEIVE);
     stream.active     = false;
-    stream.generation = next_generation(stream.generation);
+    stream.generation = 0;
+    record_dropped(manager, value.index);
     if (manager.active_streams > 0) { manager.active_streams = manager.active_streams - 1; }
     var result: OperationResult;
     result.status = STATUS_OK;
@@ -2042,8 +2227,8 @@ pub fun begin_close(manager: *Manager) OperationResult {
     manager.closing = true;
     var i: usize = 0;
     for (i < manager.storage.stream_capacity) {
-        val stream: *Stream = ?manager.storage.streams[i];
-        if (stream.active) {
+        val stream: *Stream = live(manager, i);
+        if (stream != nil) {
             stream.send_cancelled    = true;
             stream.receive_cancelled = true;
         }
@@ -2060,16 +2245,18 @@ pub fun finish_close(manager: *Manager) OperationResult {
     if (manager.active_attempts != 0) { ret operation_error(ERROR_CAPACITY); }
     var i: usize = 0;
     for (i < manager.storage.attempt_capacity) {
-        if (manager.storage.attempts[i].state != ATTEMPT_FREE) { ret operation_error(ERROR_CAPACITY); }
+        if (!attempt_free(manager, i)) { ret operation_error(ERROR_CAPACITY); }
         i = i + 1;
     }
     i = 0;
     for (i < manager.storage.stream_capacity) {
-        if (manager.storage.streams[i].active) {
-            buffer_release(manager, ?manager.storage.streams[i].send, pool.SEND);
-            buffer_release(manager, ?manager.storage.streams[i].receive, pool.RECEIVE);
-            manager.storage.streams[i].active     = false;
-            manager.storage.streams[i].generation = next_generation(manager.storage.streams[i].generation);
+        val stream: *Stream = live(manager, i);
+        if (stream != nil) {
+            buffer_release(manager, ?stream.send, pool.SEND);
+            buffer_release(manager, ?stream.receive, pool.RECEIVE);
+            stream.active     = false;
+            stream.generation = 0;
+            record_dropped(manager, i);
         }
         i = i + 1;
     }
