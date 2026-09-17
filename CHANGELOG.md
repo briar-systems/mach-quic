@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.10.1] - 2026-09-17
 
 ### Fixed
 
@@ -13,6 +13,11 @@
 - `timer` returns a cached answer until an input changes the connection (#137).
 - `receive_native` checks its packet against the connection's storage once instead of three times, and each protocol callback reads the calling thread once instead of twice. `gettid` is a system call on Linux (#137, #125).
 - The stream manager and datagram queue carry a `send_revision` counter, bumped whenever send work appears.
+- Dependencies: mach-crypto v0.12.0 (faster X25519 key generation), mach-tls v0.5.1.
+
+### Added
+
+- `quic.storage.pool`, a per-pump pool of pinned 4096-byte chunks with per-account budgets, reservations and FIFO wake registration, and `quic.storage.ranges`, bounded interval sets that spill into pool chunks (#137). Nothing uses them yet; they are the foundation of the storage work planned for 0.12.0.
 
 ## [0.10.0] - 2026-09-17
 
