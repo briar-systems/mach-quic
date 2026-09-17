@@ -320,16 +320,29 @@ pub rec Core {
     retry_source_present:       bool;
     peer_authenticated:         bool;
     handshake_confirmed:        bool;
-    initial_keys_discarded:     bool;
-    close_queued:               bool;
-    handshake_done_queued:      bool;
-    peer_close_received:        bool;
-    send_token_queued:          bool;
-    send_token_prepared:        bool;
-    idle_timer_enabled:         bool;
-    initialized:                bool;
-    closing:                    bool;
-    destroyed:                  bool;
+    # crypto data arrived that the provider has not been polled for
+    crypto_received: bool;
+    # the last generate found nothing to send and nothing has changed since:
+    # no core input, no manager revision, no due ack or pacing deadline
+    send_idle:              bool;
+    idle_stream_revision:   u64;
+    idle_datagram_revision: u64;
+    idle_deadline_ns:       u64;
+    # generates that did the full selection work, for the idle-path test
+    selecting_generates: u64;
+    # the last timer answer, valid until an input changes the core
+    timer_cached:           bool;
+    timer_cache:            transport_api.CoreTimer;
+    initial_keys_discarded: bool;
+    close_queued:           bool;
+    handshake_done_queued:  bool;
+    peer_close_received:    bool;
+    send_token_queued:      bool;
+    send_token_prepared:    bool;
+    idle_timer_enabled:     bool;
+    initialized:            bool;
+    closing:                bool;
+    destroyed:              bool;
 }
 
 rec Envelope {
@@ -2034,6 +2047,7 @@ fun process_frame(core: *Core, secrets: *Secrets,
         ret handle_ack(core, secrets, space, value, now_ns);
     }
     if (value.kind == frame.CRYPTO) {
+        core.crypto_received = true;
         val received: handshake_api.Result = handshake_api.receive_scoped(
             secrets.handshake, core.config.source, level, value.offset, value.data.data,
             value.data.len, now_ns);
@@ -2485,11 +2499,14 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     }
     if (core.closing) { ret core_result(core, transport_api.STATUS_OK, 0); }
     # keys this packet's crypto data unlocks must be installed before the next
-    # packet in the datagram, or in the caller's batch, is opened
-    val handshake_error: u64 = advance_handshake(core, secrets,
-        input.received_at_ns);
-    if (handshake_error != NO_ERROR) {
-        ret fail(core, handshake_error, input.received_at_ns);
+    # packet in the datagram, or in the caller's batch, is opened. once the
+    # handshake is confirmed only new crypto data gives the provider work
+    if (handshake_poll_due(core)) {
+        val handshake_error: u64 = advance_handshake(core, secrets,
+            input.received_at_ns);
+        if (handshake_error != NO_ERROR) {
+            ret fail(core, handshake_error, input.received_at_ns);
+        }
     }
     ret core_result(core, transport_api.STATUS_OK, 0);
 }
@@ -2515,6 +2532,7 @@ pub fun receive(core: *Core, secrets: *Secrets,
         ret core_result(core, transport_api.STATUS_CLOSED, 0);
     }
     core.last_now_ns = input.received_at_ns;
+    wake(core);
     var offset: usize = 0;
     for (offset < input.length) {
         val selected: cid_api.Selected = cid_api.current(core.cids, true);
@@ -2565,6 +2583,7 @@ pub fun queue_new_token(core: *Core, data: *u8, length: usize) bool {
     memory.copy[u8](core.storage.send_token, data, length);
     core.send_token_length = length;
     core.send_token_queued = true;
+    wake(core);
     ret true;
 }
 
@@ -2577,6 +2596,7 @@ pub fun probe_path(core: *Core, endpoint: path_api.Endpoint,
         failed.error  = path_api.ERROR_STATE;
         ret failed;
     }
+    wake(core);
     ret path_api.probe_scoped(core.paths, core.config.source, endpoint,
         preferred);
 }
@@ -2601,6 +2621,7 @@ pub fun migrate_path(core: *Core, value: path_api.Handle, preferred: bool,
         failed.error  = path_api.ERROR_STATE;
         ret failed;
     }
+    wake(core);
     if (migrated.status == path_api.STATUS_OK) { core.last_now_ns = now_ns; }
     ret migrated;
 }
@@ -2622,6 +2643,7 @@ pub fun queue_path_challenge(core: *Core, value: path_api.Handle,
         failed.error  = path_api.ERROR_TIME;
         ret failed;
     }
+    wake(core);
     ret path_api.queue_challenge_scoped(core.paths, core.config.source, value,
         data, pto_ns, pto_ns, padded, purpose);
 }
@@ -2649,6 +2671,7 @@ pub fun on_path_packet_too_big(core: *Core, value: path_api.Handle,
         failed.error  = path_api.ERROR_STATE;
         ret failed;
     }
+    wake(core);
     core.last_now_ns = now_ns;
     ret updated;
 }
@@ -2673,12 +2696,49 @@ pub fun poll_handshake(core: *Core, secrets: *Secrets,
     }
     if (core.closing) { ret core_result(core, transport_api.STATUS_CLOSED, 0); }
     core.last_now_ns = now_ns;
+    wake(core);
     val handshake_error: u64 = advance_handshake(core, secrets, now_ns);
     if (handshake_error != NO_ERROR) { ret fail(core, handshake_error, now_ns); }
     ret core_result(core, transport_api.STATUS_OK, 0);
 }
 
+fun handshake_poll_due(core: *Core) bool {
+    ret !core.handshake_confirmed || core.crypto_received;
+}
+
+# anything that can create send work outside generate ends an idle stretch
+fun wake(core: *Core) {
+    core.send_idle    = false;
+    core.timer_cached = false;
+}
+
+fun mark_idle(core: *Core) {
+    var deadline: u64   = core.pace_deadline_ns;
+    var space:    usize = 0;
+    for (space < 3) {
+        val ack_space: ack_api.Space = core.acknowledgements.spaces[space];
+        if (!ack_space.discarded && ack_space.ack_pending &&
+            ack_space.ack_deadline_armed &&
+            (deadline == 0 || ack_space.ack_deadline_ns < deadline)) {
+            deadline = ack_space.ack_deadline_ns;
+        }
+        space = space + 1;
+    }
+    core.send_idle              = true;
+    core.idle_stream_revision   = core.streams.send_revision;
+    core.idle_datagram_revision = core.datagrams.send_revision;
+    core.idle_deadline_ns       = deadline;
+}
+
+fun still_idle(core: *Core, now_ns: u64) bool {
+    ret core.send_idle && !core.closing && !core.crypto_received &&
+        core.streams.send_revision == core.idle_stream_revision &&
+        core.datagrams.send_revision == core.idle_datagram_revision &&
+        (core.idle_deadline_ns == 0 || now_ns < core.idle_deadline_ns);
+}
+
 fun advance_handshake(core: *Core, secrets: *Secrets, now_ns: u64) u64 {
+    core.crypto_received = false;
     val polled: handshake_api.Result = handshake_api.poll_scoped(
         secrets.handshake, core.config.source, now_ns);
     if (polled.status == handshake_api.STATUS_ERROR) {
@@ -3207,7 +3267,15 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.status = transport_api.STATUS_CLOSED;
         ret result;
     }
-    if (!core.closing) {
+    # nothing changed since the last generate found nothing to send
+    if (still_idle(core, now_ns)) {
+        result.status = transport_api.STATUS_EMPTY;
+        ret result;
+    }
+    core.send_idle           = false;
+    core.timer_cached        = false;
+    core.selecting_generates = core.selecting_generates + 1;
+    if (!core.closing && handshake_poll_due(core)) {
         val polled: transport_api.CoreResult = poll_handshake(core, secrets, now_ns);
         if (polled.status == transport_api.STATUS_ERROR) {
             result.status         = polled.status;
@@ -3249,6 +3317,7 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     if (!prepare_frame(core, secrets, owner, now_ns,
         sized - 96, ?value, ?path)) {
         free_owner(owner);
+        if (!core.closing && core.handshake_confirmed) { mark_idle(core); }
         result.status = transport_api.STATUS_EMPTY;
         ret result;
     }
@@ -3565,6 +3634,7 @@ pub fun complete_send(core: *Core, secrets: *Secrets, owner_id: u64,
     }
     val owner: *Owner = owner_by_id(core, owner_id);
     core.last_now_ns = now_ns;
+    wake(core);
     if (owner == nil || owner.state != OWNER_PREPARED) {
         ret core_result(core, transport_api.STATUS_STALE, 0);
     }
@@ -3672,6 +3742,14 @@ pub fun timer(core: *Core) transport_api.CoreTimer {
     var result: transport_api.CoreTimer;
     if (!core_record_valid(core) || !core.initialized || core.destroyed ||
         core.state == transport_api.CLOSED) { ret result; }
+    if (core.timer_cached) { ret core.timer_cache; }
+    core.timer_cache  = compute_timer(core);
+    core.timer_cached = true;
+    ret core.timer_cache;
+}
+
+fun compute_timer(core: *Core) transport_api.CoreTimer {
+    var result:   transport_api.CoreTimer;
     var armed:    bool = false;
     var deadline: u64  = 0;
     var kind:     u8   = 0;
@@ -3708,8 +3786,12 @@ pub fun timer(core: *Core) transport_api.CoreTimer {
         for (space_index_value < 3) {
             val ack_space: ack_api.Space =
                 core.acknowledgements.spaces[space_index_value];
+            # an ack that is already due is generate's work, not a timer's.
+            # reporting its passed deadline again would spin an owner that
+            # re-arms before it generates
             if (!ack_space.discarded && ack_space.ack_pending &&
-                ack_space.ack_deadline_armed) {
+                ack_space.ack_deadline_armed &&
+                ack_space.ack_deadline_ns > core.last_now_ns) {
                 timer_candidate(?armed, ?deadline, ?kind,
                     ack_space.ack_deadline_ns, TIMER_ACK);
             }
@@ -3790,6 +3872,7 @@ pub fun on_timeout(core: *Core, secrets: *Secrets, generation: u64,
         ret core_result(core, transport_api.STATUS_EARLY, 0);
     }
     core.last_now_ns = now_ns;
+    wake(core);
     val fired_kind:          u8  = core.timer_kind;
     val recovery_generation: u64 = core.timer_recovery_generation;
     core.timer_kind                = 0;
@@ -3874,6 +3957,7 @@ pub fun begin_close(core: *Core, secrets: *Secrets, abortive: bool,
         ret core_result(core, transport_api.STATUS_CLOSED, 0);
     }
     core.last_now_ns = now_ns;
+    wake(core);
     if (core.closing) {
         if (abortive) {
             core.close_queued        = false;
