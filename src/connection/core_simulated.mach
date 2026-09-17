@@ -85,8 +85,6 @@ rec Fixture {
     local_extensions:      [4]transport_parameters.Parameter;
     local_extension_bytes: [64]u8;
     local_parameters:      [256]u8;
-    received_token:        [128]u8;
-    send_token:            [128]u8;
     retry_token:           [128]u8;
     retry_pseudo:          [256]u8;
     supported_versions:    [2]u32;
@@ -395,8 +393,6 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
         local_extensions:              ?fixture.local_extensions[0], local_extension_capacity: 4,
         local_extension_bytes:         ?fixture.local_extension_bytes[0],
         local_extension_byte_capacity: 64,
-        received_token:                ?fixture.received_token[0], received_token_capacity: 128,
-        send_token:                    ?fixture.send_token[0], send_token_capacity: 128,
         negotiation:                   negotiation.Storage{
             retry_token:  ?fixture.retry_token[0], retry_token_capacity: 128,
             retry_pseudo: ?fixture.retry_pseudo[0], retry_pseudo_capacity: 256
@@ -744,7 +740,7 @@ test "quic.connection.core: public descriptors reject wrapping maximum ranges" {
     };
     if (core.receive(?fixture.engine, ?fixture.secrets,
         ?input).status != transport.STATUS_ERROR ||
-        core.queue_new_token(?fixture.engine, maximum::*u8, 2) ||
+        core.queue_new_token(?fixture.engine, maximum::*u8, 2) != transport.STATUS_ERROR ||
         core.begin_close(?fixture.engine, ?fixture.secrets, false, 0,
         maximum::*u8, 2, 2).status != transport.STATUS_ERROR ||
         core.snapshot(?fixture.engine).active_owners != 0) { ret 4; }
