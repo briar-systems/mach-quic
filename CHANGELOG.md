@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `mach.toml` declares `mach = "^5.3"`. mach-std 5.3.0 already required mach 5.3, so 0.12.1 needed it too. Its manifest now says so, and mach 5.2 refuses the key.
+
 ## [0.12.1] - 2026-09-17
 
 ### Security

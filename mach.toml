@@ -1,6 +1,7 @@
 [project]
 id = "quic"
 version = "0.12.1"
+mach = "^5.3"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
