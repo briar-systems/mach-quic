@@ -1113,7 +1113,8 @@ pub fun reusable(c: *Connection) bool {
 }
 
 # `tls` must have been initialized with tls_lease(c), and is refused at
-# STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c)
+# STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c). `chunks`
+# must declare exactly supply.LANES lanes
 pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
     tls: *client.Handshake,
@@ -1151,7 +1152,8 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
 }
 
 # `tls` must have been initialized with tls_lease(c), and is refused at
-# STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c)
+# STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c). `chunks`
+# must declare exactly supply.LANES lanes
 pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
     tls: *server.Handshake,

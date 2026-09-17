@@ -518,7 +518,10 @@ from then until `release_closed` succeeds. Init opens the connection's one
 account on the source and refuses an engine holding any other lease with
 `STAGE_HANDSHAKE`. tls charges that account on a third lane,
 `supply.TLS`, bounded by `Config.tls_budget` (64 KiB by default). The source
-must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes.
+must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes, and
+declare exactly `supply.LANES` (3) lanes, as `supply.pool_config` does. The
+account supplies one budget per quic lane, and a source with more lanes would
+read past them.
 When tls finds no memory it consumes nothing. The connection stops polling
 it until the source wakes the account's handle, and the caller passes that
 wake to `transport.storage_ready`, which retries the same call. Once the
