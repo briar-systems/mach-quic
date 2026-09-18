@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-18
+
 ### Added
 
 - A connection's account can be composed with the host's own lanes and handle (#198). `assembly.Config.extra_budgets` and `extra_lanes` append the host's budgets after quic's three lanes, and the source must declare exactly `supply.LANES + extra_lanes` lanes. A total above `supply.MAX_LANES` (8) is refused at `STAGE_CONFIG`. `assembly.Config.account_handle` is the handle the account is opened under, `source` by default, and a wake the source reports for it must reach `transport.storage_ready`. `supply.open_connection` takes the extra budgets, and `supply.pool_config_lanes`, `test_pool_lanes`, `make_test_lanes` and `source_lanes_of` are new.
