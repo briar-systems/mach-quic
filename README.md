@@ -525,6 +525,19 @@ account supplies one budget per quic lane, so init refuses any other count,
 read through `buffers.source_lanes`. A host that wraps a `Source` must forward
 its `fn_lanes`. A wrapper that does not reports 0 lanes and its connections are
 refused.
+
+A host that keeps its own per-connection memory beside quic's composes it
+into the same account. `Config.extra_budgets` and `Config.extra_lanes` add the
+host's budgets, in bytes, on the lanes after quic's three, so the host charges
+lane `supply.LANES + i` for its `i`th budget. The source must then declare
+exactly `supply.LANES + extra_lanes` lanes, as `supply.pool_config_lanes`
+does, and a total above `supply.MAX_LANES` (8) is refused at `STAGE_CONFIG`,
+never clamped. There is no base offset: quic's lanes are always 0 to 2.
+`Config.account_handle` is the handle the account is opened under, `source`
+unless set. It is opaque to quic and fixed for the account's life, and it is
+what the source reports when it wakes the account. A wake reported for that
+handle must reach `transport.storage_ready` for this connection. A stale or
+foreign wake is harmless, as `storage_ready` only retries what was refused.
 When tls finds no memory it consumes nothing. The connection stops polling
 it until the source wakes the account's handle, and the caller passes that
 wake to `transport.storage_ready`, which retries the same call. Once the

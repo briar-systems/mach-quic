@@ -28,6 +28,9 @@ pub val SEND:    Lane = 0;
 pub val RECEIVE: Lane = 1;
 pub val TLS:     Lane = 2;
 pub val LANES:   u8   = 3;
+# lanes a source can declare at most, and so how many a caller may add
+pub val MAX_LANES:       usize = buffers.MAX_LANES;
+pub val MAX_EXTRA_LANES: usize = buffers.MAX_LANES - LANES::usize;
 
 # the chunk sizes a connection asks a source for: quic's BYTES, and the sizes
 # mach-tls requests for handshake messages and records
@@ -64,32 +67,57 @@ pub fun classes(output: *buffers.ClassConfig, high_water: usize) {
 # across every account
 pub fun pool_config(classes: *buffers.ClassConfig, class_count: usize,
     bytes: usize) buffers.Config {
+    ret pool_config_lanes(classes, class_count, bytes, 0);
+}
+
+# as pool_config, with `extra` caller lanes after quic's three
+pub fun pool_config_lanes(classes: *buffers.ClassConfig, class_count: usize,
+    bytes: usize, extra: usize) buffers.Config {
     var config: buffers.Config;
     config.classes       = classes;
     config.class_count   = class_count;
-    config.lanes         = LANES;
+    config.lanes         = LANES + extra::u8;
     config.global_budget = bytes;
     ret config;
 }
 
-# opens a connection's account with quic's budgets and reservation in chunks
-# and tls's budget in bytes. it supplies exactly LANES budgets, so it refuses
-# a source that does not declare exactly LANES lanes, as pool_config does,
-# including one that declares none. a wrapping source must forward fn_lanes
+# opens a connection's account with quic's budgets and reservation in chunks,
+# tls's budget in bytes, and the caller's `extra_count` budgets on the lanes
+# after quic's. it supplies exactly LANES + extra_count budgets, so it refuses
+# a source that does not declare exactly that many lanes, including one that
+# declares none, and a total above MAX_LANES. a wrapping source must forward
+# fn_lanes
 pub fun open_connection(provider: *Provider, account: *Account, handle: u64,
-    send: usize, receive: usize, tls: usize, reserve: usize) bool {
-    if (provider == nil || buffers.source_lanes(provider) != LANES) { ret false; }
-    var budgets: [3]usize       = [3]usize{send * BYTES, receive * BYTES, tls};
-    val reason:  buffers.Reason = buffers.source_open_account(provider, account, handle, ?budgets[0],
-        reserve * BYTES);
+    send: usize, receive: usize, tls: usize, reserve: usize,
+    extra: *usize, extra_count: usize) bool {
+    if (provider == nil || extra_count > MAX_EXTRA_LANES ||
+        (extra == nil) != (extra_count == 0) ||
+        buffers.source_lanes(provider) != LANES::usize + extra_count) { ret false; }
+    var budgets: [8]usize;
+    budgets[0] = send * BYTES;
+    budgets[1] = receive * BYTES;
+    budgets[2] = tls;
+    var i: usize = 0;
+    for (i < extra_count) {
+        budgets[LANES::usize + i] = extra[i];
+        i                         = i + 1;
+    }
+    val reason: buffers.Reason = buffers.source_open_account(provider, account, handle,
+        ?budgets[0], reserve * BYTES);
     ret sel reason.none;
 }
 
-# opens an account for quic's own chunks alone, with no tls lane. it refuses a
-# source that does not declare exactly LANES lanes, as open_connection does
+# opens an account for quic's own chunks alone, with no tls lane and no
+# caller lanes. it refuses a source that does not declare exactly LANES lanes,
+# as open_connection does
 pub fun open(provider: *Provider, account: *Account, handle: u64, send: usize,
     receive: usize, reserve: usize) bool {
-    ret open_connection(provider, account, handle, send, receive, 0, reserve);
+    ret open_connection(provider, account, handle, send, receive, 0, reserve, nil, 0);
+}
+
+# the lanes a source declares, 0 when it declares none
+pub fun source_lanes_of(provider: *Provider) usize {
+    ret buffers.source_lanes(provider);
 }
 
 pub fun close(provider: *Provider, account: *Account) bool {
@@ -151,12 +179,18 @@ val TEST_RECORDS: usize = 4;
 # configs: CLASS_COUNT entries
 pub fun test_pool(pool: *buffers.Pool, configs: *buffers.ClassConfig,
     memory: *limited.Limited, chunks: usize) bool {
+    ret test_pool_lanes(pool, configs, memory, chunks, 0);
+}
+
+# as test_pool, with `extra` caller lanes
+pub fun test_pool_lanes(pool: *buffers.Pool, configs: *buffers.ClassConfig,
+    memory: *limited.Limited, chunks: usize, extra: usize) bool {
     classes(configs, 0);
     val bytes: usize = chunks * BYTES + TEST_RECORDS * RECORD;
     if (memory.a.ctx == nil && !limited.make(memory, (bytes + 16 * BYTES) * 2)) {
         ret false;
     }
-    ret buffers.make(pool, pool_config(configs, CLASS_COUNT, bytes),
+    ret buffers.make(pool, pool_config_lanes(configs, CLASS_COUNT, bytes, extra),
         limited.allocator_of(memory));
 }
 
@@ -169,7 +203,13 @@ pub rec TestPool {
 }
 
 pub fun make_test(fixture: *TestPool, chunks: usize) bool {
-    if (!test_pool(?fixture.pool, ?fixture.classes[0], ?fixture.memory, chunks)) { ret false; }
+    ret make_test_lanes(fixture, chunks, 0);
+}
+
+# as make_test, with `extra` caller lanes
+pub fun make_test_lanes(fixture: *TestPool, chunks: usize, extra: usize) bool {
+    if (!test_pool_lanes(?fixture.pool, ?fixture.classes[0], ?fixture.memory, chunks,
+        extra)) { ret false; }
     fixture.provider = buffers.source(?fixture.pool);
     ret true;
 }
@@ -205,7 +245,7 @@ test "quic.storage.source: a source with other than three lanes opens no account
     wide.provider = buffers.source(?wide.pool);
     var account: Account;
     if (buffers.source_lanes(?wide.provider) != 5 ||
-        open_connection(?wide.provider, ?account, 1, 4, 4, 4096, 0) || account.open) {
+        open_connection(?wide.provider, ?account, 1, 4, 4, 4096, 0, nil, 0) || account.open) {
         ret 3;
     }
     if (!buffers.destroy(?wide.pool)) { ret 4; }
@@ -214,15 +254,59 @@ test "quic.storage.source: a source with other than three lanes opens no account
     if (!make_test(?fixture, 16)) { ret 5; }
     var undeclared: Provider = fixture.provider;
     undeclared.fn_lanes = nil;
-    if (open_connection(?undeclared, ?account, 2, 4, 4, 4096, 0) ||
+    if (open_connection(?undeclared, ?account, 2, 4, 4, 4096, 0, nil, 0) ||
         open(?undeclared, ?account, 2, 4, 4, 0) || account.open ||
-        open_connection(nil, ?account, 2, 4, 4, 4096, 0) || account.open) {
+        open_connection(nil, ?account, 2, 4, 4, 4096, 0, nil, 0) || account.open) {
         ret 6;
     }
-    if (!open_connection(?fixture.provider, ?account, 3, 4, 4, 4096, 0) ||
+    if (!open_connection(?fixture.provider, ?account, 3, 4, 4, 4096, 0, nil, 0) ||
         !account.open || account.budgets[3] != 0 || !close(?fixture.provider, ?account) ||
         !end_test(?fixture)) {
         ret 7;
     }
+    ret 0;
+}
+
+# a source that claims more lanes than std allows
+fun nine_lanes(ctx: ptr) usize {
+    ret 9;
+}
+
+test "quic.storage.source: caller lanes open only when the count matches exactly" {
+    var fixture: TestPool;
+    if (!make_test_lanes(?fixture, 16, 2)) { ret 1; }
+    var account: Account;
+    var extra:   [6]usize = [6]usize{100, 200, 300, 400, 500, 600};
+    # 3 + 2 on a 5-lane source, and the budgets land after quic's
+    if (!open_connection(?fixture.provider, ?account, 1, 4, 4, 4096, 0, ?extra[0], 2) ||
+        !account.open || account.budgets[3] != 100 || account.budgets[4] != 200 ||
+        account.budgets[5] != 0 || !close(?fixture.provider, ?account)) { ret 2; }
+    # fewer than the source declares
+    if (open_connection(?fixture.provider, ?account, 2, 4, 4, 4096, 0, ?extra[0], 1) ||
+        open_connection(?fixture.provider, ?account, 2, 4, 4, 4096, 0, nil, 0) ||
+        account.open) { ret 3; }
+    # more than the source declares
+    if (open_connection(?fixture.provider, ?account, 3, 4, 4, 4096, 0, ?extra[0], 3) ||
+        account.open) { ret 4; }
+    # budgets and count must agree
+    if (open_connection(?fixture.provider, ?account, 4, 4, 4, 4096, 0, nil, 2) ||
+        open_connection(?fixture.provider, ?account, 4, 4, 4, 4096, 0, ?extra[0], 0) ||
+        account.open) { ret 5; }
+    if (!end_test(?fixture)) { ret 6; }
+    # the widest source there is still refuses a total above MAX_LANES
+    if (!make_test_lanes(?fixture, 16, MAX_EXTRA_LANES)) { ret 7; }
+    if (open_connection(?fixture.provider, ?account, 5, 4, 4, 4096, 0, ?extra[0],
+        MAX_EXTRA_LANES + 1) || account.open) { ret 8; }
+    if (!open_connection(?fixture.provider, ?account, 6, 4, 4, 4096, 0, ?extra[0],
+        MAX_EXTRA_LANES) || !account.open || account.budgets[7] != 500 ||
+        !close(?fixture.provider, ?account)) { ret 9; }
+    # a source claiming nine lanes would match a six-lane request, and the
+    # budgets have room for eight, so the cap refuses it before any budget lands
+    var liar: Provider = fixture.provider;
+    liar.fn_lanes = nine_lanes;
+    if (source_lanes_of(?liar) != 9 ||
+        open_connection(?liar, ?account, 7, 4, 4, 4096, 0, ?extra[0], 6) ||
+        account.open) { ret 10; }
+    if (!end_test(?fixture)) { ret 11; }
     ret 0;
 }
