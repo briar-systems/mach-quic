@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A datagram received between `generate` and its send completion no longer fails the connection (#190). `settle_flight` reclaimed a space's packet history as soon as nothing was tracked in it, but a prepared packet only enters the history at its completion, so the completion then failed with ERROR_HISTORY_FULL and INTERNAL_ERROR. A space's history now stays lent while any owner in that space is prepared. Found by hedge: about one HTTP/3 request in two failed on its interop lane.
+
 ## [0.13.1] - 2026-09-17
 
 ### Security
