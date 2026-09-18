@@ -1038,3 +1038,29 @@ test "quic.connection.core: owner and history chunks are held only while packets
     }
     ret 0;
 }
+
+test "quic.connection.core: a receive before the send completion keeps the history lent" {
+    var fixture: Fixture;
+    if (!initialize_with_fault(?fixture, transport.CLIENT, true, 1, MODE_ON_DEMAND)) { ret 1; }
+    var output: [1200]u8;
+    val first:  transport.CoreDatagram = core.generate(?fixture.engine,
+        ?fixture.secrets, ?output[0], 1200, 2);
+    if (first.status != transport.STATUS_OK || fixture.engine.history_blocks[0].data == nil) {
+        ret 2;
+    }
+    # nothing is tracked yet, and a datagram lands before the host reports the send
+    var ignored: [1]u8;
+    var input:   transport.CoreInput = transport.CoreInput{
+        local: fixture.engine.config.local, peer: fixture.engine.config.peer,
+        data:  ?ignored[0], length: 1, received_at_ns: 3, ecn: 0
+    };
+    val received: transport.CoreResult = core.receive(?fixture.engine, ?fixture.secrets, ?input);
+    if (received.status == transport.STATUS_ERROR ||
+        fixture.engine.history_blocks[0].data == nil ||
+        fixture.engine.recovery_state.spaces[0].packets == nil) { ret 3; }
+    if (core.complete_send(?fixture.engine, ?fixture.secrets, first.owner,
+        transport.SEND_SENT, first.count, 4).status != transport.STATUS_OK ||
+        fixture.engine.recovery_state.spaces[0].len != 1 ||
+        fixture.engine.history_blocks[0].data == nil) { ret 4; }
+    ret 0;
+}

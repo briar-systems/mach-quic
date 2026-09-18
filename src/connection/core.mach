@@ -1802,7 +1802,21 @@ fun history_ready(core: *Core, space: u8) bool {
     ret true;
 }
 
-# gives back taken tables once nothing is in them
+# a prepared owner in `space` still has to enter the history at its send
+# completion, so the history is spoken for until every owner there has settled
+fun space_has_prepared_owner(core: *Core, space: u8) bool {
+    var i: usize = 0;
+    for (i < core.owner_capacity) {
+        if (core.owners[i].state == OWNER_PREPARED && core.owners[i].space == space) {
+            ret true;
+        }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# gives back taken tables once nothing is in them. a space's history is
+# reclaimable only when nothing sent or about to be sent is tracked in it
 fun settle_flight(core: *Core) {
     if (core.owner_block.data != nil && core.owners_active == 0) {
         core.owners         = nil;
@@ -1813,7 +1827,8 @@ fun settle_flight(core: *Core) {
     for (i < 3) {
         val space: u8 = packet.SPACE_INITIAL + i::u8;
         if (core.history_blocks[i].data != nil &&
-            recovery.tracked(?core.recovery_state, space) == 0) {
+            recovery.tracked(?core.recovery_state, space) == 0 &&
+            !space_has_prepared_owner(core, space)) {
             recovery.reclaim_history(?core.recovery_state, space);
             chunks.give_block(source_of(core), ?core.history_blocks[i]);
         }
