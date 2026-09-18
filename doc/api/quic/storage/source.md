@@ -62,6 +62,20 @@ pub val TLS:     Lane = 2
 pub val LANES:   u8   = 3
 ```
 
+## val MAX_LANES
+
+```mach
+pub val MAX_LANES:       usize = buffers.MAX_LANES
+```
+
+lanes a source can declare at most, and so how many a caller may add
+
+## val MAX_EXTRA_LANES
+
+```mach
+pub val MAX_EXTRA_LANES: usize = buffers.MAX_LANES - LANES::usize
+```
+
 ## val CLASS_COUNT
 
 ```mach
@@ -118,17 +132,29 @@ bytes: usize) buffers.Config;
 a pool configuration over `class_count` classes with room for `bytes`
 across every account
 
+## fun pool_config_lanes
+
+```mach
+pub fun pool_config_lanes(classes: *buffers.ClassConfig, class_count: usize,
+bytes: usize, extra: usize) buffers.Config;
+```
+
+as pool_config, with `extra` caller lanes after quic's three
+
 ## fun open_connection
 
 ```mach
 pub fun open_connection(provider: *Provider, account: *Account, handle: u64,
-send: usize, receive: usize, tls: usize, reserve: usize) bool;
+send: usize, receive: usize, tls: usize, reserve: usize,
+extra: *usize, extra_count: usize) bool;
 ```
 
-opens a connection's account with quic's budgets and reservation in chunks
-and tls's budget in bytes. it supplies exactly LANES budgets, so it refuses
-a source that does not declare exactly LANES lanes, as pool_config does,
-including one that declares none. a wrapping source must forward fn_lanes
+opens a connection's account with quic's budgets and reservation in chunks,
+tls's budget in bytes, and the caller's `extra_count` budgets on the lanes
+after quic's. it supplies exactly LANES + extra_count budgets, so it refuses
+a source that does not declare exactly that many lanes, including one that
+declares none, and a total above MAX_LANES. a wrapping source must forward
+fn_lanes
 
 ## fun open
 
@@ -137,8 +163,17 @@ pub fun open(provider: *Provider, account: *Account, handle: u64, send: usize,
 receive: usize, reserve: usize) bool;
 ```
 
-opens an account for quic's own chunks alone, with no tls lane. it refuses a
-source that does not declare exactly LANES lanes, as open_connection does
+opens an account for quic's own chunks alone, with no tls lane and no
+caller lanes. it refuses a source that does not declare exactly LANES lanes,
+as open_connection does
+
+## fun source_lanes_of
+
+```mach
+pub fun source_lanes_of(provider: *Provider) usize;
+```
+
+the lanes a source declares, 0 when it declares none
 
 ## fun close
 
@@ -212,6 +247,15 @@ a pool with room for `chunks` BYTES chunks and a few tls records over
 
 configs: CLASS_COUNT entries
 
+## fun test_pool_lanes
+
+```mach
+pub fun test_pool_lanes(pool: *buffers.Pool, configs: *buffers.ClassConfig,
+memory: *limited.Limited, chunks: usize, extra: usize) bool;
+```
+
+as test_pool, with `extra` caller lanes
+
 ## rec TestPool
 
 ```mach
@@ -225,6 +269,14 @@ a whole test pool and its provider, which must not move once made
 ```mach
 pub fun make_test(fixture: *TestPool, chunks: usize) bool;
 ```
+
+## fun make_test_lanes
+
+```mach
+pub fun make_test_lanes(fixture: *TestPool, chunks: usize, extra: usize) bool;
+```
+
+as make_test, with `extra` caller lanes
 
 ## fun test_made
 

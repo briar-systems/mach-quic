@@ -151,13 +151,32 @@ var chunk_pool: supply.TestPool;
 var small_pool: supply.TestPool;
 var starving:   bool;
 
+# the caller composes each account: its own handle and two lanes after quic's
+val COMPOSED_LANES:           usize    = 2;
+val COMPOSED_DIALER_HANDLE:   u64      = 0xC0DE01;
+val COMPOSED_LISTENER_HANDLE: u64      = 0xC0DE02;
+var composed_budgets:         [2]usize = [2]usize{8192, 4096};
+var composed:                 bool;
+
+# how a test misdeclares the caller's lanes, and which stage refuses it
+val LANES_OK:       u8 = 0;
+val LANES_OVER:     u8 = 1;
+val LANES_MISMATCH: u8 = 2;
+var lane_fault:     u8;
+
 # one pool serves every connection a test assembles
 fun test_chunks() buffers.Source {
+    var extra: usize = 0;
+    if (composed) { extra = COMPOSED_LANES; }
     if (starving) {
-        if (!supply.test_made(?small_pool)) { supply.make_test(?small_pool, 128); }
+        if (!supply.test_made(?small_pool)) {
+            supply.make_test_lanes(?small_pool, 128, extra);
+        }
         ret small_pool.provider;
     }
-    if (!supply.test_made(?chunk_pool)) { supply.make_test(?chunk_pool, 4096); }
+    if (!supply.test_made(?chunk_pool)) {
+        supply.make_test_lanes(?chunk_pool, 4096, extra);
+    }
     ret chunk_pool.provider;
 }
 
@@ -192,7 +211,14 @@ var hog_count:   usize;
 # block takes, so its tls start finds no memory at all
 fun hog() bool {
     test_chunks();
-    if (!supply.open(?small_pool.provider, ?hog_account, 77, 256, 0, 0)) { ret false; }
+    var extra:   usize  = 0;
+    var budgets: *usize = nil;
+    if (composed) {
+        extra   = COMPOSED_LANES;
+        budgets = ?composed_budgets[0];
+    }
+    if (!supply.open_connection(?small_pool.provider, ?hog_account, 77, 256, 0, 0, 0,
+        budgets, extra)) { ret false; }
     var from: supply.Source = supply.Source{provider: ?small_pool.provider,
         account: ?hog_account, lane: supply.SEND};
     hog_count = 0;
@@ -235,7 +261,7 @@ fun starved_start(clock: *u64) i32 {
     var found: bool  = false;
     var i:     usize = 0;
     for (i < count) {
-        if (woken[i] == dialer.core.config.source) { found = true; }
+        if (woken[i] == dialer.account.handle) { found = true; }
         i = i + 1;
     }
     if (!found) { ret 42; }
@@ -331,6 +357,12 @@ fun connection_config(role: transport.Role) assembly.Config {
     }
     # a starved pool has nothing to set aside
     if (starving) { value.chunk_reserve = 0; }
+    if (composed) {
+        value.account_handle = COMPOSED_DIALER_HANDLE;
+        if (role != transport.CLIENT) { value.account_handle = COMPOSED_LISTENER_HANDLE; }
+        value.extra_budgets = ?composed_budgets[0];
+        value.extra_lanes   = COMPOSED_LANES;
+    }
     value.local_source_length         = 8;
     value.peer_destination_length     = 8;
     value.original_destination        = ?initial_destination[0];
@@ -1345,12 +1377,27 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
         ret 6;
     }
     if (starving && !hog()) { ret 39; }
+    # the lane fault lands after the parameters were encoded, so only init sees it
+    if (lane_fault != LANES_OK) {
+        dialer_config.extra_budgets = ?composed_budgets[0];
+        dialer_config.extra_lanes   = 1;
+        if (lane_fault == LANES_OVER) { dialer_config.extra_lanes = supply.MAX_EXTRA_LANES + 1; }
+    }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
         ?dialer_tls, ?dialer_scope, instants.instant(clock[0]));
     if (mislease != LEASE_OWN) {
         if (dialed.ok || dialed.stage != assembly.STAGE_HANDSHAKE ||
             !assembly.reusable(?dialer) || dialer.account.open) { ret 8; }
+        ret REFUSED;
+    }
+    if (lane_fault == LANES_OVER) {
+        if (dialed.ok || dialed.stage != assembly.STAGE_CONFIG || dialer.account.open) { ret 8; }
+        ret REFUSED;
+    }
+    if (lane_fault == LANES_MISMATCH) {
+        if (dialed.ok || dialed.stage != assembly.STAGE_STORAGE || dialer.account.open ||
+            dialer.storage != nil || dialer.provider.ctx != nil) { ret 8; }
         ret REFUSED;
     }
     if (!dialed.ok || dialed.core.reason != core.INIT_OK) { ret 7; }
@@ -2445,6 +2492,50 @@ test "quic.connection.assembly: a tls start refused for memory resumes when the 
 # charging anything else cannot reach an account the connection closes. tls
 # refuses to initialize without a lease, and the engine left uninitialized is
 # refused in turn
+# the caller's lanes ride on the connection's account, and its handle is what
+# the pool reports, so the caller routes the wake to storage_ready itself
+test "quic.connection.assembly: a composed account wakes on the caller's handle" {
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    starving = true;
+    composed = true;
+    val established: i32 = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0) { ret established; }
+    if (dialer.account.handle != COMPOSED_DIALER_HANDLE ||
+        listener.account.handle != COMPOSED_LISTENER_HANDLE ||
+        dialer.account.budgets[3] != 8192 || dialer.account.budgets[4] != 4096 ||
+        supply.source_lanes_of(?small_pool.provider) != 5) { ret 51; }
+    val settled: i32 = settle(?clock, ?moved);
+    if (settled != 0)                                     { ret settled; }
+    if (!core.snapshot(?dialer.core).handshake_confirmed) { ret 52; }
+    ret 0;
+}
+
+test "quic.connection.assembly: a composed account carries the caller's lanes through a transfer" {
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    composed = true;
+    val established: i32 = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0) { ret established; }
+    if (dialer.account.handle != COMPOSED_DIALER_HANDLE ||
+        dialer.account.budgets[4] != 4096) { ret 51; }
+    ret 0;
+}
+
+test "quic.connection.assembly: more caller lanes than a source can declare is refused at config" {
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    lane_fault = LANES_OVER;
+    ret establish_direct(1500, 1500, 8, ?clock, ?moved) - REFUSED;
+}
+
+test "quic.connection.assembly: caller lanes the source does not declare are refused at storage" {
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    lane_fault = LANES_MISMATCH;
+    ret establish_direct(1500, 1500, 8, ?clock, ?moved) - REFUSED;
+}
+
 test "quic.connection.assembly: an engine holding another connection's lease is refused" {
     var clock: u64   = 1000;
     var moved: usize = 0;

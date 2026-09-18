@@ -145,7 +145,17 @@ pub rec Config {
     chunk_reserve: usize;
     # bytes tls may hold on its own lane. this is a slice of the connection's
     # single account, not an allowance beside it
-    tls_budget:                usize;
+    tls_budget: usize;
+    # the caller's own budgets, in bytes, on the lanes after quic's three.
+    # the source must declare exactly supply.LANES + extra_lanes lanes, and a
+    # total above supply.MAX_LANES is refused at STAGE_CONFIG
+    extra_budgets: *usize;
+    extra_lanes:   usize;
+    # the handle the connection's account is opened under, `source` unless the
+    # caller composes the account into its own space. a wake the source reports
+    # for this handle must reach transport.storage_ready for this connection.
+    # a stale or foreign wake is harmless. it is fixed for the account's life
+    account_handle:            u64;
     peer_validated:            bool;
     retry_source_present:      bool;
     server_acceptance_applied: bool;
@@ -173,6 +183,7 @@ pub fun default_config(source: u64, local: ip.Endpoint,
     value.entropy_secret_context_size = 0;
     value.chunk_reserve               = 4;
     value.tls_budget                  = TLS_BUDGET;
+    value.account_handle              = source;
     ret value;
 }
 
@@ -313,6 +324,9 @@ fun parameter_role(role: transport_api.Role) u8 {
 
 fun config_valid(config: *Config, role: transport_api.Role) bool {
     if (config == nil || config.source == 0 || config.tls_budget == 0 ||
+        config.account_handle == 0 ||
+        config.extra_lanes > supply.MAX_EXTRA_LANES ||
+        (config.extra_budgets == nil) != (config.extra_lanes == 0) ||
         (config.version != packet.VERSION_1 &&
         config.version != packet.VERSION_2) ||
         config.max_udp_payload < 1200 ||
@@ -617,11 +631,11 @@ fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
     # the reservation is admission: a pool that cannot back it refuses the
     # connection before anything else is leased
     c.provider = chunks;
-    if (!supply.open_connection(?c.provider, ?c.account, config.source,
+    if (!supply.open_connection(?c.provider, ?c.account, config.account_handle,
         chunk_budget(STREAM_STRIDE::u64) + CORE_BLOCKS + datagram_budget(config),
         chunk_budget(config.receive_stream_data) + TOKEN_CHUNKS +
         datagram_budget(config), config.tls_budget,
-        config.chunk_reserve)) {
+        config.chunk_reserve, config.extra_budgets, config.extra_lanes)) {
         var no_provider: supply.Provider;
         c.provider = no_provider;
         ret false;
@@ -1111,7 +1125,7 @@ pub fun reusable(c: *Connection) bool {
 
 # `tls` must have been initialized with tls_lease(c), and is refused at
 # STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c). `chunks`
-# must declare exactly supply.LANES lanes
+# must declare exactly supply.LANES + config.extra_lanes lanes
 pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
     tls: *client.Handshake,
@@ -1150,7 +1164,7 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
 
 # `tls` must have been initialized with tls_lease(c), and is refused at
 # STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c). `chunks`
-# must declare exactly supply.LANES lanes
+# must declare exactly supply.LANES + config.extra_lanes lanes
 pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
     tls: *server.Handshake,
