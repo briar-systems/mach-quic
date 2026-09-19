@@ -986,7 +986,7 @@ test "quic.transport.simulated: a settled close answers closed to every later ca
         ?fixture.driver, 0, nil, 0, clock.instant(4));
     if (again.status != transport_api.STATUS_CLOSED || again.error != transport_api.ERROR_NONE ||
         again.state != transport_api.CLOSED) { ret 3; }
-    var reason: [4]u8;
+    var reason:      [4]u8;
     val with_reason: transport_api.OperationResult = transport_api.begin_close[Core](
         ?fixture.driver, 7, ?reason[0], 4, clock.instant(5));
     if (with_reason.status != transport_api.STATUS_CLOSED) { ret 4; }
