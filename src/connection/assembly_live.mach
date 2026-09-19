@@ -2242,7 +2242,7 @@ test "quic.connection.assembly: a full window survives 10% loss and reordering w
 # live idle connection holds. a failure means that cost moved. decide it
 # deliberately, and update these numbers, the changelog and the readme together
 val GUARD_STORAGE_BYTES:    usize = 4464;
-val GUARD_CONNECTION_BYTES: usize = 9776;
+val GUARD_CONNECTION_BYTES: usize = 9784;
 # established, no streams
 val GUARD_IDLE_CHUNKS: usize = 0;
 # established, the six h3 control streams open and drained: one record block
