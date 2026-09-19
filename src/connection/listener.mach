@@ -8,6 +8,7 @@ use quic.connection.admission;
 use quic.connection.ownership;
 use quic.connection.token;
 use quic.crypto.protection;
+use quic.frame.frame;
 use quic.packet.packet;
 use quic.storage.limited;
 use quic.storage.slots;
@@ -43,6 +44,7 @@ pub val ACTION_VERSION_NEGOTIATION: Action = 3;
 pub val ACTION_DROP:                Action = 4;
 pub val ACTION_BLOCKED:             Action = 5;
 pub val ACTION_ERROR:               Action = 6;
+pub val ACTION_REFUSE:              Action = 7;
 
 pub def Error: u8;
 pub val ERROR_NONE:         Error = 0;
@@ -787,6 +789,138 @@ fun external_disjoint(listener: *Listener, value: ownership.Range) bool {
         i = i + 1;
     }
     ret true;
+}
+
+# the bytes one CONNECTION_CLOSE with an empty reason can take
+val REFUSAL_FRAME_CAPACITY: usize = 24;
+
+# answers an Initial with a CONNECTION_CLOSE under the Initial keys its
+# destination id derives and holds no state for it (RFC 9000 10.2.3). the ids
+# are echoed swapped so the client reads it as the server's first Initial, and
+# it is the same packet whether or not the Initial carries a Retry token, since
+# the client derives its keys from the destination id either way. it touches
+# no pending slot, charge or token, so it composes with whatever preflight
+# answered
+pub fun refuse(listener: *Listener, request: *Request, error_code: u64) Result {
+    var result: Result;
+    if (!physical(listener) || !listener.initialized || listener.closing) {
+        result.action = ACTION_ERROR;
+        result.error  = ERROR_STATE;
+        ret result;
+    }
+    val request_range: ownership.Range = ownership.bytes(request::*u8,
+        $size_of(Request), ownership.ZERO_FORBIDDEN);
+    if (!external_disjoint(listener, request_range)) {
+        result.action = ACTION_ERROR;
+        result.error  = ERROR_BUFFER;
+        ret result;
+    }
+    val input_range: ownership.Range = ownership.bytes(request.data,
+        request.length, ownership.ZERO_FORBIDDEN);
+    val output_range: ownership.Range = ownership.bytes(request.output,
+        request.output_capacity, ownership.ZERO_FORBIDDEN);
+    if (request.length < 7 || !input_range.valid || !output_range.valid ||
+        !external_disjoint(listener, input_range) ||
+        !external_disjoint(listener, output_range) ||
+        !ownership.disjoint(request_range, input_range) ||
+        !ownership.disjoint(request_range, output_range) ||
+        !ownership.disjoint(input_range, output_range)) {
+        result.action = ACTION_DROP;
+        result.error  = ERROR_BUFFER;
+        ret result;
+    }
+    var partial:     Initial;
+    var id_position: usize = 0;
+    if ((request.data[0] & 0xc0) != 0xc0 ||
+        !parse_ids(request.data, request.length, ?partial, ?id_position)) {
+        result.action = ACTION_DROP;
+        result.error  = ERROR_PACKET;
+        ret result;
+    }
+    # an unsupported version has no Initial keys to answer under
+    if (!version_supported(listener, partial.version)) {
+        result.action = ACTION_DROP;
+        result.error  = ERROR_VERSION;
+        ret result;
+    }
+    val initial: Initial = parse_initial(request.data, request.length);
+    if (!initial.valid || request.length < listener.config.minimum_initial_size) {
+        result.action = ACTION_DROP;
+        result.error  = ERROR_PACKET;
+        ret result;
+    }
+    var close: frame.Frame;
+    close.kind       = frame.CONNECTION_CLOSE_TRANSPORT;
+    close.error_code = error_code;
+    close.frame_type = 0;
+    close.data       = packet.Span{data: nil, len: 0};
+    var encoded_close: [REFUSAL_FRAME_CAPACITY]u8;
+    var frame_builder: binary.Builder = binary.builder(?encoded_close[0],
+        REFUSAL_FRAME_CAPACITY, binary.BIG);
+    val frame_encoded: frame.EncodeResult = frame.encode(?frame_builder, ?close,
+        frame.default_limits());
+    if (!frame_encoded.ok) {
+        result.action = ACTION_ERROR;
+        result.error  = ERROR_OUTPUT;
+        result.detail = frame_encoded.error::u64;
+        ret result;
+    }
+    var value: packet.Packet;
+    value.header.kind              = packet.PACKET_INITIAL;
+    value.header.version           = initial.version;
+    value.header.destination       = initial.source;
+    value.header.source            = initial.destination;
+    value.header.packet_number     = 0;
+    value.header.packet_number_len = 1;
+    value.token                    = packet.Span{data: nil, len: 0};
+    var header_builder: binary.Builder = binary.builder(request.output,
+        request.output_capacity, binary.BIG);
+    val header: packet.ProtectedHeaderResult = packet.encode_protected_header(
+        ?header_builder, ?value, frame_encoded.count + protection.TAG_SIZE,
+        packet.default_limits());
+    val packet_size:   usize = header.count + frame_encoded.count + protection.TAG_SIZE;
+    var amplification: usize = 0 - 1::usize;
+    if (request.length <= amplification / 3) { amplification = request.length * 3; }
+    if (!header.ok || packet_size > request.output_capacity ||
+        packet_size > amplification) {
+        result.action = ACTION_ERROR;
+        result.error  = ERROR_OUTPUT;
+        result.detail = header.error::u64;
+        ret result;
+    }
+    # the seal takes its plaintext on the secret lane, so the frame crosses once
+    var plaintext: [REFUSAL_FRAME_CAPACITY]^u8;
+    var i:         usize = 0;
+    for (i < frame_encoded.count) {
+        plaintext[i] = encoded_close[i];
+        i            = i + 1;
+    }
+    var keys: protection.InitialKeys;
+    val derived: protection.Error = protection.derive_initial(?keys, initial.version,
+        contracts.Bytes{data: ?initial.destination.data[0],
+        len: initial.destination.len::usize});
+    var sealed: protection.Result;
+    if (derived == protection.OK) {
+        sealed = protection.seal_packet(?keys.server, 0,
+            contracts.Bytes{data: request.output, len: header.count},
+            header.packet_number_offset,
+            contracts.SecretBytes{data: ?plaintext[0], len: frame_encoded.count},
+            contracts.Buffer{data: request.output, capacity: request.output_capacity});
+    }
+    protection.destroy_initial(?keys);
+    ct.zeroize(?plaintext[0], REFUSAL_FRAME_CAPACITY);
+    if (derived != protection.OK || sealed.error != protection.OK ||
+        sealed.written != packet_size) {
+        result.action = ACTION_ERROR;
+        result.error  = ERROR_CRYPTO;
+        result.detail = derived::u64;
+        if (derived == protection.OK) { result.detail = sealed.error::u64; }
+        ret result;
+    }
+    result.action       = ACTION_REFUSE;
+    result.output_count = packet_size;
+    result.version      = initial.version;
+    ret result;
 }
 
 pub fun issue_address_token(listener: *Listener, peer: ip.Endpoint,
@@ -2344,5 +2478,179 @@ test "quic.connection.listener: a flood of valid tokens is held at the replay bo
         i = i + 1;
     }
     if (!harness_close()) { ret 11; }
+    ret 0;
+}
+
+# opens a refusal with the keys the client holds and checks it is exactly one
+# CONNECTION_CLOSE carrying `error_code`, addressed back to the client
+fun refusal_reads(output: *u8, count: usize, version: u32,
+    client_destination: packet.ConnectionId, client_source: packet.ConnectionId,
+    error_code: u64) bool {
+    if (count < 7 || (output[0] & 0xf0) != (0xc0 | (initial_bits(version) << 4))) {
+        ret false;
+    }
+    if (binary.get_uint(?output[1], 4, binary.BIG)::u32 != version) { ret false; }
+    var position: usize = 5;
+    if (output[position]::usize != client_source.len::usize) { ret false; }
+    position = position + 1;
+    var i: usize = 0;
+    for (i < client_source.len::usize) {
+        if (output[position + i] != client_source.data[i]) { ret false; }
+        i = i + 1;
+    }
+    position = position + client_source.len::usize;
+    if (output[position]::usize != client_destination.len::usize) { ret false; }
+    position = position + 1;
+    i        = 0;
+    for (i < client_destination.len::usize) {
+        if (output[position + i] != client_destination.data[i]) { ret false; }
+        i = i + 1;
+    }
+    position = position + client_destination.len::usize;
+    # no token, then a one-byte length: the whole packet is short
+    if (output[position] != 0) { ret false; }
+    position = position + 1;
+    val remaining: usize = output[position]::usize;
+    if (remaining >= 64 || position + 1 + remaining != count) { ret false; }
+    val packet_number_offset: usize = position + 1;
+    var keys: protection.InitialKeys;
+    if (protection.derive_initial(?keys, version, contracts.Bytes{
+        data: ?client_destination.data[0], len: client_destination.len::usize}) !=
+        protection.OK) { ret false; }
+    var header_scratch: [128]u8;
+    var plaintext:      [128]^u8;
+    val opened: protection.OpenResult = protection.open_packet(?keys.server, 0,
+        contracts.Bytes{data: output, len: count}, packet_number_offset,
+        contracts.Buffer{data: ?header_scratch[0], capacity: 128},
+        contracts.SecretBuffer{data: ?plaintext[0], capacity: 128});
+    protection.destroy_initial(?keys);
+    if (opened.error != protection.OK || opened.packet_number != 0 ||
+        opened.packet_number_len != 1 || opened.written == 0) { ret false; }
+    var public: [128]u8;
+    i = 0;
+    for (i < opened.written) {
+        public[i] = plaintext[i]:>u8;
+        i         = i + 1;
+    }
+    ct.zeroize(?plaintext[0], 128);
+    var decoder: binary.Decoder = binary.decoder(?public[0], opened.written, binary.BIG);
+    var close:   frame.Frame;
+    val decoded: frame.DecodeResult = frame.decode(?decoder, true, frame.default_limits(),
+        frame.Storage{ack_ranges: nil, ack_capacity: 0}, ?close);
+    ret decoded.status == frame.STATUS_DONE && decoder.pos == decoder.len &&
+        close.kind == frame.CONNECTION_CLOSE_TRANSPORT &&
+        close.error_code == error_code && close.frame_type == 0 &&
+        close.data.len == 0;
+}
+
+test "quic.connection.listener: a refusal is one CONNECTION_CLOSE under the client's Initial keys" {
+    if (!harness_open(600, false)) { ret 1; }
+    harness.versions[0] = packet.VERSION_1;
+    var input:  [1200]u8;
+    var output: [256]u8;
+    val destination: packet.ConnectionId = test_id(3);
+    val source:      packet.ConnectionId = test_id(60);
+    if (!test_initial(?input[0], destination, source, nil, 0)) { ret 2; }
+    var request: Request = harness_request(?input[0], 7, 10);
+    request.output          = ?output[0];
+    request.output_capacity = 256;
+    val refused: Result = refuse(?harness.listener, ?request, 0x02);
+    if (refused.action != ACTION_REFUSE || refused.error != ERROR_NONE ||
+        refused.version != packet.VERSION_1 || refused.output_count == 0 ||
+        refused.output_count > 3 * 1200) { ret 3; }
+    if (!refusal_reads(?output[0], refused.output_count, packet.VERSION_1,
+        destination, source, 0x02)) { ret 4; }
+    # a retried Initial is answered under the keys its new destination derives
+    val retried: packet.ConnectionId = test_id(41);
+    var token:   [8]u8;
+    if (!test_initial(?input[0], retried, source, ?token[0], 8)) { ret 5; }
+    val after_retry: Result = refuse(?harness.listener, ?request, 0x0a);
+    if (after_retry.action != ACTION_REFUSE ||
+        !refusal_reads(?output[0], after_retry.output_count, packet.VERSION_1,
+        retried, source, 0x0a)) { ret 6; }
+    # a zero-length client source id yields an empty destination
+    var empty: packet.ConnectionId;
+    empty.len = 0;
+    if (!test_initial(?input[0], destination, empty, nil, 0)) { ret 7; }
+    val unnamed: Result = refuse(?harness.listener, ?request, 0x02);
+    if (unnamed.action != ACTION_REFUSE ||
+        !refusal_reads(?output[0], unnamed.output_count, packet.VERSION_1,
+        destination, empty, 0x02)) { ret 8; }
+    if (!harness_close()) { ret 9; }
+    ret 0;
+}
+
+test "quic.connection.listener: a refusal answers v2 under v2 Initial keys" {
+    if (!harness_open(610, false)) { ret 1; }
+    harness.versions[0] = packet.VERSION_2;
+    var input:  [1200]u8;
+    var output: [256]u8;
+    val destination: packet.ConnectionId = test_id(5);
+    val source:      packet.ConnectionId = test_id(70);
+    if (!test_initial_version(?input[0], packet.VERSION_2, destination, source,
+        nil, 0)) { ret 2; }
+    var request: Request = harness_request(?input[0], 8, 10);
+    request.output          = ?output[0];
+    request.output_capacity = 256;
+    val refused: Result = refuse(?harness.listener, ?request, 0x02);
+    if (refused.action != ACTION_REFUSE || refused.version != packet.VERSION_2 ||
+        !refusal_reads(?output[0], refused.output_count, packet.VERSION_2,
+        destination, source, 0x02)) { ret 3; }
+    if (!harness_close()) { ret 4; }
+    ret 0;
+}
+
+test "quic.connection.listener: a refusal drops what it cannot answer and holds nothing" {
+    if (!harness_open(620, false)) { ret 1; }
+    harness.versions[0] = packet.VERSION_1;
+    var input:  [1200]u8;
+    var output: [256]u8;
+    val destination: packet.ConnectionId = test_id(3);
+    val source:      packet.ConnectionId = test_id(60);
+    if (!test_initial(?input[0], destination, source, nil, 0)) { ret 2; }
+    val pending_before:   usize              = harness.listener.pending.live;
+    val admission_before: admission.Snapshot = admission.snapshot(?harness.admission_manager);
+    var request: Request = harness_request(?input[0], 7, 10);
+    request.output          = ?output[0];
+    request.output_capacity = 256;
+    # an unsupported version has no keys to answer under
+    var v2: [1200]u8;
+    if (!test_initial_version(?v2[0], packet.VERSION_2, destination, source,
+        nil, 0)) { ret 3; }
+    request.data = ?v2[0];
+    val unsupported: Result = refuse(?harness.listener, ?request, 0x02);
+    if (unsupported.action != ACTION_DROP || unsupported.error != ERROR_VERSION ||
+        unsupported.output_count != 0) { ret 4; }
+    request.data = ?input[0];
+    # a short Initial is a protocol violation, not a connection attempt
+    request.length = 1199;
+    val short: Result = refuse(?harness.listener, ?request, 0x02);
+    if (short.action != ACTION_DROP || short.error != ERROR_PACKET ||
+        short.output_count != 0) { ret 5; }
+    request.length = 1200;
+    # a short header is never an Initial
+    input[0] = 0x40;
+    val malformed: Result = refuse(?harness.listener, ?request, 0x02);
+    if (malformed.action != ACTION_DROP || malformed.error != ERROR_PACKET ||
+        malformed.output_count != 0) { ret 6; }
+    input[0] = 0xc0;
+    # an output that cannot hold the packet is the caller's error
+    request.output_capacity = 20;
+    val cramped: Result = refuse(?harness.listener, ?request, 0x02);
+    if (cramped.action != ACTION_ERROR || cramped.error != ERROR_OUTPUT ||
+        cramped.output_count != 0) { ret 7; }
+    request.output_capacity = 256;
+    # the refusal composes with a preflight that already blocked or accepted
+    val accepted: Result = preflight(?harness.listener, ?request);
+    if (accepted.action != ACTION_ACCEPT) { ret 8; }
+    val refused: Result = refuse(?harness.listener, ?request, 0x02);
+    if (refused.action != ACTION_REFUSE ||
+        harness.listener.pending.live != pending_before + 1) { ret 9; }
+    if (cancel(?harness.listener, accepted.acceptance).action != ACTION_ACCEPT) { ret 10; }
+    val admission_after: admission.Snapshot = admission.snapshot(?harness.admission_manager);
+    if (harness.listener.pending.live != pending_before ||
+        admission_after.active != admission_before.active ||
+        admission_after.reserved != admission_before.reserved) { ret 11; }
+    if (!harness_close()) { ret 12; }
     ret 0;
 }

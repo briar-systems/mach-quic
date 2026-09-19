@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `listener.refuse(listener, request, error_code)` answers a client Initial with a stateless CONNECTION_CLOSE (#206). It writes one Initial packet to `request.output`, protected with the Initial keys the Initial's Destination Connection ID derives (RFC 9000 10.2.3): Destination and Source Connection IDs swapped from the request, no token, packet number 0, and one transport `CONNECTION_CLOSE` (0x1c) with `error_code`, frame type 0 and an empty reason. It creates no connection, takes no pending slot, charge or token, and composes with whatever `preflight` answered, so a server that decides at admission not to serve an Initial can refuse it with `core.CONNECTION_REFUSED` instead of dropping it and the client learns in one RTT rather than after PTO backoff. `Result.action` is `ACTION_REFUSE` with `output_count`, `ACTION_DROP` for a datagram that is not a well-formed Initial of a supported version, and `ACTION_ERROR` when the output cannot be produced. Consumer: briar-systems/hedge#231.
+
 ### Fixed
 
+- A client no longer drops a server Initial carried in a datagram under 1200 bytes (#206). RFC 9000 14.1 has the server discard short Initial datagrams, and a server's own Initial need only be padded when ack-eliciting, so a stateless CONNECTION_CLOSE from a server is short and the client read none of them.
 - `transport.begin_close`, `generate`, `receive_datagram` and `receive_native` on a driver whose close has settled answer `STATUS_CLOSED` (#207). They checked the caller's buffers against the driver's owned ranges before consulting its state, and a closed driver has handed its operation scope back, so that range was invalid and every such call failed with `ERROR_BUFFER`. A closed driver now answers closed before any buffer, ownership or scope check, and the owned-range set describes the scope only while the driver holds one. Found by mach-http (briar-systems/mach-http#145): after a deadline teardown the h3 engine's close never reached `CLOSED`.
 
 ## [0.15.0] - 2026-09-19
