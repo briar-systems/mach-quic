@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Dependencies: `[dep.std] version = "^6.0"` realized at v6.0.0, `[dep.crypto] version = "^0.18"` at v0.18.0 and `[dep.tls] version = "^0.9"` at v0.9.0, all committed as gitlinks, and `mach = "^5.9"` (#202). std 6.0.0 made `buffers.source_open_account` take a `buffers.Budgets` value that carries its lane count, which `supply.open_connection` now composes from quic's three lanes and the caller's extra ones. Its own signature and `assembly.Config` are unchanged. Nothing else std's migration guide names (sort, heap, map, set, the `ct` width names) is used here. crypto 0.14 through 0.18 and tls 0.9.0 changed no API quic calls: SHA-2 runs on std's hardware-dispatched states, secret word products use the processor multiply where mach admits it, and x25519 and Ed25519 compute on `u128`, so a handshake costs about a third of the instructions it did on crypto 0.13.
+- `buffers.Source` grew a word in std 5.7.0 (`fn_measure`), so `assembly.Connection` is 9,784 bytes, from 9,776 (#202). `assembly.Storage` stays at 4,464.
+- On aarch64-linux and aarch64-darwin, a program linking quic turns PSTATE.DIT on before `main` and refuses to start, with status 255, on a processor or kernel without the mode. This is crypto 0.17's DIT-required start through std 5.8; x86_64 and riscv64 are unaffected. CI passes `dit: required` to the shared pipeline, so the aarch64 legs test under `qemu-aarch64 -cpu max` on a runner without FEAT_DIT (#202).
+
 ## [0.14.0] - 2026-09-18
 
 ### Added

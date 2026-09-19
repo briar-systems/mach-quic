@@ -93,17 +93,18 @@ pub fun open_connection(provider: *Provider, account: *Account, handle: u64,
     if (provider == nil || extra_count > MAX_EXTRA_LANES ||
         (extra == nil) != (extra_count == 0) ||
         buffers.source_lanes(provider) != LANES::usize + extra_count) { ret false; }
-    var budgets: [8]usize;
-    budgets[0] = send * BYTES;
-    budgets[1] = receive * BYTES;
-    budgets[2] = tls;
+    var budgets: buffers.Budgets;
+    budgets.lanes    = LANES::usize + extra_count;
+    budgets.bytes[0] = send * BYTES;
+    budgets.bytes[1] = receive * BYTES;
+    budgets.bytes[2] = tls;
     var i: usize = 0;
     for (i < extra_count) {
-        budgets[LANES::usize + i] = extra[i];
-        i                         = i + 1;
+        budgets.bytes[LANES::usize + i] = extra[i];
+        i                               = i + 1;
     }
     val reason: buffers.Reason = buffers.source_open_account(provider, account, handle,
-        ?budgets[0], reserve * BYTES);
+        budgets, reserve * BYTES);
     ret sel reason.none;
 }
 
