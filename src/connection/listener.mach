@@ -895,7 +895,7 @@ pub fun refuse(listener: *Listener, request: *Request, error_code: u64) Result {
         plaintext[i] = encoded_close[i];
         i            = i + 1;
     }
-    var keys: protection.InitialKeys;
+    var keys:    protection.InitialKeys;
     val derived: protection.Error = protection.derive_initial(?keys, initial.version,
         contracts.Bytes{data: ?initial.destination.data[0],
         len: initial.destination.len::usize});
@@ -2513,13 +2513,14 @@ fun refusal_reads(output: *u8, count: usize, version: u32,
     val remaining: usize = output[position]::usize;
     if (remaining >= 64 || position + 1 + remaining != count) { ret false; }
     val packet_number_offset: usize = position + 1;
-    var keys: protection.InitialKeys;
+    var keys:                 protection.InitialKeys;
     if (protection.derive_initial(?keys, version, contracts.Bytes{
-        data: ?client_destination.data[0], len: client_destination.len::usize}) !=
+        data: ?client_destination.data[0], len: client_destination.len::usize
+    }) !=
         protection.OK) { ret false; }
     var header_scratch: [128]u8;
     var plaintext:      [128]^u8;
-    val opened: protection.OpenResult = protection.open_packet(?keys.server, 0,
+    val opened:         protection.OpenResult = protection.open_packet(?keys.server, 0,
         contracts.Bytes{data: output, len: count}, packet_number_offset,
         contracts.Buffer{data: ?header_scratch[0], capacity: 128},
         contracts.SecretBuffer{data: ?plaintext[0], capacity: 128});
@@ -2533,7 +2534,7 @@ fun refusal_reads(output: *u8, count: usize, version: u32,
         i         = i + 1;
     }
     ct.zeroize(?plaintext[0], 128);
-    var decoder: binary.Decoder = binary.decoder(?public[0], opened.written, binary.BIG);
+    var decoder: binary.Decoder     = binary.decoder(?public[0], opened.written, binary.BIG);
     var close:   frame.Frame;
     val decoded: frame.DecodeResult = frame.decode(?decoder, true, frame.default_limits(),
         frame.Storage{ack_ranges: nil, ack_capacity: 0}, ?close);
@@ -2546,8 +2547,8 @@ fun refusal_reads(output: *u8, count: usize, version: u32,
 test "quic.connection.listener: a refusal is one CONNECTION_CLOSE under the client's Initial keys" {
     if (!harness_open(600, false)) { ret 1; }
     harness.versions[0] = packet.VERSION_1;
-    var input:  [1200]u8;
-    var output: [256]u8;
+    var input:       [1200]u8;
+    var output:      [256]u8;
     val destination: packet.ConnectionId = test_id(3);
     val source:      packet.ConnectionId = test_id(60);
     if (!test_initial(?input[0], destination, source, nil, 0)) { ret 2; }
@@ -2583,8 +2584,8 @@ test "quic.connection.listener: a refusal is one CONNECTION_CLOSE under the clie
 test "quic.connection.listener: a refusal answers v2 under v2 Initial keys" {
     if (!harness_open(610, false)) { ret 1; }
     harness.versions[0] = packet.VERSION_2;
-    var input:  [1200]u8;
-    var output: [256]u8;
+    var input:       [1200]u8;
+    var output:      [256]u8;
     val destination: packet.ConnectionId = test_id(5);
     val source:      packet.ConnectionId = test_id(70);
     if (!test_initial_version(?input[0], packet.VERSION_2, destination, source,
@@ -2603,14 +2604,14 @@ test "quic.connection.listener: a refusal answers v2 under v2 Initial keys" {
 test "quic.connection.listener: a refusal drops what it cannot answer and holds nothing" {
     if (!harness_open(620, false)) { ret 1; }
     harness.versions[0] = packet.VERSION_1;
-    var input:  [1200]u8;
-    var output: [256]u8;
+    var input:       [1200]u8;
+    var output:      [256]u8;
     val destination: packet.ConnectionId = test_id(3);
     val source:      packet.ConnectionId = test_id(60);
     if (!test_initial(?input[0], destination, source, nil, 0)) { ret 2; }
     val pending_before:   usize              = harness.listener.pending.live;
     val admission_before: admission.Snapshot = admission.snapshot(?harness.admission_manager);
-    var request: Request = harness_request(?input[0], 7, 10);
+    var request:          Request            = harness_request(?input[0], 7, 10);
     request.output          = ?output[0];
     request.output_capacity = 256;
     # an unsupported version has no keys to answer under

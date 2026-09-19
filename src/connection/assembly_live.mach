@@ -192,7 +192,7 @@ var original: assembly.Connection;
 val REFUSED: i32 = 99;
 # whether the listener answers the first Initial with a stateless refusal
 # instead of a connection, and what establish_direct returns once it did
-var refusing: bool;
+var refusing:       bool;
 val REFUSAL_CLOSED: i32 = 98;
 
 # the front listener answers the dialer's Initial the way a busy server would,
