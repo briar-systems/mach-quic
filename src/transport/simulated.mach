@@ -963,3 +963,49 @@ test "quic.transport.native: a cancelled send that went out whole is sent" {
     if (!close_fixture(?fixture, 13)) { ret 19; }
     ret 0;
 }
+
+test "quic.transport.simulated: a settled close answers closed to every later call" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 131, stream_api.ROLE_CLIENT)) { ret 1; }
+    fixture.core.outbound = 1;
+    var buffer: [8]u8;
+    val first:  transport_api.Generated = transport_api.generate[Core](
+        ?fixture.driver, ?fixture.scope, ?buffer[0], 8, clock.instant(1), 1);
+    if (first.status != transport_api.STATUS_OK ||
+        transport_api.complete_send[Core](?fixture.driver, first.token,
+        transport_api.SEND_SENT, first.count, clock.instant(2)).status !=
+        transport_api.STATUS_OK ||
+        transport_api.begin_close[Core](?fixture.driver, 0, nil, 0,
+        clock.instant(3)).status != transport_api.STATUS_OK ||
+        transport_api.finish_close[Core](?fixture.driver).status !=
+        transport_api.STATUS_OK ||
+        transport_api.snapshot[Core](?fixture.driver).state != transport_api.CLOSED) {
+        ret 2;
+    }
+    val again: transport_api.OperationResult = transport_api.begin_close[Core](
+        ?fixture.driver, 0, nil, 0, clock.instant(4));
+    if (again.status != transport_api.STATUS_CLOSED || again.error != transport_api.ERROR_NONE ||
+        again.state != transport_api.CLOSED) { ret 3; }
+    var reason: [4]u8;
+    val with_reason: transport_api.OperationResult = transport_api.begin_close[Core](
+        ?fixture.driver, 7, ?reason[0], 4, clock.instant(5));
+    if (with_reason.status != transport_api.STATUS_CLOSED) { ret 4; }
+    val generated: transport_api.Generated = transport_api.generate[Core](
+        ?fixture.driver, ?fixture.scope, ?buffer[0], 8, clock.instant(6), 1);
+    if (generated.status != transport_api.STATUS_CLOSED) { ret 5; }
+    var datagram: transport_api.Datagram;
+    datagram.data        = ?buffer[0];
+    datagram.length      = 8;
+    datagram.received_at = clock.instant(7);
+    val received: transport_api.OperationResult = transport_api.receive_datagram[Core](
+        ?fixture.driver, ?datagram);
+    if (received.status != transport_api.STATUS_CLOSED) { ret 6; }
+    if (transport_api.open_stream[Core](?fixture.driver,
+        transport_api.BIDIRECTIONAL).status != transport_api.STATUS_CLOSED) { ret 7; }
+    if (transport_api.send_datagram[Core](?fixture.driver, ?buffer[0], 8).status !=
+        transport_api.STATUS_CLOSED) { ret 8; }
+    if (!transport_api.release_ready[Core](?fixture.driver) ||
+        transport_api.release_closed[Core](?fixture.driver).status !=
+        transport_api.STATUS_OK || !operation_ok(cancel.destroy(?fixture.scope))) { ret 9; }
+    ret 0;
+}

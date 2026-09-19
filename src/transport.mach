@@ -635,7 +635,12 @@ fun borrowed_all_disjoint[T](driver: *Driver[T], borrowed: *ownership.Range,
     ranges[7] = ownership.array(driver.datagrams.storage.receive_entries::*u8,
         driver.datagrams.storage.receive_capacity, $size_of(datagram_api.Entry),
         datagram_zero);
-    ranges[8] = ownership.record[cancel.Scope](driver.operation_scope);
+    # the scope is owned until finish_close hands it back, and a closed driver
+    # owns none, so its absence is an empty range rather than an invalid one
+    ranges[8] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
+    if (driver.operation_scope != nil) {
+        ranges[8] = ownership.record[cancel.Scope](driver.operation_scope);
+    }
     ranges[9] = driver.protocol.context_range(driver.protocol.context);
     b         = 0;
     for (b < count) {
@@ -987,18 +992,17 @@ pub fun receive_datagram[T](driver: *Driver[T], input: *Datagram) OperationResul
     var borrowed: [2]ownership.Range;
     borrowed[0] = ownership.record[Datagram](input);
     borrowed[1] = ownership.bytes(input.data, input.length, ownership.ZERO_ALLOWED);
-    if (!borrowed_all_disjoint[T](driver, ?borrowed[0], 2) ||
-        !ownership.disjoint(borrowed[0], borrowed[1])) {
-        ret operation_error(ERROR_BUFFER);
-    }
     var core_input: CoreInput = CoreInput{local: input.local, peer: input.peer,
         data:           input.data, length: input.length,
         received_at_ns: clock.nanos(input.received_at), ecn: input.ecn};
-    ret receive_checked[T](driver, ?core_input);
+    ret receive_checked[T](driver, ?core_input, ?borrowed[0]);
 }
 
-# the input and its bytes are already known to be disjoint from the driver
-fun receive_checked[T](driver: *Driver[T], input: *CoreInput) OperationResult {
+# `borrowed` is the caller's record and its bytes. a closed driver answers
+# closed whatever the caller passed, so they are checked only once it is known
+# to be open
+fun receive_checked[T](driver: *Driver[T], input: *CoreInput,
+    borrowed: *ownership.Range) OperationResult {
     mutex.lock(?driver.lock);
     apply_cancellation[T](driver);
     if (driver.state == CLOSED || (driver.closing &&
@@ -1006,6 +1010,11 @@ fun receive_checked[T](driver: *Driver[T], input: *CoreInput) OperationResult {
         val state: ConnectionState = driver.state;
         mutex.unlock(?driver.lock);
         ret operation_result(STATUS_CLOSED, ERROR_NONE, 0, 0, state);
+    }
+    if (!borrowed_all_disjoint[T](driver, borrowed, 2) ||
+        !ownership.disjoint(borrowed[0], borrowed[1])) {
+        mutex.unlock(?driver.lock);
+        ret operation_error(ERROR_BUFFER);
     }
     if (driver.operation_scope == nil ||
         !scope_active(driver.operation_scope)) {
@@ -1039,10 +1048,6 @@ pub fun receive_native[T](driver: *Driver[T], packet: *net_types.Packet,
     var borrowed: [2]ownership.Range;
     borrowed[0] = ownership.record[net_types.Packet](packet);
     borrowed[1] = ownership.bytes(packet.buffer, packet.length, ownership.ZERO_ALLOWED);
-    if (!borrowed_all_disjoint[T](driver, ?borrowed[0], 2) ||
-        !ownership.disjoint(borrowed[0], borrowed[1])) {
-        ret operation_error(ERROR_BUFFER);
-    }
     var local: ip.Endpoint = bound_local;
     if (packet.has_local_destination) {
         local.addr = packet.local_destination;
@@ -1050,7 +1055,7 @@ pub fun receive_native[T](driver: *Driver[T], packet: *net_types.Packet,
     }
     var input: CoreInput = CoreInput{local: local, peer: packet.peer, data: packet.buffer,
         length: packet.length, received_at_ns: clock.nanos(received_at), ecn: ecn};
-    ret receive_checked[T](driver, ?input);
+    ret receive_checked[T](driver, ?input, ?borrowed[0]);
 }
 
 pub fun timer[T](driver: *Driver[T]) Timer {
@@ -1134,6 +1139,12 @@ pub fun generate[T](driver: *Driver[T], scope: *cancel.Scope, buffer: *u8,
     }
     mutex.lock(?driver.lock);
     apply_cancellation[T](driver);
+    # closed comes first, as in receive: a closed driver has no scope to match
+    if (driver.state == CLOSED || (driver.closing && driver.close_mode == lifecycle.ABORTIVE)) {
+        mutex.unlock(?driver.lock);
+        result.status = STATUS_CLOSED;
+        ret result;
+    }
     if (!source_scope(scope, driver.operation_scope) || !scope_active(scope)) {
         mutex.unlock(?driver.lock);
         result.status = STATUS_CANCELLED;
@@ -1145,11 +1156,6 @@ pub fun generate[T](driver: *Driver[T], scope: *cancel.Scope, buffer: *u8,
         mutex.unlock(?driver.lock);
         result.status = STATUS_ERROR;
         result.error  = ERROR_BUFFER;
-        ret result;
-    }
-    if (driver.state == CLOSED || (driver.closing && driver.close_mode == lifecycle.ABORTIVE)) {
-        mutex.unlock(?driver.lock);
-        result.status = STATUS_CLOSED;
         ret result;
     }
     if (!update_now[T](driver, now_ns)) {
@@ -1857,10 +1863,18 @@ pub fun begin_close[T](driver: *Driver[T], application_error: u64, reason: *u8,
     val now_ns: u64 = clock.nanos(now);
     if (callback_reentry[T](driver))          { ret operation_error(ERROR_STATE); }
     if (driver == nil || !driver.initialized) { ret operation_error(ERROR_STATE); }
-    if (!borrowed_disjoint[T](driver, ownership.bytes(reason, reason_length,
-        ownership.ZERO_ALLOWED))) { ret operation_error(ERROR_BUFFER); }
     mutex.lock(?driver.lock);
     apply_cancellation[T](driver);
+    # a closed driver answers closed whatever reason the caller passed
+    if (driver.state == CLOSED) {
+        mutex.unlock(?driver.lock);
+        ret operation_result(STATUS_CLOSED, ERROR_NONE, 0, 0, CLOSED);
+    }
+    if (!borrowed_disjoint[T](driver, ownership.bytes(reason, reason_length,
+        ownership.ZERO_ALLOWED))) {
+        mutex.unlock(?driver.lock);
+        ret operation_error(ERROR_BUFFER);
+    }
     val result: OperationResult = begin_close_locked[T](driver, false, lifecycle.EXPLICIT,
         application_error, reason, reason_length, now_ns);
     mutex.unlock(?driver.lock);
