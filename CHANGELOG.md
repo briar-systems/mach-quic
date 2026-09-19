@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-19
+
 ### Changed
 
 - Dependencies: `[dep.std] version = "^6.0"` realized at v6.0.0, `[dep.crypto] version = "^0.18"` at v0.18.0 and `[dep.tls] version = "^0.9"` at v0.9.0, all committed as gitlinks, and `mach = "^5.9"` (#202). std 6.0.0 made `buffers.source_open_account` take a `buffers.Budgets` value that carries its lane count, which `supply.open_connection` now composes from quic's three lanes and the caller's extra ones. Its own signature and `assembly.Config` are unchanged. Nothing else std's migration guide names (sort, heap, map, set, the `ct` width names) is used here. crypto 0.14 through 0.18 and tls 0.9.0 changed no API quic calls: SHA-2 runs on std's hardware-dispatched states, secret word products use the processor multiply where mach admits it, and x25519 and Ed25519 compute on `u128`, so a handshake costs about a third of the instructions it did on crypto 0.13.
