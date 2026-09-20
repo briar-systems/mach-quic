@@ -42,6 +42,12 @@ pub val ACTION_BLOCKED:             Action = 5
 pub val ACTION_ERROR:               Action = 6
 ```
 
+## val ACTION_REFUSE
+
+```mach
+pub val ACTION_REFUSE:              Action = 7
+```
+
 ## def Error
 
 ```mach
@@ -336,6 +342,20 @@ short_destination_length: usize) ClassifiedDatagram;
 
 classifies one received datagram for a cid-indexed socket owner. every
 published byte is copied, and the input is borrowed only for this call
+
+## fun refuse
+
+```mach
+pub fun refuse(listener: *Listener, request: *Request, error_code: u64) Result;
+```
+
+answers an Initial with a CONNECTION_CLOSE under the Initial keys its
+destination id derives and holds no state for it (RFC 9000 10.2.3). the ids
+are echoed swapped so the client reads it as the server's first Initial, and
+it is the same packet whether or not the Initial carries a Retry token, since
+the client derives its keys from the destination id either way. it touches
+no pending slot, charge or token, so it composes with whatever preflight
+answered
 
 ## fun issue_address_token
 
