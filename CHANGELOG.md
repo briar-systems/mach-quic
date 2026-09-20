@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `transport.begin_close`, `generate`, `receive_datagram` and `receive_native` on a driver whose close has settled answer `STATUS_CLOSED` (#207). They checked the caller's buffers against the driver's owned ranges before consulting its state, and a closed driver has handed its operation scope back, so that range was invalid and every such call failed with `ERROR_BUFFER`. A closed driver now answers closed before any buffer, ownership or scope check, and the owned-range set describes the scope only while the driver holds one. Found by mach-http (briar-systems/mach-http#145): after a deadline teardown the h3 engine's close never reached `CLOSED`.
+
 ## [0.15.0] - 2026-09-19
 
 ### Changed
