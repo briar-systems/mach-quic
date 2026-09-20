@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `listener.ClassifiedDatagram.token_length` (#212). For `DATAGRAM_INITIAL` it is the token length the Initial header carries, taken from the parse `classify_datagram` already does, and 0 for every other class, so a socket owner that classifies before admission learns whether an Initial carries a token without a second header parse. Consumer: briar-systems/hedge#242.
+
 ## [0.16.0] - 2026-09-19
 
 ### Added

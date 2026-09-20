@@ -192,6 +192,10 @@ pub rec ConnectionId;
 pub rec ClassifiedDatagram;
 ```
 
+one received datagram as the socket owner sees it before admission.
+token_length is the Initial's token length for DATAGRAM_INITIAL and 0
+for every other class
+
 ## val PENDING_FREE
 
 ```mach
