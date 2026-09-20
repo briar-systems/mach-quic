@@ -2580,7 +2580,11 @@ fun receive_special(core: *Core, secrets: *Secrets,
 fun receive_protected(core: *Core, secrets: *Secrets,
     input: *transport_api.CoreInput,
     value: Envelope) transport_api.CoreResult {
-    if (value.kind == packet.PACKET_INITIAL && input.length < 1200) {
+    # RFC 9000 14.1 has the server discard a short Initial datagram. a server's
+    # own Initial need only be padded when ack-eliciting, so a client reads a
+    # short one, such as a stateless CONNECTION_CLOSE
+    if (value.kind == packet.PACKET_INITIAL && input.length < 1200 &&
+        core.role == transport_api.SERVER) {
         ret core_result(core, transport_api.STATUS_OK, 0);
     }
     if (value.version != 0 && value.version != core.config.version) {
