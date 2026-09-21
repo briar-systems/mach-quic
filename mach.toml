@@ -1,6 +1,6 @@
 [project]
 id = "quic"
-version = "0.17.0"
+version = "0.18.0"
 mach = "^5.9"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -61,12 +61,12 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^6.0"
+version = "^7.0"
 
 [dep.crypto]
 git = "https://github.com/briar-systems/mach-crypto"
-version = "^0.18"
+version = "^0.20"
 
 [dep.tls]
 git = "https://github.com/briar-systems/mach-tls"
-version = "^0.9"
+version = "^0.10"
