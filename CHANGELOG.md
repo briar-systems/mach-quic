@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Dependencies: `[dep.std] version = "^7.0"` realized at v7.0.2, `[dep.crypto] version = "^0.20"` at v0.20.0 and `[dep.tls] version = "^0.10"` at v0.10.0, all committed as gitlinks (#216). std 7.0.0 made `io.runtime.make(runtime, a, initial)` take the allocator every one of the runtime's allocations comes from and keep a copy of it, so the allocator's context must outlive the runtime. quic's only callers are two native transport tests in `transport.simulated`, which now hand the runtime a page allocator declared in the same scope ahead of it. Nothing in quic stores `data.toml.Value`, so its growth needed only the rebuild. `assembly.Connection` stays at 9,784 bytes and `assembly.Storage` at 4,464.
+
 ## [0.17.0] - 2026-09-19
 
 ### Added

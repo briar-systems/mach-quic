@@ -6,6 +6,8 @@ use datagram_api:  quic.stream.datagram;
 use stream_api:    quic.stream.stream;
 use transport_api: quic.transport;
 
+use std.allocator;
+use std.allocator.page;
 use std.chrono.time;
 use io_error:     std.io.error;
 use io_lifecycle: std.io.lifecycle;
@@ -765,8 +767,11 @@ test "quic.transport.simulated: native submission refusals name their kind" {
 test "quic.transport.native: a refused native send batch fails only that send" {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 112, stream_api.ROLE_CLIENT)) { ret 1; }
+    var pages:      allocator.Allocator;
+    val made_pages: err[allocator.Error] = page.make(?pages);
+    if (sel made_pages.err) { ret 2; }
     var runtime:      io_runtime.Runtime;
-    val made_runtime: err[io_error.Error] = io_runtime.make(?runtime, 4);
+    val made_runtime: err[io_error.Error] = io_runtime.make(?runtime, ?pages, 4);
     if (sel made_runtime.err) { ret 2; }
     var network:      net_async.Driver;
     val made_network: err[io_error.Error] = net_async.make(?network, ?runtime);
@@ -875,8 +880,11 @@ fun native_send(fixture: *Fixture, network: *net_async.Driver, sender: *udp.Sock
 test "quic.transport.native: a cancelled send that went out whole is sent" {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 113, stream_api.ROLE_CLIENT)) { ret 1; }
+    var pages:      allocator.Allocator;
+    val made_pages: err[allocator.Error] = page.make(?pages);
+    if (sel made_pages.err) { ret 2; }
     var runtime:      io_runtime.Runtime;
-    val made_runtime: err[io_error.Error] = io_runtime.make(?runtime, 4);
+    val made_runtime: err[io_error.Error] = io_runtime.make(?runtime, ?pages, 4);
     if (sel made_runtime.err) { ret 2; }
     var network:      net_async.Driver;
     val made_network: err[io_error.Error] = net_async.make(?network, ?runtime);
