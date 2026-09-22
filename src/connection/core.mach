@@ -379,6 +379,8 @@ pub rec Core {
     initialized:            bool;
     closing:                bool;
     destroyed:              bool;
+    # owned_range for every OWNED_* index, kept current by the sites that move them
+    owned: [OWNED_RANGES]ownership.Range;
 }
 
 rec Envelope {
@@ -539,64 +541,137 @@ fun secret_record_valid(secrets: *Secrets) bool {
     ret secrets_range(secrets).valid;
 }
 
+# the core's owned ranges, one per member a borrowed buffer must not alias. the
+# lent ones are fixed from initialize on; the chunk-backed ones move only where
+# the core takes or gives their chunk, and each such site refreshes its entry
+val OWNED_RECEIVE_HEADER:        usize = 0;
+val OWNED_RECEIVE_DECODED:       usize = 1;
+val OWNED_SEND_PLAINTEXT:        usize = 2;
+val OWNED_CLOSE_REASON:          usize = 3;
+val OWNED_FRAME_ACKS:            usize = 4;
+val OWNED_RECOVERY_EVENTS:       usize = 5;
+val OWNED_HISTORY:               usize = 6;
+val OWNED_ACK_INITIAL:           usize = 9;
+val OWNED_ACK_HANDSHAKE:         usize = 10;
+val OWNED_ACK_APPLICATION:       usize = 11;
+val OWNED_OWNERS:                usize = 12;
+val OWNED_PEER_EXTENSIONS:       usize = 13;
+val OWNED_LOCAL_EXTENSIONS:      usize = 14;
+val OWNED_PEER_EXTENSION_BYTES:  usize = 15;
+val OWNED_LOCAL_EXTENSION_BYTES: usize = 16;
+val OWNED_RECEIVED_TOKEN:        usize = 17;
+val OWNED_SEND_TOKEN:            usize = 18;
+val OWNED_RETRY_TOKEN:           usize = 19;
+val OWNED_RETRY_PSEUDO:          usize = 20;
+val OWNED_RANGES:                usize = 21;
+
+fun owned_range(core: *Core, index: usize) ownership.Range {
+    if (index == OWNED_RECEIVE_HEADER) {
+        ret ownership.bytes(core.storage.receive_header,
+            core.storage.receive_header_capacity, ownership.ZERO_FORBIDDEN);
+    }
+    if (index == OWNED_RECEIVE_DECODED) {
+        ret ownership.bytes(core.storage.receive_decoded,
+            core.storage.receive_decoded_capacity, ownership.ZERO_FORBIDDEN);
+    }
+    if (index == OWNED_SEND_PLAINTEXT) {
+        ret ownership.bytes(core.storage.send_plaintext,
+            core.storage.send_plaintext_capacity, ownership.ZERO_FORBIDDEN);
+    }
+    if (index == OWNED_CLOSE_REASON) {
+        ret ownership.bytes(core.storage.close_reason,
+            core.storage.close_reason_capacity, ownership.ZERO_FORBIDDEN);
+    }
+    if (index == OWNED_FRAME_ACKS) {
+        ret ownership.array(core.storage.frame_ack_ranges::*u8,
+            core.storage.frame_ack_capacity, $size_of(frame.AckRange),
+            ownership.ZERO_FORBIDDEN);
+    }
+    if (index == OWNED_RECOVERY_EVENTS) {
+        ret ownership.array(core.storage.recovery_events::*u8,
+            core.storage.recovery_event_capacity, $size_of(recovery.Event),
+            ownership.ZERO_FORBIDDEN);
+    }
+    if (index >= OWNED_HISTORY && index < OWNED_HISTORY + 3) {
+        val space: usize = index - OWNED_HISTORY;
+        ret ownership.array(core.recovery_state.spaces[space].packets::*u8,
+            core.recovery_state.spaces[space].capacity, $size_of(recovery.SentPacket),
+            ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_ACK_INITIAL) {
+        ret ownership.array(core.storage.ack_initial.ranges::*u8,
+            core.storage.ack_initial.capacity, $size_of(ack_api.Range),
+            ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_ACK_HANDSHAKE) {
+        ret ownership.array(core.storage.ack_handshake.ranges::*u8,
+            core.storage.ack_handshake.capacity, $size_of(ack_api.Range),
+            ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_ACK_APPLICATION) {
+        ret ownership.array(core.storage.ack_application.ranges::*u8,
+            core.storage.ack_application.capacity, $size_of(ack_api.Range),
+            ownership.ZERO_FORBIDDEN);
+    }
+    if (index == OWNED_OWNERS) {
+        ret ownership.array(core.owners::*u8, core.owner_capacity, $size_of(Owner),
+            ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_PEER_EXTENSIONS) {
+        ret ownership.array(core.storage.peer_extensions::*u8,
+            core.storage.peer_extension_capacity,
+            $size_of(transport_parameters.Parameter), ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_LOCAL_EXTENSIONS) {
+        ret ownership.array(core.storage.local_extensions::*u8,
+            core.storage.local_extension_capacity,
+            $size_of(transport_parameters.Parameter), ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_PEER_EXTENSION_BYTES) {
+        ret ownership.bytes(core.storage.peer_extension_bytes,
+            core.storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_LOCAL_EXTENSION_BYTES) {
+        ret ownership.bytes(core.storage.local_extension_bytes,
+            core.storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_RECEIVED_TOKEN) {
+        ret ownership.bytes(core.received_token.data, core.received_token.bytes,
+            ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_SEND_TOKEN) {
+        ret ownership.bytes(core.send_token.data, core.send_token.bytes,
+            ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_RETRY_TOKEN) {
+        ret ownership.bytes(core.storage.negotiation.retry_token,
+            core.storage.negotiation.retry_token_capacity, ownership.ZERO_ALLOWED);
+    }
+    if (index == OWNED_RETRY_PSEUDO) {
+        ret ownership.bytes(core.storage.negotiation.retry_pseudo,
+            core.storage.negotiation.retry_pseudo_capacity, ownership.ZERO_ALLOWED);
+    }
+    var invalid: ownership.Range;
+    ret invalid;
+}
+
+fun refresh_owned(core: *Core, index: usize) {
+    core.owned[index] = owned_range(core, index);
+}
+
+fun refresh_all_owned(core: *Core) {
+    var i: usize = 0;
+    for (i < OWNED_RANGES) {
+        refresh_owned(core, i);
+        i = i + 1;
+    }
+}
+
 fun borrowed_disjoint(core: *Core, borrowed: ownership.Range) bool {
     if (!borrowed.valid) { ret false; }
-    var owned: [21]ownership.Range;
-    owned[0] = ownership.bytes(core.storage.receive_header,
-        core.storage.receive_header_capacity, ownership.ZERO_FORBIDDEN);
-    owned[1] = ownership.bytes(core.storage.receive_decoded,
-        core.storage.receive_decoded_capacity, ownership.ZERO_FORBIDDEN);
-    owned[2] = ownership.bytes(core.storage.send_plaintext,
-        core.storage.send_plaintext_capacity, ownership.ZERO_FORBIDDEN);
-    owned[3] = ownership.bytes(core.storage.close_reason,
-        core.storage.close_reason_capacity, ownership.ZERO_FORBIDDEN);
-    owned[4] = ownership.array(core.storage.frame_ack_ranges::*u8,
-        core.storage.frame_ack_capacity, $size_of(frame.AckRange),
-        ownership.ZERO_FORBIDDEN);
-    owned[5] = ownership.array(core.storage.recovery_events::*u8,
-        core.storage.recovery_event_capacity, $size_of(recovery.Event),
-        ownership.ZERO_FORBIDDEN);
-    owned[6] = ownership.array(core.recovery_state.spaces[0].packets::*u8,
-        core.recovery_state.spaces[0].capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_ALLOWED);
-    owned[7] = ownership.array(core.recovery_state.spaces[1].packets::*u8,
-        core.recovery_state.spaces[1].capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_ALLOWED);
-    owned[8] = ownership.array(core.recovery_state.spaces[2].packets::*u8,
-        core.recovery_state.spaces[2].capacity, $size_of(recovery.SentPacket),
-        ownership.ZERO_ALLOWED);
-    owned[9] = ownership.array(core.storage.ack_initial.ranges::*u8,
-        core.storage.ack_initial.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_ALLOWED);
-    owned[10] = ownership.array(core.storage.ack_handshake.ranges::*u8,
-        core.storage.ack_handshake.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_ALLOWED);
-    owned[11] = ownership.array(core.storage.ack_application.ranges::*u8,
-        core.storage.ack_application.capacity, $size_of(ack_api.Range),
-        ownership.ZERO_FORBIDDEN);
-    owned[12] = ownership.array(core.owners::*u8,
-        core.owner_capacity, $size_of(Owner), ownership.ZERO_ALLOWED);
-    owned[13] = ownership.array(core.storage.peer_extensions::*u8,
-        core.storage.peer_extension_capacity,
-        $size_of(transport_parameters.Parameter), ownership.ZERO_ALLOWED);
-    owned[14] = ownership.array(core.storage.local_extensions::*u8,
-        core.storage.local_extension_capacity,
-        $size_of(transport_parameters.Parameter), ownership.ZERO_ALLOWED);
-    owned[15] = ownership.bytes(core.storage.peer_extension_bytes,
-        core.storage.peer_extension_byte_capacity, ownership.ZERO_ALLOWED);
-    owned[16] = ownership.bytes(core.storage.local_extension_bytes,
-        core.storage.local_extension_byte_capacity, ownership.ZERO_ALLOWED);
-    owned[17] = ownership.bytes(core.received_token.data,
-        core.received_token.bytes, ownership.ZERO_ALLOWED);
-    owned[18] = ownership.bytes(core.send_token.data, core.send_token.bytes,
-        ownership.ZERO_ALLOWED);
-    owned[19] = ownership.bytes(core.storage.negotiation.retry_token,
-        core.storage.negotiation.retry_token_capacity, ownership.ZERO_ALLOWED);
-    owned[20] = ownership.bytes(core.storage.negotiation.retry_pseudo,
-        core.storage.negotiation.retry_pseudo_capacity, ownership.ZERO_ALLOWED);
     var i: usize = 0;
-    for (i < 21) {
-        if (!ownership.disjoint(borrowed, owned[i])) { ret false; }
+    for (i < OWNED_RANGES) {
+        if (!ownership.disjoint(borrowed, core.owned[i])) { ret false; }
         i = i + 1;
     }
     ret true;
@@ -1236,8 +1311,9 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         storage.owners[i].generation = next_generation(storage.owners[i].generation);
         i                            = i + 1;
     }
-    candidate.owners              = storage.owners;
-    candidate.owner_capacity      = lent_owners(?storage);
+    candidate.owners         = storage.owners;
+    candidate.owner_capacity = lent_owners(?storage);
+    refresh_all_owned(?candidate);
     candidate_secrets.initialized = true;
     candidate.initialized         = true;
     secrets[0]                    = candidate_secrets;
@@ -1502,6 +1578,8 @@ fun detach_handshake_acks(core: *Core) {
     var none: ack_api.SpaceStorage;
     core.storage.ack_initial   = none;
     core.storage.ack_handshake = none;
+    refresh_owned(core, OWNED_ACK_INITIAL);
+    refresh_owned(core, OWNED_ACK_HANDSHAKE);
 }
 
 # nothing reads parameter extensions, the encoded local parameters, retry state
@@ -1523,6 +1601,12 @@ fun release_handshake_storage(core: *Core) {
     core.peer_parameters.extension_count       = 0;
     core.local_parameters.extensions           = nil;
     core.local_parameters.extension_count      = 0;
+    refresh_owned(core, OWNED_PEER_EXTENSIONS);
+    refresh_owned(core, OWNED_LOCAL_EXTENSIONS);
+    refresh_owned(core, OWNED_PEER_EXTENSION_BYTES);
+    refresh_owned(core, OWNED_LOCAL_EXTENSION_BYTES);
+    refresh_owned(core, OWNED_RETRY_TOKEN);
+    refresh_owned(core, OWNED_RETRY_PSEUDO);
     var no_parameters: View;
     core.config.local_transport_parameters = no_parameters;
     detach_handshake_acks(core);
@@ -1778,6 +1862,7 @@ fun owners_ready(core: *Core) bool {
     if (!chunks.take_block(source_of(core), ?core.owner_block)) { ret false; }
     core.owners         = core.owner_block.data::*Owner;
     core.owner_capacity = core.storage.owner_capacity;
+    refresh_owned(core, OWNED_OWNERS);
     ret true;
 }
 
@@ -1799,6 +1884,7 @@ fun history_ready(core: *Core, space: u8) bool {
         chunks.give_block(source_of(core), block);
         ret false;
     }
+    refresh_owned(core, OWNED_HISTORY + space_index(space));
     ret true;
 }
 
@@ -1822,6 +1908,7 @@ fun settle_flight(core: *Core) {
         core.owners         = nil;
         core.owner_capacity = 0;
         chunks.give_block(source_of(core), ?core.owner_block);
+        refresh_owned(core, OWNED_OWNERS);
     }
     var i: usize = 0;
     for (i < 3) {
@@ -1831,9 +1918,16 @@ fun settle_flight(core: *Core) {
             !space_has_prepared_owner(core, space)) {
             recovery.reclaim_history(?core.recovery_state, space);
             chunks.give_block(source_of(core), ?core.history_blocks[i]);
+            refresh_owned(core, OWNED_HISTORY + i);
         }
         i = i + 1;
     }
+}
+
+# a token chunk is either of the two, so a take or give refreshes both
+fun refresh_tokens(core: *Core) {
+    refresh_owned(core, OWNED_RECEIVED_TOKEN);
+    refresh_owned(core, OWNED_SEND_TOKEN);
 }
 
 fun token_source(core: *Core, lane: supply.Lane) supply.Source {
@@ -1847,6 +1941,7 @@ fun take_token(core: *Core, lane: supply.Lane, length: usize,
     val taken: supply.Taken  = supply.take(?from, length);
     if (!taken.ok) { ret false; }
     @chunk = taken.chunk;
+    refresh_tokens(core);
     ret true;
 }
 
@@ -1857,6 +1952,7 @@ fun give_token(core: *Core, lane: supply.Lane, chunk: *supply.Chunk) {
         var none: supply.Chunk;
         @chunk = none;
     }
+    refresh_tokens(core);
 }
 
 # a dead core's chunks, given back whatever they hold
@@ -1870,6 +1966,7 @@ pub fun release_chunks(core: *Core) {
     core.owner_capacity        = 0;
     core.owners_active         = 0;
     chunks.give_block(source_of(core), ?core.owner_block);
+    refresh_owned(core, OWNED_OWNERS);
     var i: usize = 0;
     for (i < 3) {
         if (core.history_blocks[i].data != nil) {
@@ -1877,6 +1974,7 @@ pub fun release_chunks(core: *Core) {
             none.active                   = false;
             core.recovery_state.spaces[i] = none;
             chunks.give_block(source_of(core), ?core.history_blocks[i]);
+            refresh_owned(core, OWNED_HISTORY + i);
         }
         i = i + 1;
     }
