@@ -85,6 +85,8 @@ pub rec Queue {
     peer_limit_bound: bool;
     valid:            bool;
     closing:          bool;
+    # the lent send and receive entry ranges, fixed from initialize on
+    owned: [2]ownership.Range;
 }
 
 pub rec Token {
@@ -176,8 +178,10 @@ pub fun initialize(queue: *Queue, config: Config, storage: Storage) bool {
     if (!ownership.all_disjoint(?ranges[0], 3) || queue.valid ||
         !valid_config(config, storage)) { ret false; }
     var candidate: Queue;
-    candidate.config  = config;
-    candidate.storage = storage;
+    candidate.config   = config;
+    candidate.storage  = storage;
+    candidate.owned[0] = ranges[1];
+    candidate.owned[1] = ranges[2];
     var i:     usize = 0;
     var fresh: Entry;
     fresh.generation = 1;
@@ -207,17 +211,8 @@ fun borrowed_disjoint(queue: *Queue, borrowed: ownership.Range) bool {
         !ownership.disjoint(borrowed, ownership.bytes((?queue.config)::*u8,
         $size_of(Queue), ownership.ZERO_FORBIDDEN))) { ret false; }
     if (!queue.config.enabled) { ret true; }
-    var owned: [2]ownership.Range;
-    owned[0] = ownership.array(queue.storage.send_entries::*u8,
-        queue.storage.send_capacity, $size_of(Entry), ownership.ZERO_FORBIDDEN);
-    owned[1] = ownership.array(queue.storage.receive_entries::*u8,
-        queue.storage.receive_capacity, $size_of(Entry), ownership.ZERO_FORBIDDEN);
-    var i: usize = 0;
-    for (i < 2) {
-        if (!ownership.disjoint(borrowed, owned[i])) { ret false; }
-        i = i + 1;
-    }
-    ret true;
+    ret ownership.disjoint(borrowed, queue.owned[0]) &&
+        ownership.disjoint(borrowed, queue.owned[1]);
 }
 
 pub fun lease_core(queue: *Queue, source: u64) bool {

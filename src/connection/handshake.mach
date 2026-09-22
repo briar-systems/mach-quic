@@ -262,6 +262,8 @@ pub rec Adapter {
     tls_finished:    bool;
     # start was called on the engine, which may hold memory from then on
     tls_started: bool;
+    # the lent attempt range, fixed from init_base on
+    owned_attempts: ownership.Range;
 }
 
 pub rec EventToken {
@@ -1439,8 +1441,10 @@ fun init_base(adapter: *Adapter, config: Config, storage: Storage) bool {
         storage.attempts[i].generation = next_generation(storage.attempts[i].generation);
         i                              = i + 1;
     }
-    adapter.config  = config;
-    adapter.storage = storage;
+    adapter.config         = config;
+    adapter.storage        = storage;
+    adapter.owned_attempts = ownership.array(storage.attempts::*u8,
+        storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN);
     reset_levels(adapter);
     adapter.protocol.initialized = false;
     adapter.tls_client           = nil;
@@ -1462,9 +1466,9 @@ fun adapter_record_valid(adapter: *Adapter) bool {
         $offset_of(Adapter, config)).valid;
 }
 
+# storage_valid ran at init_base, and the storage it proved is not reassigned
 fun adapter_valid(adapter: *Adapter) bool {
-    if (!adapter_record_valid(adapter) || !adapter.initialized) { ret false; }
-    ret storage_valid(adapter, adapter.config, adapter.storage);
+    ret adapter_record_valid(adapter) && adapter.initialized;
 }
 
 fun borrowed_disjoint(adapter: *Adapter, borrowed: ownership.Range) bool {
@@ -1472,8 +1476,7 @@ fun borrowed_disjoint(adapter: *Adapter, borrowed: ownership.Range) bool {
     if (!ownership.disjoint(borrowed,
         ownership.anchored_record[Adapter, Config](?adapter.config,
         $offset_of(Adapter, config)))) { ret false; }
-    ret ownership.disjoint(borrowed, ownership.array(adapter.storage.attempts::*u8,
-        adapter.storage.attempt_capacity, $size_of(Attempt), ownership.ZERO_FORBIDDEN));
+    ret ownership.disjoint(borrowed, adapter.owned_attempts);
 }
 
 pub fun initialize(adapter: *Adapter, config: Config, storage: Storage,
