@@ -151,17 +151,11 @@ fun assign(entry: *Entry, sequence: u64, id: packet.ConnectionId,
     entry.reset_token_present    = reset_token_present;
 }
 
+# the record itself. its storage was proven disjoint from it at initialize and
+# is not reassigned after, so every caller pairs this with `initialized`
 fun physical(manager: *Manager) bool {
-    if (!ownership.bytes(manager::*u8, $size_of(Manager),
-        ownership.ZERO_FORBIDDEN).valid) { ret false; }
-    var ranges: [3]ownership.Range;
-    ranges[0] = ownership.bytes(manager::*u8, $size_of(Manager),
-        ownership.ZERO_FORBIDDEN);
-    ranges[1] = ownership.array(manager.storage.local::*u8,
-        manager.storage.local_capacity, $size_of(Entry), ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.array(manager.storage.peer::*u8,
-        manager.storage.peer_capacity, $size_of(Entry), ownership.ZERO_FORBIDDEN);
-    ret ownership.all_disjoint(?ranges[0], 3);
+    ret ownership.bytes(manager::*u8, $size_of(Manager),
+        ownership.ZERO_FORBIDDEN).valid;
 }
 
 pub fun initialize(manager: *Manager, config: Config, storage: Storage,

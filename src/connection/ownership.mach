@@ -109,17 +109,12 @@ pub fun secret_disjoint(left: *^u8, left_length: usize,
     if (left == nil || right == nil || left_length == 0 || right_length == 0) {
         ret false;
     }
-    var i: usize = 0;
-    for (i < right_length) {
-        if (left == ?right[i]) { ret false; }
-        i = i + 1;
-    }
-    i = 0;
-    for (i < left_length) {
-        if (right == ?left[i]) { ret false; }
-        i = i + 1;
-    }
-    ret true;
+    # ordering reads the addresses, never the secret bytes behind them. a range
+    # whose last byte wraps below its first is refused rather than compared
+    val left_last:  *^u8 = ?left[left_length - 1];
+    val right_last: *^u8 = ?right[right_length - 1];
+    if (left_last < left || right_last < right) { ret false; }
+    ret left_last < right || right_last < left;
 }
 
 pub def Overlap: u8;
@@ -313,5 +308,19 @@ test "quic.connection.ownership: a borrowed range names itself and its collision
     val malformed: Disjointness = disjoint_from(bytes(nil, 0, ZERO_FORBIDDEN), 6,
         ?ranges[0], 0, 4);
     if (malformed.kind != OVERLAP_RANGE_INVALID || malformed.first != 6) { ret 4; }
+    ret 0;
+}
+
+test "quic.connection.ownership: secret ranges overlap by address" {
+    var fixture: AnchoredFixture;
+    val base:    *^u8 = ?fixture.secret[0];
+    val upper:   *^u8 = ?fixture.secret[4];
+    if (!secret_disjoint(base, 4, upper, 4) || !secret_disjoint(upper, 4, base, 4)) { ret 1; }
+    if (secret_disjoint(base, 5, upper, 4) || secret_disjoint(upper, 4, base, 5) ||
+        secret_disjoint(base, 8, ?fixture.secret[2], 2) ||
+        secret_disjoint(?fixture.secret[2], 2, base, 8) ||
+        secret_disjoint(base, 1, base, 1)) { ret 2; }
+    if (secret_disjoint(nil, 4, upper, 4) || secret_disjoint(base, 4, nil, 4) ||
+        secret_disjoint(base, 0, upper, 4) || secret_disjoint(base, 4, upper, 0)) { ret 3; }
     ret 0;
 }

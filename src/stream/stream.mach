@@ -248,6 +248,8 @@ pub rec Manager {
     core_lease:         u64;
     valid:              bool;
     closing:            bool;
+    # the lent record and attempt ranges, fixed from initialize on
+    owned: [2]ownership.Range;
 }
 
 pub rec Handle {
@@ -438,8 +440,10 @@ pub fun initialize(manager: *Manager, config: Config, storage: Storage) bool {
     if (!ownership.all_disjoint(?ranges[0], 3) || manager.valid ||
         !valid_config(config, storage)) { ret false; }
     var candidate: Manager;
-    candidate.config  = config;
-    candidate.storage = storage;
+    candidate.config   = config;
+    candidate.storage  = storage;
+    candidate.owned[0] = ranges[1];
+    candidate.owned[1] = ranges[2];
     var i: usize = 0;
     for (storage.streams != nil && i < storage.stream_capacity) {
         storage.streams[i].generation = 0;
@@ -491,8 +495,8 @@ fun borrowed_disjoint(manager: *Manager, borrowed: ownership.Range) bool {
     if (!manager_record_valid(manager) || !borrowed.valid ||
         !ownership.disjoint(borrowed, ownership.bytes((?manager.config)::*u8,
         $size_of(Manager), ownership.ZERO_FORBIDDEN))) { ret false; }
-    ret ownership.disjoint(borrowed, lent_records(manager.storage)) &&
-        ownership.disjoint(borrowed, lent_attempts(manager.storage));
+    ret ownership.disjoint(borrowed, manager.owned[0]) &&
+        ownership.disjoint(borrowed, manager.owned[1]);
 }
 
 # the record at `index`, or nil when its chunk is not held

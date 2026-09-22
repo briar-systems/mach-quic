@@ -1064,3 +1064,30 @@ test "quic.connection.core: a receive before the send completion keeps the histo
         fixture.engine.history_blocks[0].data == nil) { ret 4; }
     ret 0;
 }
+
+# the owned ranges are kept, not rebuilt per call, so a chunk taken after init
+# has to reach them where it is taken
+test "quic.connection.core: a buffer aliasing an owner table or history taken after init is refused" {
+    var fixture: Fixture;
+    if (!initialize_with_fault(?fixture, transport.CLIENT, true, 1, MODE_ON_DEMAND)) { ret 1; }
+    var output: [1200]u8;
+    val first:  transport.CoreDatagram = core.generate(?fixture.engine,
+        ?fixture.secrets, ?output[0], 1200, 2);
+    if (first.status != transport.STATUS_OK || fixture.engine.owners == nil ||
+        fixture.engine.history_blocks[0].data == nil) { ret 2; }
+    var input: transport.CoreInput = transport.CoreInput{
+        local: fixture.engine.config.local, peer: fixture.engine.config.peer,
+        data:  fixture.engine.owners::*u8, length: 1, received_at_ns: 3, ecn: 0
+    };
+    if (core.receive(?fixture.engine, ?fixture.secrets,
+        ?input).status != transport.STATUS_ERROR) { ret 3; }
+    input.data = fixture.engine.history_blocks[0].data;
+    if (core.receive(?fixture.engine, ?fixture.secrets,
+        ?input).status != transport.STATUS_ERROR) { ret 4; }
+    # the same datagram from a buffer of its own is not refused
+    var own: [1]u8;
+    input.data = ?own[0];
+    if (core.receive(?fixture.engine, ?fixture.secrets,
+        ?input).status == transport.STATUS_ERROR) { ret 5; }
+    ret 0;
+}
