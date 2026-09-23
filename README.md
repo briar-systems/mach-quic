@@ -545,7 +545,7 @@ handshake has handed everything over, the adapter moves tls's established
 core out of the engine and the engine holds no memory.
 
 Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 4,464 bytes and `Connection` at 9,784,
+records are `assembly.Storage` at 4,560 bytes and `Connection` at 10,624,
 which includes tls's established core. On a live connection that has gone
 idle, an established connection with no streams holds no chunks at all, and
 tls holds nothing on its lane. With the six H3 control streams open and drained, it

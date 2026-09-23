@@ -325,6 +325,8 @@ pub rec SendSlot {
     owner:        u64;
     packet:       net_types.Packet;
     native_token: io_runtime.Token;
+    # the buffer's range, set when the slot is claimed
+    range: ownership.Range;
 }
 
 pub rec Storage { sends: *SendSlot; send_capacity: usize; }
@@ -353,6 +355,8 @@ pub rec Driver[T] {
     initialized:         bool;
     released:            bool;
     closing:             bool;
+    # fill_owned's ranges, the scope's emptied once finish_close hands it back
+    owned: [OWNED_RANGES]ownership.Range;
 }
 
 pub fun default_config(source: u64) Config {
@@ -576,86 +580,75 @@ fun driver_extent[T](driver: *Driver[T]) ownership.Range {
         ?driver.cancellation, $offset_of(Driver[T], cancellation));
 }
 
+# the ranges a driver owns besides its own record, fixed from init on except the
+# scope, which finish_close hands back
+val OWNED_SENDS:            usize = 0;
+val OWNED_STREAMS:          usize = 1;
+val OWNED_STREAM_RECORDS:   usize = 2;
+val OWNED_STREAM_ATTEMPTS:  usize = 3;
+val OWNED_DATAGRAMS:        usize = 4;
+val OWNED_DATAGRAM_SENDS:   usize = 5;
+val OWNED_DATAGRAM_RECEIVE: usize = 6;
+val OWNED_SCOPE:            usize = 7;
+val OWNED_CONTEXT:          usize = 8;
+val OWNED_RANGES:           usize = 9;
+
+fun fill_owned[T](owned: *ownership.Range, protocol: *Protocol[T],
+    streams: *stream_api.Manager, datagrams: *datagram_api.Queue,
+    scope: *cancel.Scope, storage: *Storage) {
+    var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
+    if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
+    owned[OWNED_SENDS] = ownership.array(storage.sends::*u8, storage.send_capacity,
+        $size_of(SendSlot), ownership.ZERO_FORBIDDEN);
+    owned[OWNED_STREAMS]         = ownership.record[stream_api.Manager](streams);
+    owned[OWNED_STREAM_RECORDS]  = stream_api.lent_records(streams.storage);
+    owned[OWNED_STREAM_ATTEMPTS] = stream_api.lent_attempts(streams.storage);
+    owned[OWNED_DATAGRAMS]       = ownership.record[datagram_api.Queue](datagrams);
+    owned[OWNED_DATAGRAM_SENDS]  = ownership.array(datagrams.storage.send_entries::*u8,
+        datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
+        datagram_zero);
+    owned[OWNED_DATAGRAM_RECEIVE] = ownership.array(datagrams.storage.receive_entries::*u8,
+        datagrams.storage.receive_capacity, $size_of(datagram_api.Entry),
+        datagram_zero);
+    owned[OWNED_SCOPE]   = ownership.record[cancel.Scope](scope);
+    owned[OWNED_CONTEXT] = protocol.context_range(protocol.context);
+}
+
 fun ownership_valid[T](driver: *Driver[T], protocol: *Protocol[T],
     streams: *stream_api.Manager,
     datagrams: *datagram_api.Queue, scope: *cancel.Scope,
     storage: *Storage) bool {
     if (driver == nil || protocol == nil || streams == nil || datagrams == nil ||
         scope == nil || storage == nil) { ret false; }
-    var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
-    if (!datagrams.config.enabled) { datagram_zero = ownership.ZERO_ALLOWED; }
-    var ranges: [10]ownership.Range;
+    var ranges: [OWNED_RANGES + 1]ownership.Range;
     ranges[0] = driver_extent[T](driver);
-    ranges[1] = ownership.array(storage.sends::*u8, storage.send_capacity,
-        $size_of(SendSlot), ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.record[stream_api.Manager](streams);
-    ranges[3] = stream_api.lent_records(streams.storage);
-    ranges[4] = stream_api.lent_attempts(streams.storage);
-    ranges[5] = ownership.record[datagram_api.Queue](datagrams);
-    ranges[6] = ownership.array(datagrams.storage.send_entries::*u8,
-        datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
-        datagram_zero);
-    ranges[7] = ownership.array(datagrams.storage.receive_entries::*u8,
-        datagrams.storage.receive_capacity, $size_of(datagram_api.Entry),
-        datagram_zero);
-    ranges[8] = ownership.record[cancel.Scope](scope);
-    ranges[9] = protocol.context_range(protocol.context);
-    ret ownership.all_disjoint(?ranges[0], 10);
+    fill_owned[T](?ranges[1], protocol, streams, datagrams, scope, storage);
+    ret ownership.all_disjoint(?ranges[0], OWNED_RANGES + 1);
 }
 
 fun borrowed_disjoint[T](driver: *Driver[T], borrowed: ownership.Range) bool {
     ret borrowed_all_disjoint[T](driver, ?borrowed, 1);
 }
 
-# checks every borrowed range against the driver's owned ranges, building
-# those once for the whole set
+# checks every borrowed range against the driver's own record, the ranges it
+# was lent at init and every send buffer it holds
 fun borrowed_all_disjoint[T](driver: *Driver[T], borrowed: *ownership.Range,
     count: usize) bool {
-    var b: usize = 0;
+    val extent: ownership.Range = driver_extent[T](driver);
+    var b:      usize           = 0;
     for (b < count) {
-        if (!borrowed[b].valid) { ret false; }
-        b = b + 1;
-    }
-    var datagram_zero: ownership.ZeroPolicy = ownership.ZERO_FORBIDDEN;
-    if (!driver.datagrams.config.enabled) {
-        datagram_zero = ownership.ZERO_ALLOWED;
-    }
-    var ranges: [10]ownership.Range;
-    ranges[0] = driver_extent[T](driver);
-    ranges[1] = ownership.array(driver.storage.sends::*u8,
-        driver.storage.send_capacity, $size_of(SendSlot),
-        ownership.ZERO_FORBIDDEN);
-    ranges[2] = ownership.record[stream_api.Manager](driver.streams);
-    ranges[3] = stream_api.lent_records(driver.streams.storage);
-    ranges[4] = stream_api.lent_attempts(driver.streams.storage);
-    ranges[5] = ownership.record[datagram_api.Queue](driver.datagrams);
-    ranges[6] = ownership.array(driver.datagrams.storage.send_entries::*u8,
-        driver.datagrams.storage.send_capacity, $size_of(datagram_api.Entry),
-        datagram_zero);
-    ranges[7] = ownership.array(driver.datagrams.storage.receive_entries::*u8,
-        driver.datagrams.storage.receive_capacity, $size_of(datagram_api.Entry),
-        datagram_zero);
-    # the scope is owned until finish_close hands it back, and a closed driver
-    # owns none, so its absence is an empty range rather than an invalid one
-    ranges[8] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
-    if (driver.operation_scope != nil) {
-        ranges[8] = ownership.record[cancel.Scope](driver.operation_scope);
-    }
-    ranges[9] = driver.protocol.context_range(driver.protocol.context);
-    b         = 0;
-    for (b < count) {
+        if (!borrowed[b].valid || !ownership.disjoint(borrowed[b], extent)) { ret false; }
         var i: usize = 0;
-        for (i < 10) {
-            if (!ownership.disjoint(borrowed[b], ranges[i])) { ret false; }
+        for (i < OWNED_RANGES) {
+            if (!ownership.disjoint(borrowed[b], driver.owned[i])) { ret false; }
             i = i + 1;
         }
         i = 0;
         for (i < driver.storage.send_capacity) {
             if (driver.storage.sends[i].state != SLOT_FREE &&
-                !ownership.disjoint(borrowed[b],
-                ownership.bytes(driver.storage.sends[i].buffer,
-                driver.storage.sends[i].capacity,
-                ownership.ZERO_FORBIDDEN))) { ret false; }
+                !ownership.disjoint(borrowed[b], driver.storage.sends[i].range)) {
+                ret false;
+            }
             i = i + 1;
         }
         b = b + 1;
@@ -889,6 +882,7 @@ fun init_driver[T](driver: *Driver[T], role: Role, config: Config, protocol: Pro
     candidate.terminal_cause      = lifecycle.EXPLICIT;
     candidate.cancellation_reason = cancel.Reason.active{};
     candidate.lock                = mutex.make();
+    fill_owned[T](?candidate.owned[0], ?protocol, streams, datagrams, scope, ?storage);
     cancel.init_registration(?candidate.cancellation.registration);
     candidate.initialized           = true;
     candidate.cancellation.attached = true;
@@ -965,6 +959,7 @@ fun claim_slot[T](driver: *Driver[T], buffer: *u8, capacity: usize,
             slot.length          = 0;
             slot.context         = context;
             slot.owner           = 0;
+            slot.range           = ownership.bytes(buffer, capacity, ownership.ZERO_FORBIDDEN);
             driver.next_slot     = (index + 1) % driver.storage.send_capacity;
             driver.pending_sends = driver.pending_sends + 1;
             ret slot;
@@ -975,9 +970,11 @@ fun claim_slot[T](driver: *Driver[T], buffer: *u8, capacity: usize,
 }
 
 fun release_slot[T](driver: *Driver[T], slot: *SendSlot) {
+    var no_range: ownership.Range;
     slot.state    = SLOT_FREE;
     slot.buffer   = nil;
     slot.capacity = 0;
+    slot.range    = no_range;
     slot.length   = 0;
     slot.context  = 0;
     slot.owner    = 0;
@@ -1936,8 +1933,9 @@ pub fun finish_close[T](driver: *Driver[T]) OperationResult {
         }
         driver.cancellation.attached = false;
     }
-    driver.state           = CLOSED;
-    driver.operation_scope = nil;
+    driver.state              = CLOSED;
+    driver.operation_scope    = nil;
+    driver.owned[OWNED_SCOPE] = ownership.bytes(nil, 0, ownership.ZERO_ALLOWED);
     mutex.unlock(?driver.lock);
     ret operation_result(STATUS_OK, ERROR_NONE, 0, 0, CLOSED);
 }
@@ -2019,7 +2017,9 @@ pub fun release_closed[T](driver: *Driver[T]) OperationResult {
     driver.application_error       = 0;
     atomic.store(?driver.callback_owner, 0);
     var empty_cancellation: Cancellation;
+    var no_owned:           [OWNED_RANGES]ownership.Range;
     driver.cancellation = empty_cancellation;
+    driver.owned        = no_owned;
     driver.closing      = false;
     driver.initialized  = false;
     driver.released     = true;
