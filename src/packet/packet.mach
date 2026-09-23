@@ -622,6 +622,59 @@ pub fun encode(b: *binary.Builder, packet: *Packet, limits: Limits) EncodeResult
     ret encoded;
 }
 
+# the count and packet number offset encode_protected_header gives the same
+# arguments, with its refusals, and writes nothing. a full builder is the one
+# refusal it cannot see
+pub fun protected_header_size(value: *Packet, ciphertext_length: usize,
+    limits: Limits) ProtectedHeaderResult {
+    var result: ProtectedHeaderResult;
+    if (value == nil ||
+        value.header.packet_number_len < 1 || value.header.packet_number_len > 4 ||
+        value.header.packet_number > MAX_PACKET_NUMBER ||
+        value.header.destination.len::usize > MAX_CONNECTION_ID ||
+        value.header.source.len::usize > MAX_CONNECTION_ID ||
+        ciphertext_length < 16 || ciphertext_length > limits.max_packet_size) {
+        result.error = ERROR_OUTPUT;
+        ret result;
+    }
+    var count: usize = 1 + value.header.destination.len::usize;
+    if (value.header.kind != PACKET_ONE_RTT) {
+        val bits: u8 = bits_from_kind(value.header.version, value.header.kind);
+        if (bits == 0xff || value.header.kind == PACKET_RETRY ||
+            value.header.kind == PACKET_VERSION_NEGOTIATION) {
+            result.error = ERROR_KIND;
+            ret result;
+        }
+        count = count + 4 + 1 + 1 + value.header.source.len::usize;
+        if (value.header.kind == PACKET_INITIAL) {
+            val token_width: u8 = varint.width(value.token.len::u64);
+            if (!validate_span(value.token, limits.max_token_size) || token_width == 0) {
+                result.error = ERROR_TOKEN_LENGTH;
+                ret result;
+            }
+            count = count + token_width::usize + value.token.len;
+        }
+        val length_width: u8 = varint.width(value.header.packet_number_len::u64 +
+            ciphertext_length::u64);
+        if (ciphertext_length > limits.max_packet_size -
+            value.header.packet_number_len::usize || length_width == 0) {
+            result.error = ERROR_PACKET_LENGTH;
+            ret result;
+        }
+        count = count + length_width::usize;
+    }
+    result.packet_number_offset = count;
+    count                       = count + value.header.packet_number_len::usize;
+    if (count > limits.max_packet_size) {
+        result.error                = ERROR_OUTPUT;
+        result.packet_number_offset = 0;
+        ret result;
+    }
+    result.ok    = true;
+    result.count = count;
+    ret result;
+}
+
 # encodes authenticated header bytes with the ciphertext length in the long header
 pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
     ciphertext_length: usize,
@@ -730,6 +783,51 @@ test "quic.packet.packet: protected headers include authentication tag length" {
     if (!encoded.ok || encoded.packet_number_offset != 25 || encoded.count != 27 ||
         bytes[23] != 0 || bytes[24] != 34 || bytes[25] != 0x12 ||
         bytes[26] != 0x34) { ret 1; }
+    ret 0;
+}
+
+fun header_sizes_agree(value: *Packet, ciphertext_length: usize) bool {
+    var bytes:   [512]u8;
+    var builder: binary.Builder        = binary.builder(?bytes[0], 512, binary.BIG);
+    val encoded: ProtectedHeaderResult = encode_protected_header(?builder,
+        value, ciphertext_length, default_limits());
+    val sized: ProtectedHeaderResult = protected_header_size(value,
+        ciphertext_length, default_limits());
+    ret encoded.ok == sized.ok && encoded.error == sized.error &&
+        encoded.count == sized.count &&
+        encoded.packet_number_offset == sized.packet_number_offset &&
+        builder.len == sized.count;
+}
+
+test "quic.packet.packet: a protected header's size is what encoding it writes" {
+    var token: [300]u8;
+    var value: Packet;
+    value.header.version           = VERSION_1;
+    value.header.destination.len   = 8;
+    value.header.source.len        = 20;
+    value.header.packet_number_len = 1;
+    value.header.kind              = PACKET_ONE_RTT;
+    if (!header_sizes_agree(?value, 16) || !header_sizes_agree(?value, 1400)) { ret 1; }
+    value.header.kind = PACKET_HANDSHAKE;
+    if (!header_sizes_agree(?value, 16) || !header_sizes_agree(?value, 60) ||
+        !header_sizes_agree(?value, 1400)) { ret 2; }
+    value.header.kind              = PACKET_INITIAL;
+    value.header.packet_number_len = 4;
+    value.token                    = Span{data: ?token[0], len: 70};
+    if (!header_sizes_agree(?value, 1200) || !header_sizes_agree(?value, 16)) { ret 3; }
+    value.token.len = 300;
+    if (!header_sizes_agree(?value, 1200)) { ret 4; }
+    value.header.version = VERSION_2;
+    if (!header_sizes_agree(?value, 1200)) { ret 5; }
+    # refusals agree too
+    if (!header_sizes_agree(?value, 15) || protected_header_size(?value, 15,
+        default_limits()).ok) { ret 6; }
+    value.header.kind = PACKET_RETRY;
+    if (!header_sizes_agree(?value, 100) || protected_header_size(?value, 100,
+        default_limits()).error != ERROR_KIND) { ret 7; }
+    value.header.kind              = PACKET_ZERO_RTT;
+    value.header.packet_number_len = 5;
+    if (!header_sizes_agree(?value, 100)) { ret 8; }
     ret 0;
 }
 
