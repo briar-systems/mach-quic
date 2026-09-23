@@ -159,7 +159,10 @@ test "quic.stream.simulated: exact send budgets and duplicate transmissions reta
         stream.publish(?manager, final).status != stream.STATUS_OK ||
         stream.on_terminal(?manager, final.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
     if (!stream.snapshot(?manager, opened.handle).send_closed) { ret 1; }
+    # a bare fin closes the receive side once read hands it to the owner
     if (!stream.receive_stream(?manager, 0, 0, nil, 0, true).ok ||
+        stream.snapshot(?manager, opened.handle).receive_closed ||
+        stream.read(?manager, opened.handle, ?data[0], 1).status != stream.STATUS_FINISHED ||
         !stream.snapshot(?manager, opened.handle).receive_closed) { ret 1; }
     if (stream.release(?manager, opened.handle).status != stream.STATUS_OK ||
         supply.held(test_account(), supply.SEND) != 0) { ret 1; }
@@ -192,6 +195,7 @@ test "quic.stream.simulated: reset, stop-sending, and cancellation close both di
     if (!reset.ok || stream.publish(?manager, reset).status != stream.STATUS_OK ||
         stream.on_terminal(?manager, reset.token, stream.TERMINAL_ACKED).status != stream.STATUS_OK) { ret 1; }
     if (!stream.receive_stream(?manager, 0, 0, nil, 0, true).ok ||
+        stream.read(?manager, opened.handle, ?data[0], 3).status != stream.STATUS_FINISHED ||
         stream.release(?manager, opened.handle).status != stream.STATUS_OK) { ret 1; }
 
     val next: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
@@ -428,7 +432,8 @@ test "quic.stream.simulated: consumed credit frames survive loss and stream rele
     if (stream.publish(?manager, control).status != stream.STATUS_OK ||
         stream.on_terminal(?manager, control.token,
         stream.TERMINAL_ACKED).status != stream.STATUS_OK ||
-        !stream.receive_stream(?manager, 1, 4, nil, 0, true).ok) { ret 1; }
+        !stream.receive_stream(?manager, 1, 4, nil, 0, true).ok ||
+        stream.read(?manager, accepted.handle, ?output[0], 4).status != stream.STATUS_FINISHED) { ret 1; }
     records[accepted.handle.index].send_closed = true;
     if (stream.release(?manager, accepted.handle).status != stream.STATUS_OK) {
         ret 1;
@@ -942,6 +947,52 @@ test "quic.stream.simulated: news is reported until the owner takes it" {
         !stream.receive_max_stream_data(?manager, local.handle.id, 8).ok ||
         !stream.pending_news(?manager) || !stream.next_ready(?manager).writable ||
         stream.pending_news(?manager)) { ret 8; }
+    ret 0;
+}
+
+test "quic.stream.simulated: a bare fin after every byte was read is news" {
+    var records:  [4]stream.Stream;
+    var attempts: [8]stream.Attempt;
+    var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 8);
+    var bytes:    [2]u8          = [2]u8{1, 2};
+    var output:   [8]u8;
+    if (!stream.receive_stream(?manager, 1, 0, ?bytes[0], 2, false).ok) { ret 1; }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    if (accepted.status != stream.STATUS_OK || !stream.next_ready(?manager).readable ||
+        stream.read(?manager, accepted.handle, ?output[0], 8).status != stream.STATUS_OK ||
+        stream.pending_news(?manager)) { ret 2; }
+    # the owner has drained the stream, so only the fin is left to report
+    if (!stream.receive_stream(?manager, 1, 2, nil, 0, true).ok ||
+        stream.snapshot(?manager, accepted.handle).receive_closed ||
+        !stream.pending_news(?manager)) { ret 3; }
+    val ready: stream.Ready = stream.next_ready(?manager);
+    if (ready.status != stream.STATUS_OK || !ready.readable ||
+        ready.handle.id != 1 || stream.pending_news(?manager)) { ret 4; }
+    val read: stream.ReadResult = stream.read(?manager, accepted.handle, ?output[0], 8);
+    if (read.status != stream.STATUS_FINISHED || read.count != 0 || read.final_size != 2 ||
+        !stream.snapshot(?manager, accepted.handle).receive_closed) { ret 5; }
+    # a repeated fin after the owner took the end is not news again
+    if (!stream.receive_stream(?manager, 1, 2, nil, 0, true).ok ||
+        stream.pending_news(?manager)) { ret 6; }
+    ret 0;
+}
+
+test "quic.stream.simulated: a peer stream opened by a bare fin is news through accept" {
+    var records:  [4]stream.Stream;
+    var attempts: [8]stream.Attempt;
+    var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 8);
+    var output:   [8]u8;
+    if (!stream.receive_stream(?manager, 1, 0, nil, 0, true).ok ||
+        !stream.pending_news(?manager) || manager.unaccepted_streams != 1) { ret 1; }
+    val accepted: stream.CreateResult = stream.accept(?manager);
+    if (accepted.status != stream.STATUS_OK || accepted.handle.id != 1 ||
+        !stream.pending_news(?manager)) { ret 2; }
+    val ready: stream.Ready = stream.next_ready(?manager);
+    if (ready.status != stream.STATUS_OK || !ready.readable ||
+        ready.handle.id != 1 || stream.pending_news(?manager)) { ret 3; }
+    val read: stream.ReadResult = stream.read(?manager, accepted.handle, ?output[0], 8);
+    if (read.status != stream.STATUS_FINISHED || read.count != 0 || read.final_size != 0 ||
+        stream.pending_news(?manager)) { ret 4; }
     ret 0;
 }
 

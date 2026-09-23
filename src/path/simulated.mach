@@ -124,6 +124,32 @@ test "quic.path.simulated: NAT rebinding selects, preserves policy state, and en
         validated.reset_congestion || validated.reset_rtt || validated.reset_ecn ||
         !current.address_validated || !current.mtu_validated ||
         current.amplification_allowance != 0 - 1::u64) { ret 1; }
+    # an unpadded challenge goes out small where the limit forbids 1200, and
+    # its response then validates the address but not the mtu
+    val narrow: path.Observation = path.observe(?manager, endpoint(1, 4433, 1, 55002), 11, 100,
+        true, true, true, true, 40);
+    if (narrow.status != path.STATUS_OK || !narrow.needs_validation || !narrow.validate_previous ||
+        path.queue_challenge(?manager, narrow.handle, challenge(40), 100, 80, false,
+        path.VALIDATION_PATH).status != path.STATUS_OK) { ret 2; }
+    val small: path.PreparedChallenge = path.prepare_challenge(?manager, narrow.handle);
+    if (small.status != path.STATUS_OK || small.minimum_datagram_size != 0 ||
+        small.maximum_datagram_size != 300 ||
+        path.publish_challenge(?manager, small.token, 41).status != path.STATUS_OK ||
+        path.receive_response(?manager, challenge(40), 42).status != path.STATUS_OK) { ret 2; }
+    current = path.snapshot(?manager, narrow.handle);
+    if (!current.address_validated || current.mtu_validated) { ret 2; }
+    # where the limit allows 1200 the same unpadded challenge is padded
+    val wide: path.Observation = path.observe(?manager, endpoint(1, 4433, 1, 55003), 12, 400,
+        true, true, true, true, 50);
+    if (wide.status != path.STATUS_OK || !wide.needs_validation ||
+        path.queue_challenge(?manager, wide.handle, challenge(50), 100, 80, false,
+        path.VALIDATION_PATH).status != path.STATUS_OK) { ret 3; }
+    val full: path.PreparedChallenge = path.prepare_challenge(?manager, wide.handle);
+    if (full.status != path.STATUS_OK || full.minimum_datagram_size != 1200 ||
+        path.publish_challenge(?manager, full.token, 51).status != path.STATUS_OK ||
+        path.receive_response(?manager, challenge(50), 52).status != path.STATUS_OK) { ret 3; }
+    current = path.snapshot(?manager, wide.handle);
+    if (!current.address_validated || !current.mtu_validated) { ret 3; }
     ret 0;
 }
 

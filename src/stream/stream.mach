@@ -2001,7 +2001,8 @@ pub fun receive_stream(manager: *Manager, id: u64, offset: u64, data: *u8,
     if (fin) {
         stream.final_known = true;
         stream.final_size  = ending;
-        if (stream.receive_cancelled || stream.receive_read == ending) { stream.receive_closed = true; }
+        # the side closes once read hands the owner the end, even with no bytes left
+        if (stream.receive_cancelled) { stream.receive_closed = true; }
     }
     if (!stream.receive_cancelled && readable_news(stream)) {
         push_ready(manager, index, READY_READABLE);
