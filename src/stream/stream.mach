@@ -870,7 +870,7 @@ pub fun next_ready(manager: *Manager) Ready {
 # whether next_ready or accept has anything to hand the owner, O(1): a stream
 # with news it has not taken, or a peer stream it has not accepted. it changes
 # nothing
-pub fun has_news(manager: *Manager) bool {
+pub fun pending_news(manager: *Manager) bool {
     if (!manager_record_valid(manager) || !manager.valid) { ret false; }
     ret manager.ready_head != NO_STREAM || manager.unaccepted_streams != 0;
 }

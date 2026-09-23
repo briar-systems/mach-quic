@@ -914,34 +914,34 @@ test "quic.stream.simulated: news is reported until the owner takes it" {
     var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 8);
     var bytes:    [8]u8          = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
     var output:   [8]u8;
-    if (stream.has_news(?manager)) { ret 1; }
+    if (stream.pending_news(?manager)) { ret 1; }
     # a peer stream is news from the frame that opens it, and each stream the
     # frame opens implicitly waits for accept too
     if (!stream.receive_stream(?manager, 5, 0, ?bytes[0], 2, false).ok ||
-        !stream.has_news(?manager) || manager.unaccepted_streams != 2) { ret 2; }
+        !stream.pending_news(?manager) || manager.unaccepted_streams != 2) { ret 2; }
     val first: stream.CreateResult = stream.accept(?manager);
-    if (first.handle.id != 1 || !stream.has_news(?manager)) { ret 3; }
+    if (first.handle.id != 1 || !stream.pending_news(?manager)) { ret 3; }
     val second: stream.CreateResult = stream.accept(?manager);
     # the accepted stream's data is queued news now, until it is taken
     if (second.handle.id != 5 || manager.unaccepted_streams != 0 ||
-        !stream.has_news(?manager)) { ret 4; }
+        !stream.pending_news(?manager)) { ret 4; }
     val ready: stream.Ready = stream.next_ready(?manager);
-    if (!ready.readable || ready.handle.id != 5 || stream.has_news(?manager)) { ret 5; }
+    if (!ready.readable || ready.handle.id != 5 || stream.pending_news(?manager)) { ret 5; }
     # more data with a fin, a reset and a flow-control opening each bring it back
     if (stream.read(?manager, second.handle, ?output[0], 8).count != 2 ||
-        stream.has_news(?manager) ||
+        stream.pending_news(?manager) ||
         !stream.receive_stream(?manager, 5, 2, ?bytes[2], 1, true).ok ||
-        !stream.has_news(?manager) ||
+        !stream.pending_news(?manager) ||
         stream.next_ready(?manager).status != stream.STATUS_OK ||
-        stream.has_news(?manager)) { ret 6; }
-    if (!stream.receive_reset(?manager, 1, 3, 0).ok || !stream.has_news(?manager) ||
-        !stream.next_ready(?manager).reset || stream.has_news(?manager)) { ret 7; }
+        stream.pending_news(?manager)) { ret 6; }
+    if (!stream.receive_reset(?manager, 1, 3, 0).ok || !stream.pending_news(?manager) ||
+        !stream.next_ready(?manager).reset || stream.pending_news(?manager)) { ret 7; }
     val local: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
     if (stream.write(?manager, local.handle, ?bytes[0], 4).count != 2 ||
-        stream.has_news(?manager) ||
+        stream.pending_news(?manager) ||
         !stream.receive_max_stream_data(?manager, local.handle.id, 8).ok ||
-        !stream.has_news(?manager) || !stream.next_ready(?manager).writable ||
-        stream.has_news(?manager)) { ret 8; }
+        !stream.pending_news(?manager) || !stream.next_ready(?manager).writable ||
+        stream.pending_news(?manager)) { ret 8; }
     ret 0;
 }
 
