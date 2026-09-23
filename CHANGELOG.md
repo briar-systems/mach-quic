@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-23
+
 ### Added
 
 - `transport.pending_output(driver, now)` and `transport.pending_stream_news(driver)` answer whether a connection holds work its host must act on, with nothing changed and nothing allocated (#221). `pending_output` is whether the next `generate` at `now` would produce a datagram, for a buffer of at least the connection's maximum UDP payload. It is exact but for three documented edges: pending handshake work answers true, a pool refusal not yet answered by `storage_ready` answers false, and a cancellation recorded but not yet applied answers true. `pending_stream_news` is O(1): a stream has news its owner has not taken through `ready_stream`, or a peer stream waits for `accept_stream`. The README's "Pending work" section has the full table. Consumer: hedge's debug audit (hedge#182).
