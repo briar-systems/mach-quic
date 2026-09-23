@@ -747,6 +747,54 @@ a live driver. Only complete cleanup clears both lease headers. `reusable`
 confirms the complete rollback before a bounded owner reclaims either backing
 class or returns the control record to its free list.
 
+### Pending work
+
+Two queries answer whether a connection holds work its host must act on, with
+nothing changed and nothing allocated, so asking never alters what the connection
+does next. A host's audit uses them to find a connection that holds work nobody
+will drive. They follow `pending_work` in mach-http's h2 engine, split in two
+because the work has two drivers here: `generate` sends output, and the stream
+owner takes news through `ready_stream` and `accept_stream`.
+
+| Query | Driven by | Pending when |
+| --- | --- | --- |
+| `pending_output(driver, now)` | `generate` | the next `generate` at `now` would produce a datagram |
+| `pending_stream_news(driver)` | `ready_stream`, `accept_stream` | a stream has data, a fin, a reset or a flow-control opening its owner has not taken, or a peer stream has not been accepted |
+
+`pending_stream_news` is O(1). `pending_output` takes the instant because a
+delayed ACK, the pacer and the idle-cache deadline make the answer depend on time.
+It answers for a buffer of at least the connection's maximum UDP payload. It
+costs one frame choice of `generate`'s, a walk bounded by the connection's
+stream and path capacity (16 streams and 2 paths in `connection.assembly`). The
+core's answer comes from the same decisions `generate` takes: `generate` chooses
+its frame with a pure `select_frame` and checks the packet with a pure
+`plan_packet` (size, padding, header, history room, congestion, pacing and the
+path's amplification limit) before it takes anything, and the query runs those
+two. So the query and `generate` cannot drift apart, and `generate` checks that
+the packet it encodes is the one it planned.
+
+It is exact but for these edges:
+
+- Pending handshake work answers true: new crypto the provider has not been
+  polled for, a wake after the provider was refused memory, or a provider whose
+  last poll did not end waiting for input (`core.handshake_pending`). Only
+  running the provider tells whether it hands over a flight.
+- A pool refusal answers false. Once the pool refuses a chunk a send needs, a
+  send that needs one it does not hold waits for `storage_ready`, the account's
+  wake, and both `generate` and the query pass over it until then. Before any
+  refusal the pool is assumed to grant.
+- A cancellation recorded but not yet applied answers true. The next call
+  applies it, an abortive close the host must give the connection a turn for,
+  although the `generate` that applies it sends nothing.
+
+These answer false, as `generate` produces nothing for them: a closed or
+abortively closing driver, a scope no longer active once its cancellation is
+applied, an instant before the
+driver's last call, no free send slot, a prepared datagram not yet completed,
+and output held by congestion, the pacer or the amplification limit. The
+pacer's hold ends at its deadline, which `timer` reports, and the query answers
+true from that instant.
+
 ## Development
 
 Dependencies use exact Git tags.
