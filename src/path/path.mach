@@ -2033,6 +2033,29 @@ pub fun retain_recovery(manager: *Manager, value: Handle) OperationResult {
     ret result;
 }
 
+# the congestion controller and pacer `value` sends under: its own once
+# configured, or the ones configure_transport would give it now. it changes
+# nothing
+fun transport_states(manager: *Manager, value: Handle, smoothed_rtt_ns: u64,
+    now_ns: u64, congestion: *congestion_api.State, pacer: *pacer_api.State) bool {
+    if (!handle_valid(manager, value) || smoothed_rtt_ns == 0) { ret false; }
+    val path: *Path = ?manager.storage.paths[value.index];
+    if (path.transport_valid) {
+        @congestion = path.congestion;
+        @pacer      = path.pacer;
+        ret true;
+    }
+    val fresh: congestion_api.State = congestion_api.init(congestion_api.default_config(
+        congestion_api.ALGORITHM_CUBIC, path.current_mtu::u64), now_ns);
+    if (!fresh.valid) { ret false; }
+    val paced: pacer_api.State = pacer_api.init(pacer_api.default_config(path.current_mtu::u64,
+        fresh.config.initial_window), fresh.congestion_window, smoothed_rtt_ns, now_ns);
+    if (!paced.valid) { ret false; }
+    @congestion = fresh;
+    @pacer      = paced;
+    ret true;
+}
+
 pub fun configure_transport(manager: *Manager, value: Handle,
     smoothed_rtt_ns: u64,
     now_ns: u64) OperationResult {
@@ -2046,17 +2069,13 @@ pub fun configure_transport(manager: *Manager, value: Handle,
         current.status = STATUS_OK;
         ret current;
     }
-    path.congestion = congestion_api.init(congestion_api.default_config(
-        congestion_api.ALGORITHM_CUBIC, path.current_mtu::u64), now_ns);
-    if (!path.congestion.valid) { ret operation_error(ERROR_STATE); }
-    path.pacer = pacer_api.init(pacer_api.default_config(path.current_mtu::u64,
-        path.congestion.config.initial_window), path.congestion.congestion_window,
-        smoothed_rtt_ns, now_ns);
-    if (!path.pacer.valid) {
-        var clean: congestion_api.State;
-        path.congestion = clean;
+    var congestion: congestion_api.State;
+    var pacer:      pacer_api.State;
+    if (!transport_states(manager, value, smoothed_rtt_ns, now_ns, ?congestion, ?pacer)) {
         ret operation_error(ERROR_STATE);
     }
+    path.congestion      = congestion;
+    path.pacer           = pacer;
     path.transport_valid = true;
     var result: OperationResult;
     result.status = STATUS_OK;
@@ -2644,6 +2663,15 @@ pub fun configure_transport_scoped(manager: *Manager, source: u64,
         smoothed_rtt_ns, now_ns);
     leave_core_scope(manager, source);
     ret result;
+}
+
+# the congestion controller and pacer configure_transport_scoped would leave
+# `value` sending under, with nothing changed
+pub fun peek_transport_scoped(manager: *Manager, source: u64, value: Handle,
+    smoothed_rtt_ns: u64, now_ns: u64, congestion: *congestion_api.State,
+    pacer: *pacer_api.State) bool {
+    ret in_core_scope(manager, source) &&
+        transport_states(manager, value, smoothed_rtt_ns, now_ns, congestion, pacer);
 }
 
 pub fun unconfigure_transport_scoped(manager: *Manager, source: u64,
