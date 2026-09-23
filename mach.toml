@@ -65,7 +65,7 @@ version = "^7.0"
 
 [dep.crypto]
 git = "https://github.com/briar-systems/mach-crypto"
-version = "^0.20"
+ref = "tag/v0.21.0"
 
 [dep.tls]
 git = "https://github.com/briar-systems/mach-tls"
