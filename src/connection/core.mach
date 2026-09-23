@@ -24,12 +24,15 @@ use quic.wire.varint;
 use crypto.contracts;
 use crypto.secret;
 use std.crypto.ct;
+use std.crypto.rand;
 use std.encoding.binary;
+use io_error: std.io.error;
 use std.memory;
 use std.net.ip;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.error.err;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
@@ -2838,6 +2841,12 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         input.received_at_ns)) {
         ret fail(core, INTERNAL_ERROR, input.received_at_ns);
     }
+    # rfc 9000 9.3 and 9.3.3: a peer's new address is validated, and so is the
+    # validated address it left
+    if ((observed.needs_validation && !validate_path(core, observed.handle)) ||
+        (observed.validate_previous && !validate_path(core, observed.previous))) {
+        ret fail(core, INTERNAL_ERROR, input.received_at_ns);
+    }
     core.packet_refused = false;
     if (!apply_plaintext(core, secrets, level, space, observed.handle,
         receive_destination.handle, plaintext, opened.written,
@@ -3050,6 +3059,12 @@ pub fun queue_path_challenge(core: *Core, value: path_api.Handle,
         failed.error  = path_api.ERROR_STATE;
         ret failed;
     }
+    wake(core);
+    ret queue_challenge(core, value, data, padded, purpose);
+}
+
+fun queue_challenge(core: *Core, value: path_api.Handle, data: [8]u8,
+    padded: bool, purpose: u8) path_api.OperationResult {
     val pto_ns: u64 = recovery.current_pto(?core.recovery_state, true);
     if (pto_ns == 0) {
         var failed: path_api.OperationResult;
@@ -3057,9 +3072,30 @@ pub fun queue_path_challenge(core: *Core, value: path_api.Handle,
         failed.error  = path_api.ERROR_TIME;
         ret failed;
     }
-    wake(core);
     ret path_api.queue_challenge_scoped(core.paths, core.config.source, value,
         data, pto_ns, pto_ns, padded, purpose);
+}
+
+# rfc 9000 8.2 and 9.3: challenges `value` with fresh unpredictable data unless
+# it is already validating. the challenge is padded where the amplification
+# limit allows
+fun validate_path(core: *Core, value: path_api.Handle) bool {
+    if (path_api.validating_scoped(core.paths, core.config.source, value)) { ret true; }
+    var attempt: usize = 0;
+    for (attempt < 4) {
+        var data:   [8]u8;
+        val filled: err[io_error.Error] = rand.fill(?data[0], 8);
+        if (sel filled.err) { ret false; }
+        val queued: path_api.OperationResult = queue_challenge(core, value, data,
+            false, path_api.VALIDATION_PATH);
+        if (queued.status == path_api.STATUS_OK) {
+            wake(core);
+            ret true;
+        }
+        if (queued.error != path_api.ERROR_DUPLICATE) { ret false; }
+        attempt = attempt + 1;
+    }
+    ret false;
 }
 
 pub fun on_path_packet_too_big(core: *Core, value: path_api.Handle,

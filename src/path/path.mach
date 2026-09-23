@@ -136,8 +136,11 @@ pub rec Challenge {
     timeout_ns:      u64;
     state:           u8;
     purpose:         u8;
-    padded:          bool;
-    valid:           bool;
+    # the datagram must be padded, and the challenge waits until it can be
+    padded: bool;
+    # the prepared datagram was padded to 1200, so a response validates the mtu
+    sent_padded: bool;
+    valid:       bool;
 }
 
 pub rec Response {
@@ -1035,11 +1038,25 @@ pub fun queue_challenge(manager: *Manager, value: Handle, data: [8]u8,
     challenge.state                   = CHALLENGE_QUEUED;
     challenge.purpose                 = purpose;
     challenge.padded                  = padded;
+    challenge.sent_padded             = false;
     challenge.valid                   = true;
     manager.storage.challenges[index] = challenge;
     var result: OperationResult;
     result.status = STATUS_OK;
     ret result;
+}
+
+# whether `value` has a validation under way or a challenge waiting to start one
+fun validating(manager: *Manager, value: Handle) bool {
+    if (manager.storage.paths[value.index].validation_deadline_ns != 0) { ret true; }
+    var i: usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        if (manager.storage.challenges[i].valid &&
+            manager.storage.challenges[i].path_index == value.index &&
+            manager.storage.challenges[i].path_generation == value.generation) { ret true; }
+        i = i + 1;
+    }
+    ret false;
 }
 
 fun challenge_token(manager: *Manager, index: usize) ChallengeToken {
@@ -1075,16 +1092,19 @@ fun select_challenge(manager: *Manager, value: Handle, index: *usize) PreparedCh
             manager.storage.challenges[i].path_index == value.index &&
             manager.storage.challenges[i].path_generation == value.generation &&
             manager.storage.challenges[i].state == CHALLENGE_QUEUED) {
-            @index          = i;
-            result.status   = STATUS_OK;
-            result.token    = challenge_token(manager, i);
-            result.handle   = value;
-            result.endpoint = manager.storage.paths[value.index].endpoint;
-            result.data     = manager.storage.challenges[i].data;
-            if (manager.storage.challenges[i].padded) { result.minimum_datagram_size = 1200; }
+            @index                       = i;
+            result.status                = STATUS_OK;
+            result.token                 = challenge_token(manager, i);
+            result.handle                = value;
+            result.endpoint              = manager.storage.paths[value.index].endpoint;
+            result.data                  = manager.storage.challenges[i].data;
             result.maximum_datagram_size = amplification_allowance(manager, value.index);
             if (result.maximum_datagram_size > manager.storage.paths[value.index].current_mtu) {
                 result.maximum_datagram_size = manager.storage.paths[value.index].current_mtu::u64;
+            }
+            # rfc 9000 8.2.1: padded to 1200 unless the amplification limit forbids it
+            if (manager.storage.challenges[i].padded || result.maximum_datagram_size >= 1200) {
+                result.minimum_datagram_size = 1200;
             }
             if (result.maximum_datagram_size < 9 ||
                 result.maximum_datagram_size < result.minimum_datagram_size) {
@@ -1108,7 +1128,8 @@ pub fun prepare_challenge(manager: *Manager, value: Handle) PreparedChallenge {
     }
     val result: PreparedChallenge = select_challenge(manager, value, ?index);
     if (result.status == STATUS_OK) {
-        manager.storage.challenges[index].state = CHALLENGE_PREPARED;
+        manager.storage.challenges[index].state       = CHALLENGE_PREPARED;
+        manager.storage.challenges[index].sent_padded = result.minimum_datagram_size >= 1200;
     }
     ret result;
 }
@@ -1226,7 +1247,7 @@ pub fun receive_response(manager: *Manager, data: [8]u8, now_ns: u64) Validation
             }
             manager.storage.paths[index].address_validated = true;
             manager.storage.paths[index].state             = PATH_VALIDATED;
-            if (manager.storage.challenges[i].padded) {
+            if (manager.storage.challenges[i].sent_padded) {
                 manager.storage.paths[index].mtu_validated = true;
             }
             manager.storage.paths[index].validation_started_ns  = 0;
@@ -2506,6 +2527,12 @@ pub fun peek_challenge_scoped(manager: *Manager, source: u64,
         ret failed;
     }
     ret select_challenge(manager, value, ?index);
+}
+
+# whether `value` is validating or holds a challenge. false for a stale handle
+pub fun validating_scoped(manager: *Manager, source: u64, value: Handle) bool {
+    if (!in_core_scope(manager, source) || !handle_valid(manager, value)) { ret false; }
+    ret validating(manager, value);
 }
 
 # what prepare_response_scoped would answer, with nothing changed
