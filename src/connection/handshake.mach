@@ -2104,14 +2104,12 @@ pub fun complete_event(adapter: *Adapter, token: EventToken, accepted: bool) Res
     ret adapter_result(STATUS_OK, ERROR_NONE, 0, 0);
 }
 
-fun claim_attempt(adapter: *Adapter) usize {
+# the free attempt the next claim takes, or the capacity when none is free
+fun free_attempt(adapter: *Adapter) usize {
     var offset: usize = 0;
     for (offset < adapter.storage.attempt_capacity) {
         val i: usize = (adapter.next_attempt + offset) % adapter.storage.attempt_capacity;
-        if (adapter.storage.attempts[i].state == ATTEMPT_FREE) {
-            adapter.next_attempt = (i + 1) % adapter.storage.attempt_capacity;
-            ret i;
-        }
+        if (adapter.storage.attempts[i].state == ATTEMPT_FREE) { ret i; }
         offset = offset + 1;
     }
     ret adapter.storage.attempt_capacity;
@@ -2147,13 +2145,15 @@ fun next_inflight_start(adapter: *Adapter, level: Level, offset: u64, limit: u64
     ret nearest;
 }
 
-# a probe resends any unacknowledged bytes. otherwise only bytes that are
-# neither acknowledged nor in a live attempt are taken
-fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
-    probe: bool) Prepared {
+# the bytes prepare_attempt would take at `level`, reported as it would report
+# them, with the attempt it would claim in `index`. it changes nothing. a probe
+# resends any unacknowledged bytes. otherwise only bytes that are neither
+# acknowledged nor in a live attempt are taken
+fun select_attempt(adapter: *Adapter, level: Level, maximum: usize,
+    probe: bool, index: *usize) Prepared {
     var result: Prepared;
     if (!adapter_valid(adapter) || adapter.transition_active ||
-        adapter.core_lease != 0 || !adapter.started || adapter.closing ||
+        !adapter.started || adapter.closing ||
         !valid_level(level) || maximum == 0) {
         result.status = STATUS_ERROR;
         result.error  = ERROR_STATE;
@@ -2185,26 +2185,44 @@ fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
         result.error  = ERROR_STATE;
         ret result;
     }
-    val attempt_index: usize = claim_attempt(adapter);
-    if (attempt_index == adapter.storage.attempt_capacity) {
+    @index = free_attempt(adapter);
+    if (@index == adapter.storage.attempt_capacity) {
         result.status = STATUS_BLOCKED;
         result.error  = ERROR_LIMIT;
         ret result;
     }
-    val attempt: *Attempt = ?adapter.storage.attempts[attempt_index];
-    attempt.generation = next_generation(attempt.generation);
-    attempt.offset     = cursor;
-    attempt.length     = (limit - cursor)::usize;
-    attempt.chunk      = slot.chunk.ref;
-    attempt.level      = level;
-    attempt.state      = ATTEMPT_PREPARED;
-    result.status      = STATUS_OK;
-    result.token       = AttemptToken{source: adapter.config.source, index: attempt_index,
-        generation: attempt.generation};
+    val attempt: *Attempt = ?adapter.storage.attempts[@index];
+    result.status = STATUS_OK;
+    result.token  = AttemptToken{source: adapter.config.source, index: @index,
+        generation: next_generation(attempt.generation)};
     result.level  = level;
     result.offset = cursor;
     result.data   = View{data: ?slot.chunk.data[(cursor % supply.BYTES::u64)::usize],
-        length: attempt.length};
+        length: (limit - cursor)::usize};
+    ret result;
+}
+
+fun prepare_attempt(adapter: *Adapter, level: Level, maximum: usize,
+    probe: bool) Prepared {
+    var index: usize = 0;
+    if (adapter_valid(adapter) && adapter.core_lease != 0) {
+        var leased: Prepared;
+        leased.status = STATUS_ERROR;
+        leased.error  = ERROR_STATE;
+        ret leased;
+    }
+    val result: Prepared = select_attempt(adapter, level, maximum, probe, ?index);
+    if (result.status != STATUS_OK) { ret result; }
+    val state:   *LevelState  = ?adapter.levels[level_index(level)];
+    val slot:    *chunks.Slot = chunks.find(?state.send, chunks.number_of(result.offset));
+    val attempt: *Attempt     = ?adapter.storage.attempts[index];
+    adapter.next_attempt = (index + 1) % adapter.storage.attempt_capacity;
+    attempt.generation   = result.token.generation;
+    attempt.offset       = result.offset;
+    attempt.length       = result.data.length;
+    attempt.chunk        = slot.chunk.ref;
+    attempt.level        = level;
+    attempt.state        = ATTEMPT_PREPARED;
     ret result;
 }
 
@@ -2565,6 +2583,20 @@ pub fun prepare_probe_scoped(adapter: *Adapter, source: u64, level: Level,
     val result: Prepared = prepare_probe(adapter, level, maximum);
     leave_core_scope(adapter, source);
     ret result;
+}
+
+# what prepare_scoped, or prepare_probe_scoped when `probe`, would answer at
+# `level`, with nothing changed
+pub fun peek_scoped(adapter: *Adapter, source: u64, level: Level,
+    maximum: usize, probe: bool) Prepared {
+    var index: usize = 0;
+    if (!adapter_valid(adapter) || source == 0 || adapter.core_lease != source) {
+        var failed: Prepared;
+        failed.status = STATUS_ERROR;
+        failed.error  = ERROR_STATE;
+        ret failed;
+    }
+    ret select_attempt(adapter, level, maximum, probe, ?index);
 }
 
 pub fun cancel_prepared_scoped(adapter: *Adapter, source: u64,

@@ -5,6 +5,7 @@ use quic.storage.ranges;
 use supply: quic.storage.source;
 
 use std.crypto.ct;
+use std.memory;
 use std.memory.buffers;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -552,6 +553,44 @@ test "quic.connection.handshake: acknowledged crypto gives its chunk back and ac
         handshake.prepare_probe(?fixture.adapter, handshake.HANDSHAKE, 8).status !=
         handshake.STATUS_EMPTY) { ret 8; }
     if (!handshake.destroy(?fixture.adapter)) { ret 9; }
+    ret 0;
+}
+
+fun attempts_same(a: *handshake.Attempt, b: *handshake.Attempt) bool {
+    ret memory.equal[handshake.Attempt](a, b, 16);
+}
+
+test "quic.connection.handshake: a crypto peek names what the prepare after it takes and changes nothing" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 406)) { ret 1; }
+    var output: [32]u8;
+    if (!queue_event(?fixture.provider, crypto_event(1, handshake.HANDSHAKE, 0,
+        handshake.View{data: ?output[0], length: 32})) ||
+        !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 2; }
+    # the core holds the adapter from here, as it does once started
+    fixture.adapter.core_lease = 406;
+    if (handshake.peek_scoped(?fixture.adapter, 407, handshake.HANDSHAKE, 8,
+        false).error != handshake.ERROR_STATE ||
+        handshake.peek_scoped(?fixture.adapter, 406, handshake.INITIAL, 8,
+        false).status != handshake.STATUS_EMPTY) { ret 3; }
+    var before: [16]handshake.Attempt = fixture.attempts;
+    val next:   usize                 = fixture.adapter.next_attempt;
+    val peeked: handshake.Prepared    = handshake.peek_scoped(?fixture.adapter, 406,
+        handshake.HANDSHAKE, 8, false);
+    if (peeked.status != handshake.STATUS_OK || peeked.offset != 0 ||
+        peeked.data.length != 8 || fixture.adapter.next_attempt != next ||
+        !attempts_same(?fixture.attempts[0], ?before[0])) { ret 4; }
+    val taken: handshake.Prepared = handshake.prepare_scoped(?fixture.adapter, 406,
+        handshake.HANDSHAKE, 8);
+    if (taken.status != handshake.STATUS_OK || taken.offset != peeked.offset ||
+        taken.data.data != peeked.data.data || taken.data.length != peeked.data.length ||
+        taken.token.index != peeked.token.index ||
+        taken.token.generation != peeked.token.generation) { ret 5; }
+    # the next peek moves past the attempt in flight, and a probe resends it
+    if (handshake.peek_scoped(?fixture.adapter, 406, handshake.HANDSHAKE, 64,
+        false).offset != 8 ||
+        handshake.peek_scoped(?fixture.adapter, 406, handshake.HANDSHAKE, 64,
+        true).offset != 0) { ret 6; }
     ret 0;
 }
 
