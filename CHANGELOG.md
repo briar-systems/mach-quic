@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-23
+
+### Added
+
+- `transport.pending_output(driver, now)` and `transport.pending_stream_news(driver)` answer whether a connection holds work its host must act on, with nothing changed and nothing allocated (#221). `pending_output` is whether the next `generate` at `now` would produce a datagram, for a buffer of at least the connection's maximum UDP payload. It is exact but for three documented edges: pending handshake work answers true, a pool refusal not yet answered by `storage_ready` answers false, and a cancellation recorded but not yet applied answers true. `pending_stream_news` is O(1): a stream has news its owner has not taken through `ready_stream`, or a peer stream waits for `accept_stream`. The README's "Pending work" section has the full table. Consumer: hedge's debug audit (hedge#182).
+- `transport.Protocol` gains `pending_output: fun(*T, u64) bool`, served by `binding` from the new `core.pending_output`. `core.handshake_pending` names the handshake edge.
+- Pure selections beside each prepare, each answering what the prepare would take without taking it: `stream.peek_scoped`, `peek_control_scoped` and `attempts_held`, `datagram.peek_scoped`, `handshake.peek_scoped`, and `path.peek_response_scoped`, `peek_challenge_scoped`, `peek_mtu_probe_scoped`, `peek_send_scoped`, `peek_mtu_send_scoped` and `peek_transport_scoped`. `stream.pending_news`, `ack.frame_size` and `packet.protected_header_size` size or answer without writing.
+
+### Changed
+
+- `generate` chooses its frame and checks its packet before it takes anything (#221). The choice (`select_frame`) and the packet's size, padding, header, history room, congestion admission, pacing and amplification check (`plan_packet`) are pure, and the frame is taken only once the plan says it would be sent, so a send held by congestion or the pacer no longer claims and then returns its frame. `generate` checks that the packet it encodes is the one planned.
+- A send the pool refused a chunk waits for `storage_ready` before asking the pool again (#221). `generate` asked on every call. The pool registers the account on refusal, so the wake comes. A host that does not route the account's wake to `transport.storage_ready` stops sending on that path until it does, which #198 already requires.
+- `assembly.Connection` is 10,640 bytes, from 10,624 (#221): the stream manager counts unaccepted peer streams, the core records the pool refusal and whether the provider's last poll ended waiting for input, and `Protocol` holds one more callback. `assembly.Storage` stays at 4,560.
+
 ## [0.18.1] - 2026-09-22
 
 ### Changed

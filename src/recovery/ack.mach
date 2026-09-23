@@ -295,28 +295,17 @@ pub fun ack_due(tracker: *Tracker, pn_space: u8, now_ns: u64) bool {
     ret space.ack_deadline_armed && now_ns >= space.ack_deadline_ns;
 }
 
-pub fun build(tracker: *Tracker, pn_space: u8, now_ns: u64, ranges: *frame.AckRange, capacity: usize, out: *frame.Frame) BuildResult {
-    var build: BuildResult;
-    val i:     usize = index(pn_space);
-    if (tracker == nil || out == nil || !tracker.valid || i >= 3) {
-        build.error = ERROR_OUTPUT;
-        ret build;
-    }
+# the checks build makes before it writes, and the frame it writes without
+# its ranges. ERROR_STORAGE when `capacity` cannot hold the ranges
+fun ack_frame(tracker: *Tracker, pn_space: u8, now_ns: u64, capacity: usize,
+    out: *frame.Frame) u8 {
+    val i: usize = index(pn_space);
+    if (tracker == nil || out == nil || !tracker.valid || i >= 3) { ret ERROR_OUTPUT; }
     val space: *Space = ?tracker.spaces[i];
-    if (space.discarded || !space.ack_pending || space.count == 0) {
-        build.error = ERROR_SPACE;
-        ret build;
-    }
-    if (now_ns < space.largest_received_at_ns) {
-        build.error = ERROR_OUTPUT;
-        ret build;
-    }
+    if (space.discarded || !space.ack_pending || space.count == 0) { ret ERROR_SPACE; }
+    if (now_ns < space.largest_received_at_ns)                     { ret ERROR_OUTPUT; }
     val needed: usize = space.count - 1;
-    if (needed > capacity || (needed > 0 && ranges == nil)) {
-        build.error = ERROR_STORAGE;
-        ret build;
-    }
-
+    if (needed > capacity) { ret ERROR_STORAGE; }
     var ack: frame.Frame;
     ack.kind = frame.ACK;
     if (space.has_ecn) {
@@ -327,26 +316,67 @@ pub fun build(tracker: *Tracker, pn_space: u8, now_ns: u64, ranges: *frame.AckRa
     }
     ack.largest_acknowledged = space.ranges[0].end;
     ack.first_ack_range      = space.ranges[0].end - space.ranges[0].start;
-    ack.ack_ranges           = ranges;
     ack.ack_range_count      = needed;
-    var position: usize = 1;
-    for (position < space.count) {
-        val previous: Range = space.ranges[position - 1];
-        val current:  Range = space.ranges[position];
-        ranges[position - 1].gap   = previous.start - current.end - 2;
-        ranges[position - 1].range = current.end - current.start;
-        position                   = position + 1;
-    }
     if (pn_space == packet.SPACE_APPLICATION && now_ns > space.largest_received_at_ns) {
         val delay_us: u64 = (now_ns - space.largest_received_at_ns) / 1000;
         ack.ack_delay = delay_us >> tracker.ack_delay_exponent;
     }
+    @out = ack;
+    ret ERROR_NONE;
+}
+
+fun gap_at(space: *Space, position: usize) u64 {
+    ret space.ranges[position - 1].start - space.ranges[position].end - 2;
+}
+
+fun range_at(space: *Space, position: usize) u64 {
+    ret space.ranges[position].end - space.ranges[position].start;
+}
+
+pub fun build(tracker: *Tracker, pn_space: u8, now_ns: u64, ranges: *frame.AckRange, capacity: usize, out: *frame.Frame) BuildResult {
+    var build: BuildResult;
+    var ack:   frame.Frame;
+    var room:  usize = capacity;
+    if (ranges == nil) { room = 0; }
+    build.error = ack_frame(tracker, pn_space, now_ns, room, ?ack);
+    if (build.error != ERROR_NONE) { ret build; }
+    val space: *Space = ?tracker.spaces[index(pn_space)];
+    ack.ack_ranges = ranges;
+    var position: usize = 1;
+    for (position < space.count) {
+        ranges[position - 1].gap   = gap_at(space, position);
+        ranges[position - 1].range = range_at(space, position);
+        position                   = position + 1;
+    }
     @out                       = ack;
     build.ok                   = true;
-    build.range_count          = needed;
+    build.range_count          = ack.ack_range_count;
     build.generation           = space.receive_generation;
     build.largest_acknowledged = ack.largest_acknowledged;
     ret build;
+}
+
+# the bytes the frame build would write with the same arguments, or 0 where
+# build refuses. it writes nothing, so a send can be sized before the frame is
+# taken
+pub fun frame_size(tracker: *Tracker, pn_space: u8, now_ns: u64, capacity: usize) usize {
+    var ack: frame.Frame;
+    if (ack_frame(tracker, pn_space, now_ns, capacity, ?ack) != ERROR_NONE) { ret 0; }
+    val space: *Space = ?tracker.spaces[index(pn_space)];
+    # the frame without its ranges, then each range as encode writes it
+    val count: usize = ack.ack_range_count;
+    ack.ack_range_count = 0;
+    val base: frame.EncodeResult = frame.encoded_size(?ack, frame.default_limits());
+    if (!base.ok) { ret 0; }
+    var size: usize = base.count - varint.width(0)::usize +
+        varint.width(count::u64)::usize;
+    var position: usize = 1;
+    for (position < space.count) {
+        size = size + varint.width(gap_at(space, position))::usize +
+            varint.width(range_at(space, position))::usize;
+        position = position + 1;
+    }
+    ret size;
 }
 
 pub fun on_ack_sent(tracker: *Tracker, pn_space: u8, generation: u64) bool {
@@ -446,6 +476,48 @@ test "quic.recovery.ack: frame construction preserves descending ranges and dela
     if (!built.ok || ack.largest_acknowledged != 10 || ack.first_ack_range != 0 || ack.ack_range_count != 2) { ret 1; }
     if (ranges[0].gap != 0 || ranges[0].range != 0 || ranges[1].gap != 1 || ranges[1].range != 0)            { ret 1; }
     if (ack.ack_delay != 1)                                                                                  { ret 1; }
+    ret 0;
+}
+
+fun built_size(tracker: *Tracker, pn_space: u8, now_ns: u64, ranges: *frame.AckRange,
+    capacity: usize) usize {
+    var ack:   frame.Frame;
+    val built: BuildResult = build(tracker, pn_space, now_ns, ranges, capacity, ?ack);
+    if (!built.ok) { ret 0; }
+    val encoded: frame.EncodeResult = frame.encoded_size(?ack, frame.default_limits());
+    if (!encoded.ok) { ret 0; }
+    ret encoded.count;
+}
+
+test "quic.recovery.ack: an ACK frame's size is what building it writes" {
+    var initial:     [2]Range;
+    var handshake:   [2]Range;
+    var application: [8]Range;
+    var tracker:     Tracker = init(
+        SpaceStorage{ranges: ?initial[0], capacity: 2},
+        SpaceStorage{ranges: ?handshake[0], capacity: 2},
+        SpaceStorage{ranges: ?application[0], capacity: 8},
+        25000000, 3);
+    var ranges: [8]frame.AckRange;
+    # nothing to acknowledge is a refusal in both
+    if (frame_size(?tracker, packet.SPACE_APPLICATION, 1, 8) != 0) { ret 1; }
+    on_packet(?tracker, packet.SPACE_APPLICATION, 20000, 1000, true, ECN_NOT_ECT);
+    on_packet(?tracker, packet.SPACE_APPLICATION, 9000, 2000, true, ECN_NOT_ECT);
+    on_packet(?tracker, packet.SPACE_APPLICATION, 5, 3000, false, ECN_ECT1);
+    on_packet(?tracker, packet.SPACE_APPLICATION, 3, 4000, true, ECN_NOT_ECT);
+    on_packet(?tracker, packet.SPACE_APPLICATION, 2, 5000, true, ECN_CE);
+    # a range count, gaps and a delay that span several varint widths
+    val sized: usize = frame_size(?tracker, packet.SPACE_APPLICATION, 90000000, 8);
+    if (sized == 0 || sized != built_size(?tracker, packet.SPACE_APPLICATION,
+        90000000, ?ranges[0], 8)) { ret 2; }
+    if (frame_size(?tracker, packet.SPACE_APPLICATION, 6000, 8) !=
+        built_size(?tracker, packet.SPACE_APPLICATION, 6000, ?ranges[0], 8)) { ret 3; }
+    # too little range storage refuses in both
+    if (frame_size(?tracker, packet.SPACE_APPLICATION, 6000, 2) != 0 ||
+        built_size(?tracker, packet.SPACE_APPLICATION, 6000, ?ranges[0], 2) != 0) { ret 4; }
+    on_packet(?tracker, packet.SPACE_INITIAL, 0, 1, true, ECN_NOT_ECT);
+    if (frame_size(?tracker, packet.SPACE_INITIAL, 7, 0) != built_size(?tracker,
+        packet.SPACE_INITIAL, 7, nil, 0)) { ret 5; }
     ret 0;
 }
 

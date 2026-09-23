@@ -273,6 +273,12 @@ fun core_finish(core: *Core) bool {
     ret true;
 }
 
+# what core_generate would answer, given a buffer it accepts
+fun core_pending(core: *Core, now_ns: u64) bool {
+    ret core.outbound != 0 && !core.oversize && core.next_owner != 0 - 1::u64 &&
+        !core.active_owners[(core.next_owner % 64)::usize];
+}
+
 fun core_timer(core: *Core) transport_api.CoreTimer {
     ret transport_api.CoreTimer{deadline_ns: core.timer_deadline_ns,
         generation: core.timer_generation, armed: core.timer_armed};
@@ -319,7 +325,7 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
         generate:      core_generate, complete_send: core_complete,
         begin_close:   core_begin_close, close_ready: core_ready,
         finish_close:  core_finish, timer: core_timer,
-        storage_ready: core_storage_ready
+        storage_ready: core_storage_ready, pending_output: core_pending
     };
     val config: transport_api.Config = transport_api.Config{source: source,
         max_udp_payload: 1500, max_close_reason: 64};
@@ -1015,5 +1021,43 @@ test "quic.transport.simulated: a settled close answers closed to every later ca
     if (!transport_api.release_ready[Core](?fixture.driver) ||
         transport_api.release_closed[Core](?fixture.driver).status !=
         transport_api.STATUS_OK || !operation_ok(cancel.destroy(?fixture.scope))) { ret 9; }
+    ret 0;
+}
+
+fun pending(fixture: *Fixture, now_ns: u64) bool {
+    ret transport_api.pending_output[Core](?fixture.driver, clock.instant(now_ns));
+}
+
+test "quic.transport.simulated: the driver answers for output it would refuse and for a recorded cancellation" {
+    var fixture: Fixture;
+    if (!make_fixture(?fixture, 112, stream_api.ROLE_CLIENT)) { ret 1; }
+    var buffers: [5][16]u8;
+    fixture.core.outbound = 0;
+    if (pending(?fixture, 10)) { ret 2; }
+    fixture.core.outbound = 6;
+    if (!pending(?fixture, 10)) { ret 3; }
+    # every send slot taken leaves nothing generate could send into
+    var tokens: [4]transport_api.Token;
+    var i:      usize = 0;
+    for (i < 4) {
+        val generated: transport_api.Generated = transport_api.generate[Core](?fixture.driver,
+            ?fixture.scope, ?buffers[i][0], 16, clock.instant(10), 0);
+        if (generated.status != transport_api.STATUS_OK) { ret 4; }
+        tokens[i] = generated.token;
+        i         = i + 1;
+    }
+    if (pending(?fixture, 10) || transport_api.generate[Core](?fixture.driver, ?fixture.scope,
+        ?buffers[4][0], 16, clock.instant(10), 0).status != transport_api.STATUS_BLOCKED) { ret 5; }
+    if (transport_api.complete_send[Core](?fixture.driver, tokens[0], transport_api.SEND_SENT,
+        5, clock.instant(11)).status != transport_api.STATUS_OK || !pending(?fixture, 11)) { ret 6; }
+    # an instant before the driver's last call is refused, as generate refuses it
+    if (pending(?fixture, 10)) { ret 7; }
+    # a recorded cancellation is work for the next call, which applies it and
+    # closes abortively, so nothing is pending once it has
+    if (!transition_ok(cancel.cancel(?fixture.scope)) || !pending(?fixture, 11) ||
+        fixture.core.closing) { ret 8; }
+    if (transport_api.generate[Core](?fixture.driver, ?fixture.scope, ?buffers[4][0], 16,
+        clock.instant(11), 0).status != transport_api.STATUS_CLOSED ||
+        !fixture.core.abortive || pending(?fixture, 11)) { ret 9; }
     ret 0;
 }
