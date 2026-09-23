@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-09-22
+
 ### Changed
 
 - A connection checks the ranges it owns once, not on every call (#125). The storage lent at init cannot move while the connection is leased, so the core, the transport driver, the stream manager, the datagram queue and the handshake adapter each keep their owned ranges as a field, built at init after the init validation has proven them valid and disjoint, and the connection ID manager and handshake adapter no longer prove their storage disjoint again on every call. The core refreshes the entries backed by pool chunks (the owner table, each space's packet history, the two NEW_TOKEN chunks and the handshake-only storage) where it takes or gives those chunks, the driver empties its scope's entry when `finish_close` hands the scope back, and a send slot records its buffer's range when it is claimed. Per call, only the caller's buffers and the records' own addresses are checked. `ownership.secret_disjoint` compares the two ranges' ends instead of walking every byte address. Refusals and their codes are unchanged. On a loop of 300 handshakes (`establish_direct`, settle, close, release) in a release build, time in `ownership.*` falls from 5.7% to 1.6% of samples and the loop from 1.73 s to 1.69 s.
