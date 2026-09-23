@@ -1060,10 +1060,11 @@ fun challenge_token_valid(manager: *Manager, token: ChallengeToken) bool {
         manager.storage.challenges[token.index].path_generation == token.path_generation;
 }
 
-pub fun prepare_challenge(manager: *Manager, value: Handle) PreparedChallenge {
+# the queued challenge prepare_challenge would take on `value`, reported as it
+# would report it, and its slot in `index`. it changes nothing
+fun select_challenge(manager: *Manager, value: Handle, index: *usize) PreparedChallenge {
     var result: PreparedChallenge;
-    if (!handle_valid(manager, value) || manager.closing ||
-        manager.core_lease != 0) {
+    if (!handle_valid(manager, value) || manager.closing) {
         result.status = STATUS_ERROR;
         result.error  = ERROR_TOKEN;
         ret result;
@@ -1074,12 +1075,12 @@ pub fun prepare_challenge(manager: *Manager, value: Handle) PreparedChallenge {
             manager.storage.challenges[i].path_index == value.index &&
             manager.storage.challenges[i].path_generation == value.generation &&
             manager.storage.challenges[i].state == CHALLENGE_QUEUED) {
-            manager.storage.challenges[i].state = CHALLENGE_PREPARED;
-            result.status                       = STATUS_OK;
-            result.token                        = challenge_token(manager, i);
-            result.handle                       = value;
-            result.endpoint                     = manager.storage.paths[value.index].endpoint;
-            result.data                         = manager.storage.challenges[i].data;
+            @index          = i;
+            result.status   = STATUS_OK;
+            result.token    = challenge_token(manager, i);
+            result.handle   = value;
+            result.endpoint = manager.storage.paths[value.index].endpoint;
+            result.data     = manager.storage.challenges[i].data;
             if (manager.storage.challenges[i].padded) { result.minimum_datagram_size = 1200; }
             result.maximum_datagram_size = amplification_allowance(manager, value.index);
             if (result.maximum_datagram_size > manager.storage.paths[value.index].current_mtu) {
@@ -1087,14 +1088,28 @@ pub fun prepare_challenge(manager: *Manager, value: Handle) PreparedChallenge {
             }
             if (result.maximum_datagram_size < 9 ||
                 result.maximum_datagram_size < result.minimum_datagram_size) {
-                manager.storage.challenges[i].state = CHALLENGE_QUEUED;
-                result.status                       = STATUS_BLOCKED;
+                result.status = STATUS_BLOCKED;
             }
             ret result;
         }
         i = i + 1;
     }
     result.status = STATUS_EMPTY;
+    ret result;
+}
+
+pub fun prepare_challenge(manager: *Manager, value: Handle) PreparedChallenge {
+    var index: usize = 0;
+    if (manager_record_valid(manager) && manager.core_lease != 0) {
+        var leased: PreparedChallenge;
+        leased.status = STATUS_ERROR;
+        leased.error  = ERROR_TOKEN;
+        ret leased;
+    }
+    val result: PreparedChallenge = select_challenge(manager, value, ?index);
+    if (result.status == STATUS_OK) {
+        manager.storage.challenges[index].state = CHALLENGE_PREPARED;
+    }
     ret result;
 }
 
@@ -1327,10 +1342,11 @@ fun amplification_allowance(manager: *Manager, index: usize) u64 {
     ret limit - used;
 }
 
-pub fun prepare_response(manager: *Manager, value: Handle) PreparedResponse {
+# the queued response prepare_response would take on `value`, reported as it
+# would report it, and its slot in `index`. it changes nothing
+fun select_response(manager: *Manager, value: Handle, index: *usize) PreparedResponse {
     var result: PreparedResponse;
     if (!handle_valid(manager, value) || manager.closing ||
-        manager.core_lease != 0 ||
         manager.storage.paths[value.index].state == PATH_FAILED) {
         result.status = STATUS_ERROR;
         result.error  = ERROR_TOKEN;
@@ -1342,20 +1358,19 @@ pub fun prepare_response(manager: *Manager, value: Handle) PreparedResponse {
             manager.storage.responses[i].path_index == value.index &&
             manager.storage.responses[i].path_generation == value.generation &&
             manager.storage.responses[i].state == RESPONSE_QUEUED) {
-            manager.storage.responses[i].state = RESPONSE_PREPARED;
-            result.status                      = STATUS_OK;
-            result.token                       = response_token(manager, i);
-            result.handle                      = value;
-            result.endpoint                    = manager.storage.paths[value.index].endpoint;
-            result.data                        = manager.storage.responses[i].data;
-            result.require_non_probing         = manager.storage.paths[value.index].selected;
-            result.maximum_datagram_size       = amplification_allowance(manager, value.index);
+            @index                       = i;
+            result.status                = STATUS_OK;
+            result.token                 = response_token(manager, i);
+            result.handle                = value;
+            result.endpoint              = manager.storage.paths[value.index].endpoint;
+            result.data                  = manager.storage.responses[i].data;
+            result.require_non_probing   = manager.storage.paths[value.index].selected;
+            result.maximum_datagram_size = amplification_allowance(manager, value.index);
             if (result.maximum_datagram_size > manager.storage.paths[value.index].current_mtu) {
                 result.maximum_datagram_size = manager.storage.paths[value.index].current_mtu::u64;
             }
             if (result.maximum_datagram_size < 9) {
-                manager.storage.responses[i].state = RESPONSE_QUEUED;
-                result.status                      = STATUS_BLOCKED;
+                result.status = STATUS_BLOCKED;
                 ret result;
             }
             if (result.maximum_datagram_size >= 1200) { result.minimum_datagram_size = 1200; }
@@ -1364,6 +1379,21 @@ pub fun prepare_response(manager: *Manager, value: Handle) PreparedResponse {
         i = i + 1;
     }
     result.status = STATUS_EMPTY;
+    ret result;
+}
+
+pub fun prepare_response(manager: *Manager, value: Handle) PreparedResponse {
+    var index: usize = 0;
+    if (manager_record_valid(manager) && manager.core_lease != 0) {
+        var leased: PreparedResponse;
+        leased.status = STATUS_ERROR;
+        leased.error  = ERROR_TOKEN;
+        ret leased;
+    }
+    val result: PreparedResponse = select_response(manager, value, ?index);
+    if (result.status == STATUS_OK) {
+        manager.storage.responses[index].state = RESPONSE_PREPARED;
+    }
     ret result;
 }
 
@@ -1426,9 +1456,10 @@ fun clear_send(manager: *Manager, index: usize) {
     manager.storage.sends[index].valid = false;
 }
 
-fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
-    non_probing: bool, maximum: u64,
-    mtu_probe: bool, mtu_generation: u64) SendResult {
+# whether reserve_bounded would reserve `bytes` on `value`: STATUS_OK with the
+# free send slot in `index`, or the refusal it would give. it changes nothing
+fun check_reserve(manager: *Manager, value: Handle, bytes: u64,
+    non_probing: bool, maximum: u64, index: *usize) SendResult {
     var result: SendResult;
     if (!handle_valid(manager, value) || manager.closing ||
         manager.storage.paths[value.index].state == PATH_FAILED) {
@@ -1461,8 +1492,8 @@ fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
         result.error  = ERROR_AMPLIFICATION;
         ret result;
     }
-    val index: usize = free_send_index(manager);
-    if (index == invalid_index()) {
+    @index = free_send_index(manager);
+    if (@index == invalid_index()) {
         result.status = STATUS_ERROR;
         result.error  = ERROR_CAPACITY;
         ret result;
@@ -1475,7 +1506,19 @@ fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
         result.error  = ERROR_OVERFLOW;
         ret result;
     }
-    val generation:  u64 = next_generation(manager.storage.sends[index].generation);
+    result.status = STATUS_OK;
+    ret result;
+}
+
+fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
+    non_probing: bool, maximum: u64,
+    mtu_probe: bool, mtu_generation: u64) SendResult {
+    var index:  usize      = 0;
+    var result: SendResult = check_reserve(manager, value, bytes, non_probing,
+        maximum, ?index);
+    if (result.status != STATUS_OK) { ret result; }
+    val path:        *Path = ?manager.storage.paths[value.index];
+    val generation:  u64   = next_generation(manager.storage.sends[index].generation);
     var reservation: SendReservation;
     reservation.path_index       = value.index;
     reservation.path_generation  = value.generation;
@@ -1486,8 +1529,7 @@ fun reserve_bounded(manager: *Manager, value: Handle, bytes: u64,
     reservation.non_probing      = non_probing;
     reservation.valid            = true;
     manager.storage.sends[index] = reservation;
-    path.reserved_bytes          = reserved;
-    result.status                = STATUS_OK;
+    path.reserved_bytes          = path.reserved_bytes + bytes;
     result.token.source          = manager.config.source;
     result.token.index           = index;
     result.token.generation      = generation;
@@ -1701,10 +1743,11 @@ fun next_probe(path: *Path, config: Config) u16 {
     ret candidate::u16;
 }
 
-pub fun prepare_mtu_probe(manager: *Manager, value: Handle) MtuPrepared {
+# the probe prepare_mtu_probe would take on `value`, with the token it would
+# issue. it changes nothing
+fun select_mtu_probe(manager: *Manager, value: Handle) MtuPrepared {
     var result: MtuPrepared;
-    if (!handle_valid(manager, value) || manager.closing ||
-        manager.core_lease != 0) {
+    if (!handle_valid(manager, value) || manager.closing) {
         result.status = STATUS_ERROR;
         result.error  = ERROR_TOKEN;
         ret result;
@@ -1724,17 +1767,31 @@ pub fun prepare_mtu_probe(manager: *Manager, value: Handle) MtuPrepared {
         result.status = STATUS_EMPTY;
         ret result;
     }
-    path.mtu_probe_generation    = next_generation(path.mtu_probe_generation);
-    path.mtu_probe_size          = size;
-    path.mtu_probe_prepared      = true;
     result.status                = STATUS_OK;
     result.handle                = value;
     result.size                  = size;
     result.token.source          = manager.config.source;
     result.token.path_index      = value.index;
     result.token.path_generation = value.generation;
-    result.token.generation      = path.mtu_probe_generation;
+    result.token.generation      = next_generation(path.mtu_probe_generation);
     result.token.size            = size;
+    ret result;
+}
+
+pub fun prepare_mtu_probe(manager: *Manager, value: Handle) MtuPrepared {
+    if (manager_record_valid(manager) && manager.core_lease != 0) {
+        var leased: MtuPrepared;
+        leased.status = STATUS_ERROR;
+        leased.error  = ERROR_TOKEN;
+        ret leased;
+    }
+    val result: MtuPrepared = select_mtu_probe(manager, value);
+    if (result.status == STATUS_OK) {
+        val path: *Path = ?manager.storage.paths[value.index];
+        path.mtu_probe_generation = result.token.generation;
+        path.mtu_probe_size       = result.size;
+        path.mtu_probe_prepared   = true;
+    }
     ret result;
 }
 
@@ -2413,6 +2470,83 @@ pub fun on_timeout_scoped(manager: *Manager, source: u64,
     val result: TimeoutResult = on_timeout(manager, now_ns);
     leave_core_scope(manager, source);
     ret result;
+}
+
+fun in_core_scope(manager: *Manager, source: u64) bool {
+    ret manager_record_valid(manager) && source != 0 && manager.core_lease == source;
+}
+
+# what prepare_challenge_scoped would answer, with nothing changed
+pub fun peek_challenge_scoped(manager: *Manager, source: u64,
+    value: Handle) PreparedChallenge {
+    var index: usize = 0;
+    if (!in_core_scope(manager, source)) {
+        var failed: PreparedChallenge;
+        failed.status = STATUS_ERROR;
+        failed.error  = ERROR_STATE;
+        ret failed;
+    }
+    ret select_challenge(manager, value, ?index);
+}
+
+# what prepare_response_scoped would answer, with nothing changed
+pub fun peek_response_scoped(manager: *Manager, source: u64,
+    value: Handle) PreparedResponse {
+    var index: usize = 0;
+    if (!in_core_scope(manager, source)) {
+        var failed: PreparedResponse;
+        failed.status = STATUS_ERROR;
+        failed.error  = ERROR_STATE;
+        ret failed;
+    }
+    ret select_response(manager, value, ?index);
+}
+
+# what prepare_mtu_probe_scoped would answer, with nothing changed
+pub fun peek_mtu_probe_scoped(manager: *Manager, source: u64,
+    value: Handle) MtuPrepared {
+    if (!in_core_scope(manager, source)) {
+        var failed: MtuPrepared;
+        failed.status = STATUS_ERROR;
+        failed.error  = ERROR_STATE;
+        ret failed;
+    }
+    ret select_mtu_probe(manager, value);
+}
+
+# whether reserve_send_scoped would reserve `bytes` on `value`, and what it
+# would refuse with, with nothing changed. the token is left empty
+pub fun peek_send_scoped(manager: *Manager, source: u64, value: Handle,
+    bytes: u64, non_probing: bool) SendResult {
+    var index: usize = 0;
+    if (!in_core_scope(manager, source)) {
+        var failed: SendResult;
+        failed.status = STATUS_ERROR;
+        failed.error  = ERROR_STATE;
+        ret failed;
+    }
+    if (!handle_valid(manager, value)) {
+        var stale: SendResult;
+        stale.status = STATUS_ERROR;
+        stale.error  = ERROR_TOKEN;
+        ret stale;
+    }
+    ret check_reserve(manager, value, bytes, non_probing,
+        manager.storage.paths[value.index].current_mtu::u64, ?index);
+}
+
+# whether an MTU probe of `bytes` that prepare_mtu_probe_scoped would issue
+# could then be reserved, with nothing changed
+pub fun peek_mtu_send_scoped(manager: *Manager, source: u64, value: Handle,
+    bytes: u64, non_probing: bool, size: u16) SendResult {
+    var index: usize = 0;
+    if (!in_core_scope(manager, source) || bytes != size::u64) {
+        var failed: SendResult;
+        failed.status = STATUS_ERROR;
+        failed.error  = ERROR_STATE;
+        ret failed;
+    }
+    ret check_reserve(manager, value, bytes, non_probing, size::u64, ?index);
 }
 
 pub fun prepare_mtu_probe_scoped(manager: *Manager, source: u64,
