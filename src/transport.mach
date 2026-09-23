@@ -387,10 +387,7 @@ fun protocol_valid[T](protocol: *Protocol[T]) bool {
         protocol.storage_ready != nil && protocol.pending_output != nil;
 }
 
-# a callback's own thread calling back into its driver is refused, since the
-# non-recursive driver.lock would deadlock it, while any other thread blocks on
-# the lock. callback_owner holds the running callback's thread token, which is
-# never 0 and never shared by two live threads, so only the owner matches it
+# refuse only the callback's own thread, which would deadlock on driver.lock
 fun callback_reentry[T](driver: *Driver[T]) bool {
     ret driver != nil && atomic.load(?driver.callback_owner) != 0 &&
         atomic.load(?driver.callback_owner) == thread.current_token();
