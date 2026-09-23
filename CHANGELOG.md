@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A bare FIN that arrives after the owner has read every byte is reported (#225). `receive_stream` closed the receive side as soon as such a FIN arrived, so no news was queued, `ready_stream` never named the stream and nothing prompted the owner to call `read_stream`, which would have returned the end. The same held for a peer stream opened by a bare FIN, which `accept_stream` handed over with no news. The receive side now closes only when `read_stream` hands the owner the end, as it already did for a FIN carrying data, so the FIN is readable news, `pending_stream_news` answers true until it is taken, and `accept_stream` queues it for a stream it opened. An owner must now read that end before `release_stream` accepts the stream, and `stream_snapshot` reports `receive_closed` only after it has.
+
 ## [0.19.0] - 2026-09-23
 
 ### Added

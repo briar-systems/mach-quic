@@ -2310,16 +2310,16 @@ test "quic.connection.assembly: stream news is pending until the owner takes it"
     var output: [8]u8;
     if (transport.read_stream[binding.Binding](?listener.driver, accepted.stream,
         ?output[0], 8).count != 1 || news_pending(?listener)) { ret 24; }
-    # a byte with the fin is news again
-    if (transport.write_stream[binding.Binding](?dialer.driver, request.stream,
-        ?output[0], 1).count != 1 ||
-        transport.finish_stream[binding.Binding](?dialer.driver,
+    # a bare fin after every byte was read is news again, and reads as the end
+    if (transport.finish_stream[binding.Binding](?dialer.driver,
         request.stream).status != transport.STATUS_OK) { ret 25; }
     clock = clock + 1000;
     if (hop(?dialer, ?listener, ?dialer_scope, listener_endpoint(), dialer_endpoint(),
         clock) != transport.STATUS_OK || !news_pending(?listener) ||
         !transport.ready_stream[binding.Binding](?listener.driver).readable ||
-        news_pending(?listener)) { ret 26; }
+        news_pending(?listener) ||
+        !transport.read_stream[binding.Binding](?listener.driver, accepted.stream,
+        ?output[0], 8).fin) { ret 26; }
     # the peer asking the listener to stop sending is news on the listener
     if (transport.cancel_stream_receive[binding.Binding](?dialer.driver, request.stream,
         9).status != transport.STATUS_OK) { ret 27; }
@@ -2328,6 +2328,35 @@ test "quic.connection.assembly: stream news is pending until the owner takes it"
         clock) != transport.STATUS_OK || !news_pending(?listener) ||
         !transport.ready_stream[binding.Binding](?listener.driver).reset ||
         news_pending(?listener)) { ret 28; }
+    ret 0;
+}
+
+test "quic.connection.assembly: a peer stream opened by a bare fin is news through accept" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 8) != 0) { ret refusal(); }
+    if (news_pending(?listener))      { ret 20; }
+    val request: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.UNIDIRECTIONAL);
+    if (request.status != transport.STATUS_OK ||
+        transport.finish_stream[binding.Binding](?dialer.driver,
+        request.stream).status != transport.STATUS_OK) { ret 21; }
+    clock = clock + 1000;
+    if (hop(?dialer, ?listener, ?dialer_scope, listener_endpoint(), dialer_endpoint(),
+        clock) != transport.STATUS_OK || !news_pending(?listener)) { ret 22; }
+    val accepted: transport.OpenResult = transport.accept_stream[binding.Binding](
+        ?listener.driver);
+    if (accepted.status != transport.STATUS_OK || !news_pending(?listener)) { ret 23; }
+    val ready: transport.ReadyStream = transport.ready_stream[binding.Binding](
+        ?listener.driver);
+    if (ready.status != transport.STATUS_OK || !ready.readable || news_pending(?listener)) { ret 24; }
+    var output: [8]u8;
+    val read:   transport.ReadResult = transport.read_stream[binding.Binding](?listener.driver,
+        accepted.stream, ?output[0], 8);
+    if (read.status != transport.STATUS_OK || !read.fin || read.count != 0 ||
+        news_pending(?listener)) { ret 25; }
     ret 0;
 }
 
