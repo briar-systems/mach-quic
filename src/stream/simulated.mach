@@ -770,9 +770,25 @@ test "quic.stream.simulated: a fragmenting peer is held at the interval cap" {
 
 var lifetime_bytes: [4096]u8;
 
+# a pool whose classes each keep one released chunk, so a class's next take
+# reuses the chunk, and its slot, that its last release gave back. a pool that
+# keeps none hands out a slot never used before one given back
+fun retaining_chunks(chunks: *supply.TestPool, account: *supply.Account) bool {
+    supply.classes(?chunks.classes[0], 1);
+    val bytes: usize = 16 * supply.BYTES;
+    if (!limited.make(?chunks.memory, bytes * 2) ||
+        !buffers.make(?chunks.pool, supply.pool_config(?chunks.classes[0],
+        supply.CLASS_COUNT, bytes), limited.allocator_of(?chunks.memory))) { ret false; }
+    chunks.provider = buffers.source(?chunks.pool);
+    ret supply.open(?chunks.provider, account, 1, 16, 16, 0);
+}
+
 # a chunk released by one stream and taken by another is not reachable through
 # anything the first stream still holds
 test "quic.stream.simulated: a reused chunk is untouched by the stream that released it" {
+    var chunks:  supply.TestPool;
+    var account: supply.Account;
+    if (!retaining_chunks(?chunks, ?account)) { ret 9; }
     var records:  [2]stream.Stream;
     var attempts: [8]stream.Attempt;
     var limits:   stream.Config = config(42, 2, 16384);
@@ -783,7 +799,7 @@ test "quic.stream.simulated: a reused chunk is untouched by the stream that rele
     var manager: stream.Manager = initialize_manager(limits, stream.Storage{
         streams:  ?records[0], stream_capacity: 2,
         attempts: ?attempts[0], attempt_capacity: 8,
-        chunks:   test_chunks(), account: test_account(), send_buffer_limit: 8192
+        chunks:   ?chunks.provider, account: ?account, send_buffer_limit: 8192
     });
     var i: usize = 0;
     for (i < 4096) {
@@ -804,7 +820,7 @@ test "quic.stream.simulated: a reused chunk is untouched by the stream that rele
         stream.STATUS_OK ||
         stream.on_terminal(?manager, probe.token, stream.TERMINAL_ACKED).status !=
         stream.STATUS_OK || records[a.handle.index].send_base != 4096 ||
-        supply.held(test_account(), supply.SEND) != 0) { ret 5; }
+        supply.held(?account, supply.SEND) != 0) { ret 5; }
     # b takes the same chunk and fills it with its own bytes
     val b:     stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
     var other: [16]u8;

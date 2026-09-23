@@ -703,11 +703,15 @@ Timers are absolute monotonic deadlines carrying the driver source and protocol
 generation. `on_timeout` revalidates both the deadline and generation before
 advancing driver time. Early and obsolete observations do not affect later work.
 Protocol callbacks are invoked under the connection lock and cannot reenter the
-same driver. Same-thread reentry is rejected before lock acquisition. Immutable
-driver anchors and lifecycle state are snapshotted around each callback, and
-unauthorized callback mutation is restored and reported as a protocol error.
-Callbacks must be transactional on non-OK returns. Successful generation
-owns exactly one opaque send owner until its terminal callback.
+same driver. Same-thread reentry is rejected before lock acquisition. The guard
+compares the caller's `std.sync.thread.current_token` with the running
+callback's, which costs no system call. On linux x86_64 only the main thread or a
+thread std spawned may call into a driver, since the token reads a thread pointer
+that std installs on those threads alone. Immutable driver anchors and
+lifecycle state are snapshotted around each callback, and unauthorized callback
+mutation is restored and reported as a protocol error. Callbacks must be
+transactional on non-OK returns. Successful generation owns exactly one opaque
+send owner until its terminal callback.
 
 The connection cancellation scope may be a child of a process or listener scope.
 Cancellation and deadline propagation begin abortive close under the same lock as
