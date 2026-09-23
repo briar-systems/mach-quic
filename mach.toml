@@ -69,4 +69,4 @@ ref = "tag/v0.21.0"
 
 [dep.tls]
 git = "https://github.com/briar-systems/mach-tls"
-version = "^0.10"
+version = "^0.11"
