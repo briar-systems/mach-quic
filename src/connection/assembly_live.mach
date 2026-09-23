@@ -17,8 +17,9 @@ use packet_api: quic.packet.packet;
 use path_api:   quic.path.path;
 use ack_api:    quic.recovery.ack;
 use quic.storage.limited;
-use supply:     quic.storage.source;
-use stream_api: quic.stream.stream;
+use supply:       quic.storage.source;
+use datagram_api: quic.stream.datagram;
+use stream_api:   quic.stream.stream;
 use quic.transport;
 use quic.transport.binding;
 
@@ -34,6 +35,7 @@ use std.memory;
 use std.memory.buffers;
 use std.net.ip;
 use std.print;
+use std.sync.atomic;
 use std.sync.cancel;
 use std.system.os;
 use std.types.bool.bool;
@@ -253,8 +255,7 @@ fun refused_start(clock: *u64, length: usize) i32 {
         transport.DRAINING) { ret 57; }
     # a draining client sends nothing more
     clock[0] = clock[0] + 1000;
-    val after: transport.Generated = transport.generate[binding.Binding](
-        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, instants.instant(clock[0]), 0);
+    val after: transport.Generated = checked_generate(?dialer, ?dialer_scope, ?wire[0], 1500, instants.instant(clock[0]), 0);
     if (after.status == transport.STATUS_OK) { ret 58; }
     if (!listener_api.begin_close(?front) || !listener_api.finish_close(?front) ||
         !admission.begin_close(?admission_manager) ||
@@ -321,8 +322,7 @@ fun unhog() bool {
 # until the pool wakes the connection, and then the same start runs again
 fun starved_start(clock: *u64) i32 {
     clock[0] = clock[0] + 1000;
-    val waiting: transport.Generated = transport.generate[binding.Binding](
-        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, instants.instant(clock[0]), 0);
+    val waiting: transport.Generated = checked_generate(?dialer, ?dialer_scope, ?wire[0], 1500, instants.instant(clock[0]), 0);
     if (waiting.status == transport.STATUS_OK ||
         waiting.status == transport.STATUS_ERROR ||
         !core.snapshot(?dialer.core).handshake_waiting ||
@@ -466,6 +466,85 @@ fun watch() {
     if (observed != nil) { observe(observed); }
 }
 
+# every generate a test makes is checked against pending_output asked just
+# before it. a datagram the query did not predict, or a prediction the
+# generate did not bear out outside the query's documented edges, reads as an
+# error to the test that made the call
+val MISPREDICTED: u8 = 0xee;
+
+# the public state a query could touch: every record of the connection but
+# its secrets, the storage it lent, and its account
+# the public state a query could touch: every record of the connection
+# that holds no secret, the storage it lent, its account, and what the
+# driver and the handshake adapter keep beside their secret-bearing context
+rec Public {
+    core:              core.Core;
+    cids:              cid_api.Manager;
+    paths:             path_api.Manager;
+    streams:           stream_api.Manager;
+    datagrams:         datagram_api.Queue;
+    storage:           assembly.Storage;
+    account:           supply.Account;
+    state:             transport.ConnectionState;
+    last_now_ns:       u64;
+    pending_sends:     usize;
+    next_slot:         usize;
+    closing:           bool;
+    next_attempt:      usize;
+    handshake_lease:   u64;
+    handshake_closing: bool;
+}
+
+# fills a zeroed record field by field, so padding compares equal
+fun public_of(value: *assembly.Connection, output: *Public) {
+    output.core              = value.core;
+    output.cids              = value.cids;
+    output.paths             = value.paths;
+    output.streams           = value.streams;
+    output.datagrams         = value.datagrams;
+    output.storage           = @value.storage;
+    output.account           = value.account;
+    output.state             = value.driver.state;
+    output.last_now_ns       = value.driver.last_now_ns;
+    output.pending_sends     = value.driver.pending_sends;
+    output.next_slot         = value.driver.next_slot;
+    output.closing           = value.driver.closing;
+    output.next_attempt      = value.handshake.next_attempt;
+    output.handshake_lease   = value.handshake.core_lease;
+    output.handshake_closing = value.handshake.closing;
+}
+
+fun checked_generate(value: *assembly.Connection, scope: *cancel.Scope, buffer: *u8,
+    capacity: usize, now: time.Instant, context: usize) transport.Generated {
+    val handshake_work: bool = core.handshake_pending(?value.core);
+    val refused:        bool = value.core.send_refused;
+    val cancelled:      bool = atomic.load(?value.driver.cancellation.pending) != 0;
+    var before:         Public;
+    var after:          Public;
+    public_of(value, ?before);
+    val predicted: bool = transport.pending_output[binding.Binding](?value.driver, now);
+    val news:      bool = transport.pending_stream_news[binding.Binding](?value.driver);
+    public_of(value, ?after);
+    # asking changes nothing
+    if (news != stream_api.pending_news(?value.streams) ||
+        !memory.equal[Public](?before, ?after, 1)) {
+        var touched: transport.Generated;
+        touched.status = transport.STATUS_ERROR;
+        touched.error  = MISPREDICTED;
+        ret touched;
+    }
+    var generated: transport.Generated = transport.generate[binding.Binding](?value.driver,
+        scope, buffer, capacity, now, context);
+    val sent: bool = generated.status == transport.STATUS_OK;
+    val edge: bool = handshake_work || cancelled || (value.core.send_refused && !refused) ||
+        capacity < value.core.send_max_udp_payload;
+    if (sent != predicted && (sent || !edge)) {
+        generated.status = transport.STATUS_ERROR;
+        generated.error  = MISPREDICTED;
+    }
+    ret generated;
+}
+
 # one generated datagram, completed on the sender and delivered to the peer,
 # exactly as an owner's scheduling loop would move it
 fun carry(source: *assembly.Connection, sink: *assembly.Connection,
@@ -475,7 +554,7 @@ fun carry(source: *assembly.Connection, sink: *assembly.Connection,
     for (guard < 64) {
         clock[0] = clock[0] + 1000;
         val generated: transport.Generated =
-            transport.generate[binding.Binding](?source.driver, source_scope,
+            checked_generate(source, source_scope,
             ?wire[0], 1500, instants.instant(clock[0]), 0);
         if (generated.status == transport.STATUS_EMPTY ||
             generated.status == transport.STATUS_BLOCKED) { ret 0; }
@@ -802,8 +881,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         ?admission_manager, ?token_manager)) { ret 10; }
     var retry_bytes: [512]u8;
     clock = clock + 1000;
-    val first: transport.Generated = transport.generate[binding.Binding](
-        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, instants.instant(clock), 0);
+    val first:   transport.Generated = checked_generate(?dialer, ?dialer_scope, ?wire[0], 1500, instants.instant(clock), 0);
     var request: listener_api.Request;
     request.peer   = dialer_endpoint();
     request.data   = ?wire[0];
@@ -836,8 +914,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     if (core.poll_handshake(?dialer.core, ?dialer.secrets, clock).status ==
         transport.STATUS_ERROR) { ret 13; }
     clock = clock + 1000;
-    val second: transport.Generated = transport.generate[binding.Binding](
-        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, instants.instant(clock), 0);
+    val second:         transport.Generated             = checked_generate(?dialer, ?dialer_scope, ?wire[0], 1500, instants.instant(clock), 0);
     val routed_initial: listener_api.ClassifiedDatagram =
         listener_api.classify_datagram(?wire[0], second.count, 8);
     if (routed_initial.class != listener_api.DATAGRAM_INITIAL ||
@@ -1001,7 +1078,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     var ack_wire: [1500]u8;
     clock = clock + 1000;
     val ack_only: transport.Generated =
-        transport.generate[binding.Binding](?listener.driver, ?listener_scope,
+        checked_generate(?listener, ?listener_scope,
         ?ack_wire[0], 1500, instants.instant(clock), 0);
     if (ack_only.status != transport.STATUS_OK || ack_only.count == 0) { ret 215; }
     stream_byte[0] = 0xA2;
@@ -1031,7 +1108,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     clock = clock + 100000000;
     var reply_wire: [1500]u8;
     val reply:      transport.Generated =
-        transport.generate[binding.Binding](?dialer.driver, ?dialer_scope,
+        checked_generate(?dialer, ?dialer_scope,
         ?reply_wire[0], 1500, instants.instant(clock), 0);
     if (reply.status != transport.STATUS_OK || reply.count == 0) { ret 219; }
     clock = clock + 1000;
@@ -1104,8 +1181,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         instants.instant(clock + 1000));
     if (!redialed.ok || redialed.core.reason != core.INIT_OK) { ret 225; }
     clock = clock + 2000;
-    val third: transport.Generated = transport.generate[binding.Binding](
-        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, instants.instant(clock), 0);
+    val third: transport.Generated = checked_generate(?dialer, ?dialer_scope, ?wire[0], 1500, instants.instant(clock), 0);
     if (third.status != transport.STATUS_OK ||
         third.token.index != first.token.index ||
         third.token.generation == first.token.generation ||
@@ -1481,8 +1557,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     }
 
     clock[0] = clock[0] + 1000;
-    val first: transport.Generated = transport.generate[binding.Binding](
-        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, instants.instant(clock[0]), 0);
+    val first: transport.Generated = checked_generate(?dialer, ?dialer_scope, ?wire[0], 1500, instants.instant(clock[0]), 0);
     clock[0] = clock[0] + 1000;
     if (first.status != transport.STATUS_OK || first.count < 1200 ||
         transport.complete_send[binding.Binding](?dialer.driver, first.token,
@@ -1707,7 +1782,7 @@ fun hop(source: *assembly.Connection, sink: *assembly.Connection,
     source_scope: *cancel.Scope, sink_local: ip.Endpoint, sink_peer: ip.Endpoint,
     now_ns: u64) u8 {
     val generated: transport.Generated =
-        transport.generate[binding.Binding](?source.driver, source_scope,
+        checked_generate(source, source_scope,
         ?wire[0], 1500, instants.instant(now_ns), 0);
     if (generated.status != transport.STATUS_OK) { ret generated.status; }
     if (transport.complete_send[binding.Binding](?source.driver,
@@ -1745,6 +1820,9 @@ test "quic.connection.assembly: a pacing delay arms the connection timer" {
         listener_endpoint(), now) != transport.STATUS_BLOCKED) { ret 21; }
     val paced: u64 = listener.core.pace_deadline_ns;
     if (paced <= now) { ret 22; }
+    # output held by the pacer is pending only from the instant it is ready
+    if (output_pending(?listener, now) || output_pending(?listener, paced - 1) ||
+        !output_pending(?listener, paced)) { ret 26; }
     val timer: transport.Timer = transport.timer[binding.Binding](?listener.driver);
     if (!timer.armed || instants.nanos(timer.deadline) != paced) { ret 23; }
     if (transport.on_timeout[binding.Binding](?listener.driver, timer,
@@ -1852,8 +1930,11 @@ test "quic.connection.assembly: connections sharing a scratch pair cannot run at
     val before:  transport.ConnectionState = dialer.core.state;
     val packets: u64                       = dialer.core.packet_numbers[2];
     clock = clock + 1000;
-    val refused: transport.Generated = transport.generate[binding.Binding](
-        ?dialer.driver, ?dialer_scope, ?wire[0], 1500, instants.instant(clock), 0);
+    # the query reads the core alone, so it answers while the pair is held
+    if (!transport.pending_output[binding.Binding](?dialer.driver,
+        instants.instant(clock))) { ret 24; }
+    val refused: transport.Generated = transport.generate[binding.Binding](?dialer.driver,
+        ?dialer_scope, ?wire[0], 1500, instants.instant(clock), 0);
     scratch.give_back(?pump_scratch, ?pump_secret, listener.core.config.source);
     if (refused.status != transport.STATUS_ERROR ||
         refused.error != transport.ERROR_STATE || refused.count != 0 ||
@@ -2022,8 +2103,7 @@ test "quic.connection.assembly: a failed recovery event still settles every owne
     broken.bytes = 60000;
     var ack_wire: [1500]u8;
     clock = clock + 1000;
-    val ack: transport.Generated = transport.generate[binding.Binding](
-        ?dialer.driver, ?dialer_scope, ?ack_wire[0], 1500, instants.instant(clock), 0);
+    val ack: transport.Generated = checked_generate(?dialer, ?dialer_scope, ?ack_wire[0], 1500, instants.instant(clock), 0);
     if (ack.status != transport.STATUS_OK ||
         transport.complete_send[binding.Binding](?dialer.driver, ack.token,
         transport.SEND_SENT, ack.count, instants.instant(clock)).status != transport.STATUS_OK) { ret 23; }
@@ -2077,8 +2157,7 @@ test "quic.connection.assembly: a fired ack timer is not reported again" {
 
 fun generate_status(value: *assembly.Connection, scope: *cancel.Scope, now_ns: u64) u8 {
     var scratch:   [1500]u8;
-    val generated: transport.Generated = transport.generate[binding.Binding](
-        ?value.driver, scope, ?scratch[0], 1500, instants.instant(now_ns), 0);
+    val generated: transport.Generated = checked_generate(value, scope, ?scratch[0], 1500, instants.instant(now_ns), 0);
     if (generated.status == transport.STATUS_OK) {
         transport.complete_send[binding.Binding](?value.driver, generated.token,
             transport.SEND_SENT, generated.count, instants.instant(now_ns));
@@ -2146,6 +2225,112 @@ test "quic.connection.assembly: an idle generate does no selection work until so
     ret 0;
 }
 
+fun output_pending(value: *assembly.Connection, now_ns: u64) bool {
+    ret transport.pending_output[binding.Binding](?value.driver, instants.instant(now_ns));
+}
+
+fun news_pending(value: *assembly.Connection) bool {
+    ret transport.pending_stream_news[binding.Binding](?value.driver);
+}
+
+# sends until generate finds nothing, and answers whether it ended empty
+fun drain(value: *assembly.Connection, scope: *cancel.Scope, now_ns: u64) bool {
+    var sends: usize = 0;
+    for (sends < 64) {
+        val status: u8 = generate_status(value, scope, now_ns);
+        if (status == transport.STATUS_EMPTY) { ret true; }
+        if (status != transport.STATUS_OK)    { ret false; }
+        sends = sends + 1;
+    }
+    ret false;
+}
+
+test "quic.connection.assembly: output is pending from the work that makes it until generate sends it" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 8) != 0) { ret refusal(); }
+    clock = clock + 1000;
+    if (!drain(?listener, ?listener_scope, clock) || output_pending(?listener, clock)) { ret 20; }
+    # a stream write outside any core call, until generate has sent it all
+    val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?listener.driver, transport.UNIDIRECTIONAL);
+    if (opened.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?listener.driver, opened.stream,
+        ?bulk_bytes[0], 3000).count != 3000 || !output_pending(?listener, clock)) { ret 21; }
+    if (!drain(?listener, ?listener_scope, clock) || output_pending(?listener, clock)) { ret 22; }
+    # a delayed ack is pending only once it is due, so the answer takes the time
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val request: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    if (request.status != transport.STATUS_OK) { ret 23; }
+    val space:   *ack_api.Space = ?listener.core.acknowledgements.spaces[2];
+    var delayed: bool           = false;
+    var tries:   usize          = 0;
+    for (!delayed && tries < 6) {
+        if (pump(?clock, ?moved, 2) != 0) { ret refusal(); }
+        if (send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+            dialer_endpoint(), request.stream, ?clock) != transport.STATUS_OK) { ret 24; }
+        delayed = space.ack_pending && space.ack_deadline_armed &&
+            !space.ack_immediate && space.ack_deadline_ns > clock + 1;
+        tries = tries + 1;
+    }
+    if (!delayed) { ret 25; }
+    val due: u64 = space.ack_deadline_ns;
+    if (!drain(?listener, ?listener_scope, clock + 1) ||
+        output_pending(?listener, clock + 1) || output_pending(?listener, due - 1) ||
+        !output_pending(?listener, due)) { ret 26; }
+    if (!drain(?listener, ?listener_scope, due) || output_pending(?listener, due) ||
+        space.ack_pending) { ret 27; }
+    ret 0;
+}
+
+test "quic.connection.assembly: stream news is pending until the owner takes it" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)                                 { ret established; }
+    if (pump(?clock, ?moved, 8) != 0)                     { ret refusal(); }
+    if (news_pending(?listener) || news_pending(?dialer)) { ret 20; }
+    # a peer stream is news from its first frame, and its data once accepted
+    val request: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    if (request.status != transport.STATUS_OK ||
+        send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        dialer_endpoint(), request.stream, ?clock) != transport.STATUS_OK ||
+        !news_pending(?listener)) { ret 21; }
+    val accepted: transport.OpenResult = transport.accept_stream[binding.Binding](
+        ?listener.driver);
+    if (accepted.status != transport.STATUS_OK || !news_pending(?listener)) { ret 22; }
+    val readable: transport.ReadyStream = transport.ready_stream[binding.Binding](
+        ?listener.driver);
+    if (readable.status != transport.STATUS_OK || !readable.readable ||
+        news_pending(?listener)) { ret 23; }
+    var output: [8]u8;
+    if (transport.read_stream[binding.Binding](?listener.driver, accepted.stream,
+        ?output[0], 8).count != 1 || news_pending(?listener)) { ret 24; }
+    # a byte with the fin is news again
+    if (transport.write_stream[binding.Binding](?dialer.driver, request.stream,
+        ?output[0], 1).count != 1 ||
+        transport.finish_stream[binding.Binding](?dialer.driver,
+        request.stream).status != transport.STATUS_OK) { ret 25; }
+    clock = clock + 1000;
+    if (hop(?dialer, ?listener, ?dialer_scope, listener_endpoint(), dialer_endpoint(),
+        clock) != transport.STATUS_OK || !news_pending(?listener) ||
+        !transport.ready_stream[binding.Binding](?listener.driver).readable ||
+        news_pending(?listener)) { ret 26; }
+    # the peer asking the listener to stop sending is news on the listener
+    if (transport.cancel_stream_receive[binding.Binding](?dialer.driver, request.stream,
+        9).status != transport.STATUS_OK) { ret 27; }
+    clock = clock + 1000;
+    if (hop(?dialer, ?listener, ?dialer_scope, listener_endpoint(), dialer_endpoint(),
+        clock) != transport.STATUS_OK || !news_pending(?listener) ||
+        !transport.ready_stream[binding.Binding](?listener.driver).reset ||
+        news_pending(?listener)) { ret 28; }
+    ret 0;
+}
+
 rec Lossy {
     seed:        u64;
     loss:        u64;
@@ -2181,7 +2366,7 @@ fun lossy_carry(source: *assembly.Connection, sink: *assembly.Connection,
     var guard: usize = 0;
     for (guard < 64) {
         val generated: transport.Generated =
-            transport.generate[binding.Binding](?source.driver, source_scope,
+            checked_generate(source, source_scope,
             ?wire[0], 1500, instants.instant(now_ns), 0);
         if (generated.status == transport.STATUS_EMPTY ||
             generated.status == transport.STATUS_BLOCKED) { brk; }
@@ -2337,7 +2522,7 @@ test "quic.connection.assembly: a full window survives 10% loss and reordering w
 # live idle connection holds. a failure means that cost moved. decide it
 # deliberately, and update these numbers, the changelog and the readme together
 val GUARD_STORAGE_BYTES:    usize = 4560;
-val GUARD_CONNECTION_BYTES: usize = 10632;
+val GUARD_CONNECTION_BYTES: usize = 10640;
 # established, no streams
 val GUARD_IDLE_CHUNKS: usize = 0;
 # established, the six h3 control streams open and drained: one record block
