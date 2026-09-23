@@ -230,6 +230,8 @@ pub rec Connection {
     # connection's account
     provider: supply.Provider;
     account:  supply.Account;
+    # the same account's secret chunks, which hold handshake keys' contexts
+    secret_provider: supply.SecretProvider;
     # handshake-only state, held until the core confirms the handshake
     handshake_block:        chunks_api.Block;
     storage_generation:     u64;
@@ -500,12 +502,13 @@ fun public_datagram_storage(c: *Connection) datagram_api.Storage {
     };
 }
 
-fun private_core_storage(storage: *SecretScratch) core_api.SecretStorage {
+fun private_core_storage(c: *Connection) core_api.SecretStorage {
     ret core_api.SecretStorage{
-        receive_plaintext:          ?storage.receive_plaintext[0],
+        receive_plaintext:          ?c.secret_scratch.receive_plaintext[0],
         receive_plaintext_capacity: MAX_UDP_PAYLOAD,
-        send_plaintext:             ?storage.send_plaintext[0],
-        send_plaintext_capacity:    MAX_UDP_PAYLOAD
+        send_plaintext:             ?c.secret_scratch.send_plaintext[0],
+        send_plaintext_capacity:    MAX_UDP_PAYLOAD,
+        context_chunks:             ?c.secret_provider
     };
 }
 
@@ -573,9 +576,11 @@ val SPILLS_PER_STREAM: usize = 2;
 
 # chunks held against the send direction besides stream and crypto bytes: the
 # handshake block, the owner table, one packet history per space, the queued
-# NEW_TOKEN, the stream records and the stream attempts
+# NEW_TOKEN, the stream records, the stream attempts and one secret chunk per
+# handshake level's key contexts
 val CORE_BLOCKS: usize = 1 + 1 + 3 + TOKEN_CHUNKS +
-    (STREAM_CAPACITY + stream_api.RECORDS_PER_BLOCK - 1) / stream_api.RECORDS_PER_BLOCK + 1;
+    (STREAM_CAPACITY + stream_api.RECORDS_PER_BLOCK - 1) / stream_api.RECORDS_PER_BLOCK + 1 +
+    core_api.LEVEL_CONTEXT_SLOTS;
 
 # packets a space tracks, within one chunk and no more than the recovery
 # events a call can report
@@ -623,28 +628,34 @@ fun backing_lease_valid(c: *Connection) bool {
 
 fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
-    scope: *cancel.Scope) bool {
-    if (c == nil || config == nil || chunks.ctx == nil || c.storage != nil ||
+    secret_chunks: buffers.SecretSource, scope: *cancel.Scope) bool {
+    if (c == nil || config == nil || chunks.ctx == nil || secret_chunks.ctx == nil ||
+        chunks.ctx != secret_chunks.ctx || c.storage != nil ||
         c.scratch != nil || c.secret_scratch != nil || c.account.open ||
         !storage_ranges_valid(c, config, storage, work, secret_work, scope) ||
         !capacities_valid(storage)) { ret false; }
     # the reservation is admission: a pool that cannot back it refuses the
     # connection before anything else is leased
-    c.provider = chunks;
+    c.provider        = chunks;
+    c.secret_provider = secret_chunks;
     if (!supply.open_connection(?c.provider, ?c.account, config.account_handle,
         chunk_budget(STREAM_STRIDE::u64) + CORE_BLOCKS + datagram_budget(config),
         chunk_budget(config.receive_stream_data) + TOKEN_CHUNKS +
         datagram_budget(config), config.tls_budget,
         config.chunk_reserve, config.extra_budgets, config.extra_lanes)) {
-        var no_provider: supply.Provider;
-        c.provider = no_provider;
+        var no_provider:        supply.Provider;
+        var no_secret_provider: supply.SecretProvider;
+        c.provider        = no_provider;
+        c.secret_provider = no_secret_provider;
         ret false;
     }
     var from: ranges.Source = chunk_source(c);
     if (!chunks_api.take_block(?from, ?c.handshake_block)) {
         supply.close(?c.provider, ?c.account);
-        var no_provider: supply.Provider;
-        c.provider = no_provider;
+        var no_provider:        supply.Provider;
+        var no_secret_provider: supply.SecretProvider;
+        c.provider        = no_provider;
+        c.secret_provider = no_secret_provider;
         ret false;
     }
     storage.generation   = next_generation(storage.generation);
@@ -661,13 +672,18 @@ fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
 fun release_backing(c: *Connection) bool {
     if (!backing_lease_valid(c)) { ret false; }
     # a core that never finished still holds its owner and history chunks
-    if (c.account.open) { core_api.release_chunks(?c.core); }
+    if (c.account.open) {
+        core_api.release_secret_chunks(?c.core, ?c.secrets);
+        core_api.release_chunks(?c.core);
+    }
     var from: ranges.Source = chunk_source(c);
     chunks_api.give_block(?from, ?c.handshake_block);
     if (c.handshake_block.data != nil ||
         (c.account.open && !supply.close(?c.provider, ?c.account))) { ret false; }
-    var no_provider: supply.Provider;
+    var no_provider:        supply.Provider;
+    var no_secret_provider: supply.SecretProvider;
     c.provider               = no_provider;
+    c.secret_provider        = no_secret_provider;
     c.storage.source         = 0;
     c.storage.leased         = false;
     c.storage                = nil;
@@ -804,7 +820,7 @@ fun core_storage(c: *Connection) core_api.Storage {
 }
 
 fun secret_storage(c: *Connection) core_api.SecretStorage {
-    ret private_core_storage(c.secret_scratch);
+    ret private_core_storage(c);
 }
 
 fun datagram_storage(c: *Connection) datagram_api.Storage {
@@ -1125,9 +1141,11 @@ pub fun reusable(c: *Connection) bool {
 
 # `tls` must have been initialized with tls_lease(c), and is refused at
 # STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c). `chunks`
-# must declare exactly supply.LANES + config.extra_lanes lanes
+# must declare exactly supply.LANES + config.extra_lanes lanes, and
+# `secret_chunks` must serve the same pool
 pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
+    secret_chunks: buffers.SecretSource,
     tls: *client.Handshake,
     scope: *cancel.Scope, now: time.Instant) InitResult {
     if (!connection_range(c).valid ||
@@ -1147,7 +1165,8 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
     if (!ownership.record[Storage](storage).valid ||
         !ownership.record[Scratch](work).valid ||
         !secret_scratch_range(secret_work).valid ||
-        !acquire_backing(c, config, storage, work, secret_work, chunks, scope)) {
+        !acquire_backing(c, config, storage, work, secret_work, chunks, secret_chunks,
+        scope)) {
         ret staged(STAGE_STORAGE);
     }
     val built: Stage = build_managers(c, config, transport_api.CLIENT);
@@ -1164,9 +1183,11 @@ pub fun init_client(c: *Connection, config: *Config, storage: *Storage,
 
 # `tls` must have been initialized with tls_lease(c), and is refused at
 # STAGE_HANDSHAKE otherwise. it must stay put until tls_released(c). `chunks`
-# must declare exactly supply.LANES + config.extra_lanes lanes
+# must declare exactly supply.LANES + config.extra_lanes lanes, and
+# `secret_chunks` must serve the same pool
 pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
     work: *Scratch, secret_work: *SecretScratch, chunks: buffers.Source,
+    secret_chunks: buffers.SecretSource,
     tls: *server.Handshake,
     scope: *cancel.Scope, now: time.Instant) InitResult {
     if (!connection_range(c).valid ||
@@ -1186,7 +1207,8 @@ pub fun init_server(c: *Connection, config: *Config, storage: *Storage,
     if (!ownership.record[Storage](storage).valid ||
         !ownership.record[Scratch](work).valid ||
         !secret_scratch_range(secret_work).valid ||
-        !acquire_backing(c, config, storage, work, secret_work, chunks, scope)) {
+        !acquire_backing(c, config, storage, work, secret_work, chunks, secret_chunks,
+        scope)) {
         ret staged(STAGE_STORAGE);
     }
     val built: Stage = build_managers(c, config, transport_api.SERVER);
