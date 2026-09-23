@@ -15,10 +15,11 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
-pub def Provider: buffers.Source;
-pub def Account:  buffers.Account;
-pub def Ref:      buffers.Ref;
-pub def Chunk:    buffers.Chunk;
+pub def Provider:       buffers.Source;
+pub def SecretProvider: buffers.SecretSource;
+pub def Account:        buffers.Account;
+pub def Ref:            buffers.Ref;
+pub def Chunk:          buffers.Chunk;
 
 # the largest request quic makes, and the unit budgets are counted in
 pub val BYTES: usize = 4096;
@@ -32,9 +33,10 @@ pub val LANES:   u8   = 3;
 pub val MAX_LANES:       usize = buffers.MAX_LANES;
 pub val MAX_EXTRA_LANES: usize = buffers.MAX_LANES - LANES::usize;
 
-# the chunk sizes a connection asks a source for: quic's BYTES, and the sizes
-# mach-tls requests for handshake messages and records
-pub val CLASS_COUNT: usize = 3;
+# the chunk sizes a connection asks a source for: quic's BYTES, the sizes
+# mach-tls requests for handshake messages and records, and a secret BYTES
+# class for key material
+pub val CLASS_COUNT: usize = 4;
 pub val SMALL:       usize = 512;
 pub val RECORD:      usize = 17408;
 
@@ -45,12 +47,20 @@ pub rec Source {
     lane:     Lane;
 }
 
+# one connection's view of its provider's secret chunks, charged to one lane
+# of the same account
+pub rec SecretSource {
+    provider: *SecretProvider;
+    account:  *Account;
+    lane:     Lane;
+}
+
 pub rec Taken {
     ok:    bool;
     chunk: Chunk;
 }
 
-# the CLASS_COUNT plain classes a connection asks for, smallest first
+# the CLASS_COUNT classes a connection asks for, the plain ones smallest first
 # ---
 # output:     CLASS_COUNT entries
 # high_water: released chunks each class keeps for reuse
@@ -60,6 +70,8 @@ pub fun classes(output: *buffers.ClassConfig, high_water: usize) {
     output[1] = buffers.ClassConfig{size: BYTES, align: 0, secret: false,
         high_water: high_water};
     output[2] = buffers.ClassConfig{size: RECORD, align: 0, secret: false,
+        high_water: high_water};
+    output[3] = buffers.ClassConfig{size: BYTES, align: 0, secret: true,
         high_water: high_water};
 }
 
@@ -151,6 +163,27 @@ pub fun give(from: *Source, chunk: Chunk) bool {
     ret sel reason.none;
 }
 
+# a secret chunk of at least `bytes`, registering the account for a wake on
+# refusal. its bytes are reached only through the provider's welded view
+pub fun take_secret(from: *SecretSource, bytes: usize) Taken {
+    var taken: Taken;
+    if (from.provider == nil || bytes == 0 || bytes > BYTES) { ret taken; }
+    val got: buffers.Acquired = buffers.secret_source_acquire(from.provider, from.account,
+        buffers.Request{bytes: bytes, align: 0, lane: from.lane, secret: true}, true);
+    if (!sel got.status.ok) { ret taken; }
+    taken.ok    = true;
+    taken.chunk = got.chunk;
+    ret taken;
+}
+
+# wipes a secret chunk in full and gives it back. a refused release leaves it
+# held
+pub fun give_secret(from: *SecretSource, chunk: Chunk) bool {
+    val reason: buffers.Reason = buffers.secret_source_release(from.provider, from.account,
+        chunk);
+    ret sel reason.none;
+}
+
 # a chunk is retained while bytes sealed from it are in flight
 pub fun retain(provider: *Provider, ref: Ref) bool {
     val reason: buffers.Reason = buffers.source_retain(provider, ref);
@@ -201,6 +234,7 @@ pub rec TestPool {
     pool:     buffers.Pool;
     classes:  [CLASS_COUNT]buffers.ClassConfig;
     provider: Provider;
+    secret:   SecretProvider;
 }
 
 pub fun make_test(fixture: *TestPool, chunks: usize) bool {
@@ -212,6 +246,7 @@ pub fun make_test_lanes(fixture: *TestPool, chunks: usize, extra: usize) bool {
     if (!test_pool_lanes(?fixture.pool, ?fixture.classes[0], ?fixture.memory, chunks,
         extra)) { ret false; }
     fixture.provider = buffers.source(?fixture.pool);
+    fixture.secret   = buffers.secret_source(?fixture.pool);
     ret true;
 }
 
@@ -223,8 +258,10 @@ pub fun test_made(fixture: *TestPool) bool {
 # the next make
 pub fun end_test(fixture: *TestPool) bool {
     if (!test_made(fixture) || !buffers.destroy(?fixture.pool)) { ret false; }
-    var none: Provider;
+    var none:      Provider;
+    var no_secret: SecretProvider;
     fixture.provider = none;
+    fixture.secret   = no_secret;
     ret true;
 }
 
