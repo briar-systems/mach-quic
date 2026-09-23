@@ -217,14 +217,16 @@ pub rec Manager {
     receive_advertised:          u64;
     accept_sequence:             u64;
     active_streams:              usize;
-    active_attempts:             usize;
-    peer_limits_applied:         bool;
-    max_data_pending:            bool;
-    max_streams_bidi_pending:    bool;
-    max_streams_uni_pending:     bool;
-    peer_bidi_advertised:        u64;
-    peer_uni_advertised:         u64;
-    control_prepared:            bool;
+    # peer streams accept has not returned yet
+    unaccepted_streams:       usize;
+    active_attempts:          usize;
+    peer_limits_applied:      bool;
+    max_data_pending:         bool;
+    max_streams_bidi_pending: bool;
+    max_streams_uni_pending:  bool;
+    peer_bidi_advertised:     u64;
+    peer_uni_advertised:      u64;
+    control_prepared:         bool;
     # bumped whenever send work may have appeared outside a core call, so an
     # idle core notices without scanning
     send_revision: u64;
@@ -722,6 +724,7 @@ fun initialize_stream(manager: *Manager, index: usize, id: u64, local: bool, acc
     @record(manager, index)   = stream;
     record_taken(manager, index);
     manager.active_streams = manager.active_streams + 1;
+    if (!accepted) { manager.unaccepted_streams = manager.unaccepted_streams + 1; }
 }
 
 fun create_error(code: u8) CreateResult {
@@ -864,6 +867,14 @@ pub fun next_ready(manager: *Manager) Ready {
     ret result;
 }
 
+# whether next_ready or accept has anything to hand the owner, O(1): a stream
+# with news it has not taken, or a peer stream it has not accepted. it changes
+# nothing
+pub fun has_news(manager: *Manager) bool {
+    if (!manager_record_valid(manager) || !manager.valid) { ret false; }
+    ret manager.ready_head != NO_STREAM || manager.unaccepted_streams != 0;
+}
+
 # the pool gave chunks back, so every stream a refused chunk stopped may write
 pub fun storage_released(manager: *Manager) {
     if (!manager_record_valid(manager) || !manager.valid) { ret; }
@@ -977,6 +988,7 @@ pub fun accept(manager: *Manager) CreateResult {
         ret empty;
     }
     record(manager, chosen).accepted = true;
+    manager.unaccepted_streams       = manager.unaccepted_streams - 1;
     # news that arrived before accept was skipped, so it is queued now
     val accepted: *Stream = at_stream(manager, chosen);
     var news:     u8      = 0;
@@ -1311,17 +1323,21 @@ fun prepared_error(status: u8, code: u8) Prepared {
     ret result;
 }
 
-pub fun prepare_control(manager: *Manager) Prepared {
-    if (!manager_record_valid(manager) || !manager.valid || manager.closing ||
-        manager.core_lease != 0) {
+# the flow-control frame prepare_control would send, reported as it would
+# report it but with no token, the attempt it would take in `attempt_index`
+# and the stream it names in `stream_index`. it changes nothing, and it
+# assumes the attempt's chunk is granted when one must be taken
+fun select_control(manager: *Manager, attempt_index: *usize,
+    stream_index: *usize) Prepared {
+    if (!manager_record_valid(manager) || !manager.valid || manager.closing) {
         ret prepared_error(STATUS_ERROR, ERROR_STATE);
     }
     if (manager.control_prepared) {
         ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY);
     }
-    var kind:         u8    = 0;
-    var maximum:      u64   = 0;
-    var stream_index: usize = manager.storage.stream_capacity;
+    var kind:    u8  = 0;
+    var maximum: u64 = 0;
+    @stream_index = manager.storage.stream_capacity;
     if (manager.max_data_pending) {
         kind    = SEND_MAX_DATA;
         maximum = manager.receive_max_data;
@@ -1331,9 +1347,9 @@ pub fun prepare_control(manager: *Manager) Prepared {
         for (i < manager.storage.stream_capacity) {
             val stream: *Stream = live(manager, i);
             if (stream != nil && stream.max_stream_data_pending) {
-                kind         = SEND_MAX_STREAM_DATA;
-                maximum      = stream.receive_limit;
-                stream_index = i;
+                kind          = SEND_MAX_STREAM_DATA;
+                maximum       = stream.receive_limit;
+                @stream_index = i;
                 brk;
             }
             i = i + 1;
@@ -1352,10 +1368,29 @@ pub fun prepare_control(manager: *Manager) Prepared {
         empty.status = STATUS_EMPTY;
         ret empty;
     }
-    val attempt_index: usize = free_attempt_index(manager);
-    if (attempt_index == manager.storage.attempt_capacity) {
+    @attempt_index = free_attempt_index(manager);
+    if (@attempt_index == manager.storage.attempt_capacity) {
         ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY);
     }
+    var result: Prepared;
+    result.ok      = true;
+    result.status  = STATUS_OK;
+    result.kind    = kind;
+    result.maximum = maximum;
+    if (@stream_index < manager.storage.stream_capacity) {
+        result.handle = handle(manager, @stream_index);
+    }
+    ret result;
+}
+
+pub fun prepare_control(manager: *Manager) Prepared {
+    if (manager_record_valid(manager) && manager.core_lease != 0) {
+        ret prepared_error(STATUS_ERROR, ERROR_STATE);
+    }
+    var attempt_index: usize    = 0;
+    var stream_index:  usize    = 0;
+    var result:        Prepared = select_control(manager, ?attempt_index, ?stream_index);
+    if (result.status != STATUS_OK) { ret result; }
     val attempt: *Attempt = occupy_attempt(manager, attempt_index);
     if (attempt == nil) { ret prepared_error(STATUS_BLOCKED, ERROR_STORAGE); }
     attempt.stream_index      = stream_index;
@@ -1363,19 +1398,11 @@ pub fun prepare_control(manager: *Manager) Prepared {
     if (stream_index < manager.storage.stream_capacity) {
         attempt.stream_generation = record(manager, stream_index).generation;
     }
-    attempt.maximum          = maximum;
-    attempt.kind             = kind;
+    attempt.maximum          = result.maximum;
+    attempt.kind             = result.kind;
     attempt.state            = ATTEMPT_RESERVED;
     manager.control_prepared = true;
-    var result: Prepared;
-    result.ok      = true;
-    result.status  = STATUS_OK;
-    result.token   = attempt_token(manager, attempt_index);
-    result.kind    = kind;
-    result.maximum = maximum;
-    if (stream_index < manager.storage.stream_capacity) {
-        result.handle = handle(manager, stream_index);
-    }
+    result.token             = attempt_token(manager, attempt_index);
     ret result;
 }
 
@@ -1412,18 +1439,21 @@ fun next_inflight_start(manager: *Manager, index: usize, offset: u64, limit: u64
     ret nearest;
 }
 
-pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: bool) Prepared {
-    if (!valid_handle(manager, value) || manager.closing ||
-        manager.core_lease != 0) { ret prepared_error(STATUS_ERROR, ERROR_TOKEN); }
+# what prepare would send on `value`, reported as it would report it but with
+# no token, the attempt it would take in `attempt_index` and the chunk its
+# bytes lie in. it changes nothing, and it assumes the attempt's chunk is
+# granted when one must be taken
+fun select_stream(manager: *Manager, value: Handle, maximum_bytes: usize, probe: bool,
+    attempt_index: *usize, chunk: *supply.Ref) Prepared {
+    if (!valid_handle(manager, value) || manager.closing) { ret prepared_error(STATUS_ERROR, ERROR_TOKEN); }
     val stream: *Stream = record(manager, value.index);
     if (stream.has_prepared) { ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY); }
-    val attempt_index: usize = free_attempt_index(manager);
-    if (attempt_index == manager.storage.attempt_capacity) { ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY); }
+    @attempt_index = free_attempt_index(manager);
+    if (@attempt_index == manager.storage.attempt_capacity) { ret prepared_error(STATUS_BLOCKED, ERROR_CAPACITY); }
     var kind:        u8    = 0;
     var offset:      u64   = 0;
     var length:      usize = 0;
     var include_fin: bool  = false;
-    var chunk:       supply.Ref;
     var data:        *u8   = nil;
     if ((stream.reset_pending || (probe && stream.reset_inflight > 0 && !stream.reset_acked)) &&
         stream.reset_inflight < 255) {
@@ -1457,7 +1487,7 @@ pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: b
                 offset      = cursor;
                 length      = minimum_size(maximum_bytes, (limit - cursor)::usize);
                 kind        = SEND_STREAM;
-                chunk       = slot.chunk.ref;
+                @chunk      = slot.chunk.ref;
                 data        = ?slot.chunk.data[(cursor % supply.BYTES::u64)::usize];
                 include_fin = offset + length::u64 == stream.send_write && stream.send_finished &&
                     !stream.fin_acked && stream.fin_inflight < 255 && (stream.fin_pending || probe);
@@ -1475,21 +1505,9 @@ pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: b
         empty.status = STATUS_EMPTY;
         ret empty;
     }
-    val attempt: *Attempt = occupy_attempt(manager, attempt_index);
-    if (attempt == nil) { ret prepared_error(STATUS_BLOCKED, ERROR_STORAGE); }
-    attempt.stream_index      = value.index;
-    attempt.stream_generation = value.generation;
-    attempt.offset            = offset;
-    attempt.length            = length;
-    attempt.chunk             = chunk;
-    attempt.kind              = kind;
-    attempt.fin               = include_fin;
-    attempt.state             = ATTEMPT_RESERVED;
-    stream.has_prepared       = true;
     var result: Prepared;
     result.ok     = true;
     result.status = STATUS_OK;
-    result.token  = attempt_token(manager, attempt_index);
     result.handle = value;
     result.kind   = kind;
     result.offset = offset;
@@ -1503,6 +1521,30 @@ pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: b
         result.application_error = stream.send_error;
     }
     if (kind == SEND_STOP) { result.application_error = stream.receive_error; }
+    ret result;
+}
+
+pub fun prepare(manager: *Manager, value: Handle, maximum_bytes: usize, probe: bool) Prepared {
+    if (manager_record_valid(manager) && manager.core_lease != 0) {
+        ret prepared_error(STATUS_ERROR, ERROR_TOKEN);
+    }
+    var attempt_index: usize    = 0;
+    var chunk:         supply.Ref;
+    var result:        Prepared = select_stream(manager, value, maximum_bytes, probe,
+        ?attempt_index, ?chunk);
+    if (result.status != STATUS_OK) { ret result; }
+    val attempt: *Attempt = occupy_attempt(manager, attempt_index);
+    if (attempt == nil) { ret prepared_error(STATUS_BLOCKED, ERROR_STORAGE); }
+    attempt.stream_index                      = value.index;
+    attempt.stream_generation                 = value.generation;
+    attempt.offset                            = result.offset;
+    attempt.length                            = result.data.len;
+    attempt.chunk                             = chunk;
+    attempt.kind                              = result.kind;
+    attempt.fin                               = result.fin;
+    attempt.state                             = ATTEMPT_RESERVED;
+    record(manager, value.index).has_prepared = true;
+    result.token                              = attempt_token(manager, attempt_index);
     ret result;
 }
 
@@ -2204,6 +2246,7 @@ pub fun release(manager: *Manager, value: Handle) OperationResult {
     }
     val peer: bool = !stream.local;
     val uni:  bool = stream.unidirectional;
+    if (!stream.accepted) { manager.unaccepted_streams = manager.unaccepted_streams - 1; }
     reconcile_uncredited(manager, stream);
     unlink_everywhere(manager, value.index);
     buffer_release(manager, ?stream.send, supply.SEND);
@@ -2270,13 +2313,14 @@ pub fun finish_close(manager: *Manager) OperationResult {
         }
         i = i + 1;
     }
-    manager.active_streams = 0;
-    manager.ready_head     = NO_STREAM;
-    manager.ready_tail     = NO_STREAM;
-    manager.blocked_head   = NO_STREAM;
-    manager.blocked_tail   = NO_STREAM;
-    manager.core_lease     = 0;
-    manager.valid          = false;
+    manager.active_streams     = 0;
+    manager.unaccepted_streams = 0;
+    manager.ready_head         = NO_STREAM;
+    manager.ready_tail         = NO_STREAM;
+    manager.blocked_head       = NO_STREAM;
+    manager.blocked_tail       = NO_STREAM;
+    manager.core_lease         = 0;
+    manager.valid              = false;
     var result: OperationResult;
     result.status = STATUS_OK;
     ret result;
@@ -2349,6 +2393,35 @@ pub fun prepare_scoped(manager: *Manager, source: u64, value: Handle,
     val result: Prepared = prepare(manager, value, maximum_bytes, probe);
     leave_core_scope(manager, source);
     ret result;
+}
+
+fun in_core_scope(manager: *Manager, source: u64) bool {
+    ret manager_record_valid(manager) && source != 0 && manager.core_lease == source;
+}
+
+# what prepare_control_scoped would answer, with no token and nothing
+# changed. it assumes the attempt's chunk is granted, see attempts_held
+pub fun peek_control_scoped(manager: *Manager, source: u64) Prepared {
+    var attempt_index: usize = 0;
+    var stream_index:  usize = 0;
+    if (!in_core_scope(manager, source)) { ret prepared_error(STATUS_ERROR, ERROR_STATE); }
+    ret select_control(manager, ?attempt_index, ?stream_index);
+}
+
+# what prepare_scoped would answer on `value`, with no token and nothing
+# changed. it assumes the attempt's chunk is granted, see attempts_held
+pub fun peek_scoped(manager: *Manager, source: u64, value: Handle,
+    maximum_bytes: usize, probe: bool) Prepared {
+    var attempt_index: usize = 0;
+    var chunk:         supply.Ref;
+    if (!in_core_scope(manager, source)) { ret prepared_error(STATUS_ERROR, ERROR_STATE); }
+    ret select_stream(manager, value, maximum_bytes, probe, ?attempt_index, ?chunk);
+}
+
+# whether a prepare can claim an attempt without taking a chunk from the pool
+pub fun attempts_held(manager: *Manager) bool {
+    ret manager_record_valid(manager) &&
+        (manager.storage.attempts != nil || manager.attempt_block.data != nil);
 }
 
 pub fun cancel_prepared_scoped(manager: *Manager, source: u64,
