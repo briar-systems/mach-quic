@@ -2806,9 +2806,11 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         }
         core.config.peer_destination = value.source;
     }
+    # rfc 9000 9.3: only the application space's packet numbers order a
+    # migration, so a handshake packet never counts as non-probing
     val observed: path_api.Observation = path_api.observe_scoped(core.paths, core.config.source,
         path_endpoint(input.local, input.peer), opened.packet_number,
-        value.length::u64, non_probing, true, true,
+        value.length::u64, non_probing && space == packet.SPACE_APPLICATION, true, true,
         cid_api.snapshot(core.cids).peer_active > 1, input.received_at_ns);
     if (observed.status == path_api.STATUS_ERROR) {
         ret fail(core, NO_VIABLE_PATH, input.received_at_ns);
