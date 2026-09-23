@@ -2069,6 +2069,88 @@ test "quic.connection.assembly: an acknowledged MTU probe keeps a connection who
     ret 0;
 }
 
+# the client behind a nat that moved it to a new port, as the listener sees it
+fun rebound_endpoint() ip.Endpoint {
+    ret endpoint(1, 55001);
+}
+
+fun rebound_pump(clock: *u64, moved: *usize, rounds: usize) i64 {
+    var round: usize = 0;
+    for (round < rounds) {
+        val forward: i64 = carry(?dialer, ?listener, ?dialer_scope,
+            listener_endpoint(), rebound_endpoint(), clock, moved);
+        if (forward != 0) {
+            fault_side = 1;
+            ret forward;
+        }
+        val backward: i64 = carry(?listener, ?dialer, ?listener_scope,
+            dialer_endpoint(), listener_endpoint(), clock, moved);
+        if (backward != 0) {
+            fault_side = 2;
+            ret backward;
+        }
+        round = round + 1;
+    }
+    ret 0;
+}
+
+fun listener_challenged(value: path_api.Handle) bool {
+    var i: usize = 0;
+    for (i < 4) {
+        val challenge: *path_api.Challenge = ?listener.storage.path_challenges[i];
+        if (challenge.valid && challenge.path_index == value.index &&
+            challenge.path_generation == value.generation &&
+            challenge.purpose == path_api.VALIDATION_PATH) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# hedge#293: a response larger than three times what the rebound client sent
+# from its new port reaches it only once the listener validated that port
+test "quic.connection.assembly: a rebound client's new address is validated and lifts the amplification limit" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    var request_byte: [1]u8                = [1]u8{'q'};
+    val request:      transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    if (request.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?dialer.driver, request.stream,
+        ?request_byte[0], 1).count != 1 ||
+        transport.finish_stream[binding.Binding](?dialer.driver,
+        request.stream).status != transport.STATUS_OK) { ret 20; }
+    # the dialer's first application packet leaves from the new port, so it
+    # migrates only if handshake packet numbers do not order the migration
+    if (carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        rebound_endpoint(), ?clock, ?moved) != 0) { ret 21; }
+    # the listener follows the new port and challenges both it and the
+    # validated port it left
+    val selected: path_api.PathResult = path_api.selected(?listener.paths);
+    val previous: path_api.Handle     = path_api.Handle{source: listener.core.config.source, index: 0,
+        generation: listener.storage.path_values[0].generation};
+    if (selected.status != path_api.STATUS_OK || selected.handle.index == 0 ||
+        listener.storage.path_values[selected.handle.index].address_validated ||
+        !listener_challenged(selected.handle) || !listener_challenged(previous)) { ret 22; }
+    val accepted: transport.OpenResult =
+        transport.accept_stream[binding.Binding](?listener.driver);
+    if (accepted.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?listener.driver, accepted.stream,
+        ?bulk_bytes[0], 4000).count != 4000 ||
+        transport.finish_stream[binding.Binding](?listener.driver,
+        accepted.stream).status != transport.STATUS_OK) { ret 23; }
+    if (rebound_pump(?clock, ?moved, 16) != 0) { ret refusal(); }
+    val rebound: *path_api.Path = ?listener.storage.path_values[selected.handle.index];
+    if (!rebound.address_validated || !rebound.selected ||
+        !listener.storage.path_values[0].address_validated) { ret 24; }
+    var fin: bool = false;
+    if (drain_stream(?dialer.driver, request.stream, ?lossy_sink[0], 4096,
+        ?fin) != 4000 || !fin) { ret 25; }
+    ret 0;
+}
+
 fun sent_owner(value: *assembly.Connection, number: u64) *core.Owner {
     var i: usize = 0;
     for (i < value.core.owner_capacity) {
