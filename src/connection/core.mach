@@ -356,6 +356,12 @@ pub rec Core {
     handshake_waiting: bool;
     # the connection's account woke, so the provider is polled once more
     storage_woken: bool;
+    # the provider's last poll ended waiting for input, so without new crypto
+    # or a wake its next poll hands over nothing
+    handshake_quiet: bool;
+    # the pool refused a chunk a send needed and has not woken the account
+    # since, so sends that need one wait for storage_ready
+    send_refused: bool;
     # the handshake handed everything over and holds no memory
     handshake_settled: bool;
     # the last generate found nothing to send and nothing has changed since:
@@ -2636,6 +2642,8 @@ fun restart_client(core: *Core, secrets: *Secrets, value: negotiation_api.Result
     core.probes_remaining = 0;
     core.probe_space      = 0;
     core.probe_owner      = 0;
+    # the provider restarted its flight, so its next poll hands it over
+    core.handshake_quiet = false;
     if (value.restart == negotiation_api.RESTART_VERSION) {
         core.packet_numbers[0]          = 0;
         core.expected_packet_numbers[0] = 0;
@@ -3108,6 +3116,7 @@ fun handshake_poll_due(core: *Core) bool {
 pub fun storage_ready(core: *Core) {
     if (!core_record_valid(core) || !core.initialized || core.destroyed) { ret; }
     core.storage_woken = true;
+    core.send_refused  = false;
     wake(core);
 }
 
@@ -3151,6 +3160,8 @@ fun advance_handshake(core: *Core, secrets: *Secrets, now_ns: u64) u64 {
         ret handshake_failure(core, polled);
     }
     core.handshake_waiting = polled.status == handshake_api.STATUS_WAITING;
+    core.handshake_quiet   = polled.status == handshake_api.STATUS_MORE ||
+        polled.status == handshake_api.STATUS_EMPTY;
     val pumped: u64 = pump_handshake(core, secrets);
     if (pumped != NO_ERROR) { ret pumped; }
     ret settle_handshake(core, secrets);
@@ -3385,27 +3396,121 @@ fun choose_close_level(core: *Core, secrets: *Secrets) handshake_api.Level {
     ret 0;
 }
 
-fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
-    now_ns: u64, maximum: usize, output: *frame.Frame,
-    path: *path_api.Handle) bool {
+# the frame sources generate takes from, in the order it takes them
+val SOURCE_NONE:           u8 = 0;
+val SOURCE_CLOSE:          u8 = 1;
+val SOURCE_ACK:            u8 = 2;
+val SOURCE_CRYPTO:         u8 = 3;
+val SOURCE_HANDSHAKE_DONE: u8 = 4;
+val SOURCE_NEW_TOKEN:      u8 = 5;
+val SOURCE_NEW_CID:        u8 = 6;
+val SOURCE_RETIRE_CID:     u8 = 7;
+val SOURCE_PATH_RESPONSE:  u8 = 8;
+val SOURCE_PATH_CHALLENGE: u8 = 9;
+val SOURCE_MTU_PROBE:      u8 = 10;
+val SOURCE_STREAM_CONTROL: u8 = 11;
+val SOURCE_STREAM:         u8 = 12;
+val SOURCE_DATAGRAM:       u8 = 13;
+val SOURCE_PROBE:          u8 = 14;
+
+# the frame the next packet carries, chosen without taking it. `value` is the
+# frame as it would be sent, except an ACK, whose ranges are only counted in
+# `ack_size`
+rec Choice {
+    source:                u8;
+    kind:                  OwnerKind;
+    level:                 handshake_api.Level;
+    space:                 u8;
+    path:                  path_api.Handle;
+    stream:                stream_api.Handle;
+    value:                 frame.Frame;
+    ack_size:              usize;
+    mtu_size:              u16;
+    minimum_datagram_size: u16;
+    probing:               bool;
+    include_ping:          bool;
+}
+
+# the frame a stream manager's flow-control attempt is sent as
+fun control_frame(control: *stream_api.Prepared) frame.Frame {
+    var value: frame.Frame;
+    if (control.kind == stream_api.SEND_MAX_DATA) {
+        value.kind    = frame.MAX_DATA;
+        value.maximum = control.maximum;
+    }
+    if (control.kind == stream_api.SEND_MAX_STREAM_DATA) {
+        value.kind      = frame.MAX_STREAM_DATA;
+        value.stream_id = control.handle.id;
+        value.maximum   = control.maximum;
+    }
+    if (control.kind == stream_api.SEND_MAX_STREAMS_BIDI) {
+        value.kind    = frame.MAX_STREAMS_BIDI;
+        value.maximum = control.maximum;
+    }
+    if (control.kind == stream_api.SEND_MAX_STREAMS_UNI) {
+        value.kind    = frame.MAX_STREAMS_UNI;
+        value.maximum = control.maximum;
+    }
+    ret value;
+}
+
+# the frame a stream attempt is sent as
+fun stream_frame(prepared: *stream_api.Prepared) frame.Frame {
+    var value: frame.Frame;
+    if (prepared.kind == stream_api.SEND_STREAM) {
+        value.kind = frame.STREAM_BASE | 0x02;
+        if (prepared.offset != 0) { value.kind = value.kind | 0x04; }
+        if (prepared.fin)         { value.kind = value.kind | 0x01; }
+        value.stream_id = prepared.handle.id;
+        value.offset    = prepared.offset;
+        value.data      = prepared.data;
+        value.fin       = prepared.fin;
+    }
+    if (prepared.kind == stream_api.SEND_RESET) {
+        value.kind       = frame.RESET_STREAM;
+        value.stream_id  = prepared.handle.id;
+        value.error_code = prepared.application_error;
+        value.final_size = prepared.final_size;
+    }
+    if (prepared.kind == stream_api.SEND_STOP) {
+        value.kind       = frame.STOP_SENDING;
+        value.stream_id  = prepared.handle.id;
+        value.error_code = prepared.application_error;
+    }
+    ret value;
+}
+
+# a stream source that must take an attempt chunk is passed over while the
+# pool's last refusal stands, as the prepare that took it would be refused
+fun stream_storage_refused(core: *Core) bool {
+    ret core.send_refused && !stream_api.attempts_held(core.streams);
+}
+
+# the frame generate would send next, chosen without taking anything. false
+# when there is none, or when a source refuses in a way that ends the search,
+# as it did when this choice and its taking were one step
+fun select_frame(core: *Core, secrets: *Secrets, now_ns: u64, maximum: usize,
+    choice: *Choice) bool {
+    var clean: Choice;
+    @choice = clean;
     val selected: path_api.PathResult = selected_path(core);
     if (selected.status != path_api.STATUS_OK) { ret false; }
-    @path = selected.handle;
+    choice.path = selected.handle;
 
     if (core.close_queued) {
         val level: handshake_api.Level = choose_close_level(core, secrets);
         if (level == 0) { ret false; }
-        output.kind = frame.CONNECTION_CLOSE_TRANSPORT;
+        choice.value.kind = frame.CONNECTION_CLOSE_TRANSPORT;
         if (core.close_frame_type == frame.CONNECTION_CLOSE_APPLICATION) {
-            output.kind = frame.CONNECTION_CLOSE_APPLICATION;
+            choice.value.kind = frame.CONNECTION_CLOSE_APPLICATION;
         }
-        output.error_code = core.close_error;
-        output.frame_type = core.close_frame_type;
-        output.data       = packet.Span{data: core.storage.close_reason,
+        choice.value.error_code = core.close_error;
+        choice.value.frame_type = core.close_frame_type;
+        choice.value.data       = packet.Span{data: core.storage.close_reason,
             len: core.close_reason_length};
-        owner.kind        = OWNER_CLOSE;
-        owner.level       = level;
-        core.close_queued = false;
+        choice.source = SOURCE_CLOSE;
+        choice.kind   = OWNER_CLOSE;
+        choice.level  = level;
         ret true;
     }
     if (core.closing) { ret false; }
@@ -3416,18 +3521,14 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
         val level: handshake_api.Level = level_for_space(core, secrets, space);
         if (level != 0 && !core.ack_prepared[index] &&
             ack_api.ack_due(?core.acknowledgements, space, now_ns)) {
-            val built: ack_api.BuildResult = ack_api.build(?core.acknowledgements,
-                space, now_ns, core.storage.frame_ack_ranges,
-                core.storage.frame_ack_capacity, output);
-            if (!built.ok) { ret false; }
-            owner.kind                  = OWNER_ACK;
-            owner.level                 = level;
-            owner.space                 = space;
-            owner.ack_generation        = built.generation;
-            owner.ack_largest           = built.largest_acknowledged;
-            owner.ack_update_generation = pending_update_generation(core,
-                secrets, space, built.largest_acknowledged);
-            core.ack_prepared[index] = true;
+            choice.ack_size = ack_api.frame_size(?core.acknowledgements, space, now_ns,
+                core.storage.frame_ack_capacity);
+            if (choice.ack_size == 0) { ret false; }
+            choice.value.kind = frame.ACK;
+            choice.source     = SOURCE_ACK;
+            choice.kind       = OWNER_ACK;
+            choice.level      = level;
+            choice.space      = space;
             ret true;
         }
         space = space + 1;
@@ -3436,30 +3537,20 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
     var level: handshake_api.Level = handshake_api.INITIAL;
     for (level <= handshake_api.APPLICATION) {
         if (level != handshake_api.EARLY && level_available(core, secrets, level)) {
-            var prepared:    handshake_api.Prepared;
             val probe_owner: *Owner = owner_by_id(core, core.probe_owner);
-            var probing:     bool   = false;
-            if (core.probes_remaining > 0 && probe_owner != nil &&
-                probe_owner.kind == OWNER_CRYPTO &&
-                probe_owner.level == level) {
-                probing  = true;
-                prepared = handshake_api.prepare_probe_scoped(secrets.handshake, core.config.source, level, maximum);
-            }
-            or {
-                prepared = handshake_api.prepare_scoped(secrets.handshake, core.config.source, level, maximum);
-            }
+            val probing:     bool   = core.probes_remaining > 0 && probe_owner != nil &&
+                probe_owner.kind == OWNER_CRYPTO && probe_owner.level == level;
+            val prepared: handshake_api.Prepared = handshake_api.peek_scoped(secrets.handshake,
+                core.config.source, level, maximum, probing);
             if (prepared.status == handshake_api.STATUS_OK) {
-                output.kind   = frame.CRYPTO;
-                output.offset = prepared.offset;
-                output.data   = packet.Span{data: prepared.data.data,
+                choice.value.kind   = frame.CRYPTO;
+                choice.value.offset = prepared.offset;
+                choice.value.data   = packet.Span{data: prepared.data.data,
                     len: prepared.data.length};
-                owner.kind            = OWNER_CRYPTO;
-                owner.level           = level;
-                owner.token.handshake = prepared.token;
-                if (probing) {
-                    owner.pto_probe       = true;
-                    core.probes_remaining = core.probes_remaining - 1;
-                }
+                choice.source  = SOURCE_CRYPTO;
+                choice.kind    = OWNER_CRYPTO;
+                choice.level   = level;
+                choice.probing = probing;
                 ret true;
             }
             if (prepared.status == handshake_api.STATUS_ERROR) { ret false; }
@@ -3469,53 +3560,45 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
 
     val application: handshake_api.Level = app_send_level(core, secrets);
     if (application == 0) { ret false; }
+    choice.level = application;
 
     if (application == handshake_api.APPLICATION && core.handshake_done_queued) {
-        output.kind                = frame.HANDSHAKE_DONE;
-        owner.kind                 = OWNER_HANDSHAKE_DONE;
-        owner.level                = application;
-        core.handshake_done_queued = false;
+        choice.value.kind = frame.HANDSHAKE_DONE;
+        choice.source     = SOURCE_HANDSHAKE_DONE;
+        choice.kind       = OWNER_HANDSHAKE_DONE;
         ret true;
     }
 
     if (application == handshake_api.APPLICATION && core.send_token_queued &&
         !core.send_token_prepared) {
-        output.kind = frame.NEW_TOKEN;
-        output.data = packet.Span{data: core.send_token.data,
+        choice.value.kind = frame.NEW_TOKEN;
+        choice.value.data = packet.Span{data: core.send_token.data,
             len: core.send_token_length};
-        owner.kind               = OWNER_NEW_TOKEN;
-        owner.level              = application;
-        core.send_token_queued   = false;
-        core.send_token_prepared = true;
+        choice.source = SOURCE_NEW_TOKEN;
+        choice.kind   = OWNER_NEW_TOKEN;
         ret true;
     }
 
     if (application == handshake_api.APPLICATION) {
         val advertisement: cid_api.Selected = cid_api.next_advertisement(core.cids);
         if (advertisement.status == cid_api.STATUS_OK) {
-            if (cid_api.advertisement_sent_scoped(core.cids,
-                core.config.source,
-                advertisement.handle).status != cid_api.STATUS_OK) { ret false; }
-            output.kind                  = frame.NEW_CONNECTION_ID;
-            output.sequence              = advertisement.handle.sequence;
-            output.retire_prior_to       = 0;
-            output.connection_id         = advertisement.id;
-            output.stateless_reset_token = advertisement.reset_token;
-            owner.kind                   = OWNER_NEW_CID;
-            owner.level                  = application;
-            owner.token.cid_retirement   = advertisement.handle;
+            choice.value.kind                  = frame.NEW_CONNECTION_ID;
+            choice.value.sequence              = advertisement.handle.sequence;
+            choice.value.retire_prior_to       = 0;
+            choice.value.connection_id         = advertisement.id;
+            choice.value.stateless_reset_token = advertisement.reset_token;
+            choice.source                      = SOURCE_NEW_CID;
+            choice.kind                        = OWNER_NEW_CID;
             ret true;
         }
         val retirement: cid_api.Result = cid_api.next_retirement(core.cids);
         if (retirement.status == cid_api.STATUS_OK) {
-            if (cid_api.retirement_sent_scoped(core.cids,
-                core.config.source,
-                retirement.handle).status != cid_api.STATUS_OK) { ret false; }
-            output.kind                = frame.RETIRE_CONNECTION_ID;
-            output.sequence            = retirement.handle.sequence;
-            owner.kind                 = OWNER_CID_RETIREMENT;
-            owner.level                = application;
-            owner.token.cid_retirement = retirement.handle;
+            # the retirement is refused once the manager closes
+            if (core.cids.closing) { ret false; }
+            choice.value.kind     = frame.RETIRE_CONNECTION_ID;
+            choice.value.sequence = retirement.handle.sequence;
+            choice.source         = SOURCE_RETIRE_CID;
+            choice.kind           = OWNER_CID_RETIREMENT;
             ret true;
         }
 
@@ -3527,68 +3610,50 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
                     generation: core.paths.storage.paths[path_index].generation
                 };
                 val response: path_api.PreparedResponse =
-                    path_api.prepare_response_scoped(core.paths, core.config.source, handle);
+                    path_api.peek_response_scoped(core.paths, core.config.source, handle);
                 if (response.status == path_api.STATUS_OK) {
-                    output.kind                 = frame.PATH_RESPONSE;
-                    output.path_data            = response.data;
-                    owner.kind                  = OWNER_PATH_RESPONSE;
-                    owner.level                 = application;
-                    owner.token.path_response   = response.token;
-                    owner.include_ping          = response.require_non_probing;
-                    owner.minimum_datagram_size = response.minimum_datagram_size;
-                    @path                       = response.handle;
+                    choice.value.kind            = frame.PATH_RESPONSE;
+                    choice.value.path_data       = response.data;
+                    choice.source                = SOURCE_PATH_RESPONSE;
+                    choice.kind                  = OWNER_PATH_RESPONSE;
+                    choice.include_ping          = response.require_non_probing;
+                    choice.minimum_datagram_size = response.minimum_datagram_size;
+                    choice.path                  = response.handle;
                     ret true;
                 }
                 val challenge: path_api.PreparedChallenge =
-                    path_api.prepare_challenge_scoped(core.paths, core.config.source, handle);
+                    path_api.peek_challenge_scoped(core.paths, core.config.source, handle);
                 if (challenge.status == path_api.STATUS_OK) {
-                    output.kind                 = frame.PATH_CHALLENGE;
-                    output.path_data            = challenge.data;
-                    owner.kind                  = OWNER_PATH_CHALLENGE;
-                    owner.level                 = application;
-                    owner.token.path_challenge  = challenge.token;
-                    owner.minimum_datagram_size = challenge.minimum_datagram_size;
-                    @path                       = challenge.handle;
+                    choice.value.kind            = frame.PATH_CHALLENGE;
+                    choice.value.path_data       = challenge.data;
+                    choice.source                = SOURCE_PATH_CHALLENGE;
+                    choice.kind                  = OWNER_PATH_CHALLENGE;
+                    choice.minimum_datagram_size = challenge.minimum_datagram_size;
+                    choice.path                  = challenge.handle;
                     ret true;
                 }
             }
             path_index = path_index + 1;
         }
-        val mtu: path_api.MtuPrepared = path_api.prepare_mtu_probe_scoped(core.paths, core.config.source,
-            selected.handle);
+        val mtu: path_api.MtuPrepared = path_api.peek_mtu_probe_scoped(core.paths,
+            core.config.source, selected.handle);
         if (mtu.status == path_api.STATUS_OK) {
-            output.kind                 = frame.PING;
-            owner.kind                  = OWNER_MTU_PROBE;
-            owner.level                 = application;
-            owner.token.mtu_probe       = mtu.token;
-            owner.minimum_datagram_size = mtu.size;
-            @path                       = mtu.handle;
+            choice.value.kind            = frame.PING;
+            choice.source                = SOURCE_MTU_PROBE;
+            choice.kind                  = OWNER_MTU_PROBE;
+            choice.mtu_size              = mtu.size;
+            choice.minimum_datagram_size = mtu.size;
+            choice.path                  = mtu.handle;
             ret true;
         }
     }
 
-    val control: stream_api.Prepared = stream_api.prepare_control_scoped(core.streams, core.config.source);
-    if (control.status == stream_api.STATUS_OK) {
-        if (control.kind == stream_api.SEND_MAX_DATA) {
-            output.kind    = frame.MAX_DATA;
-            output.maximum = control.maximum;
-        }
-        if (control.kind == stream_api.SEND_MAX_STREAM_DATA) {
-            output.kind      = frame.MAX_STREAM_DATA;
-            output.stream_id = control.handle.id;
-            output.maximum   = control.maximum;
-        }
-        if (control.kind == stream_api.SEND_MAX_STREAMS_BIDI) {
-            output.kind    = frame.MAX_STREAMS_BIDI;
-            output.maximum = control.maximum;
-        }
-        if (control.kind == stream_api.SEND_MAX_STREAMS_UNI) {
-            output.kind    = frame.MAX_STREAMS_UNI;
-            output.maximum = control.maximum;
-        }
-        owner.kind         = OWNER_STREAM;
-        owner.level        = application;
-        owner.token.stream = control.token;
+    val control: stream_api.Prepared = stream_api.peek_control_scoped(core.streams,
+        core.config.source);
+    if (control.status == stream_api.STATUS_OK && !stream_storage_refused(core)) {
+        choice.value  = control_frame(?control);
+        choice.source = SOURCE_STREAM_CONTROL;
+        choice.kind   = OWNER_STREAM;
         ret true;
     }
     if (control.status == stream_api.STATUS_ERROR) { ret false; }
@@ -3597,36 +3662,14 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
     for (stream_index < core.streams.storage.stream_capacity) {
         val handle: stream_api.Handle = stream_api.handle_at(core.streams, stream_index);
         if (handle.source != 0) {
-            val prepared: stream_api.Prepared = stream_api.prepare_scoped(core.streams, core.config.source,
-                handle, maximum, core.probes_remaining > 0);
-            if (prepared.status == stream_api.STATUS_OK) {
-                if (prepared.kind == stream_api.SEND_STREAM) {
-                    output.kind = frame.STREAM_BASE | 0x02;
-                    if (prepared.offset != 0) { output.kind = output.kind | 0x04; }
-                    if (prepared.fin)         { output.kind = output.kind | 0x01; }
-                    output.stream_id = prepared.handle.id;
-                    output.offset    = prepared.offset;
-                    output.data      = prepared.data;
-                    output.fin       = prepared.fin;
-                }
-                if (prepared.kind == stream_api.SEND_RESET) {
-                    output.kind       = frame.RESET_STREAM;
-                    output.stream_id  = prepared.handle.id;
-                    output.error_code = prepared.application_error;
-                    output.final_size = prepared.final_size;
-                }
-                if (prepared.kind == stream_api.SEND_STOP) {
-                    output.kind       = frame.STOP_SENDING;
-                    output.stream_id  = prepared.handle.id;
-                    output.error_code = prepared.application_error;
-                }
-                owner.kind         = OWNER_STREAM;
-                owner.level        = application;
-                owner.token.stream = prepared.token;
-                if (core.probes_remaining > 0) {
-                    owner.pto_probe       = true;
-                    core.probes_remaining = core.probes_remaining - 1;
-                }
+            val prepared: stream_api.Prepared = stream_api.peek_scoped(core.streams,
+                core.config.source, handle, maximum, core.probes_remaining > 0);
+            if (prepared.status == stream_api.STATUS_OK && !stream_storage_refused(core)) {
+                choice.value   = stream_frame(?prepared);
+                choice.source  = SOURCE_STREAM;
+                choice.kind    = OWNER_STREAM;
+                choice.stream  = handle;
+                choice.probing = core.probes_remaining > 0;
                 ret true;
             }
             if (prepared.status == stream_api.STATUS_ERROR) { ret false; }
@@ -3634,13 +3677,13 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
         stream_index = stream_index + 1;
     }
 
-    val datagram: datagram_api.Prepared = datagram_api.prepare_scoped(core.datagrams, core.config.source, true);
+    val datagram: datagram_api.Prepared = datagram_api.peek_scoped(core.datagrams,
+        core.config.source, true);
     if (datagram.status == datagram_api.STATUS_OK) {
-        output.kind          = frame.DATAGRAM_LEN;
-        output.data          = datagram.data;
-        owner.kind           = OWNER_DATAGRAM;
-        owner.level          = application;
-        owner.token.datagram = datagram.token;
+        choice.value.kind = frame.DATAGRAM_LEN;
+        choice.value.data = datagram.data;
+        choice.source     = SOURCE_DATAGRAM;
+        choice.kind       = OWNER_DATAGRAM;
         ret true;
     }
     if (datagram.status == datagram_api.STATUS_ERROR &&
@@ -3650,14 +3693,340 @@ fun prepare_frame(core: *Core, secrets: *Secrets, owner: *Owner,
         val probe_level: handshake_api.Level = level_for_space(core, secrets,
             core.probe_space);
         if (probe_level == 0) { ret false; }
-        output.kind           = frame.PING;
-        owner.kind            = OWNER_PROBE;
-        owner.level           = probe_level;
-        owner.pto_probe       = true;
-        core.probes_remaining = core.probes_remaining - 1;
+        choice.value.kind = frame.PING;
+        choice.source     = SOURCE_PROBE;
+        choice.kind       = OWNER_PROBE;
+        choice.level      = probe_level;
+        choice.probing    = true;
         ret true;
     }
     ret false;
+}
+
+val TAKEN:   u8 = 1;
+val REFUSED: u8 = 2;
+val FAILED:  u8 = 3;
+
+# takes the chosen frame from its source into `owner` and `output`. REFUSED
+# when the source's pool refused the storage it needed, FAILED when the source
+# no longer gives what was chosen
+fun take_frame(core: *Core, secrets: *Secrets, owner: *Owner, choice: *Choice,
+    now_ns: u64, maximum: usize, output: *frame.Frame, path: *path_api.Handle) u8 {
+    @output     = choice.value;
+    @path       = choice.path;
+    owner.kind  = choice.kind;
+    owner.level = choice.level;
+    val source: u8 = choice.source;
+    if (source == SOURCE_CLOSE) {
+        core.close_queued = false;
+        ret TAKEN;
+    }
+    if (source == SOURCE_ACK) {
+        val built: ack_api.BuildResult = ack_api.build(?core.acknowledgements,
+            choice.space, now_ns, core.storage.frame_ack_ranges,
+            core.storage.frame_ack_capacity, output);
+        if (!built.ok) { ret FAILED; }
+        owner.space                 = choice.space;
+        owner.ack_generation        = built.generation;
+        owner.ack_largest           = built.largest_acknowledged;
+        owner.ack_update_generation = pending_update_generation(core,
+            secrets, choice.space, built.largest_acknowledged);
+        core.ack_prepared[space_index(choice.space)] = true;
+        ret TAKEN;
+    }
+    if (source == SOURCE_CRYPTO) {
+        var prepared: handshake_api.Prepared;
+        if (choice.probing) {
+            prepared = handshake_api.prepare_probe_scoped(secrets.handshake, core.config.source,
+                choice.level, maximum);
+        }
+        or {
+            prepared = handshake_api.prepare_scoped(secrets.handshake, core.config.source,
+                choice.level, maximum);
+        }
+        if (prepared.status != handshake_api.STATUS_OK) { ret FAILED; }
+        output.offset         = prepared.offset;
+        output.data           = packet.Span{data: prepared.data.data, len: prepared.data.length};
+        owner.token.handshake = prepared.token;
+        if (choice.probing) {
+            owner.pto_probe       = true;
+            core.probes_remaining = core.probes_remaining - 1;
+        }
+        ret TAKEN;
+    }
+    if (source == SOURCE_HANDSHAKE_DONE) {
+        core.handshake_done_queued = false;
+        ret TAKEN;
+    }
+    if (source == SOURCE_NEW_TOKEN) {
+        core.send_token_queued   = false;
+        core.send_token_prepared = true;
+        ret TAKEN;
+    }
+    if (source == SOURCE_NEW_CID) {
+        val advertisement: cid_api.Selected = cid_api.next_advertisement(core.cids);
+        if (advertisement.status != cid_api.STATUS_OK ||
+            cid_api.advertisement_sent_scoped(core.cids, core.config.source,
+            advertisement.handle).status != cid_api.STATUS_OK) { ret FAILED; }
+        owner.token.cid_retirement = advertisement.handle;
+        ret TAKEN;
+    }
+    if (source == SOURCE_RETIRE_CID) {
+        val retirement: cid_api.Result = cid_api.next_retirement(core.cids);
+        if (retirement.status != cid_api.STATUS_OK ||
+            cid_api.retirement_sent_scoped(core.cids, core.config.source,
+            retirement.handle).status != cid_api.STATUS_OK) { ret FAILED; }
+        owner.token.cid_retirement = retirement.handle;
+        ret TAKEN;
+    }
+    if (source == SOURCE_PATH_RESPONSE) {
+        val response: path_api.PreparedResponse = path_api.prepare_response_scoped(core.paths,
+            core.config.source, choice.path);
+        if (response.status != path_api.STATUS_OK) { ret FAILED; }
+        output.path_data            = response.data;
+        owner.token.path_response   = response.token;
+        owner.include_ping          = response.require_non_probing;
+        owner.minimum_datagram_size = response.minimum_datagram_size;
+        ret TAKEN;
+    }
+    if (source == SOURCE_PATH_CHALLENGE) {
+        val challenge: path_api.PreparedChallenge = path_api.prepare_challenge_scoped(
+            core.paths, core.config.source, choice.path);
+        if (challenge.status != path_api.STATUS_OK) { ret FAILED; }
+        output.path_data            = challenge.data;
+        owner.token.path_challenge  = challenge.token;
+        owner.minimum_datagram_size = challenge.minimum_datagram_size;
+        ret TAKEN;
+    }
+    if (source == SOURCE_MTU_PROBE) {
+        val mtu: path_api.MtuPrepared = path_api.prepare_mtu_probe_scoped(core.paths,
+            core.config.source, choice.path);
+        if (mtu.status != path_api.STATUS_OK) { ret FAILED; }
+        owner.token.mtu_probe       = mtu.token;
+        owner.minimum_datagram_size = mtu.size;
+        ret TAKEN;
+    }
+    if (source == SOURCE_STREAM_CONTROL) {
+        val control: stream_api.Prepared = stream_api.prepare_control_scoped(core.streams,
+            core.config.source);
+        if (control.status == stream_api.STATUS_BLOCKED &&
+            control.error == stream_api.ERROR_STORAGE) { ret REFUSED; }
+        if (control.status != stream_api.STATUS_OK) { ret FAILED; }
+        @output            = control_frame(?control);
+        owner.token.stream = control.token;
+        ret TAKEN;
+    }
+    if (source == SOURCE_STREAM) {
+        val prepared: stream_api.Prepared = stream_api.prepare_scoped(core.streams,
+            core.config.source, choice.stream, maximum, choice.probing);
+        if (prepared.status == stream_api.STATUS_BLOCKED &&
+            prepared.error == stream_api.ERROR_STORAGE) { ret REFUSED; }
+        if (prepared.status != stream_api.STATUS_OK) { ret FAILED; }
+        @output            = stream_frame(?prepared);
+        owner.token.stream = prepared.token;
+        if (choice.probing) {
+            owner.pto_probe       = true;
+            core.probes_remaining = core.probes_remaining - 1;
+        }
+        ret TAKEN;
+    }
+    if (source == SOURCE_DATAGRAM) {
+        val datagram: datagram_api.Prepared = datagram_api.prepare_scoped(core.datagrams,
+            core.config.source, true);
+        if (datagram.status != datagram_api.STATUS_OK) { ret FAILED; }
+        output.data          = datagram.data;
+        owner.token.datagram = datagram.token;
+        ret TAKEN;
+    }
+    if (source == SOURCE_PROBE) {
+        owner.pto_probe       = true;
+        core.probes_remaining = core.probes_remaining - 1;
+        ret TAKEN;
+    }
+    ret FAILED;
+}
+
+# the packet a choice becomes, sized and admitted without sending anything
+rec Plan {
+    status:           transport_api.Status;
+    error:            u64;
+    header:           packet.Packet;
+    number:           u64;
+    space:            u8;
+    frame_bytes:      usize;
+    padding:          usize;
+    header_count:     usize;
+    packet_size:      usize;
+    pace_ready_at_ns: u64;
+    ack_eliciting:    bool;
+}
+
+fun plan_refused(status: transport_api.Status, error: u64) Plan {
+    var plan: Plan;
+    plan.status = status;
+    plan.error  = error;
+    ret plan;
+}
+
+fun encoded_bytes(value: *frame.Frame) usize {
+    val encoded: frame.EncodeResult = frame.encoded_size(value, frame.default_limits());
+    if (!encoded.ok) { ret 0; }
+    ret encoded.count;
+}
+
+# sizes the packet that carries `choice` and runs every check generate makes
+# before it seals one: packet number, padding, header, history room,
+# congestion, pacing and the path's amplification limit. it changes nothing.
+# BLOCKED and ERROR carry what generate answers, and a pacing BLOCKED the
+# instant the pacer is ready
+fun plan_packet(core: *Core, secrets: *Secrets, choice: *Choice, now_ns: u64,
+    available: usize) Plan {
+    var plan: Plan;
+    if (choice.source == SOURCE_ACK) { plan.frame_bytes = choice.ack_size; }
+    or                               { plan.frame_bytes = encoded_bytes(?choice.value); }
+    if (plan.frame_bytes == 0)       { ret plan_refused(transport_api.STATUS_ERROR, FRAME_ENCODING_ERROR); }
+    if (choice.include_ping) {
+        var ping: frame.Frame;
+        ping.kind        = frame.PING;
+        plan.frame_bytes = plan.frame_bytes + encoded_bytes(?ping);
+    }
+    if (plan.frame_bytes > core.storage.send_plaintext_capacity) {
+        ret plan_refused(transport_api.STATUS_ERROR, FRAME_ENCODING_ERROR);
+    }
+    plan.space = packet.number_space(kind_for_level(choice.level));
+    val index: usize = space_index(plan.space);
+    plan.number = core.packet_numbers[index];
+    if (plan.number > packet.MAX_PACKET_NUMBER) {
+        ret plan_refused(transport_api.STATUS_ERROR, PROTOCOL_VIOLATION);
+    }
+    val history:       recovery.History = core.recovery_state.spaces[index];
+    var largest_acked: u64              = 0 - 1::u64;
+    if (history.has_largest_acked) { largest_acked = history.largest_acked; }
+    val width: u8 = packet.packet_number_width(plan.number, largest_acked);
+    plan.header.header.kind              = kind_for_level(choice.level);
+    plan.header.header.version           = core.config.version;
+    plan.header.header.packet_number     = plan.number;
+    plan.header.header.packet_number_len = width;
+    plan.header.header.key_phase         = choice.level == handshake_api.APPLICATION &&
+        secrets.application_send.phase;
+    val destination: cid_api.Selected = cid_api.current(core.cids, false);
+    val source:      cid_api.Selected = cid_api.current(core.cids, true);
+    if (destination.status != cid_api.STATUS_OK || source.status != cid_api.STATUS_OK) {
+        ret plan_refused(transport_api.STATUS_ERROR, INTERNAL_ERROR);
+    }
+    plan.header.header.destination = destination.id;
+    plan.header.header.source      = source.id;
+    if (plan.header.header.kind == packet.PACKET_INITIAL &&
+        core.role == transport_api.CLIENT) {
+        plan.header.token = negotiation_api.token(?core.negotiation);
+    }
+    var padding_ok:        bool  = true;
+    var minimum_plaintext: usize = 0;
+    if (width < 4) { minimum_plaintext = 4 - width::usize; }
+    if (plan.header.header.kind == packet.PACKET_INITIAL) {
+        val measured: packet.ProtectedHeaderResult = packet.protected_header_size(
+            ?plan.header, 1200, packet.default_limits());
+        if (!measured.ok || measured.count + 16 >= 1200) {
+            padding_ok = false;
+        }
+        or {
+            val initial_minimum: usize = 1200 - measured.count - 16;
+            if (initial_minimum > minimum_plaintext) {
+                minimum_plaintext = initial_minimum;
+            }
+        }
+    }
+    if (plan.header.header.kind != packet.PACKET_INITIAL &&
+        choice.minimum_datagram_size > 0) {
+        val measured: packet.ProtectedHeaderResult = packet.protected_header_size(
+            ?plan.header, plan.frame_bytes + 16, packet.default_limits());
+        if (!measured.ok || measured.count + 16 >=
+            choice.minimum_datagram_size::usize) {
+            if (!measured.ok) { padding_ok = false; }
+        }
+        or {
+            val path_minimum: usize = choice.minimum_datagram_size::usize -
+                measured.count - 16;
+            if (path_minimum > minimum_plaintext) {
+                minimum_plaintext = path_minimum;
+            }
+        }
+    }
+    if (plan.frame_bytes < minimum_plaintext) {
+        plan.padding = minimum_plaintext - plan.frame_bytes;
+        if (plan.padding > core.storage.send_plaintext_capacity - plan.frame_bytes) {
+            padding_ok = false;
+        }
+    }
+    val plaintext: usize = plan.frame_bytes + plan.padding;
+    var header:    packet.ProtectedHeaderResult;
+    if (padding_ok) {
+        header = packet.protected_header_size(?plan.header, plaintext + 16,
+            packet.default_limits());
+    }
+    if (!padding_ok || !header.ok || header.count > available ||
+        plaintext + 16 > available - header.count) {
+        ret plan_refused(transport_api.STATUS_ERROR, INTERNAL_ERROR);
+    }
+    plan.header_count  = header.count;
+    plan.packet_size   = header.count + plaintext + 16;
+    plan.ack_eliciting = frame.ack_eliciting(choice.value.kind);
+    # a space with no history is lent one of its full capacity by the send
+    var history_len:      usize = history.len;
+    var history_capacity: usize = history.capacity;
+    if (!recovery.has_history(?core.recovery_state, plan.space)) {
+        history_len      = 0;
+        history_capacity = space_history(core, plan.space).capacity;
+    }
+    if (plan.ack_eliciting && history_len >= history_capacity) {
+        ret plan_refused(transport_api.STATUS_BLOCKED, 0);
+    }
+    var congestion: congestion_api.State;
+    var pacer:      pacer_api.State;
+    if (!path_api.peek_transport_scoped(core.paths, core.config.source, choice.path,
+        core.recovery_state.rtt.smoothed_ns, now_ns, ?congestion, ?pacer)) {
+        ret plan_refused(transport_api.STATUS_ERROR, INTERNAL_ERROR);
+    }
+    val transport_path: *path_api.Path = ?core.paths.storage.paths[choice.path.index];
+    if (plan.ack_eliciting &&
+        (transport_path.recovery_owners == 0 - 1::usize ||
+        plan.packet_size::u64 > (0 - 1::u64) -
+        transport_path.recovery_bytes_in_flight ||
+        plan.packet_size > (0 - 1::usize) - core.recovery_state.bytes_in_flight)) {
+        ret plan_refused(transport_api.STATUS_BLOCKED, 0);
+    }
+    val admitted: congestion_api.Admission = congestion_api.admit(
+        ?congestion, transport_path.recovery_bytes_in_flight,
+        0 - 1::u64, plan.packet_size::u64, 0, plan.ack_eliciting,
+        choice.probing || choice.kind == OWNER_PROBE);
+    if (!admitted.ok || !admitted.permitted) {
+        ret plan_refused(transport_api.STATUS_BLOCKED, 0);
+    }
+    val scheduled: pacer_api.Schedule = pacer_api.schedule(?pacer, now_ns,
+        congestion.congestion_window, core.recovery_state.rtt.smoothed_ns,
+        plan.packet_size::u64, !plan.ack_eliciting);
+    if (!scheduled.ok) { ret plan_refused(transport_api.STATUS_ERROR, INTERNAL_ERROR); }
+    if (!scheduled.ready) {
+        var paced: Plan = plan_refused(transport_api.STATUS_BLOCKED, 0);
+        paced.pace_ready_at_ns = scheduled.ready_at_ns;
+        ret paced;
+    }
+    var reserved: path_api.SendResult;
+    if (choice.source == SOURCE_MTU_PROBE) {
+        reserved = path_api.peek_mtu_send_scoped(core.paths, core.config.source, choice.path,
+            plan.packet_size::u64, true, choice.mtu_size);
+    }
+    or {
+        reserved = path_api.peek_send_scoped(core.paths, core.config.source, choice.path,
+            plan.packet_size::u64, choice.include_ping ||
+            (choice.value.kind != frame.PATH_CHALLENGE &&
+            choice.value.kind != frame.PATH_RESPONSE));
+    }
+    if (reserved.status != path_api.STATUS_OK) {
+        ret plan_refused(transport_api.STATUS_BLOCKED, 0);
+    }
+    plan.status = transport_api.STATUS_OK;
+    ret plan;
 }
 
 fun send_key(core: *Core, secrets: *Secrets,
@@ -3725,10 +4094,7 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     }
     # the caller is generating now, so a pacing wake has served its purpose
     core.pace_deadline_ns = 0;
-    var available: usize = capacity;
-    if (available > core.send_max_udp_payload) {
-        available = core.send_max_udp_payload;
-    }
+    val available: usize = send_available(core, capacity);
     # only an mtu probe may exceed the validated path mtu, and it is padded
     # against `available` rather than sized by `maximum`
     val selected: path_api.PathResult = selected_path(core);
@@ -3738,20 +4104,51 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.error  = NO_VIABLE_PATH;
         ret result;
     }
-    var sized: usize =
-        core.paths.storage.paths[selected.handle.index].current_mtu::usize;
-    if (sized > available) { sized = available; }
+    val maximum: usize = frame_maximum(core, selected.handle, available);
     var claimed: Owner;
     if (!claim_owner(core, ?claimed)) {
         result.status = transport_api.STATUS_BLOCKED;
         ret result;
     }
-    var value: frame.Frame;
-    var path:  path_api.Handle;
-    if (!prepare_frame(core, secrets, ?claimed, now_ns,
-        sized - 96, ?value, ?path)) {
-        if (!core.closing && core.handshake_confirmed) { mark_idle(core); }
-        result.status = transport_api.STATUS_EMPTY;
+    # the plan decides; the frame is taken only once it would be sent. a
+    # source refused storage is passed over from then on, so a second choice
+    # never meets the same refusal
+    var choice: Choice;
+    var plan:   Plan;
+    var value:  frame.Frame;
+    var path:   path_api.Handle;
+    var taken:  u8    = FAILED;
+    var tries:  usize = 0;
+    val fresh:  Owner = claimed;
+    for (tries < 2 && taken != TAKEN) {
+        claimed = fresh;
+        if (!select_frame(core, secrets, now_ns, maximum, ?choice)) {
+            if (!core.closing && core.handshake_confirmed) { mark_idle(core); }
+            result.status = transport_api.STATUS_EMPTY;
+            ret result;
+        }
+        plan = plan_packet(core, secrets, ?choice, now_ns, available);
+        if (plan.status != transport_api.STATUS_OK) {
+            if (plan.pace_ready_at_ns != 0) { core.pace_deadline_ns = plan.pace_ready_at_ns; }
+            result.status = plan.status;
+            result.error  = plan.error;
+            ret result;
+        }
+        if (!owner_storage_ready(core, plan.space)) {
+            result.status = transport_api.STATUS_BLOCKED;
+            ret result;
+        }
+        taken = take_frame(core, secrets, ?claimed, ?choice, now_ns, maximum, ?value, ?path);
+        if (taken == REFUSED) { core.send_refused = true; }
+        if (taken == FAILED) {
+            if (!core.closing && core.handshake_confirmed) { mark_idle(core); }
+            result.status = transport_api.STATUS_EMPTY;
+            ret result;
+        }
+        tries = tries + 1;
+    }
+    if (taken != TAKEN) {
+        result.status = transport_api.STATUS_BLOCKED;
         ret result;
     }
     # a refused table or history chunk is backpressure: the frame goes back
@@ -3760,7 +4157,8 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     if (owner == nil) {
         cancel_payload(core, secrets, ?claimed);
         settle_flight(core);
-        result.status = transport_api.STATUS_BLOCKED;
+        core.send_refused = true;
+        result.status     = transport_api.STATUS_BLOCKED;
         ret result;
     }
     if (path_api.configure_transport_scoped(core.paths, core.config.source, path,
@@ -3791,143 +4189,44 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
             ret result;
         }
     }
-    val space:  u8    = packet.number_space(kind_for_level(owner.level));
-    val index:  usize = space_index(space);
-    val number: u64   = core.packet_numbers[index];
-    if (number > packet.MAX_PACKET_NUMBER) {
-        cancel_payload(core, secrets, owner);
-        result.status = transport_api.STATUS_ERROR;
-        result.error  = PROTOCOL_VIOLATION;
-        ret result;
-    }
-    val history:       recovery.History = core.recovery_state.spaces[index];
-    var largest_acked: u64              = 0 - 1::u64;
-    if (history.has_largest_acked) { largest_acked = history.largest_acked; }
-    val width:            u8 = packet.packet_number_width(number, largest_acked);
-    var protected_packet: packet.Packet;
-    protected_packet.header.kind              = kind_for_level(owner.level);
-    protected_packet.header.version           = core.config.version;
-    protected_packet.header.packet_number     = number;
-    protected_packet.header.packet_number_len = width;
-    protected_packet.header.key_phase         = owner.level == handshake_api.APPLICATION &&
-        secrets.application_send.phase;
-    val destination: cid_api.Selected = cid_api.current(core.cids, false);
-    val source:      cid_api.Selected = cid_api.current(core.cids, true);
-    if (destination.status != cid_api.STATUS_OK || source.status != cid_api.STATUS_OK) {
-        cancel_payload(core, secrets, owner);
-        result.status = transport_api.STATUS_ERROR;
-        result.error  = INTERNAL_ERROR;
-        ret result;
-    }
-    protected_packet.header.destination = destination.id;
-    protected_packet.header.source      = source.id;
-    if (protected_packet.header.kind == packet.PACKET_INITIAL &&
-        core.role == transport_api.CLIENT) {
-        protected_packet.token = negotiation_api.token(?core.negotiation);
-    }
-    var header:            packet.ProtectedHeaderResult;
-    var padding_ok:        bool  = true;
-    var minimum_plaintext: usize = 0;
-    if (width < 4) { minimum_plaintext = 4 - width::usize; }
-    if (protected_packet.header.kind == packet.PACKET_INITIAL) {
-        var measured_builder: binary.Builder = binary.builder(output, available,
-            binary.BIG);
-        val measured_header: packet.ProtectedHeaderResult =
-            packet.encode_protected_header(?measured_builder,
-            ?protected_packet, 1200, packet.default_limits());
-        if (!measured_header.ok || measured_header.count + 16 >= 1200) {
-            padding_ok = false;
-        }
-        or {
-            val initial_minimum: usize = 1200 - measured_header.count - 16;
-            if (initial_minimum > minimum_plaintext) {
-                minimum_plaintext = initial_minimum;
-            }
-        }
-    }
-    if (protected_packet.header.kind != packet.PACKET_INITIAL &&
-        owner.minimum_datagram_size > 0) {
-        var measured_builder: binary.Builder = binary.builder(output, available,
-            binary.BIG);
-        val measured_header: packet.ProtectedHeaderResult =
-            packet.encode_protected_header(?measured_builder,
-            ?protected_packet, plaintext.len + 16,
-            packet.default_limits());
-        if (!measured_header.ok || measured_header.count + 16 >=
-            owner.minimum_datagram_size::usize) {
-            if (!measured_header.ok) { padding_ok = false; }
-        }
-        or {
-            val path_minimum: usize = owner.minimum_datagram_size::usize -
-                measured_header.count - 16;
-            if (path_minimum > minimum_plaintext) {
-                minimum_plaintext = path_minimum;
-            }
-        }
-    }
-    if (plaintext.len < minimum_plaintext) {
-        val padding:       usize = minimum_plaintext - plaintext.len;
+    if (plan.padding > 0) {
         var padding_frame: frame.Frame;
         padding_frame.kind          = frame.PADDING;
-        padding_frame.padding_count = padding;
-        if (!encode_frame(?plaintext, ?padding_frame)) { padding_ok = false; }
+        padding_frame.padding_count = plan.padding;
+        if (!encode_frame(?plaintext, ?padding_frame)) {
+            cancel_payload(core, secrets, owner);
+            result.status = transport_api.STATUS_ERROR;
+            result.error  = INTERNAL_ERROR;
+            ret result;
+        }
     }
-    if (padding_ok) {
-        var header_builder: binary.Builder = binary.builder(output, available,
-            binary.BIG);
-        header = packet.encode_protected_header(?header_builder, ?protected_packet,
-            plaintext.len + 16, packet.default_limits());
-    }
-    if (!padding_ok || !header.ok || header.count > available ||
-        plaintext.len + 16 > available - header.count) {
+    var header_builder: binary.Builder = binary.builder(output, available,
+        binary.BIG);
+    val header: packet.ProtectedHeaderResult = packet.encode_protected_header(
+        ?header_builder, ?plan.header, plaintext.len + 16, packet.default_limits());
+    # the packet is exactly the one planned, or the plan and the send disagree
+    if (plaintext.len != plan.frame_bytes + plan.padding || !header.ok ||
+        header.count != plan.header_count) {
         cancel_payload(core, secrets, owner);
         result.status = transport_api.STATUS_ERROR;
         result.error  = INTERNAL_ERROR;
         ret result;
     }
-    val packet_size:   usize = header.count + plaintext.len + 16;
-    val ack_eliciting: bool  = frame.ack_eliciting(value.kind);
-    val in_flight:     bool  = ack_eliciting;
-    if (ack_eliciting && history.len >= history.capacity) {
-        cancel_payload(core, secrets, owner);
-        result.status = transport_api.STATUS_BLOCKED;
-        ret result;
-    }
+    val packet_size:    usize          = plan.packet_size;
+    val ack_eliciting:  bool           = plan.ack_eliciting;
+    val in_flight:      bool           = ack_eliciting;
+    val index:          usize          = space_index(plan.space);
+    val number:         u64            = plan.number;
     val transport_path: *path_api.Path =
         ?core.paths.storage.paths[path.index];
-    if (ack_eliciting &&
-        (transport_path.recovery_owners == 0 - 1::usize ||
-        packet_size::u64 > (0 - 1::u64) -
-        transport_path.recovery_bytes_in_flight ||
-        packet_size > (0 - 1::usize) - core.recovery_state.bytes_in_flight)) {
-        cancel_payload(core, secrets, owner);
-        result.status = transport_api.STATUS_BLOCKED;
-        ret result;
-    }
-    val admitted: congestion_api.Admission = congestion_api.admit(
-        ?transport_path.congestion, transport_path.recovery_bytes_in_flight,
-        0 - 1::u64, packet_size::u64, 0, in_flight,
-        owner.pto_probe || owner.kind == OWNER_PROBE);
-    if (!admitted.ok || !admitted.permitted) {
-        cancel_payload(core, secrets, owner);
-        result.status = transport_api.STATUS_BLOCKED;
-        ret result;
-    }
     owner.pacer = pacer_api.schedule(?transport_path.pacer, now_ns,
         transport_path.congestion.congestion_window,
         core.recovery_state.rtt.smoothed_ns,
         packet_size::u64, !ack_eliciting);
-    if (!owner.pacer.ok) {
+    if (!owner.pacer.ok || !owner.pacer.ready) {
         cancel_payload(core, secrets, owner);
         result.status = transport_api.STATUS_ERROR;
         result.error  = INTERNAL_ERROR;
-        ret result;
-    }
-    if (!owner.pacer.ready) {
-        val ready_at_ns: u64 = owner.pacer.ready_at_ns;
-        cancel_payload(core, secrets, owner);
-        core.pace_deadline_ns = ready_at_ns;
-        result.status         = transport_api.STATUS_BLOCKED;
         ret result;
     }
     var reserved: path_api.SendResult;
@@ -3943,7 +4242,8 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     }
     if (reserved.status != path_api.STATUS_OK) {
         cancel_payload(core, secrets, owner);
-        result.status = transport_api.STATUS_BLOCKED;
+        result.status = transport_api.STATUS_ERROR;
+        result.error  = INTERNAL_ERROR;
         ret result;
     }
     owner.path_send = reserved.token;
@@ -3981,10 +4281,10 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         ret result;
     }
     core.packet_numbers[index] = number + 1;
-    recovery.note_prepared(?core.recovery_state, space, number);
+    recovery.note_prepared(?core.recovery_state, plan.space, number);
     owner.packet_number    = number;
     owner.bytes            = packet_size;
-    owner.space            = space;
+    owner.space            = plan.space;
     owner.ack_eliciting    = ack_eliciting;
     owner.in_flight        = in_flight;
     owner.growth_permitted = in_flight &&
@@ -4005,6 +4305,66 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
     result.count  = sealed.written;
     result.owner  = owner.owner;
     ret result;
+}
+
+# whether a send may try the pool for the owner table and the space's history
+# it does not hold. not while the pool's last refusal stands: the account's
+# wake says when to try again
+fun owner_storage_ready(core: *Core, space: u8) bool {
+    ret !core.send_refused ||
+        (core.owners != nil && recovery.has_history(?core.recovery_state, space));
+}
+
+# the bytes a datagram may take in a caller's buffer of `capacity`
+fun send_available(core: *Core, capacity: usize) usize {
+    if (capacity > core.send_max_udp_payload) { ret core.send_max_udp_payload; }
+    ret capacity;
+}
+
+# the room a frame gets in a packet on `selected`: the path's mtu within what
+# the buffer takes, less the packet's own overhead
+fun frame_maximum(core: *Core, selected: path_api.Handle, available: usize) usize {
+    var sized: usize = core.paths.storage.paths[selected.index].current_mtu::usize;
+    if (sized > available) { sized = available; }
+    ret sized - 96;
+}
+
+# whether the provider may hand over crypto or events on its next poll: new
+# crypto arrived, the pool woke a provider it refused, or its last poll did
+# not end waiting for input. pending_output answers true while it holds
+pub fun handshake_pending(core: *Core) bool {
+    ret core_record_valid(core) && core.initialized && !core.destroyed &&
+        !core.closing && handshake_poll_due(core) &&
+        (core.storage_woken || core.crypto_received || !core.handshake_quiet);
+}
+
+# whether the next generate at `now_ns` would produce a datagram, answered with
+# nothing changed and nothing allocated, for a caller buffer of at least the
+# connection's maximum UDP payload. it is exact but for two edges, each where
+# generate learns its answer only by acting:
+# - handshake work pending (handshake_pending) answers true, since only
+#   running the provider tells whether it yields a flight
+# - storage: while the pool's last refusal on the send path stands (until
+#   storage_ready), a send needing a chunk the connection does not hold
+#   answers false. otherwise the pool is assumed to grant it
+pub fun pending_output(core: *Core, secrets: *Secrets, now_ns: u64) bool {
+    if (!core_record_valid(core) || !secret_record_valid(secrets) || !core.initialized ||
+        !secrets.initialized || core.destroyed || secrets.destroyed ||
+        now_ns < core.last_now_ns) { ret false; }
+    if (core.state == transport_api.CLOSED || (core.closing && !core.close_queued)) { ret false; }
+    if (still_idle(core, now_ns))                                                   { ret false; }
+    if (handshake_pending(core))                                                    { ret true; }
+    if (has_prepared_owner(core))                                                   { ret false; }
+    val selected: path_api.PathResult = selected_path(core);
+    if (selected.status != path_api.STATUS_OK ||
+        selected.handle.index >= core.paths.storage.path_capacity) { ret false; }
+    if (core.owners != nil && core.owners_active >= core.owner_capacity) { ret false; }
+    val available: usize = send_available(core, core.send_max_udp_payload);
+    var choice:    Choice;
+    if (!select_frame(core, secrets, now_ns, frame_maximum(core, selected.handle, available),
+        ?choice)) { ret false; }
+    val plan: Plan = plan_packet(core, secrets, ?choice, now_ns, available);
+    ret plan.status == transport_api.STATUS_OK && owner_storage_ready(core, plan.space);
 }
 
 # the receive generation whose update this ack reports, or zero. rfc 9001 6.5:

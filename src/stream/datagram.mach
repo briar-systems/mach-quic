@@ -361,9 +361,12 @@ fun prepared_error(status: u8, code: u8) Prepared {
     ret result;
 }
 
-pub fun prepare(queue: *Queue, with_length: bool) Prepared {
-    if (!queue_record_valid(queue) || !queue.valid || queue.closing ||
-        queue.core_lease != 0) { ret prepared_error(STATUS_ERROR, ERROR_STATE); }
+# the datagram prepare would reserve, reported as prepare would report it. it
+# changes nothing
+fun select(queue: *Queue, with_length: bool) Prepared {
+    if (!queue_record_valid(queue) || !queue.valid || queue.closing) {
+        ret prepared_error(STATUS_ERROR, ERROR_STATE);
+    }
     if (!queue.config.enabled) { ret prepared_error(STATUS_ERROR, ERROR_DISABLED); }
     if (!queue.peer_limit_bound) {
         ret prepared_error(STATUS_ERROR, ERROR_STATE);
@@ -385,7 +388,6 @@ pub fun prepare(queue: *Queue, with_length: bool) Prepared {
     if (encoded == 0 || encoded > queue.config.peer_max_frame_size) {
         ret prepared_error(STATUS_ERROR, ERROR_LIMIT);
     }
-    entry.state = ENTRY_RESERVED;
     var result: Prepared;
     result.ok          = true;
     result.status      = STATUS_OK;
@@ -394,6 +396,17 @@ pub fun prepare(queue: *Queue, with_length: bool) Prepared {
     result.data.len    = entry.length;
     result.frame_size  = encoded;
     result.with_length = with_length;
+    ret result;
+}
+
+pub fun prepare(queue: *Queue, with_length: bool) Prepared {
+    if (queue_record_valid(queue) && queue.core_lease != 0) {
+        ret prepared_error(STATUS_ERROR, ERROR_STATE);
+    }
+    val result: Prepared = select(queue, with_length);
+    if (result.status == STATUS_OK) {
+        queue.storage.send_entries[result.token.index].state = ENTRY_RESERVED;
+    }
     ret result;
 }
 
@@ -600,6 +613,14 @@ pub fun prepare_scoped(queue: *Queue, source: u64,
     ret result;
 }
 
+# what prepare_scoped would answer, with nothing changed
+pub fun peek_scoped(queue: *Queue, source: u64, with_length: bool) Prepared {
+    if (!queue_record_valid(queue) || source == 0 || queue.core_lease != source) {
+        ret prepared_error(STATUS_ERROR, ERROR_STATE);
+    }
+    ret select(queue, with_length);
+}
+
 pub fun cancel_prepared_scoped(queue: *Queue, source: u64,
     prepared: Prepared) OperationResult {
     if (!enter_core_scope(queue, source)) {
@@ -747,6 +768,34 @@ test "quic.stream.datagram: authenticated limits bind once and close preserves s
     if (!prepared.ok || begin_close_scoped(?queue, 12).status != STATUS_OK ||
         publish_scoped(?queue, 12, prepared).status != STATUS_OK ||
         queue.send_count != 0) { ret 3; }
+    ret 0;
+}
+
+test "quic.stream.datagram: a peek names the datagram the prepare after it takes and changes nothing" {
+    var send_entries:    [2]Entry;
+    var receive_entries: [1]Entry;
+    var queue:           Queue = initialized_for_test(Config{source: 13,
+        peer_max_frame_size: 0, local_max_frame_size: 8, enabled: true},
+        test_storage(?send_entries[0], 2, 4, ?receive_entries[0], 1, 4));
+    var data: [3]u8 = [3]u8{1, 2, 3};
+    if (!lease_core(?queue, 13) ||
+        peek_scoped(?queue, 13, true).error != ERROR_STATE ||
+        bind_peer_limit_scoped(?queue, 13, 5).status != STATUS_OK ||
+        peek_scoped(?queue, 13, true).status != STATUS_EMPTY ||
+        peek_scoped(?queue, 14, true).error != ERROR_STATE) { ret 1; }
+    if (!enqueue(?queue, ?data[0], 3).ok || !enqueue(?queue, ?data[0], 1).ok) { ret 2; }
+    val entries: [2]Entry = send_entries;
+    val peeked:  Prepared = peek_scoped(?queue, 13, true);
+    if (peeked.status != STATUS_OK || peeked.data.len != 3 ||
+        !memory.equal[Entry](?send_entries[0], ?entries[0], 2)) { ret 3; }
+    val taken: Prepared = prepare_scoped(?queue, 13, true);
+    if (taken.status != STATUS_OK || taken.token.index != peeked.token.index ||
+        taken.token.generation != peeked.token.generation ||
+        taken.frame_size != peeked.frame_size) { ret 4; }
+    # the reserved datagram is passed over, in the peek as in the prepare
+    if (peek_scoped(?queue, 13, false).data.len != 1 ||
+        prepare_scoped(?queue, 13, false).data.len != 1 ||
+        peek_scoped(?queue, 13, true).status != STATUS_EMPTY) { ret 5; }
     ret 0;
 }
 

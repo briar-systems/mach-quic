@@ -2,6 +2,7 @@ use quic.storage.limited;
 use supply: quic.storage.source;
 use quic.stream.stream;
 
+use std.memory;
 use std.memory.buffers;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -904,5 +905,104 @@ test "quic.stream.simulated: a peer stream with no record chunk is refused uncha
     val opened: stream.ReceiveResult = stream.receive_stream(?manager, (fits - 1) * 4, 0,
         ?data[0], 1, false);
     if (!opened.ok || manager.active_streams != stream.RECORDS_PER_BLOCK || supply.held(?account, supply.SEND) != 1) { ret 3; }
+    ret 0;
+}
+
+test "quic.stream.simulated: news is reported until the owner takes it" {
+    var records:  [4]stream.Stream;
+    var attempts: [8]stream.Attempt;
+    var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 8);
+    var bytes:    [8]u8          = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    var output:   [8]u8;
+    if (stream.pending_news(?manager)) { ret 1; }
+    # a peer stream is news from the frame that opens it, and each stream the
+    # frame opens implicitly waits for accept too
+    if (!stream.receive_stream(?manager, 5, 0, ?bytes[0], 2, false).ok ||
+        !stream.pending_news(?manager) || manager.unaccepted_streams != 2) { ret 2; }
+    val first: stream.CreateResult = stream.accept(?manager);
+    if (first.handle.id != 1 || !stream.pending_news(?manager)) { ret 3; }
+    val second: stream.CreateResult = stream.accept(?manager);
+    # the accepted stream's data is queued news now, until it is taken
+    if (second.handle.id != 5 || manager.unaccepted_streams != 0 ||
+        !stream.pending_news(?manager)) { ret 4; }
+    val ready: stream.Ready = stream.next_ready(?manager);
+    if (!ready.readable || ready.handle.id != 5 || stream.pending_news(?manager)) { ret 5; }
+    # more data with a fin, a reset and a flow-control opening each bring it back
+    if (stream.read(?manager, second.handle, ?output[0], 8).count != 2 ||
+        stream.pending_news(?manager) ||
+        !stream.receive_stream(?manager, 5, 2, ?bytes[2], 1, true).ok ||
+        !stream.pending_news(?manager) ||
+        stream.next_ready(?manager).status != stream.STATUS_OK ||
+        stream.pending_news(?manager)) { ret 6; }
+    if (!stream.receive_reset(?manager, 1, 3, 0).ok || !stream.pending_news(?manager) ||
+        !stream.next_ready(?manager).reset || stream.pending_news(?manager)) { ret 7; }
+    val local: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    if (stream.write(?manager, local.handle, ?bytes[0], 4).count != 2 ||
+        stream.pending_news(?manager) ||
+        !stream.receive_max_stream_data(?manager, local.handle.id, 8).ok ||
+        !stream.pending_news(?manager) || !stream.next_ready(?manager).writable ||
+        stream.pending_news(?manager)) { ret 8; }
+    ret 0;
+}
+
+rec Snapshot {
+    manager:  stream.Manager;
+    records:  [4]stream.Stream;
+    attempts: [8]stream.Attempt;
+}
+
+test "quic.stream.simulated: a peek names what the prepare after it sends and changes nothing" {
+    var records:  [4]stream.Stream;
+    var attempts: [8]stream.Attempt;
+    var manager:  stream.Manager      = ready_manager(?records[0], ?attempts[0], 8);
+    var bytes:    [8]u8               = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    var before:   Snapshot;
+    var after:    Snapshot;
+    val local:    stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    if (stream.write(?manager, local.handle, ?bytes[0], 2).count != 2 ||
+        !stream.lease_core(?manager, 31)) { ret 1; }
+    if (stream.peek_scoped(?manager, 32, local.handle, 8, false).error != stream.ERROR_STATE ||
+        stream.peek_control_scoped(?manager, 31).status != stream.STATUS_EMPTY) { ret 2; }
+    before = Snapshot{manager: manager, records: records, attempts: attempts};
+    val peeked: stream.Prepared = stream.peek_scoped(?manager, 31, local.handle, 8, false);
+    after = Snapshot{manager: manager, records: records, attempts: attempts};
+    if (peeked.status != stream.STATUS_OK || peeked.data.len != 2 ||
+        !memory.equal[Snapshot](?before, ?after, 1)) { ret 3; }
+    val taken: stream.Prepared = stream.prepare_scoped(?manager, 31, local.handle, 8, false);
+    if (taken.status != stream.STATUS_OK || taken.kind != peeked.kind ||
+        taken.offset != peeked.offset || taken.data.data != peeked.data.data ||
+        taken.data.len != peeked.data.len || taken.fin != peeked.fin) { ret 4; }
+    # the reserved attempt blocks the stream in the peek as in the prepare
+    if (stream.peek_scoped(?manager, 31, local.handle, 8, false).status !=
+        stream.STATUS_BLOCKED) { ret 5; }
+    # a flow-control frame once the owner consumes what the peer sent
+    if (!stream.receive_stream_scoped(?manager, 31, 1, 0, ?bytes[0], 8, false).ok) { ret 6; }
+    val peer:   stream.CreateResult = stream.accept(?manager);
+    var output: [8]u8;
+    if (stream.read(?manager, peer.handle, ?output[0], 8).count != 8 ||
+        stream.credit(?manager, peer.handle, 8).status != stream.STATUS_OK) { ret 7; }
+    before = Snapshot{manager: manager, records: records, attempts: attempts};
+    val control: stream.Prepared = stream.peek_control_scoped(?manager, 31);
+    after = Snapshot{manager: manager, records: records, attempts: attempts};
+    if (control.status != stream.STATUS_OK || !memory.equal[Snapshot](?before, ?after, 1)) { ret 8; }
+    val sent: stream.Prepared = stream.prepare_control_scoped(?manager, 31);
+    if (sent.status != stream.STATUS_OK || sent.kind != control.kind ||
+        sent.maximum != control.maximum) { ret 9; }
+    ret 0;
+}
+
+test "quic.stream.simulated: attempts are held only while an attempt chunk is" {
+    var chunks:  supply.TestPool;
+    var account: supply.Account;
+    var manager: stream.Manager;
+    if (!demand_manager(?chunks, ?account, 16, ?manager) ||
+        stream.attempts_held(?manager)) { ret 1; }
+    val opened: stream.CreateResult = stream.open(?manager, stream.DIRECTION_BIDIRECTIONAL);
+    var data:   [4]u8               = [4]u8{1, 2, 3, 4};
+    if (stream.write(?manager, opened.handle, ?data[0], 4).count != 4) { ret 2; }
+    val prepared: stream.Prepared = stream.prepare(?manager, opened.handle, 4, false);
+    if (!prepared.ok || !stream.attempts_held(?manager) ||
+        stream.cancel_prepared(?manager, prepared).status != stream.STATUS_OK ||
+        stream.attempts_held(?manager)) { ret 3; }
     ret 0;
 }

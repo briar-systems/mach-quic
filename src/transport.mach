@@ -164,6 +164,9 @@ pub rec Protocol[T] {
     timer:         fun(*T) CoreTimer;
     # the connection's account woke. memory the core was refused is tried again
     storage_ready: fun(*T);
+    # whether the next generate at this instant would produce a datagram, with
+    # nothing changed. see pending_output
+    pending_output: fun(*T, u64) bool;
 }
 
 # the scope's cancellation callback runs on a foreign thread and is handed an
@@ -381,7 +384,7 @@ fun protocol_valid[T](protocol: *Protocol[T]) bool {
         protocol.generate != nil && protocol.complete_send != nil &&
         protocol.begin_close != nil && protocol.close_ready != nil &&
         protocol.finish_close != nil && protocol.timer != nil &&
-        protocol.storage_ready != nil;
+        protocol.storage_ready != nil && protocol.pending_output != nil;
 }
 
 fun callback_reentry[T](driver: *Driver[T]) bool {
@@ -406,6 +409,7 @@ fun callback_intact[T](driver: *Driver[T], before: *Driver[T], caller: i64) bool
         driver.protocol.finish_close == before.protocol.finish_close &&
         driver.protocol.timer == before.protocol.timer &&
         driver.protocol.storage_ready == before.protocol.storage_ready &&
+        driver.protocol.pending_output == before.protocol.pending_output &&
         driver.streams == before.streams &&
         driver.datagrams == before.datagrams &&
         driver.operation_scope == before.operation_scope &&
@@ -528,6 +532,19 @@ fun callback_timer[T](driver: *Driver[T]) CoreTimer {
         restore_callback[T](driver, ?before);
         var failed: CoreTimer;
         ret failed;
+    }
+    atomic.store(?driver.callback_owner, 0);
+    ret result;
+}
+
+fun callback_pending_output[T](driver: *Driver[T], now_ns: u64) bool {
+    val before: Driver[T] = @driver;
+    val caller: i64       = os.thread_current_id();
+    atomic.store(?driver.callback_owner, caller);
+    val result: bool = driver.protocol.pending_output(driver.protocol.context, now_ns);
+    if (!callback_intact[T](driver, ?before, caller)) {
+        restore_callback[T](driver, ?before);
+        ret false;
     }
     atomic.store(?driver.callback_owner, 0);
     ret result;
@@ -2046,6 +2063,58 @@ pub fun snapshot[T](driver: *Driver[T]) Snapshot {
     result.queued_datagrams    = driver.datagrams.send_count;
     result.received_datagrams  = driver.datagrams.receive_count;
     result.initialized         = true;
+    mutex.unlock(?driver.lock);
+    ret result;
+}
+
+fun slot_free[T](driver: *Driver[T]) bool {
+    var i: usize = 0;
+    for (i < driver.storage.send_capacity) {
+        if (driver.storage.sends[i].state == SLOT_FREE) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# whether generate at `now` would produce a datagram, answered with nothing
+# changed and nothing allocated, for a buffer of at least the connection's
+# maximum UDP payload. a host's audit uses it to find a connection that holds
+# output nobody will generate.
+#
+# false for a closed or abortively closing driver, a scope no longer active,
+# a time before the driver's last call, or no free send slot, where generate
+# answers without a datagram. true for a cancellation recorded but not yet
+# applied: the next call applies it, an abortive close the host must give the
+# connection a turn for, though the generate that applies it sends nothing.
+# otherwise the protocol answers, and connection.core's answer is exact but
+# for its two documented edges, pending handshake work and a standing pool
+# refusal
+pub fun pending_output[T](driver: *Driver[T], now: time.Instant) bool {
+    val now_ns: u64 = clock.nanos(now);
+    if (callback_reentry[T](driver) || driver == nil || !driver.initialized) { ret false; }
+    mutex.lock(?driver.lock);
+    var result: bool = false;
+    if (driver.state != CLOSED &&
+        !(driver.closing && driver.close_mode == lifecycle.ABORTIVE)) {
+        if (atomic.load(?driver.cancellation.pending) != 0) {
+            result = true;
+        }
+        or (driver.operation_scope != nil && scope_active(driver.operation_scope) &&
+            now_ns >= driver.last_now_ns && slot_free[T](driver)) {
+            result = callback_pending_output[T](driver, now_ns);
+        }
+    }
+    mutex.unlock(?driver.lock);
+    ret result;
+}
+
+# whether ready_stream or accept_stream has anything to hand the owner: a
+# stream with data, a fin, a reset or a flow-control opening it has not taken,
+# or a peer stream it has not accepted. O(1), with nothing changed
+pub fun pending_stream_news[T](driver: *Driver[T]) bool {
+    if (callback_reentry[T](driver) || driver == nil || !driver.initialized) { ret false; }
+    mutex.lock(?driver.lock);
+    val result: bool = stream_api.pending_news(driver.streams);
     mutex.unlock(?driver.lock);
     ret result;
 }

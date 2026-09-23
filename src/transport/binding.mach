@@ -215,6 +215,12 @@ fun on_storage_ready(binding: *Binding) {
     if (bound(binding)) { core_api.storage_ready(binding.core); }
 }
 
+# reads the core alone, so it lends no scratch
+fun on_pending_output(binding: *Binding, now_ns: u64) bool {
+    if (!bound(binding)) { ret false; }
+    ret core_api.pending_output(binding.core, binding.secrets, now_ns);
+}
+
 fun on_timer(binding: *Binding) transport_api.CoreTimer {
     var idle: transport_api.CoreTimer;
     if (!bound(binding)) { ret idle; }
@@ -420,16 +426,17 @@ pub fun route_valid(binding: *Binding, route: *Route) bool {
 pub fun protocol(binding: *Binding) transport_api.Protocol[Binding] {
     var value: transport_api.Protocol[Binding];
     if (!bound(binding)) { ret value; }
-    value.context       = binding;
-    value.context_range = binding_range;
-    value.receive       = on_receive;
-    value.timeout       = on_timeout;
-    value.generate      = on_generate;
-    value.complete_send = on_complete_send;
-    value.begin_close   = on_begin_close;
-    value.close_ready   = on_close_ready;
-    value.finish_close  = on_finish_close;
-    value.timer         = on_timer;
-    value.storage_ready = on_storage_ready;
+    value.context        = binding;
+    value.context_range  = binding_range;
+    value.receive        = on_receive;
+    value.timeout        = on_timeout;
+    value.generate       = on_generate;
+    value.complete_send  = on_complete_send;
+    value.begin_close    = on_begin_close;
+    value.close_ready    = on_close_ready;
+    value.finish_close   = on_finish_close;
+    value.timer          = on_timer;
+    value.storage_ready  = on_storage_ready;
+    value.pending_output = on_pending_output;
     ret value;
 }

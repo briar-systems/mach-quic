@@ -1013,18 +1013,31 @@ test "quic.connection.core: owner and history chunks are held only while packets
         held[count] = got.chunk;
         count       = count + 1;
     }
-    if (count < 2 || core.generate(?fixture.engine, ?fixture.secrets, ?output[0], 1200,
+    if (count < 2 || !core.pending_output(?fixture.engine, ?fixture.secrets, 4) ||
+        core.generate(?fixture.engine, ?fixture.secrets, ?output[0], 1200,
         4).status != transport.STATUS_BLOCKED ||
         fixture.adapter_attempts[0].state != handshake.ATTEMPT_FREE ||
         core.snapshot(?fixture.engine).active_owners != 0) { ret 4; }
     count = count - 1;
     supply.give(?from, held[count]);
-    # one chunk is not enough for the table and the history together
-    if (core.generate(?fixture.engine, ?fixture.secrets, ?output[0], 1200,
+    # the refusal stands until the pool wakes the account, and the owner routes
+    # that wake to storage_ready. until then the output is not pending, as the
+    # generate that would send it waits
+    if (core.pending_output(?fixture.engine, ?fixture.secrets, 5) ||
+        core.generate(?fixture.engine, ?fixture.secrets, ?output[0], 1200,
+        5).status != transport.STATUS_BLOCKED || fixture.engine.owners != nil) { ret 7; }
+    core.storage_ready(?fixture.engine);
+    # the wake makes it pending again, though one chunk is not enough for the
+    # table and the history together: only the pool's answer tells
+    if (!core.pending_output(?fixture.engine, ?fixture.secrets, 5) ||
+        core.generate(?fixture.engine, ?fixture.secrets, ?output[0], 1200,
         5).status != transport.STATUS_BLOCKED || fixture.engine.owners != nil ||
-        fixture.engine.history_blocks[0].data != nil) { ret 5; }
+        fixture.engine.history_blocks[0].data != nil ||
+        core.pending_output(?fixture.engine, ?fixture.secrets, 5)) { ret 5; }
     count = count - 1;
     supply.give(?from, held[count]);
+    core.storage_ready(?fixture.engine);
+    if (!core.pending_output(?fixture.engine, ?fixture.secrets, 6)) { ret 8; }
     val sent: transport.CoreDatagram = core.generate(?fixture.engine,
         ?fixture.secrets, ?output[0], 1200, 6);
     if (sent.status != transport.STATUS_OK ||
@@ -1036,6 +1049,64 @@ test "quic.connection.core: owner and history chunks are held only while packets
         count = count - 1;
         supply.give(?from, held[count]);
     }
+    ret 0;
+}
+
+fun same_datagram(a: transport.CoreDatagram, b: transport.CoreDatagram,
+    a_bytes: *u8, b_bytes: *u8) bool {
+    if (a.status != b.status || a.count != b.count || a.owner != b.owner ||
+        a.error != b.error) { ret false; }
+    var i: usize = 0;
+    for (i < a.count) {
+        if (a_bytes[i] != b_bytes[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# two fixtures made the same way are the same connection, so asking one of
+# them any number of times must leave its next datagrams those of the other
+test "quic.connection.core: asking whether output is pending changes nothing generate sends" {
+    var asked:     Fixture;
+    var plain:     Fixture;
+    var asked_out: [1200]u8;
+    var plain_out: [1200]u8;
+    if (!initialize(?asked, transport.CLIENT, true, 1) ||
+        !initialize(?plain, transport.CLIENT, true, 1)) { ret 1; }
+    # a fresh client holds handshake work, which only polling the provider tells
+    if (!core.handshake_pending(?asked.engine) ||
+        !core.pending_output(?asked.engine, ?asked.secrets, 2) ||
+        !core.pending_output(?asked.engine, ?asked.secrets, 9)) { ret 2; }
+    val first: transport.CoreDatagram = core.generate(?asked.engine, ?asked.secrets,
+        ?asked_out[0], 1200, 2);
+    if (first.status != transport.STATUS_OK || !same_datagram(first,
+        core.generate(?plain.engine, ?plain.secrets, ?plain_out[0], 1200, 2),
+        ?asked_out[0], ?plain_out[0])) { ret 3; }
+    # the provider was polled quiet, so the answer is the plan's from here: the
+    # prepared Initial holds the next send back
+    if (core.handshake_pending(?asked.engine) ||
+        core.pending_output(?asked.engine, ?asked.secrets, 3)) { ret 4; }
+    val held: transport.CoreDatagram = core.generate(?asked.engine, ?asked.secrets,
+        ?asked_out[0], 1200, 3);
+    if (held.status != transport.STATUS_BLOCKED || !same_datagram(held,
+        core.generate(?plain.engine, ?plain.secrets, ?plain_out[0], 1200, 3),
+        ?asked_out[0], ?plain_out[0])) { ret 5; }
+    # a failed send gives the crypto back to be sent again
+    if (core.complete_send(?asked.engine, ?asked.secrets, first.owner,
+        transport.SEND_FAILED, 0, 4).status != transport.STATUS_OK ||
+        core.complete_send(?plain.engine, ?plain.secrets, first.owner,
+        transport.SEND_FAILED, 0, 4).status != transport.STATUS_OK) { ret 6; }
+    var now: u64 = 5;
+    for (now < 8) {
+        core.pending_output(?asked.engine, ?asked.secrets, now + 100);
+        now = now + 1;
+    }
+    if (!core.pending_output(?asked.engine, ?asked.secrets, 8)) { ret 7; }
+    val again: transport.CoreDatagram = core.generate(?asked.engine, ?asked.secrets,
+        ?asked_out[0], 1200, 8);
+    if (again.status != transport.STATUS_OK || !same_datagram(again,
+        core.generate(?plain.engine, ?plain.secrets, ?plain_out[0], 1200, 8),
+        ?asked_out[0], ?plain_out[0])) { ret 8; }
     ret 0;
 }
 

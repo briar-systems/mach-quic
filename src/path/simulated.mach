@@ -1,5 +1,7 @@
 use quic.path.path;
 
+use std.memory;
+
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -635,5 +637,100 @@ test "quic.path.simulated: failed prior-path revalidation defeats forwarding att
         true, true, true, true, 312);
     if (!recovered.selected || recovered.handle.generation != restarted.handle.generation ||
         !recovered.needs_validation) { ret 1; }
+    ret 0;
+}
+
+rec Held {
+    manager:    path.Manager;
+    paths:      [2]path.Path;
+    challenges: [2]path.Challenge;
+    responses:  [2]path.Response;
+    sends:      [2]path.SendReservation;
+}
+
+fun same(a: *Held, b: *Held) bool {
+    ret memory.equal[Held](a, b, 1);
+}
+
+test "quic.path.simulated: a peek answers what the prepare after it does and changes nothing" {
+    var held:    Held;
+    var before:  Held;
+    val storage: path.Storage = path.Storage{paths: ?held.paths[0], path_capacity: 2,
+        challenges: ?held.challenges[0], challenge_capacity: 2,
+        responses:  ?held.responses[0], response_capacity: 2,
+        sends:      ?held.sends[0], send_capacity: 2};
+    val initial: path.Endpoint = endpoint(1, 4433, 1, 55000);
+    held.manager = initialize_manager(config(113, path.ROLE_SERVER, false), storage, initial);
+    val handle: path.Handle = path.selected(?held.manager).handle;
+    if (!path.lease_core(?held.manager, 113)) { ret 1; }
+    # nothing queued, and a reservation the amplification limit refuses
+    before = held;
+    if (path.peek_response_scoped(?held.manager, 113, handle).status != path.STATUS_EMPTY ||
+        path.peek_challenge_scoped(?held.manager, 113, handle).status != path.STATUS_EMPTY ||
+        path.peek_send_scoped(?held.manager, 113, handle, 1200, false).error !=
+        path.ERROR_AMPLIFICATION || !same(?held, ?before)) { ret 2; }
+    if (path.peek_response_scoped(?held.manager, 114, handle).error != path.ERROR_STATE) { ret 3; }
+    if (path.queue_response_scoped(?held.manager, 113, handle, challenge(5)).status !=
+        path.STATUS_OK) { ret 4; }
+    # blocked by amplification before anything was received, then taken
+    before = held;
+    val blocked: path.PreparedResponse = path.peek_response_scoped(?held.manager, 113, handle);
+    if (blocked.status != path.STATUS_BLOCKED || !same(?held, ?before) ||
+        path.prepare_response_scoped(?held.manager, 113, handle).status !=
+        path.STATUS_BLOCKED) { ret 5; }
+    path.observe_scoped(?held.manager, 113, initial, 1, 500, false, true, true, true, 1);
+    before = held;
+    val peeked:  path.PreparedResponse = path.peek_response_scoped(?held.manager, 113, handle);
+    val allowed: path.SendResult       = path.peek_send_scoped(?held.manager, 113, handle, 1200, false);
+    if (peeked.status != path.STATUS_OK || allowed.status != path.STATUS_OK ||
+        allowed.allowance != 1500 || !same(?held, ?before)) { ret 6; }
+    val taken: path.PreparedResponse = path.prepare_response_scoped(?held.manager, 113, handle);
+    if (taken.status != path.STATUS_OK || taken.token.index != peeked.token.index ||
+        taken.token.generation != peeked.token.generation ||
+        taken.maximum_datagram_size != peeked.maximum_datagram_size ||
+        taken.minimum_datagram_size != peeked.minimum_datagram_size ||
+        path.peek_response_scoped(?held.manager, 113, handle).status != path.STATUS_EMPTY) { ret 7; }
+    val reserved: path.SendResult = path.reserve_send_scoped(?held.manager, 113, handle, 1200, false);
+    if (reserved.status != path.STATUS_OK || reserved.allowance != allowed.allowance ||
+        path.peek_send_scoped(?held.manager, 113, handle, 301, false).status !=
+        path.STATUS_BLOCKED ||
+        path.reserve_send_scoped(?held.manager, 113, handle, 301, false).status !=
+        path.STATUS_BLOCKED) { ret 8; }
+    # a challenge on the same path
+    path.confirm_handshake_scoped(?held.manager, 113);
+    if (path.queue_challenge_scoped(?held.manager, 113, handle, challenge(9), 100, 100, false,
+        path.VALIDATION_PATH).status != path.STATUS_OK) { ret 9; }
+    before = held;
+    val challenged: path.PreparedChallenge = path.peek_challenge_scoped(?held.manager, 113, handle);
+    if (challenged.status != path.STATUS_OK || !same(?held, ?before)) { ret 10; }
+    val prepared: path.PreparedChallenge = path.prepare_challenge_scoped(?held.manager, 113, handle);
+    if (prepared.status != path.STATUS_OK || prepared.token.index != challenged.token.index ||
+        prepared.token.generation != challenged.token.generation) { ret 11; }
+    ret 0;
+}
+
+test "quic.path.simulated: an MTU probe peek names the probe the prepare after it takes" {
+    var held:    Held;
+    var before:  Held;
+    val storage: path.Storage = path.Storage{paths: ?held.paths[0], path_capacity: 2,
+        challenges: ?held.challenges[0], challenge_capacity: 2,
+        responses:  ?held.responses[0], response_capacity: 2,
+        sends:      ?held.sends[0], send_capacity: 2};
+    held.manager = initialize_manager(config(115, path.ROLE_CLIENT, true), storage,
+        endpoint(1, 4433, 1, 55000));
+    val handle: path.Handle = path.selected(?held.manager).handle;
+    if (!path.lease_core(?held.manager, 115)) { ret 1; }
+    before = held;
+    val peeked: path.MtuPrepared = path.peek_mtu_probe_scoped(?held.manager, 115, handle);
+    if (peeked.status != path.STATUS_OK || peeked.size != 1400 ||
+        path.peek_mtu_send_scoped(?held.manager, 115, handle, 1400, true, peeked.size).status !=
+        path.STATUS_OK || !same(?held, ?before)) { ret 2; }
+    val probe: path.MtuPrepared = path.prepare_mtu_probe_scoped(?held.manager, 115, handle);
+    if (probe.status != path.STATUS_OK || probe.size != peeked.size ||
+        probe.token.generation != peeked.token.generation ||
+        path.reserve_mtu_send_scoped(?held.manager, 115, handle, 1400, true,
+        probe.token).status != path.STATUS_OK) { ret 3; }
+    # a prepared probe blocks the next, in the peek as in the prepare
+    if (path.peek_mtu_probe_scoped(?held.manager, 115, handle).status != path.STATUS_BLOCKED) { ret 4; }
     ret 0;
 }
