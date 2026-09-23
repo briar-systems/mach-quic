@@ -514,8 +514,8 @@ on its implementation criteria with that one left explicitly undemonstrated.
 `Config`. `Connection` is the small secret-welded control record. The caller
 separately owns a public `Storage` holding the connection's fixed state, a
 `std.memory.buffers.Source` for everything taken on demand, a
-`std.memory.buffers.SecretSource` over the same pool for key contexts, and a per-pump
-scratch pair: a public `Scratch` with the per-call packet and event buffers,
+`std.memory.buffers.SecretSource` over the same pool for key contexts, and a
+per-pump scratch pair: a public `Scratch` with the per-call packet and event buffers,
 and a secret-welded `SecretScratch` with the two secret plaintext buffers. One
 pair serves every connection on a pump. A connection binds it at init and
 lends it to the core around each call. A call that finds the pair in use,
@@ -535,9 +535,9 @@ from then until `release_closed` succeeds. Init opens the connection's one
 account on the source and refuses an engine holding any other lease with
 `STAGE_HANDSHAKE`. tls charges that account on a third lane,
 `supply.TLS`, bounded by `Config.tls_budget` (64 KiB by default). The source
-must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes,
-and a secret 4,096-byte class, and declare exactly `supply.LANES` (3) lanes, as `supply.pool_config` does. The
-account supplies one budget per quic lane, so init refuses any other count,
+must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes
+and a secret 4,096-byte class, and declare exactly `supply.LANES` (3) lanes,
+as `supply.pool_config` does. The account supplies one budget per quic lane, so init refuses any other count,
 read through `buffers.source_lanes`. A host that wraps a `Source` must forward
 its `fn_lanes`. A wrapper that does not reports 0 lanes and its connections are
 refused.
@@ -565,7 +565,8 @@ records are `assembly.Storage` at 4,560 bytes and `Connection` at 16,968,
 which includes tls's established core and the expanded 1-RTT key contexts
 (1,992 bytes to send, 4,008 to receive). On a live connection that has gone
 idle, an established connection with no streams holds no chunks at all, and
-tls holds nothing on its lane. With the six H3 control streams open and drained, it
+tls holds nothing on its lane. The one exception is a connection whose 0-RTT
+keys were accepted, which keeps them and their secret chunk until teardown. With the six H3 control streams open and drained, it
 holds one 4,096-byte chunk of stream records. While 64 KiB crosses one stream, the sending end
 holds at most five chunks and the receiving end five (four on the send lane,
 one on the receive lane), however large the transfer: a record block, the
@@ -576,8 +577,8 @@ acknowledged and on the client until the owner takes it. The scratch pair is pai
 pump, not per connection. During the handshake the dialer holds at most six
 send-lane chunks and 8,704 tls bytes after any call, and the listener eight and
 18,944. Those chunks include one secret chunk for each handshake level whose
-keys are live, given back when that level's keys are discarded. The caller's `mach-tls` handshake record, 6,424 bytes for a client and
-6,224 for a server, must stay put until `assembly.tls_released(c)`. From then
+keys are live, given back when that level's keys are discarded. The caller's
+`mach-tls` handshake record, 6,424 bytes for a client and 6,224 for a server, must stay put until `assembly.tls_released(c)`. From then
 the connection never refers to it again and it may be initialized for another
 connection, so an owner needs one per connection in handshake, not one per
 connection.
