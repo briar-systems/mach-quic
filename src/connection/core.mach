@@ -727,12 +727,12 @@ fun fail(core: *Core, error: u64, now_ns: u64) transport_api.CoreResult {
     ret core_result(core, transport_api.STATUS_ERROR, error);
 }
 
+# the whole set, expanded contexts included, since the secret is its first field
 fun key_set_disjoint(data: *^u8, length: usize,
     keys: *protection.KeySet) bool {
-    ret ownership.secret_disjoint(data, length, ?keys.secret[0], 48) &&
-        ownership.secret_disjoint(data, length, ?keys.key[0], 32) &&
-        ownership.secret_disjoint(data, length, ?keys.iv[0], 12) &&
-        ownership.secret_disjoint(data, length, ?keys.hp[0], 32);
+    ret $offset_of(protection.KeySet, secret) == 0 &&
+        ownership.secret_disjoint(data, length, ?keys.secret[0],
+        $size_of(protection.KeySet));
 }
 
 fun welded_keys_disjoint(secrets: *Secrets, data: *^u8,

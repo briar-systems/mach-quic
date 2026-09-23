@@ -3,8 +3,8 @@
 use crypto.aead.aes_gcm;
 use crypto.aead.chacha20_poly1305;
 use crypto.contracts;
+use crypto.cipher.aes;
 use crypto.hkdf;
-use crypto.internal.aes;
 use crypto.internal.chacha20;
 use quic.packet.packet;
 use std.crypto.ct;
@@ -114,6 +114,8 @@ pub rec KeySet {
     level:      Level;
     generation: u64;
     state:      State;
+    aead:       aes_gcm.Context;
+    header:     aes.Context;
 }
 
 pub rec InitialKeys {
@@ -206,8 +208,25 @@ fun secret_bytes(value: *KeySet) contracts.SecretBytes {
     ret contracts.SecretBytes{data: ?value.secret[0], len: value.secret_len};
 }
 
+$if ($mach.build.mode == $mach.mode.debug) {
+    var expansions: u64;
+
+    # key expansions since the process started, a debug hook for tests
+    pub fun expansion_count() u64 {
+        ret expansions;
+    }
+}
+
+fun count_expansion() {
+    $if ($mach.build.mode == $mach.mode.debug) {
+        expansions = expansions + 1;
+    }
+}
+
 pub fun destroy(value: *KeySet) {
     if (value == nil) { ret; }
+    aes_gcm.dnit(?value.aead);
+    aes.dnit(?value.header);
     ct.zeroize(?value.secret[0], MAX_SECRET_SIZE);
     ct.zeroize(?value.key[0], MAX_KEY_SIZE);
     ct.zeroize(?value.iv[0], IV_SIZE);
@@ -222,7 +241,33 @@ pub fun destroy(value: *KeySet) {
     value.state      = STATE_DISCARDED;
 }
 
-fun move_set(destination: *KeySet, source: *KeySet) {
+# expand an active set's aead and header protection keys into its contexts
+#
+# the only place a key is expanded, so the per-packet paths never do. a failure
+# discards the set.
+fun install(value: *KeySet) Error {
+    aes_gcm.dnit(?value.aead);
+    aes.dnit(?value.header);
+    if (value.state != STATE_ACTIVE
+        || (value.algorithm != AES_128_GCM_SHA256 && value.algorithm != AES_256_GCM_SHA384)) {
+        ret OK;
+    }
+    count_expansion();
+    var error: Error = map_crypto(aes_gcm.init(?value.aead, key_bytes(value)));
+    if (error == OK) {
+        count_expansion();
+        error = map_crypto(aes.init(?value.header,
+            contracts.SecretBytes{data: ?value.hp[0], len: value.hp_len}));
+    }
+    if (error != OK) { destroy(value); }
+    ret error;
+}
+
+# move the key material, leaving the destination's contexts empty
+#
+# contexts are never copied: a set that is used to protect packets is
+# installed where it lives
+fun move_material(destination: *KeySet, source: *KeySet) {
     destroy(destination);
     var i: usize = 0;
     for (i < MAX_SECRET_SIZE) {
@@ -249,6 +294,11 @@ fun move_set(destination: *KeySet, source: *KeySet) {
     destination.generation = source.generation;
     destination.state      = source.state;
     destroy(source);
+}
+
+fun move_set(destination: *KeySet, source: *KeySet) Error {
+    move_material(destination, source);
+    ret install(destination);
 }
 
 fun copy_hp(destination: *KeySet, source: *KeySet) {
@@ -371,7 +421,7 @@ fun derive_material(output: *KeySet, version: u32, level: Level,
         destroy(?next);
         ret error;
     }
-    move_set(output, ?next);
+    move_material(output, ?next);
     ret OK;
 }
 
@@ -380,7 +430,10 @@ pub fun derive_tls(output: *KeySet, version: u32, level: Level,
     if (level != LEVEL_EARLY && level != LEVEL_HANDSHAKE && level != LEVEL_APPLICATION) {
         ret INVALID_INPUT;
     }
-    ret derive_material(output, version, level, algorithm, traffic_secret, 1, true, nil);
+    val error: Error = derive_material(output, version, level, algorithm, traffic_secret,
+        1, true, nil);
+    if (error != OK) { ret error; }
+    ret install(output);
 }
 
 fun initial_salt(version: u32) contracts.SecretBytes {
@@ -437,11 +490,11 @@ pub fun derive_initial(output: *InitialKeys, version: u32,
             contracts.SecretBytes{data: ?server_secret[0], len: 32}, 1, true, nil);
     }
     if (error == OK) {
-        destroy(?output.client);
-        destroy(?output.server);
-        move_set(?output.client, ?next.client);
-        move_set(?output.server, ?next.server);
-        output.state = STATE_ACTIVE;
+        destroy_initial(output);
+        error = move_set(?output.client, ?next.client);
+        if (error == OK) { error = move_set(?output.server, ?next.server); }
+        if (error == OK) { output.state = STATE_ACTIVE; }
+        or { destroy_initial(output); }
     }
     destroy(?next.client);
     destroy(?next.server);
@@ -496,7 +549,7 @@ pub fun seal(value: *KeySet, packet_number: u64, aad: contracts.Bytes,
     if (nonce_error != OK) { ret failed(nonce_error); }
     var operation: contracts.Operation;
     if (value.algorithm == AES_128_GCM_SHA256 || value.algorithm == AES_256_GCM_SHA384) {
-        operation = aes_gcm.seal(key_bytes(value),
+        operation = aes_gcm.seal_with(?value.aead,
             contracts.Bytes{data: ?nonce[0], len: IV_SIZE}, aad, plaintext, output);
     }
     or (value.algorithm == CHACHA20_POLY1305_SHA256) {
@@ -518,7 +571,7 @@ pub fun open(value: *KeySet, packet_number: u64, aad: contracts.Bytes,
     if (nonce_error != OK) { ret failed(nonce_error); }
     var operation: contracts.Operation;
     if (value.algorithm == AES_128_GCM_SHA256 || value.algorithm == AES_256_GCM_SHA384) {
-        operation = aes_gcm.open(key_bytes(value),
+        operation = aes_gcm.open_with(?value.aead,
             contracts.Bytes{data: ?nonce[0], len: IV_SIZE}, aad, input, output);
     }
     or (value.algorithm == CHACHA20_POLY1305_SHA256) {
@@ -537,19 +590,14 @@ pub fun header_mask(value: *KeySet, sample: contracts.Bytes,
     var mask:  [64]^u8;
     var error: Error = OK;
     if (value.algorithm == AES_128_GCM_SHA256 || value.algorithm == AES_256_GCM_SHA384) {
-        var context:     aes.Context;
-        val initialized: contracts.Error = aes.init(?context,
-            contracts.SecretBytes{data: ?value.hp[0], len: value.hp_len});
-        if (initialized != contracts.OK) { error = map_crypto(initialized); }
-        if (error == OK) {
-            var i: usize = 0;
-            for (i < SAMPLE_SIZE) {
-                mask[i] = sample.data[i];
-                i       = i + 1;
-            }
-            aes.encrypt(?context, ?mask[0], ?mask[0]);
+        var i: usize = 0;
+        for (i < SAMPLE_SIZE) {
+            mask[i] = sample.data[i];
+            i       = i + 1;
         }
-        aes.destroy(?context);
+        error = map_crypto(aes.encrypt_block(?value.header,
+            contracts.SecretBytes{data: ?mask[0], len: SAMPLE_SIZE},
+            contracts.SecretBuffer{data: ?mask[0], capacity: SAMPLE_SIZE}));
     }
     or (value.algorithm == CHACHA20_POLY1305_SHA256) {
         var nonce: [12]u8;
@@ -786,7 +834,11 @@ pub fun init_send(output: *SendKeys, version: u32, algorithm: Algorithm,
         ret error;
     }
     destroy_send(output);
-    move_set(?output.current, ?current);
+    val installed: Error = move_set(?output.current, ?current);
+    if (installed != OK) {
+        destroy_send(output);
+        ret installed;
+    }
     output.phase      = false;
     output.generation = 1;
     output.state      = STATE_ACTIVE;
@@ -834,7 +886,11 @@ pub fun initiate_update(value: *SendKeys) Error {
         destroy(?next);
         ret error;
     }
-    move_set(?value.current, ?next);
+    val installed: Error = move_set(?value.current, ?next);
+    if (installed != OK) {
+        destroy_send(value);
+        ret installed;
+    }
     value.phase                = !value.phase;
     value.generation           = value.current.generation;
     value.updates              = value.updates + 1;
@@ -858,7 +914,11 @@ pub fun respond_to_update(value: *SendKeys, receive_generation: u64) Error {
         destroy(?next);
         ret error;
     }
-    move_set(?value.current, ?next);
+    val installed: Error = move_set(?value.current, ?next);
+    if (installed != OK) {
+        destroy_send(value);
+        ret installed;
+    }
     value.phase                = !value.phase;
     value.generation           = value.current.generation;
     value.updates              = value.updates + 1;
@@ -901,8 +961,13 @@ pub fun init_receive(output: *ReceiveKeys, version: u32, algorithm: Algorithm,
         ret error;
     }
     destroy_receive(output);
-    move_set(?output.current, ?current);
-    move_set(?output.next, ?next);
+    error = move_set(?output.current, ?current);
+    if (error == OK) { error = move_set(?output.next, ?next); }
+    if (error != OK) {
+        destroy(?next);
+        destroy_receive(output);
+        ret error;
+    }
     output.phase      = false;
     output.generation = 1;
     output.state      = STATE_ACTIVE;
@@ -951,10 +1016,14 @@ fun commit_received(value: *ReceiveKeys, used: *KeySet,
         destroy(?future);
         ret error;
     }
-    destroy(?value.previous);
-    move_set(?value.previous, ?value.current);
-    move_set(?value.current, ?value.next);
-    move_set(?value.next, ?future);
+    var installed: Error = move_set(?value.previous, ?value.current);
+    if (installed == OK) { installed = move_set(?value.current, ?value.next); }
+    if (installed == OK) { installed = move_set(?value.next, ?future); }
+    if (installed != OK) {
+        destroy(?future);
+        destroy_receive(value);
+        ret installed;
+    }
     value.have_previous             = true;
     value.phase                     = !value.phase;
     value.generation                = value.current.generation;
