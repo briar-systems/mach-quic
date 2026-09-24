@@ -838,6 +838,33 @@ test "quic.connection.core: failed provider start rolls back every manager lease
     ret 0;
 }
 
+fun key_set_blank(value: *protection.KeySet) bool {
+    var i: usize = 0;
+    for (i < 32) {
+        if (value.key[i]:>u8 != 0 || value.hp[i]:>u8 != 0) { ret false; }
+        i = i + 1;
+    }
+    ret value.state == protection.STATE_EMPTY && value.key_len == 0 &&
+        value.secret_len == 0 && value.hp_len == 0;
+}
+
+test "quic.connection.core: initial keys derive in place and a refusal leaves none behind" {
+    var clean: Fixture;
+    if (!initialize(?clean, transport.CLIENT, true, 1) ||
+        clean.secrets.initial_keys.state != protection.STATE_ACTIVE ||
+        clean.secrets.initial_keys.client.key_len == 0 ||
+        clean.secrets.handshake != ?clean.adapter) { ret 1; }
+    var refused: Fixture;
+    if (initialize_with_fault(?refused, transport.CLIENT, true, 1,
+        FAULT_PROVIDER_START) ||
+        refused.init_result.reason != core.INIT_PROVIDER_START ||
+        refused.secrets.initialized || refused.secrets.handshake != nil ||
+        refused.secrets.initial_keys.state != protection.STATE_EMPTY ||
+        !key_set_blank(?refused.secrets.initial_keys.client) ||
+        !key_set_blank(?refused.secrets.initial_keys.server)) { ret 2; }
+    ret 0;
+}
+
 test "quic.connection.core: active manager leases reject unscoped protocol mutation" {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
