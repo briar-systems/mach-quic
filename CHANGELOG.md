@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-25
+
 ### Changed
 
 - **Breaking.** quic moves to mach-std 8 and requires mach 5.12 (#230). `[dep.std] version = "^8.0"` realized at v8.0.0, `[dep.crypto] version = "^0.22"` at v0.22.0 and `[dep.tls] version = "^0.12"` at v0.12.0, and the manifest requires `mach = "^5.12"`. Resolution is flat, so a consumer must move to std 8, crypto 0.22, tls 0.12 and mach 5.12 with this release. std 8 carries the typed secret view (mach-std#905) the handshake-level key contexts live in.
