@@ -1,0 +1,14 @@
+# the library and every test module it does not reach
+# `mach test . --lib tests` runs all of quic's tests
+
+use std.runtime;
+
+use quic.lib;
+
+use congestion_tests: quic.congestion.simulated;
+use assembly_tests:   quic.connection.assembly;
+use live_tests:       quic.connection.assembly_live;
+use scratch_tests:    quic.connection.scratch;
+use path_tests:       quic.path.simulated;
+use recovery_tests:   quic.recovery.simulated;
+use stream_tests:     quic.stream.simulated;

@@ -190,6 +190,10 @@ pub rec SecretStorage {
     receive_plaintext_capacity: usize;
     send_plaintext:             *^u8;
     send_plaintext_capacity:    usize;
+    # where the core takes one secret chunk per handshake level for that
+    # level's expanded contexts, charged to the chunk source's account on the
+    # send lane. it must bind typed views
+    context_chunks: *supply.SecretProvider;
 }
 
 pub rec Secrets {
@@ -202,8 +206,11 @@ pub rec Secrets {
     handshake_receive:   protection.KeySet;
     application_send:    protection.SendKeys;
     application_receive: protection.ReceiveKeys;
-    initialized:         bool;
-    destroyed:           bool;
+    # the secret chunk behind each handshake level's contexts while its keys
+    # are live
+    level_chunks: [LEVEL_CONTEXT_SLOTS]supply.Chunk;
+    initialized:  bool;
+    destroyed:    bool;
 }
 
 pub rec Snapshot {
@@ -735,6 +742,24 @@ fun key_set_disjoint(data: *^u8, length: usize,
         ownership.secret_disjoint(data, length, ?keys.hp[0], 32);
 }
 
+# the whole record, its expanded contexts included, anchored on the first
+# set's secret, which leads it
+fun send_keys_disjoint(data: *^u8, length: usize,
+    keys: *protection.SendKeys) bool {
+    ret $offset_of(protection.SendKeys, current) == 0 &&
+        $offset_of(protection.KeySet, secret) == 0 &&
+        ownership.secret_disjoint(data, length, ?keys.current.secret[0],
+        $size_of(protection.SendKeys));
+}
+
+fun receive_keys_disjoint(data: *^u8, length: usize,
+    keys: *protection.ReceiveKeys) bool {
+    ret $offset_of(protection.ReceiveKeys, previous) == 0 &&
+        $offset_of(protection.KeySet, secret) == 0 &&
+        ownership.secret_disjoint(data, length, ?keys.previous.secret[0],
+        $size_of(protection.ReceiveKeys));
+}
+
 fun welded_keys_disjoint(secrets: *Secrets, data: *^u8,
     length: usize) bool {
     ret key_set_disjoint(data, length, ?secrets.initial_keys.client) &&
@@ -743,12 +768,8 @@ fun welded_keys_disjoint(secrets: *Secrets, data: *^u8,
         key_set_disjoint(data, length, ?secrets.early_receive) &&
         key_set_disjoint(data, length, ?secrets.handshake_send) &&
         key_set_disjoint(data, length, ?secrets.handshake_receive) &&
-        key_set_disjoint(data, length, ?secrets.application_send.current) &&
-        key_set_disjoint(data, length,
-        ?secrets.application_receive.previous) &&
-        key_set_disjoint(data, length,
-        ?secrets.application_receive.current) &&
-        key_set_disjoint(data, length, ?secrets.application_receive.next);
+        send_keys_disjoint(data, length, ?secrets.application_send) &&
+        receive_keys_disjoint(data, length, ?secrets.application_receive);
 }
 
 # capacity of storage the caller lends for the connection's lifetime. storage
@@ -804,6 +825,9 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         secret_storage.receive_plaintext == secret_storage.send_plaintext ||
         secret_storage.receive_plaintext_capacity < config.max_udp_payload ||
         secret_storage.send_plaintext_capacity < 1200 ||
+        secret_storage.context_chunks == nil ||
+        secret_storage.context_chunks.fn_bind == nil ||
+        storage.chunk_source.account == nil ||
         storage.receive_header_capacity < config.max_udp_payload ||
         storage.receive_decoded_capacity < config.max_udp_payload ||
         storage.send_plaintext_capacity < 1200 ||
@@ -1122,6 +1146,12 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ret true;
 }
 
+# holds no key material or expanded context, so the assignment copies none
+fun reset_secrets(secrets: *Secrets) {
+    var empty: Secrets;
+    secrets[0] = empty;
+}
+
 fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     secret_storage: SecretStorage, handshake: *handshake_api.Adapter,
     cids: *cid_api.Manager,
@@ -1197,12 +1227,9 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     if (local_decoded.status != transport_parameters.STATUS_DONE ||
         !validate_local_parameters(config, ?local_parameters, cids, paths, streams,
         datagrams)) { ret refuse(init_result, INIT_PARAMETERS); }
-    var candidate:         Core;
-    var candidate_secrets: Secrets;
+    var candidate: Core;
     candidate.config               = config;
     candidate.storage              = storage;
-    candidate_secrets.storage      = secret_storage;
-    candidate_secrets.handshake    = handshake;
     candidate.cids                 = cids;
     candidate.paths                = paths;
     candidate.streams              = streams;
@@ -1279,14 +1306,29 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         handshake_api.release_core(handshake, config.source);
         ret refuse(init_result, INIT_LEASE);
     }
-    if (protection.derive_initial(?candidate_secrets.initial_keys, config.version,
-        contracts.Bytes{data: ?config.initial_secret_destination.data[0],
-        len: config.initial_secret_destination.len::usize}) != protection.OK) {
+    # keys derive straight into the caller's record so no copy of them outlives this frame
+    reset_secrets(secrets);
+    secrets.storage   = secret_storage;
+    secrets.handshake = handshake;
+    if (!take_contexts(?candidate, secrets, INITIAL_CONTEXTS)) {
         datagram_api.release_core(datagrams, config.source);
         stream_api.release_core(streams, config.source);
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
+        reset_secrets(secrets);
+        ret refuse(init_result, INIT_LEASE);
+    }
+    if (protection.derive_initial(?secrets.initial_keys, config.version,
+        contracts.Bytes{data: ?config.initial_secret_destination.data[0],
+        len: config.initial_secret_destination.len::usize}) != protection.OK) {
+        destroy_initial_level(?candidate, secrets);
+        datagram_api.release_core(datagrams, config.source);
+        stream_api.release_core(streams, config.source);
+        path_api.release_core(paths, config.source);
+        cid_api.release_core(cids, config.source);
+        handshake_api.release_core(handshake, config.source);
+        reset_secrets(secrets);
         ret refuse(init_result, INIT_KEYS);
     }
     if (path_api.configure_transport_scoped(paths, config.source, current_path.handle,
@@ -1297,7 +1339,8 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
-        protection.destroy_initial(?candidate_secrets.initial_keys);
+        destroy_initial_level(?candidate, secrets);
+        reset_secrets(secrets);
         ret refuse(init_result, INIT_PATH);
     }
     val started: handshake_api.Result = handshake_api.start_scoped(handshake,
@@ -1311,7 +1354,8 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
-        protection.destroy_initial(?candidate_secrets.initial_keys);
+        destroy_initial_level(?candidate, secrets);
+        reset_secrets(secrets);
         ret refuse(init_result, INIT_PROVIDER_START);
     }
     var i: usize = 0;
@@ -1323,11 +1367,10 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     candidate.owners         = storage.owners;
     candidate.owner_capacity = lent_owners(?storage);
     refresh_all_owned(?candidate);
-    candidate_secrets.initialized = true;
-    candidate.initialized         = true;
-    secrets[0]                    = candidate_secrets;
-    core[0]                       = candidate;
-    init_result.ok                = true;
+    secrets.initialized   = true;
+    candidate.initialized = true;
+    core[0]               = candidate;
+    init_result.ok        = true;
     ret true;
 }
 
@@ -1415,13 +1458,7 @@ pub fun abandon_initialization(core: *Core, secrets: *Secrets) bool {
         !handshake_api.abandon_core(secrets.handshake, core.config.source)) {
         ret false;
     }
-    protection.destroy_initial(?secrets.initial_keys);
-    protection.destroy(?secrets.early_send);
-    protection.destroy(?secrets.early_receive);
-    protection.destroy(?secrets.handshake_send);
-    protection.destroy(?secrets.handshake_receive);
-    protection.destroy_send(?secrets.application_send);
-    protection.destroy_receive(?secrets.application_receive);
+    destroy_keys(core, secrets);
     ct.zeroize(secrets.storage.receive_plaintext,
         secrets.storage.receive_plaintext_capacity);
     ct.zeroize(secrets.storage.send_plaintext,
@@ -1438,6 +1475,10 @@ fun install_secret(core: *Core, secrets: *Secrets,
     val secret: contracts.SecretBytes = contracts.SecretBytes{
         data: event.secret.data, len: event.secret.length
     };
+    if ((event.level == handshake_api.EARLY &&
+        !take_contexts(core, secrets, EARLY_CONTEXTS)) ||
+        (event.level == handshake_api.HANDSHAKE &&
+        !take_contexts(core, secrets, HANDSHAKE_CONTEXTS))) { ret false; }
     var error: protection.Error = protection.INVALID_INPUT;
     if (event.level == handshake_api.EARLY) {
         if (event.direction == handshake_api.DIRECTION_SEND) {
@@ -1567,7 +1608,7 @@ fun discard_initial_keys(core: *Core, secrets: *Secrets) bool {
         core.storage.recovery_events, core.storage.recovery_event_capacity);
     if (!initial.ok || !apply_recovery_events(core, secrets,
         initial.event_count, core.last_now_ns, false, false, before)) { ret false; }
-    protection.destroy_initial(?secrets.initial_keys);
+    destroy_initial_level(core, secrets);
     if (!ack_api.discard_space(?core.acknowledgements, packet.SPACE_INITIAL) ||
         handshake_api.discard_scoped(secrets.handshake, core.config.source,
         handshake_api.INITIAL).status != handshake_api.STATUS_OK) {
@@ -1645,8 +1686,7 @@ fun confirm_handshake(core: *Core, secrets: *Secrets) bool {
     if (!handshake_discarded.ok || !apply_recovery_events(core, secrets,
         handshake_discarded.event_count, core.last_now_ns, false, false,
         handshake_before)) { ret false; }
-    protection.destroy(?secrets.handshake_send);
-    protection.destroy(?secrets.handshake_receive);
+    destroy_handshake_level(core, secrets);
     ack_api.discard_space(?core.acknowledgements, packet.SPACE_HANDSHAKE);
     release_handshake_storage(core);
     if (handshake_api.discard_scoped(secrets.handshake, core.config.source,
@@ -1684,8 +1724,7 @@ fun pump_handshake(core: *Core, secrets: *Secrets) u64 {
         if (event.kind == handshake_api.EVENT_EARLY_DATA) {
             core.early_disposition = event.disposition;
             if (event.disposition == handshake_api.EARLY_REJECTED) {
-                protection.destroy(?secrets.early_send);
-                protection.destroy(?secrets.early_receive);
+                destroy_early_level(core, secrets);
             }
         }
         if (event.kind == handshake_api.EVENT_AUTHENTICATION) {
@@ -1937,6 +1976,102 @@ fun settle_flight(core: *Core) {
 fun refresh_tokens(core: *Core) {
     refresh_owned(core, OWNED_RECEIVED_TOKEN);
     refresh_owned(core, OWNED_SEND_TOKEN);
+}
+
+# the handshake levels that hold a secret chunk for their contexts
+pub val LEVEL_CONTEXT_SLOTS: usize = 3;
+
+val INITIAL_CONTEXTS:   usize = 0;
+val EARLY_CONTEXTS:     usize = 1;
+val HANDSHAKE_CONTEXTS: usize = 2;
+# both directions of one handshake level
+val LEVEL_CONTEXT_BYTES: usize = 2 * $size_of(protection.Contexts);
+
+fun context_source(core: *Core, secrets: *Secrets) supply.SecretSource {
+    ret supply.SecretSource{provider: secrets.storage.context_chunks,
+        account: core.storage.chunk_source.account, lane: supply.SEND};
+}
+
+# the two sets a handshake level's chunk holds contexts for, the client or
+# send side first
+fun level_set(secrets: *Secrets, slot: usize, index: usize) *protection.KeySet {
+    if (slot == INITIAL_CONTEXTS) {
+        if (index == 0) { ret ?secrets.initial_keys.client; }
+        ret ?secrets.initial_keys.server;
+    }
+    if (slot == EARLY_CONTEXTS) {
+        if (index == 0) { ret ?secrets.early_send; }
+        ret ?secrets.early_receive;
+    }
+    if (index == 0) { ret ?secrets.handshake_send; }
+    ret ?secrets.handshake_receive;
+}
+
+# takes a handshake level's secret chunk before its keys are installed, once
+# for both directions, and binds the level's sets to the contexts in it
+fun take_contexts(core: *Core, secrets: *Secrets, slot: usize) bool {
+    if (secrets.level_chunks[slot].bytes != 0) { ret true; }
+    var from:  supply.SecretSource = context_source(core, secrets);
+    val taken: supply.Taken        = supply.take_secret(?from, LEVEL_CONTEXT_BYTES);
+    if (!taken.ok) { ret false; }
+    val contexts: *protection.Contexts =
+        supply.view_secret[protection.Contexts](?from, taken.chunk, 2);
+    if (contexts == nil) {
+        supply.give_secret(?from, taken.chunk);
+        ret false;
+    }
+    secrets.level_chunks[slot] = taken.chunk;
+    if (protection.bind(level_set(secrets, slot, 0), ?contexts[0]) != protection.OK ||
+        protection.bind(level_set(secrets, slot, 1), ?contexts[1]) != protection.OK) {
+        give_contexts(core, secrets, slot);
+        ret false;
+    }
+    ret true;
+}
+
+# unbinds a handshake level's sets and gives its chunk back once their keys
+# are destroyed
+fun give_contexts(core: *Core, secrets: *Secrets, slot: usize) {
+    if (secrets.level_chunks[slot].bytes == 0) { ret; }
+    protection.unbind(level_set(secrets, slot, 0));
+    protection.unbind(level_set(secrets, slot, 1));
+    var from: supply.SecretSource = context_source(core, secrets);
+    if (supply.give_secret(?from, secrets.level_chunks[slot])) {
+        var none: supply.Chunk;
+        secrets.level_chunks[slot] = none;
+    }
+}
+
+fun destroy_initial_level(core: *Core, secrets: *Secrets) {
+    protection.destroy_initial(?secrets.initial_keys);
+    give_contexts(core, secrets, INITIAL_CONTEXTS);
+}
+
+fun destroy_early_level(core: *Core, secrets: *Secrets) {
+    protection.destroy(?secrets.early_send);
+    protection.destroy(?secrets.early_receive);
+    give_contexts(core, secrets, EARLY_CONTEXTS);
+}
+
+fun destroy_handshake_level(core: *Core, secrets: *Secrets) {
+    protection.destroy(?secrets.handshake_send);
+    protection.destroy(?secrets.handshake_receive);
+    give_contexts(core, secrets, HANDSHAKE_CONTEXTS);
+}
+
+# every key the core holds, and the chunks behind them
+fun destroy_keys(core: *Core, secrets: *Secrets) {
+    destroy_initial_level(core, secrets);
+    destroy_early_level(core, secrets);
+    destroy_handshake_level(core, secrets);
+    protection.destroy_send(?secrets.application_send);
+    protection.destroy_receive(?secrets.application_receive);
+}
+
+# a dead core's secret chunks, given back whatever they hold
+pub fun release_secret_chunks(core: *Core, secrets: *Secrets) {
+    if (!core_record_valid(core) || !secret_record_valid(secrets)) { ret; }
+    destroy_keys(core, secrets);
 }
 
 fun token_source(core: *Core, lane: supply.Lane) supply.Source {
@@ -2627,8 +2762,7 @@ fun restart_client(core: *Core, secrets: *Secrets, value: negotiation_api.Result
     or {
         core.version_restart_count = core.version_restart_count + 1;
         core.config.version        = value.version;
-        protection.destroy(?secrets.early_send);
-        protection.destroy(?secrets.early_receive);
+        destroy_early_level(core, secrets);
         if (handshake_api.on_version_negotiation_scoped(secrets.handshake, core.config.source, value.version,
             now_ns).status != handshake_api.STATUS_OK) { ret false; }
     }
@@ -4889,13 +5023,7 @@ pub fun finish_close(core: *Core, secrets: *Secrets) bool {
     if (!handshake_snapshot.closing && handshake_api.close_scoped(secrets.handshake, core.config.source, 0, core.last_now_ns).status != handshake_api.STATUS_OK) { ret false; }
     if (!handshake_api.destroy_scoped(secrets.handshake,
         core.config.source)) { ret false; }
-    protection.destroy_initial(?secrets.initial_keys);
-    protection.destroy(?secrets.early_send);
-    protection.destroy(?secrets.early_receive);
-    protection.destroy(?secrets.handshake_send);
-    protection.destroy(?secrets.handshake_receive);
-    protection.destroy_send(?secrets.application_send);
-    protection.destroy_receive(?secrets.application_receive);
+    destroy_keys(core, secrets);
     ct.zeroize(secrets.storage.receive_plaintext,
         secrets.storage.receive_plaintext_capacity);
     ct.zeroize(secrets.storage.send_plaintext,

@@ -16,7 +16,7 @@ use std.net.udp;
 use std.sync.atomic;
 use std.sync.cancel;
 use std.sync.mutex;
-use std.system.os;
+use std.sync.thread;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -353,7 +353,7 @@ pub rec Driver[T] {
     close_cause:         lifecycle.Cause;
     terminal_cause:      lifecycle.Cause;
     cancellation_reason: cancel.Reason;
-    callback_owner:      i64;
+    callback_owner:      thread.Token;
     lock:                mutex.Mutex;
     initialized:         bool;
     released:            bool;
@@ -387,14 +387,13 @@ fun protocol_valid[T](protocol: *Protocol[T]) bool {
         protocol.storage_ready != nil && protocol.pending_output != nil;
 }
 
+# refuse only the callback's own thread, which would deadlock on driver.lock
 fun callback_reentry[T](driver: *Driver[T]) bool {
     ret driver != nil && atomic.load(?driver.callback_owner) != 0 &&
-        atomic.load(?driver.callback_owner) == os.thread_current_id();
+        atomic.load(?driver.callback_owner) == thread.current_token();
 }
 
-# os.thread_current_id is a system call on linux, so each callback reads it
-# once and checks the owner against that value
-fun callback_intact[T](driver: *Driver[T], before: *Driver[T], caller: i64) bool {
+fun callback_intact[T](driver: *Driver[T], before: *Driver[T], caller: thread.Token) bool {
     ret driver.config.source == before.config.source &&
         driver.config.max_udp_payload == before.config.max_udp_payload &&
         driver.config.max_close_reason == before.config.max_close_reason &&
@@ -440,8 +439,8 @@ fun restore_callback[T](driver: *Driver[T], before: *Driver[T]) {
 }
 
 fun callback_receive[T](driver: *Driver[T], input: *CoreInput) CoreResult {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     val result: CoreResult = driver.protocol.receive(driver.protocol.context,
         input);
@@ -456,8 +455,8 @@ fun callback_receive[T](driver: *Driver[T], input: *CoreInput) CoreResult {
 
 fun callback_timeout[T](driver: *Driver[T], generation: u64,
     now_ns: u64) CoreResult {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     val result: CoreResult = driver.protocol.timeout(driver.protocol.context,
         generation, now_ns);
@@ -472,8 +471,8 @@ fun callback_timeout[T](driver: *Driver[T], generation: u64,
 
 fun callback_generate[T](driver: *Driver[T], output: *u8, capacity: usize,
     now_ns: u64) CoreDatagram {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     val result: CoreDatagram = driver.protocol.generate(
         driver.protocol.context, output, capacity, now_ns);
@@ -491,8 +490,8 @@ fun callback_generate[T](driver: *Driver[T], output: *u8, capacity: usize,
 fun callback_complete_send[T](driver: *Driver[T], owner: u64,
     send_status: SendStatus, count: usize,
     now_ns: u64) CoreResult {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     val result: CoreResult = driver.protocol.complete_send(
         driver.protocol.context, owner, send_status, count, now_ns);
@@ -508,8 +507,8 @@ fun callback_complete_send[T](driver: *Driver[T], owner: u64,
 fun callback_begin_close[T](driver: *Driver[T], abortive: bool,
     application_error: u64, reason: *u8,
     reason_length: usize, now_ns: u64) CoreResult {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     val result: CoreResult = driver.protocol.begin_close(
         driver.protocol.context, abortive, application_error, reason,
@@ -524,8 +523,8 @@ fun callback_begin_close[T](driver: *Driver[T], abortive: bool,
 }
 
 fun callback_timer[T](driver: *Driver[T]) CoreTimer {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     val result: CoreTimer = driver.protocol.timer(driver.protocol.context);
     if (!callback_intact[T](driver, ?before, caller)) {
@@ -538,8 +537,8 @@ fun callback_timer[T](driver: *Driver[T]) CoreTimer {
 }
 
 fun callback_pending_output[T](driver: *Driver[T], now_ns: u64) bool {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     val result: bool = driver.protocol.pending_output(driver.protocol.context, now_ns);
     if (!callback_intact[T](driver, ?before, caller)) {
@@ -551,8 +550,8 @@ fun callback_pending_output[T](driver: *Driver[T], now_ns: u64) bool {
 }
 
 fun callback_close_ready[T](driver: *Driver[T]) bool {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     val result: bool = driver.protocol.close_ready(driver.protocol.context);
     if (!callback_intact[T](driver, ?before, caller)) {
@@ -564,8 +563,8 @@ fun callback_close_ready[T](driver: *Driver[T]) bool {
 }
 
 fun callback_finish_close[T](driver: *Driver[T]) bool {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     val result: bool = driver.protocol.finish_close(driver.protocol.context);
     if (!callback_intact[T](driver, ?before, caller)) {
@@ -577,8 +576,8 @@ fun callback_finish_close[T](driver: *Driver[T]) bool {
 }
 
 fun callback_storage_ready[T](driver: *Driver[T]) {
-    val before: Driver[T] = @driver;
-    val caller: i64       = os.thread_current_id();
+    val before: Driver[T]    = @driver;
+    val caller: thread.Token = thread.current_token();
     atomic.store(?driver.callback_owner, caller);
     driver.protocol.storage_ready(driver.protocol.context);
     if (!callback_intact[T](driver, ?before, caller)) {

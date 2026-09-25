@@ -89,6 +89,23 @@ the exact triggering packet, the connection calls `confirm_update_response` with
 that receive generation and triggering packet number. Until then, a consecutive
 authenticated update is rejected without publishing plaintext or receive state.
 
+Expanded keys are kept, never rebuilt per packet. A `KeySet` refers to AEAD
+and header-protection contexts through `aead` and `header`, which `bind` points
+at storage its holder owns. `SendKeys` holds the send direction's two contexts
+inline. `ReceiveKeys` holds one AEAD context per generation (previous, current
+and next) and one header-protection context, since header protection keys do
+not change on a key update (RFC 9001 section 6). Installing 1-RTT keys expands
+the current keys, a key update expands only the new AEAD key, and the receive
+side's next generation is expanded by the first packet that needs it, so
+forged packets in a new phase cost at most one expansion per phase. The
+Initial, 0-RTT and Handshake levels each take one secret pool chunk while their
+keys are live (see Connection assembly), view it through std's typed secret
+view as two `Contexts`, one per direction, and bind their sets to them before
+the keys are derived. `unbind` forgets a set's contexts before that chunk goes
+back. No level of a connection expands a key per packet. A set nobody bound,
+such as the one the listener seals a single stateless packet with, expands its
+keys for each packet. ChaCha20-Poly1305 keeps no expanded AEAD context.
+
 `destroy`, `destroy_initial`, `destroy_send`, and `destroy_receive` zero all
 secret, packet-key, IV, and header-key storage and make later operations fail as
 discarded. Direct copies of secret-bearing records are unsupported. Retry tags
@@ -498,8 +515,10 @@ on its implementation criteria with that one left explicitly undemonstrated.
 `connection.assembly` builds a connection and every manager it owns from one
 `Config`. `Connection` is the small secret-welded control record. The caller
 separately owns a public `Storage` holding the connection's fixed state, a
-`std.memory.buffers.Source` for everything taken on demand, and a per-pump
-scratch pair: a public `Scratch` with the per-call packet and event buffers,
+`std.memory.buffers.Source` for everything taken on demand, a
+`std.memory.buffers.SecretSource` over the same pool for key contexts, which
+must bind typed views (`fn_bind`), and a
+per-pump scratch pair: a public `Scratch` with the per-call packet and event buffers,
 and a secret-welded `SecretScratch` with the two secret plaintext buffers. One
 pair serves every connection on a pump. A connection binds it at init and
 lends it to the core around each call. A call that finds the pair in use,
@@ -519,9 +538,9 @@ from then until `release_closed` succeeds. Init opens the connection's one
 account on the source and refuses an engine holding any other lease with
 `STAGE_HANDSHAKE`. tls charges that account on a third lane,
 `supply.TLS`, bounded by `Config.tls_budget` (64 KiB by default). The source
-must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes, and
-declare exactly `supply.LANES` (3) lanes, as `supply.pool_config` does. The
-account supplies one budget per quic lane, so init refuses any other count,
+must offer the classes `supply.classes` names: 512, 4,096 and 17,408 bytes
+and a secret 4,096-byte class, and declare exactly `supply.LANES` (3) lanes,
+as `supply.pool_config` does. The account supplies one budget per quic lane, so init refuses any other count,
 read through `buffers.source_lanes`. A host that wraps a `Source` must forward
 its `fn_lanes`. A wrapper that does not reports 0 lanes and its connections are
 refused.
@@ -545,10 +564,12 @@ handshake has handed everything over, the adapter moves tls's established
 core out of the engine and the engine holds no memory.
 
 Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 4,560 bytes and `Connection` at 10,640,
-which includes tls's established core. On a live connection that has gone
+records are `assembly.Storage` at 4,560 bytes and `Connection` at 16,976,
+which includes tls's established core and the expanded 1-RTT key contexts
+(1,992 bytes to send, 4,008 to receive). On a live connection that has gone
 idle, an established connection with no streams holds no chunks at all, and
-tls holds nothing on its lane. With the six H3 control streams open and drained, it
+tls holds nothing on its lane. The one exception is a connection whose 0-RTT
+keys were accepted, which keeps them and their secret chunk until teardown. With the six H3 control streams open and drained, it
 holds one 4,096-byte chunk of stream records. While 64 KiB crosses one stream, the sending end
 holds at most five chunks and the receiving end five (four on the send lane,
 one on the receive lane), however large the transfer: a record block, the
@@ -556,10 +577,11 @@ owner table, one packet history and the attempt block while packets are in
 flight, plus one data chunk, since a stream buffers at most one chunk of
 unacknowledged bytes. A NEW_TOKEN holds a chunk only while it waits, on the server until it is
 acknowledged and on the client until the owner takes it. The scratch pair is paid once per
-pump, not per connection. During the handshake the dialer holds at most five
-send-lane chunks and 8,704 tls bytes after any call, and the listener six and
-18,944. The caller's `mach-tls` handshake record, 6,424 bytes for a client and
-6,224 for a server, must stay put until `assembly.tls_released(c)`. From then
+pump, not per connection. During the handshake the dialer holds at most six
+send-lane chunks and 8,704 tls bytes after any call, and the listener eight and
+18,944. Those chunks include one secret chunk for each handshake level whose
+keys are live, given back when that level's keys are discarded. The caller's
+`mach-tls` handshake record, 6,424 bytes for a client and 6,224 for a server, must stay put until `assembly.tls_released(c)`. From then
 the connection never refers to it again and it may be initialized for another
 connection, so an owner needs one per connection in handshake, not one per
 connection.
@@ -703,11 +725,15 @@ Timers are absolute monotonic deadlines carrying the driver source and protocol
 generation. `on_timeout` revalidates both the deadline and generation before
 advancing driver time. Early and obsolete observations do not affect later work.
 Protocol callbacks are invoked under the connection lock and cannot reenter the
-same driver. Same-thread reentry is rejected before lock acquisition. Immutable
-driver anchors and lifecycle state are snapshotted around each callback, and
-unauthorized callback mutation is restored and reported as a protocol error.
-Callbacks must be transactional on non-OK returns. Successful generation
-owns exactly one opaque send owner until its terminal callback.
+same driver. Same-thread reentry is rejected before lock acquisition. The guard
+compares the caller's `std.sync.thread.current_token` with the running
+callback's, which costs no system call. On linux x86_64 only the main thread or a
+thread std spawned may call into a driver, since the token reads a thread pointer
+that std installs on those threads alone. Immutable driver anchors and
+lifecycle state are snapshotted around each callback, and unauthorized callback
+mutation is restored and reported as a protocol error. Callbacks must be
+transactional on non-OK returns. Successful generation owns exactly one opaque
+send owner until its terminal callback.
 
 The connection cancellation scope may be a child of a process or listener scope.
 Cancellation and deadline propagation begin abortive close under the same lock as
@@ -797,12 +823,17 @@ true from that instant.
 
 ## Development
 
-Dependencies use exact Git tags.
+quic requires mach 5.12 and mach-std 8. Dependencies are version ranges, pinned
+by their committed gitlinks.
 
 ```sh
 mach dep pull .
 mach build .
-mach test .
+mach test . --lib tests
 ```
+
+mach tests only the selected artifact's closure, and the library does not
+reach every test module, so the test-only `tests` artifact reaches them all.
+`tools/test-selection` fails when a test under `src` is collected on no target.
 
 Build products are written to Mach's default `out/` directory.

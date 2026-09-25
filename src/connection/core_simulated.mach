@@ -398,19 +398,20 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
             retry_pseudo: ?fixture.retry_pseudo[0], retry_pseudo_capacity: 256
         }
     };
+    storage.chunk_source = ranges.Source{provider: ?fixture.chunk_pool.provider,
+        account: ?fixture.chunk_account, lane: supply.SEND};
     var secret_storage: core.SecretStorage = core.SecretStorage{
         receive_plaintext:          ?fixture.secret_receive[0],
         receive_plaintext_capacity: 1200,
         send_plaintext:             ?fixture.secret_send[0],
-        send_plaintext_capacity:    1200
+        send_plaintext_capacity:    1200,
+        context_chunks:             ?fixture.chunk_pool.secret
     };
     if (fault == MODE_ON_DEMAND) {
         storage.owners                       = nil;
         storage.recovery_initial.packets     = nil;
         storage.recovery_handshake.packets   = nil;
         storage.recovery_application.packets = nil;
-        storage.chunk_source                 = ranges.Source{provider: ?fixture.chunk_pool.provider,
-            account: ?fixture.chunk_account, lane: supply.SEND};
     }
     if (fault == FAULT_STORAGE_CAPACITY) { storage.close_reason_capacity = 0; }
     if (fault == FAULT_STORAGE_OVERLAP) {
@@ -835,6 +836,33 @@ test "quic.connection.core: failed provider start rolls back every manager lease
         fixture.init_result.error != core.INTERNAL_ERROR ||
         fixture.init_result.reason != core.INIT_PROVIDER_START ||
         fixture.init_result.provider_error != 0x7711) { ret 1; }
+    ret 0;
+}
+
+fun key_set_blank(value: *protection.KeySet) bool {
+    var i: usize = 0;
+    for (i < 32) {
+        if (value.key[i]:>u8 != 0 || value.hp[i]:>u8 != 0) { ret false; }
+        i = i + 1;
+    }
+    ret value.state == protection.STATE_EMPTY && value.key_len == 0 &&
+        value.secret_len == 0 && value.hp_len == 0;
+}
+
+test "quic.connection.core: initial keys derive in place and a refusal leaves none behind" {
+    var clean: Fixture;
+    if (!initialize(?clean, transport.CLIENT, true, 1) ||
+        clean.secrets.initial_keys.state != protection.STATE_ACTIVE ||
+        clean.secrets.initial_keys.client.key_len == 0 ||
+        clean.secrets.handshake != ?clean.adapter) { ret 1; }
+    var refused: Fixture;
+    if (initialize_with_fault(?refused, transport.CLIENT, true, 1,
+        FAULT_PROVIDER_START) ||
+        refused.init_result.reason != core.INIT_PROVIDER_START ||
+        refused.secrets.initialized || refused.secrets.handshake != nil ||
+        refused.secrets.initial_keys.state != protection.STATE_EMPTY ||
+        !key_set_blank(?refused.secrets.initial_keys.client) ||
+        !key_set_blank(?refused.secrets.initial_keys.server)) { ret 2; }
     ret 0;
 }
 
