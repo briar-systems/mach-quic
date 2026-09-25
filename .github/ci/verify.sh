@@ -16,3 +16,6 @@ if [ "$manifest" != "$exported" ]; then
   exit 1
 fi
 echo "release version $manifest"
+
+# every test under src is collected by `mach test . --lib tests` on some target
+tools/test-selection "$MACH_COMPILER"
