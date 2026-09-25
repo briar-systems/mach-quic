@@ -1056,8 +1056,8 @@ test "quic.connection.cid: hostile products and storage aliases are rejected ato
         local_capacity:    3, peer: ?peer[0], peer_capacity: 4},
         make_id(1), make_id(10)) ||
         initialize(?manager, Config{source: 206, local_active_limit: 2,
-        peer_active_limit:                        2}, Storage{local: ?local[0], local_capacity: 3,
-        peer: (?local[0])::*Entry, peer_capacity: 4},
+        peer_active_limit: 2}, Storage{local: ?local[0], local_capacity: 3,
+        peer:              (?local[0])::*Entry, peer_capacity: 4},
         make_id(1), make_id(10)) || manager.initialized ||
         local[0].state != ENTRY_RETIRED || peer[0].state != ENTRY_RETIRE_SENT) {
         ret 1;

@@ -201,13 +201,13 @@ fun make_fixture(fixture: *Fixture, source: u64) bool {
         chunks:   ?fixture.chunk_pool.provider, account: ?fixture.account
     };
     val protocol: handshake.Protocol = handshake.Protocol{
-        context: (?fixture.provider)::ptr, context_size: $size_of(Provider),
-        secret_context:                                  ?fixture.secret[0], secret_context_size: 32,
-        start:                                           start_provider,
-        ingest:                                          ingest_provider, restart: restart_provider,
-        poll:                                            poll_provider,
-        next_event:                                      next_provider_event, complete_event: complete_provider_event,
-        close:                                           close_provider, destroy: destroy_provider, initialized: true
+        context:        (?fixture.provider)::ptr, context_size: $size_of(Provider),
+        secret_context: ?fixture.secret[0], secret_context_size: 32,
+        start:          start_provider,
+        ingest:         ingest_provider, restart: restart_provider,
+        poll:           poll_provider,
+        next_event:     next_provider_event, complete_event: complete_provider_event,
+        close:          close_provider, destroy: destroy_provider, initialized: true
     };
     if (!handshake.initialize(?fixture.adapter, handshake.Config{source: source,
         max_crypto_per_level: 64, max_event_data: 64, max_peer_identity: 64},

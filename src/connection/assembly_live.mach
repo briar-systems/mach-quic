@@ -182,6 +182,13 @@ fun test_chunks() buffers.Source {
     ret chunk_pool.provider;
 }
 
+# the secret side of whichever pool test_chunks serves
+fun test_secret_chunks() buffers.SecretSource {
+    test_chunks();
+    if (starving) { ret small_pool.secret; }
+    ret chunk_pool.secret;
+}
+
 # which lease establish_direct gives the dialer's engine
 val LEASE_OWN:      u8 = 0;
 val LEASE_PEER:     u8 = 1;
@@ -282,8 +289,9 @@ var hog_account: supply.Account;
 var hog_chunks:  [256]supply.Chunk;
 var hog_count:   usize;
 
-# holds every chunk of the small pool but one, which the dialer's handshake
-# block takes, so its tls start finds no memory at all
+# holds every chunk of the small pool but two, which the dialer's handshake
+# block and its Initial keys' contexts take, so its tls start finds no memory
+# at all
 fun hog() bool {
     test_chunks();
     var extra:   usize  = 0;
@@ -303,9 +311,10 @@ fun hog() bool {
         hog_chunks[hog_count] = taken.chunk;
         hog_count             = hog_count + 1;
     }
-    if (hog_count == 0 || hog_count == 256) { ret false; }
-    hog_count = hog_count - 1;
-    ret supply.give(?from, hog_chunks[hog_count]);
+    if (hog_count < 2 || hog_count == 256) { ret false; }
+    hog_count = hog_count - 2;
+    ret supply.give(?from, hog_chunks[hog_count]) &&
+        supply.give(?from, hog_chunks[hog_count + 1]);
 }
 
 fun unhog() bool {
@@ -775,16 +784,16 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         (?dialer_storage.path_values[0])::*u8, 2 * $size_of(path_api.Path));
     val core_overlap: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, core_scope, instants.instant(1000));
+        test_secret_chunks(), ?dialer_tls, core_scope, instants.instant(1000));
     val handshake_overlap: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, handshake_scope, instants.instant(1000));
+        test_secret_chunks(), ?dialer_tls, handshake_scope, instants.instant(1000));
     val cid_overlap: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, cid_scope, instants.instant(1000));
+        test_secret_chunks(), ?dialer_tls, cid_scope, instants.instant(1000));
     val path_overlap: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, path_scope, instants.instant(1000));
+        test_secret_chunks(), ?dialer_tls, path_scope, instants.instant(1000));
     if (core_scope == nil || handshake_scope == nil || cid_scope == nil ||
         path_scope == nil || core_overlap.stage != assembly.STAGE_STORAGE ||
         handshake_overlap.stage != assembly.STAGE_STORAGE ||
@@ -801,17 +810,17 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         ((?dialer_storage)::usize + 1)::*assembly.Storage;
     val malformed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, misaligned, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, ?dialer_scope, instants.instant(1000));
+        test_secret_chunks(), ?dialer_tls, ?dialer_scope, instants.instant(1000));
     val missing: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, nil, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, ?dialer_scope, instants.instant(1000));
+        test_secret_chunks(), ?dialer_tls, ?dialer_scope, instants.instant(1000));
     if (malformed.stage != assembly.STAGE_STORAGE ||
         missing.stage != assembly.STAGE_STORAGE ||
         malformed.cleanup_retained || missing.cleanup_retained ||
         dialer_storage.leased || !scratch.idle(?pump_scratch, ?pump_secret)) { ret 237; }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, ?dialer_scope, instants.instant(1000));
+        test_secret_chunks(), ?dialer_tls, ?dialer_scope, instants.instant(1000));
     if (!dialed.ok)                         { ret 170 + dialed.stage::i32; }
     if (dialed.core.reason != core.INIT_OK) { ret 180 + dialed.core.reason::i32; }
     val dialer_storage_generation: u64 = dialer_storage.generation;
@@ -819,15 +828,16 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     var competing:     assembly.Connection;
     val public_reused: assembly.InitResult = assembly.init_client(?competing,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, ?dialer_scope, instants.instant(1000));
+        test_secret_chunks(), ?dialer_tls, ?dialer_scope, instants.instant(1000));
     # the scratch pair may be shared, but never laid over a connection's storage
     val scratch_overlap: assembly.InitResult = assembly.init_client(?competing,
         ?dialer_config, ?listener_storage, (?listener_storage)::*assembly.Scratch,
-        ?pump_secret, test_chunks(), ?dialer_tls, ?dialer_scope,
+        ?pump_secret, test_chunks(),
+        test_secret_chunks(), ?dialer_tls, ?dialer_scope,
         instants.instant(1000));
     val copied_reused: assembly.InitResult = assembly.init_client(?competing,
         ?dialer_config, ?copied_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, ?dialer_scope, instants.instant(1000));
+        test_secret_chunks(), ?dialer_tls, ?dialer_scope, instants.instant(1000));
     if (public_reused.stage != assembly.STAGE_STORAGE ||
         scratch_overlap.stage != assembly.STAGE_STORAGE ||
         copied_reused.stage != assembly.STAGE_STORAGE ||
@@ -948,7 +958,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 14; }
     val served: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config, ?listener_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?listener_tls, ?listener_scope,
+        test_secret_chunks(), ?listener_tls, ?listener_scope,
         instants.instant(clock));
     if (!served.ok)                         { ret 140 + served.stage::i32; }
     if (served.core.reason != core.INIT_OK) { ret 150 + served.core.reason::i32; }
@@ -1177,6 +1187,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{}))) { ret 224; }
     val redialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
+        test_secret_chunks(),
         ?dialer_tls_two, ?dialer_scope,
         instants.instant(clock + 1000));
     if (!redialed.ok || redialed.core.reason != core.INIT_OK) { ret 225; }
@@ -1216,6 +1227,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     cancel.cancel(?listener_scope);
     val refused_two: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config_two, ?listener_storage, ?pump_scratch, ?pump_secret, test_chunks(),
+        test_secret_chunks(),
         ?listener_tls_two,
         ?listener_scope, instants.instant(clock + 2000));
     if (refused_two.ok || refused_two.stage != assembly.STAGE_DRIVER ||
@@ -1233,6 +1245,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{}))) { ret 235; }
     val reserved_two: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config_two, ?listener_storage, ?pump_scratch, ?pump_secret, test_chunks(),
+        test_secret_chunks(),
         ?listener_tls_two,
         ?listener_scope, instants.instant(clock + 2000));
     if (!reserved_two.ok || reserved_two.core.reason != core.INIT_OK) { ret 229; }
@@ -1285,7 +1298,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     rollback_probe.armed         = true;
     var rollback_entropy_source: secret.Entropy = secret.Entropy{
         context: (?rollback_probe)::ptr, secret_context: nil,
-        fill_fn:                                         rollback_entropy, initialized: true
+        fill_fn: rollback_entropy, initialized: true
     };
     var rollback_tls_config: config.ClientConfig = dialer_tls_config;
     rollback_tls_config.entropy              = ?rollback_entropy_source;
@@ -1300,7 +1313,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         !operation_ok(cancel.make_root(?dialer_scope, opt[time.Instant].none{}))) { ret 239; }
     val retained: assembly.InitResult = assembly.init_client(?dialer,
         ?rollback_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
+        test_secret_chunks(), ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
     val retained_storage_generation: u64 = dialer_storage.generation;
     if (retained.ok || retained.stage != assembly.STAGE_CORE ||
         retained.core.reason != core.INIT_PROVIDER_START ||
@@ -1313,14 +1326,14 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
         dialer.handshake_block.data == nil) { ret 240; }
     val repeated: assembly.InitResult = assembly.init_client(?dialer,
         ?rollback_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
+        test_secret_chunks(), ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
     val public_retained: assembly.InitResult = assembly.init_client(?competing,
         ?rollback_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
+        test_secret_chunks(), ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
     val scratch_retained: assembly.InitResult = assembly.init_client(?competing,
         ?rollback_config, ?listener_storage, (?listener_storage)::*assembly.Scratch,
         ?pump_secret, test_chunks(),
-        ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
+        test_secret_chunks(), ?rollback_tls, ?dialer_scope, instants.instant(clock + 1000));
     if (repeated.stage != assembly.STAGE_STORAGE ||
         !repeated.cleanup_retained ||
         public_retained.stage != assembly.STAGE_STORAGE ||
@@ -1535,7 +1548,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     }
     val dialed: assembly.InitResult = assembly.init_client(?dialer,
         ?dialer_config, ?dialer_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?dialer_tls, ?dialer_scope, instants.instant(clock[0]));
+        test_secret_chunks(), ?dialer_tls, ?dialer_scope, instants.instant(clock[0]));
     if (mislease != LEASE_OWN) {
         if (dialed.ok || dialed.stage != assembly.STAGE_HANDSHAKE ||
             !assembly.reusable(?dialer) || dialer.account.open) { ret 8; }
@@ -1590,7 +1603,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
         server.QUIC_TRANSPORT_PARAMETERS)) { ret 10; }
     val served: assembly.InitResult = assembly.init_server(?listener,
         ?listener_config, ?listener_storage, ?pump_scratch, ?pump_secret, test_chunks(),
-        ?listener_tls, ?listener_scope, instants.instant(clock[0]));
+        test_secret_chunks(), ?listener_tls, ?listener_scope, instants.instant(clock[0]));
     # handshake-only state is held until the handshake is confirmed
     if (!served.ok || served.core.reason != core.INIT_OK ||
         listener.handshake_block.data == nil ||
@@ -2633,7 +2646,7 @@ test "quic.connection.assembly: a full window survives 10% loss and reordering w
 # live idle connection holds. a failure means that cost moved. decide it
 # deliberately, and update these numbers, the changelog and the readme together
 val GUARD_STORAGE_BYTES:    usize = 4560;
-val GUARD_CONNECTION_BYTES: usize = 10640;
+val GUARD_CONNECTION_BYTES: usize = 16976;
 # established, no streams
 val GUARD_IDLE_CHUNKS: usize = 0;
 # established, the six h3 control streams open and drained: one record block
@@ -2954,8 +2967,8 @@ test "quic.connection.assembly: a connection copied after its lease was taken is
 # bytes, beside the caller's tls handshake records. a failure means that cost
 # moved. decide it deliberately, and update these numbers, the changelog and
 # the readme together
-val GUARD_HANDSHAKE_DIALER_SEND:   usize = 5;
-val GUARD_HANDSHAKE_LISTENER_SEND: usize = 6;
+val GUARD_HANDSHAKE_DIALER_SEND:   usize = 6;
+val GUARD_HANDSHAKE_LISTENER_SEND: usize = 8;
 val GUARD_HANDSHAKE_DIALER_TLS:    usize = 8704;
 val GUARD_HANDSHAKE_LISTENER_TLS:  usize = 18944;
 val GUARD_CLIENT_HANDSHAKE_BYTES:  usize = 6424;
@@ -2987,4 +3000,28 @@ test "quic.connection.assembly: a handshake costs what was measured" {
         ret 2;
     }
     ret 0;
+}
+
+$if ($mach.build.mode == $mach.mode.debug) {
+    # two peers, three levels (Initial, Handshake, 1-RTT), two directions, and
+    # an aead and a header protection key in each
+    val INSTALL_EXPANSIONS: u64 = 24;
+
+    test "quic.connection.assembly: every level expands its keys at install alone" {
+        var clock:       u64   = 1000;
+        var moved:       usize = 0;
+        val start:       u64   = protection.expansion_count();
+        val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+        if (established != 0) { ret established; }
+        val handshake: u64 = protection.expansion_count() - start;
+        val settled:   i32 = settle(?clock, ?moved);
+        if (settled != 0) { ret settled; }
+        val idle: u64 = protection.expansion_count() - start - handshake;
+        if (handshake != INSTALL_EXPANSIONS || idle != 0) {
+            print.eprintlnf("{} expansions over the handshake (expected {}), {} after it, {} datagrams",
+                handshake, INSTALL_EXPANSIONS, idle, moved);
+            ret 1;
+        }
+        ret 0;
+    }
 }

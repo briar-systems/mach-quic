@@ -1847,12 +1847,12 @@ test "quic.connection.listener: hostile configuration aliases acquire no leases"
         minimum_initial_size: 1200, require_retry: false}, nil, ?admission_manager,
         ?token_manager) ||
         initialize(?listener, Config{source: 533,
-        supported_versions: (?admission_manager)::*u32, supported_version_count: 1,
-        minimum_initial_size:                                                    1200, require_retry: false},
+        supported_versions:   (?admission_manager)::*u32, supported_version_count: 1,
+        minimum_initial_size: 1200, require_retry: false},
         limited.allocator_of(?memory_state), ?admission_manager, ?token_manager) ||
         initialize_result(?listener, Config{source: 533,
-        supported_versions: (?admission_manager.peers)::*u32, supported_version_count: 1,
-        minimum_initial_size:                                                          1200, require_retry: false},
+        supported_versions:   (?admission_manager.peers)::*u32, supported_version_count: 1,
+        minimum_initial_size: 1200, require_retry: false},
         limited.allocator_of(?memory_state), ?admission_manager,
         ?token_manager).error != ERROR_CONFIG ||
         listener.initialized || admission_manager.listener_lease != 0 ||
