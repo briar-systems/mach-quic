@@ -3211,3 +3211,46 @@ $if ($mach.build.mode == $mach.mode.debug) {
         ret 0;
     }
 }
+
+# rfc 9000 9.3: every challenge to a rebound client's new port is lost, so its
+# validation fails and the listener falls back to the port the client left.
+# the client keeps sending from the new port, and the listener validates it again
+test "quic.connection.assembly: a port whose validation failed is validated again when the peer sends from it" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val bound:   ip.Endpoint = nat_endpoint(1);
+    var request: transport.Stream;
+    val asked:   i32         = request_from(bound, ?request, ?clock, ?moved);
+    if (asked != 0) { ret asked; }
+    var drops:  usize = 1000;
+    var failed: bool  = false;
+    var rounds: usize = 0;
+    for (!failed && rounds < 256) {
+        if (nat_round(bound, dialer_endpoint(), ?drops, ?clock, ?moved) != 0) {
+            ret report_paths(48);
+        }
+        val path: *path_api.Path = listener_path(bound);
+        failed = path != nil && path.state == path_api.PATH_FAILED;
+        rounds = rounds + 1;
+    }
+    if (!failed) { ret report_paths(49); }
+    drops = 0;
+    val answered: i32 = await_answer(bound, dialer_endpoint(), ?drops, request, ?clock, ?moved);
+    if (answered != 0) { ret report_paths(answered); }
+    rounds = 0;
+    var path: *path_api.Path = listener_path(bound);
+    for (rounds < 64 && (path == nil || !path.address_validated || !path.selected)) {
+        if (nat_round(bound, dialer_endpoint(), ?drops, ?clock, ?moved) != 0) {
+            ret report_paths(50);
+        }
+        path   = listener_path(bound);
+        rounds = rounds + 1;
+    }
+    if (path == nil || path.state != path_api.PATH_VALIDATED || !path.selected) {
+        ret report_paths(51);
+    }
+    ret 0;
+}
