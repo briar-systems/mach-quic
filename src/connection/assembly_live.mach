@@ -2119,6 +2119,141 @@ fun listener_challenged(value: path_api.Handle) bool {
     ret false;
 }
 
+# the client behind a nat that has moved it `hops` ports from where it started
+fun nat_endpoint(hops: u16) ip.Endpoint {
+    ret endpoint(1, 55000 + hops);
+}
+
+# the listener's live path to `peer`, or nil
+fun listener_path(peer: ip.Endpoint) *path_api.Path {
+    var i: usize = 0;
+    for (i < 2) {
+        val path: *path_api.Path = ?listener.storage.path_values[i];
+        if (path.valid && path.endpoint.peer.port == peer.port) { ret path; }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+# whether the listener published a challenge to `peer` at `now_ns`
+fun challenge_sent(peer: ip.Endpoint, now_ns: u64) bool {
+    var i: usize = 0;
+    for (i < 4) {
+        val challenge: *path_api.Challenge = ?listener.storage.path_challenges[i];
+        if (challenge.valid && challenge.state == path_api.CHALLENGE_SENT &&
+            challenge.sent_at_ns == now_ns &&
+            listener.storage.path_values[challenge.path_index].endpoint.peer.port == peer.port) {
+            ret true;
+        }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# one round behind a nat that maps the dialer to `bound`. its datagrams reach
+# the listener from there, and of the listener's only those sent to `bound` or
+# `also` reach it. the next `drops` of them that carry a challenge to `bound`
+# are lost. the round ends on the next timer either end has due
+fun nat_round(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize, clock: *u64,
+    moved: *usize) i64 {
+    if (carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(), bound, clock,
+        moved) != 0) {
+        fault_side = 1;
+        ret fault_step::i64;
+    }
+    var guard: usize = 0;
+    for (guard < 64) {
+        clock[0] = clock[0] + 1000;
+        val generated: transport.Generated = checked_generate(?listener, ?listener_scope,
+            ?wire[0], 1500, instants.instant(clock[0]), 0);
+        if (generated.status == transport.STATUS_EMPTY ||
+            generated.status == transport.STATUS_BLOCKED) { brk; }
+        clock[0] = clock[0] + 1000;
+        if (generated.status != transport.STATUS_OK ||
+            transport.complete_send[binding.Binding](?listener.driver, generated.token,
+            transport.SEND_SENT, generated.count, instants.instant(clock[0])).status !=
+            transport.STATUS_OK) {
+            fault_side = 2;
+            ret 3;
+        }
+        if (drops[0] > 0 && challenge_sent(bound, clock[0])) {
+            drops[0] = drops[0] - 1;
+        }
+        or (generated.peer.port == bound.port || generated.peer.port == also.port) {
+            if (!deliver(?dialer, dialer_endpoint(), listener_endpoint(), ?wire[0],
+                generated.count, clock[0])) {
+                fault_side = 2;
+                ret 4;
+            }
+        }
+        moved[0] = moved[0] + 1;
+        guard    = guard + 1;
+    }
+    clock[0] = next_deadline(clock[0]);
+    if (!fire_due(?dialer, clock[0]) || !fire_due(?listener, clock[0])) { ret 8; }
+    ret 0;
+}
+
+# the dialer asks from `bound` on a new stream, and the listener answers with
+# 4000 bytes, more than three times what the request carried
+fun request_from(bound: ip.Endpoint, request: *transport.Stream, clock: *u64,
+    moved: *usize) i32 {
+    var request_byte: [1]u8                = [1]u8{'q'};
+    val opened:       transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    if (opened.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?dialer.driver, opened.stream,
+        ?request_byte[0], 1).count != 1 ||
+        transport.finish_stream[binding.Binding](?dialer.driver,
+        opened.stream).status != transport.STATUS_OK) { ret 40; }
+    if (carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(), bound, clock,
+        moved) != 0) { ret 41; }
+    val accepted: transport.OpenResult =
+        transport.accept_stream[binding.Binding](?listener.driver);
+    if (accepted.status != transport.STATUS_OK ||
+        transport.write_stream[binding.Binding](?listener.driver, accepted.stream,
+        ?bulk_bytes[0], 4000).count != 4000 ||
+        transport.finish_stream[binding.Binding](?listener.driver,
+        accepted.stream).status != transport.STATUS_OK) { ret 42; }
+    @request = opened.stream;
+    ret 0;
+}
+
+fun flag(value: bool) u64 {
+    if (value) { ret 1; }
+    ret 0;
+}
+
+# the listener's paths and close error beside a failed nat test's code
+fun report_paths(code: i32) i32 {
+    var i: usize = 0;
+    for (i < 2) {
+        val path: *path_api.Path = ?listener.storage.path_values[i];
+        print.eprintlnf("listener path {}: valid {} port {} state {} validated {} mtu {} selected {}",
+            i, flag(path.valid), path.endpoint.peer.port::u64, path.state::u64,
+            flag(path.address_validated), flag(path.mtu_validated), flag(path.selected));
+        i = i + 1;
+    }
+    print.eprintlnf("listener close error {}, code {}", listener.core.close_error, code);
+    ret code;
+}
+
+# nat rounds until the dialer has read the whole answer to `request`
+fun await_answer(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize,
+    request: transport.Stream, clock: *u64, moved: *usize) i32 {
+    var total:  usize = 0;
+    var fin:    bool  = false;
+    var rounds: usize = 0;
+    for (!fin && rounds < 256) {
+        if (nat_round(bound, also, drops, clock, moved) != 0) { ret 43; }
+        total = total + drain_stream(?dialer.driver, request, ?lossy_sink[total],
+            4096 - total, ?fin);
+        rounds = rounds + 1;
+    }
+    if (!fin || total != 4000) { ret 44; }
+    ret 0;
+}
+
 # hedge#293: a response larger than three times what the rebound client sent
 # from its new port reaches it only once the listener validated that port
 test "quic.connection.assembly: a rebound client's new address is validated and lifts the amplification limit" {
