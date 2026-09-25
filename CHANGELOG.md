@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The library entry moved from `src/lib.mach` to `src/lib/quic.mach` and the tests entry from `src/tests.mach` to `src/lib/tests.mach`, the family layout for artifact entries (briar-systems/.github#107). A bare `use quic;` still binds the library entry, and every other module path is unchanged. The entry module itself is now `quic.lib.quic`, so an import that named `quic.lib` directly, such as one reading `quic.lib.VERSION`, names that path or uses `use quic;` instead (#249).
+
 ## [0.20.1] - 2026-09-25
 
 ### Fixed

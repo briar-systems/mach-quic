@@ -1,4 +1,4 @@
-# quic.lib
+# quic.lib.quic
 
 ## val VERSION
 
