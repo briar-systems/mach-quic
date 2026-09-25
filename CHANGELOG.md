@@ -11,6 +11,10 @@
 - A transport callback no longer costs a system call (#231). The re-entry guard, which refuses a callback's own thread calling back into its driver and lets any other thread block on the driver lock, named the thread with `os.thread_current_id`, a `gettid` system call on linux, on every callback and every guarded entry point. It now uses `std.sync.thread.current_token`, which has the same contract (positive, never 0, distinct across live threads) and reads the thread pointer. `transport.Driver.callback_owner` is a `thread.Token`. On linux x86_64 only the main thread or a thread std spawned may call into a driver, since std 7.5.0 installs the thread pointer on those alone. Measured with hedge (`70b3ee1` on std 7.5.0, release build, linux-x86_64) and hedge#274's keep-alive probe. Over its whole run holding 2,000 QUIC connections with a one-second keep-alive, hedge under `strace -c` made 538,709 `gettid` calls before and none after. Holding 5,000 such connections, three interleaved 20 s windows per build gave a median of 9,367 ms of CPU before and 8,638 ms after, 47.5 and 43.7 microseconds per UDP datagram delivered on the host.
 - Dependencies: `[dep.std] version = "^7.5"` realized at v7.5.0 (#231), for `sync.thread.current_token`. std 7.4.0 hands out a buffer slot never used before one given back, so the stream test that proves a reused chunk is untouched by the stream that released it now draws on a pool that keeps one released chunk per class.
 
+### Fixed
+
+- Connection setup no longer leaves a copy of the Initial keys on the stack (#242). `core.initialize` built the whole `Secrets` record in a local, derived the Initial keys into it and copied it out with an assignment, so the dead frame kept the key material. The keys now derive straight into the caller's `Secrets`, and a refusal after derivation wipes them and leaves the caller's record empty. Nothing in initialization copies a `Secrets` record holding keys or expanded contexts by assignment.
+
 ## [0.19.1] - 2026-09-23
 
 ### Fixed

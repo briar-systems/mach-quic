@@ -1145,6 +1145,12 @@ fun component_storage_valid(core: *Core, secrets: *Secrets, config: *Config,
     ret true;
 }
 
+# holds no key material or expanded context, so the assignment copies none
+fun reset_secrets(secrets: *Secrets) {
+    var empty: Secrets;
+    secrets[0] = empty;
+}
+
 fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     secret_storage: SecretStorage, handshake: *handshake_api.Adapter,
     cids: *cid_api.Manager,
@@ -1220,12 +1226,9 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     if (local_decoded.status != transport_parameters.STATUS_DONE ||
         !validate_local_parameters(config, ?local_parameters, cids, paths, streams,
         datagrams)) { ret refuse(init_result, INIT_PARAMETERS); }
-    var candidate:         Core;
-    var candidate_secrets: Secrets;
+    var candidate: Core;
     candidate.config               = config;
     candidate.storage              = storage;
-    candidate_secrets.storage      = secret_storage;
-    candidate_secrets.handshake    = handshake;
     candidate.cids                 = cids;
     candidate.paths                = paths;
     candidate.streams              = streams;
@@ -1302,23 +1305,29 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         handshake_api.release_core(handshake, config.source);
         ret refuse(init_result, INIT_LEASE);
     }
-    if (!take_contexts(?candidate, ?candidate_secrets, INITIAL_CONTEXTS)) {
+    # keys derive straight into the caller's record so no copy of them outlives this frame
+    reset_secrets(secrets);
+    secrets.storage   = secret_storage;
+    secrets.handshake = handshake;
+    if (!take_contexts(?candidate, secrets, INITIAL_CONTEXTS)) {
         datagram_api.release_core(datagrams, config.source);
         stream_api.release_core(streams, config.source);
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
+        reset_secrets(secrets);
         ret refuse(init_result, INIT_LEASE);
     }
-    if (protection.derive_initial(?candidate_secrets.initial_keys, config.version,
+    if (protection.derive_initial(?secrets.initial_keys, config.version,
         contracts.Bytes{data: ?config.initial_secret_destination.data[0],
         len: config.initial_secret_destination.len::usize}) != protection.OK) {
-        destroy_initial_level(?candidate, ?candidate_secrets);
+        destroy_initial_level(?candidate, secrets);
         datagram_api.release_core(datagrams, config.source);
         stream_api.release_core(streams, config.source);
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
+        reset_secrets(secrets);
         ret refuse(init_result, INIT_KEYS);
     }
     if (path_api.configure_transport_scoped(paths, config.source, current_path.handle,
@@ -1329,7 +1338,8 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
-        destroy_initial_level(?candidate, ?candidate_secrets);
+        destroy_initial_level(?candidate, secrets);
+        reset_secrets(secrets);
         ret refuse(init_result, INIT_PATH);
     }
     val started: handshake_api.Result = handshake_api.start_scoped(handshake,
@@ -1343,7 +1353,8 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
         path_api.release_core(paths, config.source);
         cid_api.release_core(cids, config.source);
         handshake_api.release_core(handshake, config.source);
-        destroy_initial_level(?candidate, ?candidate_secrets);
+        destroy_initial_level(?candidate, secrets);
+        reset_secrets(secrets);
         ret refuse(init_result, INIT_PROVIDER_START);
     }
     var i: usize = 0;
@@ -1355,11 +1366,10 @@ fun initialize(core: *Core, secrets: *Secrets, config: Config, storage: Storage,
     candidate.owners         = storage.owners;
     candidate.owner_capacity = lent_owners(?storage);
     refresh_all_owned(?candidate);
-    candidate_secrets.initialized = true;
-    candidate.initialized         = true;
-    secrets[0]                    = candidate_secrets;
-    core[0]                       = candidate;
-    init_result.ok                = true;
+    secrets.initialized   = true;
+    candidate.initialized = true;
+    core[0]               = candidate;
+    init_result.ok        = true;
     ret true;
 }
 
