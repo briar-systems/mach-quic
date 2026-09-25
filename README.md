@@ -268,7 +268,10 @@ responses, send reservations, and MTU probes remain completion-owned until they
 publish, cancel, or become stale. `finish_close` refuses to invalidate storage
 while any owner remains. Failed paths likewise cannot be released or restarted
 until their owners drain. Restart increments the path generation before accepting
-traffic again.
+traffic again. A server that receives a non-probing packet from a failed path's
+address once the handshake is confirmed releases that path, when its owners have
+drained, and validates the address afresh as it would a new one (RFC 9000 9.3). A
+probing packet from it is still refused.
 
 ## Stream contracts
 

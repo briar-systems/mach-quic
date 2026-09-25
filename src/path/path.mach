@@ -790,14 +790,22 @@ pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes
     var index: usize      = invalid_index();
     if (found.status == STATUS_OK) {
         index = found.handle.index;
+        # rfc 9000 9.3: a peer that moves back to an address whose validation
+        # failed is validated afresh, as at a new address. the failed path
+        # gives up its slot once nothing it sent is still owned
         if (manager.storage.paths[index].state == PATH_FAILED) {
-            result.status           = STATUS_BLOCKED;
-            result.handle           = found.handle;
-            result.needs_validation = true;
-            ret result;
+            if (!non_probing || !manager.handshake_confirmed ||
+                manager.config.role == ROLE_CLIENT ||
+                release(manager, found.handle).status != STATUS_OK) {
+                result.status           = STATUS_BLOCKED;
+                result.handle           = found.handle;
+                result.needs_validation = true;
+                ret result;
+            }
+            index = invalid_index();
         }
     }
-    or {
+    if (index == invalid_index()) {
         if (!manager.handshake_confirmed) {
             result.status = STATUS_DROPPED;
             ret result;
