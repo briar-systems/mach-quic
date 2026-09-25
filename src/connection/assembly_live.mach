@@ -3254,3 +3254,49 @@ test "quic.connection.assembly: a port whose validation failed is validated agai
     }
     ret 0;
 }
+
+# rfc 9000 9.3: a client whose nat moves it three times keeps its connection,
+# and each answer reaches it at the port it was last moved to. a request the
+# listener cannot place yet is refused without closing, and the dialer's
+# retransmission gets through once the path it replaces has drained
+test "quic.connection.assembly: a client rebound three times is answered at its last port" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    var request_byte: [1]u8 = [1]u8{'q'};
+    var hops:         u16   = 1;
+    for (hops <= 3) {
+        val bound:  ip.Endpoint          = nat_endpoint(hops);
+        val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+            ?dialer.driver, transport.BIDIRECTIONAL);
+        if (opened.status != transport.STATUS_OK ||
+            transport.write_stream[binding.Binding](?dialer.driver, opened.stream,
+            ?request_byte[0], 1).count != 1 ||
+            transport.finish_stream[binding.Binding](?dialer.driver,
+            opened.stream).status != transport.STATUS_OK) { ret 52; }
+        var drops:    usize                = 0;
+        var accepted: transport.OpenResult = transport.accept_stream[binding.Binding](
+            ?listener.driver);
+        var rounds: usize = 0;
+        for (accepted.status != transport.STATUS_OK && rounds < 64) {
+            if (nat_round(bound, bound, ?drops, ?clock, ?moved) != 0) { ret report_paths(53); }
+            accepted = transport.accept_stream[binding.Binding](?listener.driver);
+            rounds   = rounds + 1;
+        }
+        if (accepted.status != transport.STATUS_OK || listener.core.close_error != 0 ||
+            transport.write_stream[binding.Binding](?listener.driver, accepted.stream,
+            ?bulk_bytes[0], 4000).count != 4000 ||
+            transport.finish_stream[binding.Binding](?listener.driver,
+            accepted.stream).status != transport.STATUS_OK) { ret report_paths(54); }
+        val answered: i32 = await_answer(bound, bound, ?drops, opened.stream, ?clock, ?moved);
+        if (answered != 0) { ret report_paths(answered); }
+        val path: *path_api.Path = listener_path(bound);
+        if (path == nil || !path.address_validated || !path.selected) {
+            ret report_paths(55);
+        }
+        hops = hops + 1;
+    }
+    ret 0;
+}

@@ -749,6 +749,29 @@ fun abandon_path(manager: *Manager, index: usize, released: *Handle) bool {
     ret true;
 }
 
+# rfc 9000 9.3: frees the slot of a path the connection no longer needs. a
+# failed path goes first, then the one heard from least recently
+fun reclaim_path(manager: *Manager, released: *Handle) bool {
+    var chosen: usize = invalid_index();
+    var i:      usize = 0;
+    for (i < manager.storage.path_capacity) {
+        val path: *Path = ?manager.storage.paths[i];
+        if (path.valid && !path_needed(manager, i)) {
+            if (chosen == invalid_index()) {
+                chosen = i;
+            }
+            or ((path.state == PATH_FAILED) != (manager.storage.paths[chosen].state == PATH_FAILED)) {
+                if (path.state == PATH_FAILED) { chosen = i; }
+            }
+            or (path.last_received_ns < manager.storage.paths[chosen].last_received_ns) {
+                chosen = i;
+            }
+        }
+        i = i + 1;
+    }
+    ret chosen != invalid_index() && abandon_path(manager, chosen, released);
+}
+
 fun create_path(manager: *Manager, endpoint: Endpoint, locally_created: bool,
     preferred: bool, is_rebinding: bool) PathResult {
     val index: usize = free_path_index(manager);
@@ -887,6 +910,15 @@ pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes
         }
         if (manager.config.role == ROLE_CLIENT) {
             result.status = STATUS_DROPPED;
+            ret result;
+        }
+        # rfc 9000 9.3: with every slot held, a path the connection no longer
+        # needs makes room. when none can, the packet is refused and the
+        # connection kept, so a later packet from the peer tries again
+        if (free_path_index(manager) == invalid_index() &&
+            !reclaim_path(manager, ?result.released)) {
+            result.status = STATUS_BLOCKED;
+            result.error  = ERROR_CAPACITY;
             ret result;
         }
         val rebinding: bool       = selected_port_rebinding(manager, endpoint);
