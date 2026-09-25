@@ -115,7 +115,8 @@ pub rec KeySet {
     generation: u64;
     state:      State;
     # the contexts this set protects packets with, owned by whoever holds the
-    # set and kept when the key material is wiped. nil expands per packet
+    # set and kept when the key material is wiped. a set nobody bound, such as
+    # one sealing a single stateless packet, expands per packet
     aead:   *aes_gcm.Context;
     header: *aes.Context;
 }
@@ -279,6 +280,16 @@ pub fun bind(value: *KeySet, contexts: *Contexts) Error {
     value.aead   = ?contexts.aead;
     value.header = ?contexts.header;
     ret install(value);
+}
+
+# wipes a set's contexts and forgets them, before their storage goes away.
+# the key material is left as it is
+pub fun unbind(value: *KeySet) {
+    if (value == nil)        { ret; }
+    if (value.aead != nil)   { aes_gcm.dnit(value.aead); }
+    if (value.header != nil) { aes.dnit(value.header); }
+    value.aead   = nil;
+    value.header = nil;
 }
 
 # expands an active set's aead key into its bound context

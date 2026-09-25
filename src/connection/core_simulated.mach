@@ -398,19 +398,20 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
             retry_pseudo: ?fixture.retry_pseudo[0], retry_pseudo_capacity: 256
         }
     };
+    storage.chunk_source = ranges.Source{provider: ?fixture.chunk_pool.provider,
+        account: ?fixture.chunk_account, lane: supply.SEND};
     var secret_storage: core.SecretStorage = core.SecretStorage{
         receive_plaintext:          ?fixture.secret_receive[0],
         receive_plaintext_capacity: 1200,
         send_plaintext:             ?fixture.secret_send[0],
-        send_plaintext_capacity:    1200
+        send_plaintext_capacity:    1200,
+        context_chunks:             ?fixture.chunk_pool.secret
     };
     if (fault == MODE_ON_DEMAND) {
         storage.owners                       = nil;
         storage.recovery_initial.packets     = nil;
         storage.recovery_handshake.packets   = nil;
         storage.recovery_application.packets = nil;
-        storage.chunk_source                 = ranges.Source{provider: ?fixture.chunk_pool.provider,
-            account: ?fixture.chunk_account, lane: supply.SEND};
     }
     if (fault == FAULT_STORAGE_CAPACITY) { storage.close_reason_capacity = 0; }
     if (fault == FAULT_STORAGE_OVERLAP) {

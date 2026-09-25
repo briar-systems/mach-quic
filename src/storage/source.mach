@@ -184,6 +184,13 @@ pub fun give_secret(from: *SecretSource, chunk: Chunk) bool {
     ret sel reason.none;
 }
 
+# a held secret chunk viewed as `count` values of T for the rest of its hold.
+# nil for a stale chunk, a shape that does not fit, or a provider without
+# typed views
+pub fun view_secret[T](from: *SecretSource, chunk: Chunk, count: usize) *T {
+    ret buffers.secret_source_view_typed[T](from.provider, chunk, count);
+}
+
 # a chunk is retained while bytes sealed from it are in flight
 pub fun retain(provider: *Provider, ref: Ref) bool {
     val reason: buffers.Reason = buffers.source_retain(provider, ref);

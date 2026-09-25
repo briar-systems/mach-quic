@@ -192,7 +192,7 @@ pub rec SecretStorage {
     send_plaintext_capacity:    usize;
     # where the core takes one secret chunk per handshake level for that
     # level's expanded contexts, charged to the chunk source's account on the
-    # send lane. nil expands them per packet instead
+    # send lane. it must bind typed views
     context_chunks: *supply.SecretProvider;
 }
 
@@ -825,8 +825,9 @@ fun storage_valid(core: *Core, secrets: *Secrets, config: *Config,
         secret_storage.receive_plaintext == secret_storage.send_plaintext ||
         secret_storage.receive_plaintext_capacity < config.max_udp_payload ||
         secret_storage.send_plaintext_capacity < 1200 ||
-        (secret_storage.context_chunks != nil &&
-        storage.chunk_source.account == nil) ||
+        secret_storage.context_chunks == nil ||
+        secret_storage.context_chunks.fn_bind == nil ||
+        storage.chunk_source.account == nil ||
         storage.receive_header_capacity < config.max_udp_payload ||
         storage.receive_decoded_capacity < config.max_udp_payload ||
         storage.send_plaintext_capacity < 1200 ||
@@ -1991,21 +1992,49 @@ fun context_source(core: *Core, secrets: *Secrets) supply.SecretSource {
         account: core.storage.chunk_source.account, lane: supply.SEND};
 }
 
-# takes a handshake level's secret chunk as its keys are installed, once for
-# both directions. a core without a secret source keeps none
+# the two sets a handshake level's chunk holds contexts for, the client or
+# send side first
+fun level_set(secrets: *Secrets, slot: usize, index: usize) *protection.KeySet {
+    if (slot == INITIAL_CONTEXTS) {
+        if (index == 0) { ret ?secrets.initial_keys.client; }
+        ret ?secrets.initial_keys.server;
+    }
+    if (slot == EARLY_CONTEXTS) {
+        if (index == 0) { ret ?secrets.early_send; }
+        ret ?secrets.early_receive;
+    }
+    if (index == 0) { ret ?secrets.handshake_send; }
+    ret ?secrets.handshake_receive;
+}
+
+# takes a handshake level's secret chunk before its keys are installed, once
+# for both directions, and binds the level's sets to the contexts in it
 fun take_contexts(core: *Core, secrets: *Secrets, slot: usize) bool {
-    if (secrets.storage.context_chunks == nil ||
-        secrets.level_chunks[slot].bytes != 0) { ret true; }
+    if (secrets.level_chunks[slot].bytes != 0) { ret true; }
     var from:  supply.SecretSource = context_source(core, secrets);
     val taken: supply.Taken        = supply.take_secret(?from, LEVEL_CONTEXT_BYTES);
     if (!taken.ok) { ret false; }
+    val contexts: *protection.Contexts =
+        supply.view_secret[protection.Contexts](?from, taken.chunk, 2);
+    if (contexts == nil) {
+        supply.give_secret(?from, taken.chunk);
+        ret false;
+    }
     secrets.level_chunks[slot] = taken.chunk;
+    if (protection.bind(level_set(secrets, slot, 0), ?contexts[0]) != protection.OK ||
+        protection.bind(level_set(secrets, slot, 1), ?contexts[1]) != protection.OK) {
+        give_contexts(core, secrets, slot);
+        ret false;
+    }
     ret true;
 }
 
-# gives a handshake level's chunk back once its keys are destroyed
+# unbinds a handshake level's sets and gives its chunk back once their keys
+# are destroyed
 fun give_contexts(core: *Core, secrets: *Secrets, slot: usize) {
     if (secrets.level_chunks[slot].bytes == 0) { ret; }
+    protection.unbind(level_set(secrets, slot, 0));
+    protection.unbind(level_set(secrets, slot, 1));
     var from: supply.SecretSource = context_source(core, secrets);
     if (supply.give_secret(?from, secrets.level_chunks[slot])) {
         var none: supply.Chunk;
