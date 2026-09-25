@@ -259,8 +259,8 @@ pub rec Observation {
     reset_rtt:            bool;
     reset_ecn:            bool;
     rotate_connection_id: bool;
-    # a path given up to make room while packets sent on it were in flight.
-    # the caller settles those packets without charging any path
+    # a path given up while packets sent on it were in flight. the caller
+    # settles those packets without charging any path
     released: Handle;
 }
 
