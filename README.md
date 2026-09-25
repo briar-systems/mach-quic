@@ -273,6 +273,17 @@ address once the handshake is confirmed releases that path, when its owners have
 drained, and validates the address afresh as it would a new one (RFC 9000 9.3). A
 probing packet from it is still refused.
 
+A server whose path slots are all held gives up a path the connection no longer
+needs to make room for a peer's new address: one that is not selected, is not
+the validated fallback a failed migration would revert to, and holds no prepared
+challenge, response, send reservation or MTU probe. A failed path goes first,
+then the one heard from least recently. Any validation under way on it is
+abandoned (RFC 9000 9.3), and `Observation.released` names it when packets sent
+on it were still in flight, so the core settles those packets without charging
+any path. With nothing to give up, the packet is refused with STATUS_BLOCKED and
+ERROR_CAPACITY and the connection stays open, so the peer's retransmission tries
+again. The failed path a returning peer revives is given up the same way.
+
 ## Stream contracts
 
 The stream manager is allocation-free. The caller supplies stable stream slots,

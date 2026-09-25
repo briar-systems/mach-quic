@@ -2188,7 +2188,12 @@ fun terminal_owner(core: *Core, secrets: *Secrets,
         source:     owner.path_send.source, index: owner.path_send.path_index,
         generation: owner.path_send.path_generation
     };
-    if (path_handle.source == 0 || path_handle.index >=
+    # sent on a path given up since, so no path is charged (rfc 9000 9.4)
+    if (path_handle.source == 0) {
+        free_owner(core, owner);
+        ret ok;
+    }
+    if (path_handle.index >=
         core.paths.storage.path_capacity ||
         !core.paths.storage.paths[path_handle.index].valid ||
         core.paths.storage.paths[path_handle.index].generation !=
@@ -2946,6 +2951,7 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         path_endpoint(input.local, input.peer), opened.packet_number,
         value.length::u64, non_probing && space == packet.SPACE_APPLICATION, true, true,
         cid_api.snapshot(core.cids).peer_active > 1, input.received_at_ns);
+    detach_path(core, observed.released);
     if (observed.status == path_api.STATUS_ERROR) {
         ret fail(core, NO_VIABLE_PATH, input.received_at_ns);
     }
@@ -3210,6 +3216,23 @@ fun queue_challenge(core: *Core, value: path_api.Handle, data: [8]u8,
     }
     ret path_api.queue_challenge_scoped(core.paths, core.config.source, value,
         data, pto_ns, pto_ns, padded, purpose);
+}
+
+# the path manager gave up `value` while packets sent on it were in flight.
+# they settle without charging a path, which a new path may now hold the slot of
+fun detach_path(core: *Core, value: path_api.Handle) {
+    if (value.source == 0 || core.owners == nil) { ret; }
+    var i: usize = 0;
+    for (i < core.owner_capacity) {
+        val owner: *Owner = ?core.owners[i];
+        if (owner.state == OWNER_SENT && owner.path_send.source == value.source &&
+            owner.path_send.path_index == value.index &&
+            owner.path_send.path_generation == value.generation) {
+            var detached: path_api.SendToken;
+            owner.path_send = detached;
+        }
+        i = i + 1;
+    }
 }
 
 # rfc 9000 8.2 and 9.3: challenges `value` with fresh unpredictable data unless
