@@ -259,6 +259,9 @@ pub rec Observation {
     reset_rtt:            bool;
     reset_ecn:            bool;
     rotate_connection_id: bool;
+    # a path given up while packets sent on it were in flight. the caller
+    # settles those packets without charging any path
+    released: Handle;
 }
 
 pub rec PreparedChallenge {
@@ -688,6 +691,64 @@ fun free_path_index(manager: *Manager) usize {
     ret invalid_index();
 }
 
+# whether work prepared on the path at `index` is still owned: a prepared
+# challenge or response, a send reservation or an mtu probe. queued and
+# unanswered challenges, queued responses and packets in flight are not, and
+# are abandoned with the path
+fun path_committed(manager: *Manager, index: usize) bool {
+    val path: *Path = ?manager.storage.paths[index];
+    if (path.mtu_probe_prepared || path.mtu_probe_active) { ret true; }
+    var i: usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        if (manager.storage.challenges[i].valid && manager.storage.challenges[i].path_index == index &&
+            manager.storage.challenges[i].path_generation == path.generation &&
+            manager.storage.challenges[i].state == CHALLENGE_PREPARED) { ret true; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < manager.storage.response_capacity) {
+        if (manager.storage.responses[i].valid && manager.storage.responses[i].path_index == index &&
+            manager.storage.responses[i].path_generation == path.generation &&
+            manager.storage.responses[i].state == RESPONSE_PREPARED) { ret true; }
+        i = i + 1;
+    }
+    i = 0;
+    for (i < manager.storage.send_capacity) {
+        if (manager.storage.sends[i].valid && manager.storage.sends[i].path_index == index &&
+            manager.storage.sends[i].path_generation == path.generation) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# whether the connection still needs the path at `index`: it is selected, it
+# is the validated fallback a failed migration reverts to, or it owns work
+fun path_needed(manager: *Manager, index: usize) bool {
+    val path: *Path = ?manager.storage.paths[index];
+    ret path.selected || path_committed(manager, index) ||
+        (manager.fallback_index == index && manager.fallback_generation == path.generation &&
+        path.state != PATH_FAILED);
+}
+
+# rfc 9000 9.3 and 9.4: frees the slot of the path at `index`, abandoning any
+# validation under way on it. packets in flight on it no longer count toward
+# any path, and the handle is returned so the caller can settle them that way.
+# nothing is freed while the path is needed
+fun abandon_path(manager: *Manager, index: usize, released: *Handle) bool {
+    if (path_needed(manager, index)) { ret false; }
+    val path:       *Path = ?manager.storage.paths[index];
+    val generation: u64   = path.generation;
+    if (path.recovery_owners != 0) { @released = handle_at(manager, index); }
+    free_path_challenges(manager, index, generation, false);
+    free_path_responses(manager, index, generation, false);
+    if (manager.fallback_index == index && manager.fallback_generation == generation) {
+        manager.fallback_index      = invalid_index();
+        manager.fallback_generation = 0;
+    }
+    reset_path(path, generation);
+    ret true;
+}
+
 fun create_path(manager: *Manager, endpoint: Endpoint, locally_created: bool,
     preferred: bool, is_rebinding: bool) PathResult {
     val index: usize = free_path_index(manager);
@@ -806,11 +867,11 @@ pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes
         index = found.handle.index;
         # rfc 9000 9.3: a peer that moves back to an address whose validation
         # failed is validated afresh, as at a new address. the failed path
-        # gives up its slot once nothing it sent is still owned
+        # gives up its slot once no prepared work holds it
         if (manager.storage.paths[index].state == PATH_FAILED) {
             if (!non_probing || !manager.handshake_confirmed ||
                 manager.config.role == ROLE_CLIENT ||
-                release(manager, found.handle).status != STATUS_OK) {
+                !abandon_path(manager, index, ?result.released)) {
                 result.status           = STATUS_BLOCKED;
                 result.handle           = found.handle;
                 result.needs_validation = true;
