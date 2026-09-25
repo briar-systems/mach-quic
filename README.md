@@ -223,7 +223,14 @@ a failed prior-path revalidation invalidates that path while a failed MTU
 confirmation leaves address ownership intact. A matching PATH_RESPONSE can arrive
 on any path and validates the path on which its PATH_CHALLENGE was sent. A
 challenge below 1200 bytes validates only address ownership. MTU validation needs
-a padded challenge.
+a padded challenge. A response that validates a path whose MTU is not yet
+validated sets `ValidationResult.validate_mtu`, and the core then queues a padded
+MTU challenge on that path, which the validated address lets it send at once
+(RFC 9000 8.2.1). A challenge left unanswered for a probe timeout is sent again
+with fresh data, and each later wait doubles, until the validation deadline
+(RFC 9000 8.2.1 and 9.4). `on_timeout` reports the path and purpose in
+`TimeoutResult.resend`. Once every challenge slot is held, a new challenge takes
+the slot of the oldest one sent for the same path and purpose.
 
 Every received PATH_CHALLENGE queues one copied response on its exact receive path,
 including duplicates. The response preparation reports the path's amplification
@@ -268,7 +275,25 @@ responses, send reservations, and MTU probes remain completion-owned until they
 publish, cancel, or become stale. `finish_close` refuses to invalidate storage
 while any owner remains. Failed paths likewise cannot be released or restarted
 until their owners drain. Restart increments the path generation before accepting
-traffic again.
+traffic again. A server that receives a non-probing packet from a failed path's
+address once the handshake is confirmed gives up that path and validates the
+address afresh as it would a new one (RFC 9000 9.3). Only prepared work, a
+prepared challenge or response, a send reservation or an MTU probe, holds it.
+Packets still in flight on it do not, since only the peer's packets from that
+address could settle them: `Observation.released` names the path, and the core
+detaches those packets' owners so they settle without charging any path. A
+probing packet from a failed address is still refused.
+
+A server whose path slots are all held gives up a path the connection no longer
+needs to make room for a peer's new address: one that is not selected, is not
+the validated fallback a failed migration would revert to, and holds no prepared
+challenge, response, send reservation or MTU probe. A failed path goes first,
+then the one heard from least recently. Any validation under way on it is
+abandoned (RFC 9000 9.3), and `Observation.released` names it when packets sent
+on it were still in flight, so the core settles those packets without charging
+any path. With nothing to give up, the packet is refused with STATUS_BLOCKED and
+ERROR_CAPACITY and the connection stays open, so the peer's retransmission tries
+again.
 
 ## Stream contracts
 
@@ -564,7 +589,7 @@ handshake has handed everything over, the adapter moves tls's established
 core out of the engine and the engine holds no memory.
 
 Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 4,560 bytes and `Connection` at 16,976,
+records are `assembly.Storage` at 4,656 bytes and `Connection` at 16,976,
 which includes tls's established core and the expanded 1-RTT key contexts
 (1,992 bytes to send, 4,008 to receive). On a live connection that has gone
 idle, an established connection with no streams holds no chunks at all, and

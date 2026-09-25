@@ -648,9 +648,11 @@ test "quic.path.simulated: failed prior-path revalidation defeats forwarding att
     val new_challenge: path.PreparedChallenge = path.prepare_challenge(?manager, moved.handle);
     path.publish_challenge(?manager, new_challenge.token, 10);
     val prior_failed: path.TimeoutResult = path.on_timeout(?manager, 310);
+    # a probing packet does not revive the failed path. a non-probing one would
+    # validate it afresh (#238)
     if (prior_failed.failed.index != old.index || prior_failed.reverted || prior_failed.connection_lost ||
         path.selected(?manager).handle.index != moved.handle.index ||
-        path.observe(?manager, initial, 12, 100, true, true, true, true, 311).status != path.STATUS_BLOCKED) {
+        path.observe(?manager, initial, 12, 100, false, true, true, true, 311).status != path.STATUS_BLOCKED) {
         ret 1;
     }
     val candidate_failed: path.TimeoutResult = path.on_timeout(?manager, 310);
