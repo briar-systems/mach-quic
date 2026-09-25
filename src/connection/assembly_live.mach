@@ -1298,7 +1298,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     rollback_probe.armed         = true;
     var rollback_entropy_source: secret.Entropy = secret.Entropy{
         context: (?rollback_probe)::ptr, secret_context: nil,
-        fill_fn:                                         rollback_entropy, initialized: true
+        fill_fn: rollback_entropy, initialized: true
     };
     var rollback_tls_config: config.ClientConfig = dialer_tls_config;
     rollback_tls_config.entropy              = ?rollback_entropy_source;
