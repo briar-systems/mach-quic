@@ -98,11 +98,13 @@ not change on a key update (RFC 9001 section 6). Installing 1-RTT keys expands
 the current keys, a key update expands only the new AEAD key, and the receive
 side's next generation is expanded by the first packet that needs it, so
 forged packets in a new phase cost at most one expansion per phase. The
-Initial, 0-RTT and Handshake levels each take one secret pool chunk for both
-directions' contexts while their keys are live (see Connection assembly). Until
-std's typed secret view (mach-std#905) lets a context live in that chunk, those
-levels leave their sets unbound, and an unbound set expands its keys per
-packet. ChaCha20-Poly1305 keeps no expanded AEAD context.
+Initial, 0-RTT and Handshake levels each take one secret pool chunk while their
+keys are live (see Connection assembly), view it through std's typed secret
+view as two `Contexts`, one per direction, and bind their sets to them before
+the keys are derived. `unbind` forgets a set's contexts before that chunk goes
+back. No level of a connection expands a key per packet. A set nobody bound,
+such as the one the listener seals a single stateless packet with, expands its
+keys for each packet. ChaCha20-Poly1305 keeps no expanded AEAD context.
 
 `destroy`, `destroy_initial`, `destroy_send`, and `destroy_receive` zero all
 secret, packet-key, IV, and header-key storage and make later operations fail as
@@ -514,7 +516,8 @@ on its implementation criteria with that one left explicitly undemonstrated.
 `Config`. `Connection` is the small secret-welded control record. The caller
 separately owns a public `Storage` holding the connection's fixed state, a
 `std.memory.buffers.Source` for everything taken on demand, a
-`std.memory.buffers.SecretSource` over the same pool for key contexts, and a
+`std.memory.buffers.SecretSource` over the same pool for key contexts, which
+must bind typed views (`fn_bind`), and a
 per-pump scratch pair: a public `Scratch` with the per-call packet and event buffers,
 and a secret-welded `SecretScratch` with the two secret plaintext buffers. One
 pair serves every connection on a pump. A connection binds it at init and
@@ -561,7 +564,7 @@ handshake has handed everything over, the adapter moves tls's established
 core out of the engine and the engine holds no memory.
 
 Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 4,560 bytes and `Connection` at 16,968,
+records are `assembly.Storage` at 4,560 bytes and `Connection` at 16,976,
 which includes tls's established core and the expanded 1-RTT key contexts
 (1,992 bytes to send, 4,008 to receive). On a live connection that has gone
 idle, an established connection with no streams holds no chunks at all, and
@@ -820,12 +823,17 @@ true from that instant.
 
 ## Development
 
-Dependencies use exact Git tags.
+quic requires mach 5.12 and mach-std 8. Dependencies are version ranges, pinned
+by their committed gitlinks.
 
 ```sh
 mach dep pull .
 mach build .
-mach test .
+mach test . --lib tests
 ```
+
+mach tests only the selected artifact's closure, and the library does not
+reach every test module, so the test-only `tests` artifact reaches them all.
+`tools/test-selection` fails when a test under `src` is collected on no target.
 
 Build products are written to Mach's default `out/` directory.
