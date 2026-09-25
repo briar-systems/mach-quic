@@ -2669,9 +2669,13 @@ fun process_frame(core: *Core, secrets: *Secrets,
     if (value.kind == frame.PATH_RESPONSE) {
         val validated: path_api.ValidationResult = path_api.receive_response_scoped(
             core.paths, core.config.source, value.path_data, now_ns);
+        # rfc 9000 8.2.1 and 8.2.3: a path whose challenge went out unpadded is
+        # validated again with a padded one, which confirms its mtu
         if (validated.status != path_api.STATUS_ERROR &&
             apply_path_signals(core, validated.reset_congestion,
-            validated.reset_rtt, false, now_ns)) { ret true; }
+            validated.reset_rtt, false, now_ns) &&
+            (!validated.validate_mtu || challenge_path(core, validated.handle, true,
+            path_api.VALIDATION_MTU))) { ret true; }
         core.close_error = INTERNAL_ERROR;
         ret false;
     }
@@ -3217,13 +3221,20 @@ fun queue_challenge(core: *Core, value: path_api.Handle, data: [8]u8,
 # limit allows
 fun validate_path(core: *Core, value: path_api.Handle) bool {
     if (path_api.validating_scoped(core.paths, core.config.source, value)) { ret true; }
+    ret challenge_path(core, value, false, path_api.VALIDATION_PATH);
+}
+
+# rfc 9000 8.2.1: queues a challenge on `value` for `purpose` with fresh
+# unpredictable data, and wakes the driver to send it
+fun challenge_path(core: *Core, value: path_api.Handle, padded: bool,
+    purpose: u8) bool {
     var attempt: usize = 0;
     for (attempt < 4) {
         var data:   [8]u8;
         val filled: err[io_error.Error] = rand.fill(?data[0], 8);
         if (sel filled.err) { ret false; }
         val queued: path_api.OperationResult = queue_challenge(core, value, data,
-            false, path_api.VALIDATION_PATH);
+            padded, purpose);
         if (queued.status == path_api.STATUS_OK) {
             wake(core);
             ret true;
@@ -4765,6 +4776,12 @@ fun compute_timer(core: *Core) transport_api.CoreTimer {
                     core.paths.storage.paths[path_index].validation_deadline_ns,
                     TIMER_PATH);
             }
+            if (core.paths.storage.paths[path_index].valid &&
+                core.paths.storage.paths[path_index].challenge_resend_ns != 0) {
+                timer_candidate(?armed, ?deadline, ?kind,
+                    core.paths.storage.paths[path_index].challenge_resend_ns,
+                    TIMER_PATH);
+            }
             path_index = path_index + 1;
         }
         var space_index_value: usize = 0;
@@ -4926,9 +4943,18 @@ fun on_timeout_unsettled(core: *Core, secrets: *Secrets, generation: u64,
     if (fired_kind == TIMER_PACE) {
         core.pace_deadline_ns = 0;
     }
-    if (fired_kind == TIMER_PATH && !apply_path_timeout(core,
-        path_api.on_timeout_scoped(core.paths, core.config.source, now_ns), now_ns)) {
-        ret fail(core, NO_VIABLE_PATH, now_ns);
+    if (fired_kind == TIMER_PATH) {
+        val timed: path_api.TimeoutResult = path_api.on_timeout_scoped(core.paths,
+            core.config.source, now_ns);
+        if (!apply_path_timeout(core, timed, now_ns)) {
+            ret fail(core, NO_VIABLE_PATH, now_ns);
+        }
+        # rfc 9000 8.2.1 and 9.4: an unanswered challenge is sent again with
+        # fresh data until the validation deadline
+        if (timed.resend_purpose != 0 && !challenge_path(core, timed.resend,
+            timed.resend_purpose == path_api.VALIDATION_MTU, timed.resend_purpose)) {
+            ret fail(core, INTERNAL_ERROR, now_ns);
+        }
     }
     ret core_result(core, transport_api.STATUS_OK, 0);
 }
