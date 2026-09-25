@@ -3,7 +3,7 @@
 
 use std.runtime;
 
-use quic.lib;
+use quic.lib.quic;
 
 use congestion_tests: quic.congestion.simulated;
 use assembly_tests:   quic.connection.assembly;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The library entry moved from `src/lib.mach` to `src/lib/quic.mach` and the tests entry from `src/tests.mach` to `src/lib/tests.mach`, the family layout for artifact entries (briar-systems/.github#107). A bare `use quic;` still binds the library entry, and every other module path is unchanged. The entry module itself is now `quic.lib.quic`, so an import that named `quic.lib` directly, such as one reading `quic.lib.VERSION`, names that path or uses `use quic;` instead (#249).
+
 ### Fixed
 
 - A lost PATH_CHALLENGE or PATH_RESPONSE no longer fails path validation (#236). A challenge was sent once, so one lost datagram left the path unvalidated until its deadline of three probe timeouts, and a rebound client whose new port failed that way lost the connection with NO_VIABLE_PATH once the check of its old port failed too. A sent challenge now arms a resend a probe timeout later. If no response has arrived by then, the core queues a new challenge with fresh data for the same purpose, and each later wait doubles, as a probe timeout backs off (RFC 9000 8.2.1 and 9.4). No resend is armed past the validation deadline, so the default factor of three sends two challenges. A response to any of them validates the path. `path.on_timeout` reports a due resend in `TimeoutResult.resend` and `resend_purpose`, and the core's path timer covers resends. `path.Path` gains `challenge_resend_ns` and `challenge_backoff_ns`, and `path.Challenge` gains `resend_ns`. Once every challenge slot is held, a new challenge takes the slot of the oldest one sent for the same path and purpose. `assembly.Storage` is 4,656 bytes, up from 4,560, and `assembly.Connection` stays at 16,976.
