@@ -3001,3 +3001,27 @@ test "quic.connection.assembly: a handshake costs what was measured" {
     }
     ret 0;
 }
+
+$if ($mach.build.mode == $mach.mode.debug) {
+    # two peers, three levels (Initial, Handshake, 1-RTT), two directions, and
+    # an aead and a header protection key in each
+    val INSTALL_EXPANSIONS: u64 = 24;
+
+    test "quic.connection.assembly: every level expands its keys at install alone" {
+        var clock:       u64   = 1000;
+        var moved:       usize = 0;
+        val start:       u64   = protection.expansion_count();
+        val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
+        if (established != 0) { ret established; }
+        val handshake: u64 = protection.expansion_count() - start;
+        val settled:   i32 = settle(?clock, ?moved);
+        if (settled != 0) { ret settled; }
+        val idle: u64 = protection.expansion_count() - start - handshake;
+        if (handshake != INSTALL_EXPANSIONS || idle != 0) {
+            print.eprintlnf("{} expansions over the handshake (expected {}), {} after it, {} datagrams",
+                handshake, INSTALL_EXPANSIONS, idle, moved);
+            ret 1;
+        }
+        ret 0;
+    }
+}
