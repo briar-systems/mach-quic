@@ -2669,9 +2669,13 @@ fun process_frame(core: *Core, secrets: *Secrets,
     if (value.kind == frame.PATH_RESPONSE) {
         val validated: path_api.ValidationResult = path_api.receive_response_scoped(
             core.paths, core.config.source, value.path_data, now_ns);
+        # rfc 9000 8.2.1 and 8.2.3: a path whose challenge went out unpadded is
+        # validated again with a padded one, which confirms its mtu
         if (validated.status != path_api.STATUS_ERROR &&
             apply_path_signals(core, validated.reset_congestion,
-            validated.reset_rtt, false, now_ns)) { ret true; }
+            validated.reset_rtt, false, now_ns) &&
+            (!validated.validate_mtu || challenge_path(core, validated.handle, true,
+            path_api.VALIDATION_MTU))) { ret true; }
         core.close_error = INTERNAL_ERROR;
         ret false;
     }
