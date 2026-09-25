@@ -223,7 +223,14 @@ a failed prior-path revalidation invalidates that path while a failed MTU
 confirmation leaves address ownership intact. A matching PATH_RESPONSE can arrive
 on any path and validates the path on which its PATH_CHALLENGE was sent. A
 challenge below 1200 bytes validates only address ownership. MTU validation needs
-a padded challenge.
+a padded challenge. A response that validates a path whose MTU is not yet
+validated sets `ValidationResult.validate_mtu`, and the core then queues a padded
+MTU challenge on that path, which the validated address lets it send at once
+(RFC 9000 8.2.1). A challenge left unanswered for a probe timeout is sent again
+with fresh data, and each later wait doubles, until the validation deadline
+(RFC 9000 8.2.1 and 9.4). `on_timeout` reports the path and purpose in
+`TimeoutResult.resend`. Once every challenge slot is held, a new challenge takes
+the slot of the oldest one sent for the same path and purpose.
 
 Every received PATH_CHALLENGE queues one copied response on its exact receive path,
 including duplicates. The response preparation reports the path's amplification
@@ -578,7 +585,7 @@ handshake has handed everything over, the adapter moves tls's established
 core out of the engine and the engine holds no memory.
 
 Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 4,560 bytes and `Connection` at 16,976,
+records are `assembly.Storage` at 4,656 bytes and `Connection` at 16,976,
 which includes tls's established core and the expanded 1-RTT key contexts
 (1,992 bytes to send, 4,008 to receive). On a live connection that has gone
 idle, an established connection with no streams holds no chunks at all, and

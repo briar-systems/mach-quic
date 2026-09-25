@@ -125,6 +125,10 @@ pub rec Path {
     mtu_probe_prepared:         bool;
     mtu_probe_active:           bool;
     transport_valid:            bool;
+    # an unanswered challenge is sent again at `challenge_resend_ns`, after
+    # `challenge_backoff_ns`, which doubles with each send (rfc 9000 9.4)
+    challenge_resend_ns:  u64;
+    challenge_backoff_ns: u64;
 }
 
 pub rec Challenge {
@@ -136,6 +140,8 @@ pub rec Challenge {
     timeout_ns:      u64;
     state:           u8;
     purpose:         u8;
+    # the probe timeout a first send waits before the challenge is sent again
+    resend_ns: u64;
     # the datagram must be padded, and the challenge waits until it can be
     padded: bool;
     # the prepared datagram was padded to 1200, so a response validates the mtu
@@ -298,6 +304,9 @@ pub rec ValidationResult {
     reset_congestion: bool;
     reset_rtt:        bool;
     reset_ecn:        bool;
+    # the path's address is validated but not its mtu, so a padded challenge
+    # is due (rfc 9000 8.2.1)
+    validate_mtu: bool;
 }
 
 pub rec TimeoutResult {
@@ -313,6 +322,9 @@ pub rec TimeoutResult {
     reset_congestion:      bool;
     reset_rtt:             bool;
     reset_ecn:             bool;
+    # a challenge on this path went unanswered, so one with fresh data is due
+    resend:         Handle;
+    resend_purpose: u8;
 }
 
 pub rec MtuPrepared {
@@ -500,6 +512,8 @@ fun reset_path(value: *Path, generation: u64) {
     value.transport_valid            = false;
     value.validation_started_ns      = 0;
     value.validation_deadline_ns     = 0;
+    value.challenge_resend_ns        = 0;
+    value.challenge_backoff_ns       = 0;
     value.largest_non_probing_packet = 0;
     value.last_received_ns           = 0;
     value.generation                 = generation;
@@ -1082,6 +1096,25 @@ fun clear_challenge(manager: *Manager, index: usize) {
     manager.storage.challenges[index].valid = false;
 }
 
+# the slot of the earliest challenge sent on `value` for `purpose`, which a new
+# one may take once every slot is held. it is the one least likely answered
+fun oldest_sent_challenge(manager: *Manager, value: Handle, purpose: u8) usize {
+    var oldest: usize = invalid_index();
+    var i:      usize = 0;
+    for (i < manager.storage.challenge_capacity) {
+        val challenge: *Challenge = ?manager.storage.challenges[i];
+        if (challenge.valid && challenge.state == CHALLENGE_SENT &&
+            challenge.path_index == value.index && challenge.path_generation == value.generation &&
+            challenge.purpose == purpose &&
+            (oldest == invalid_index() ||
+            challenge.sent_at_ns < manager.storage.challenges[oldest].sent_at_ns)) {
+            oldest = i;
+        }
+        i = i + 1;
+    }
+    ret oldest;
+}
+
 fun challenge_data_available(manager: *Manager, data: [8]u8) bool {
     var i: usize = 0;
     for (i < manager.storage.challenge_capacity) {
@@ -1121,7 +1154,8 @@ pub fun queue_challenge(manager: *Manager, value: Handle, data: [8]u8,
         pending = pending + 1;
     }
     if (!challenge_data_available(manager, data)) { ret operation_error(ERROR_DUPLICATE); }
-    val index: usize = free_challenge_index(manager);
+    var index: usize = free_challenge_index(manager);
+    if (index == invalid_index()) { index = oldest_sent_challenge(manager, value, purpose); }
     if (index == invalid_index()) { ret operation_error(ERROR_CAPACITY); }
     var pto_ns: u64 = current_pto_ns;
     if (path_pto_ns > pto_ns) { pto_ns = path_pto_ns; }
@@ -1136,6 +1170,7 @@ pub fun queue_challenge(manager: *Manager, value: Handle, data: [8]u8,
     challenge.path_generation         = value.generation;
     challenge.generation              = generation;
     challenge.timeout_ns              = duration_ns;
+    challenge.resend_ns               = pto_ns;
     challenge.state                   = CHALLENGE_QUEUED;
     challenge.purpose                 = purpose;
     challenge.padded                  = padded;
@@ -1258,6 +1293,23 @@ pub fun cancel_challenge(manager: *Manager, token: ChallengeToken) OperationResu
     ret result;
 }
 
+# rfc 9000 9.4: a sent challenge is sent again once its wait passes unanswered.
+# the first wait is a probe timeout and each later one doubles, as a probe
+# timeout backs off, and none is armed past the validation deadline
+fun arm_resend(path: *Path, probe_timeout_ns: u64, now_ns: u64) {
+    var wait_ns: u64 = probe_timeout_ns;
+    if (path.challenge_backoff_ns != 0 &&
+        !checked_multiply(path.challenge_backoff_ns, 2, ?wait_ns)) {
+        wait_ns = 0 - 1::u64;
+    }
+    path.challenge_backoff_ns = wait_ns;
+    var resend_ns: u64 = 0;
+    if (!checked_add(now_ns, wait_ns, ?resend_ns) || resend_ns >= path.validation_deadline_ns) {
+        resend_ns = 0;
+    }
+    path.challenge_resend_ns = resend_ns;
+}
+
 pub fun publish_challenge(manager: *Manager, token: ChallengeToken, now_ns: u64) OperationResult {
     if (!manager_record_valid(manager) || manager.core_lease != 0 ||
         !challenge_token_valid(manager, token)) {
@@ -1286,6 +1338,7 @@ pub fun publish_challenge(manager: *Manager, token: ChallengeToken, now_ns: u64)
         manager.storage.paths[value.index].validation_deadline_ns = deadline_ns;
         manager.storage.paths[value.index].validation_purpose     =
             manager.storage.challenges[token.index].purpose;
+        manager.storage.paths[value.index].challenge_backoff_ns = 0;
     }
     or {
         if (manager.storage.paths[value.index].validation_purpose !=
@@ -1297,6 +1350,8 @@ pub fun publish_challenge(manager: *Manager, token: ChallengeToken, now_ns: u64)
     }
     manager.storage.challenges[token.index].state      = CHALLENGE_SENT;
     manager.storage.challenges[token.index].sent_at_ns = now_ns;
+    arm_resend(?manager.storage.paths[value.index],
+        manager.storage.challenges[token.index].resend_ns, now_ns);
     var result: OperationResult;
     result.status = STATUS_OK;
     ret result;
@@ -1351,9 +1406,8 @@ pub fun receive_response(manager: *Manager, data: [8]u8, now_ns: u64) Validation
             if (manager.storage.challenges[i].sent_padded) {
                 manager.storage.paths[index].mtu_validated = true;
             }
-            manager.storage.paths[index].validation_started_ns  = 0;
-            manager.storage.paths[index].validation_deadline_ns = 0;
-            manager.storage.paths[index].validation_purpose     = 0;
+            result.validate_mtu = !manager.storage.paths[index].mtu_validated;
+            end_validation(?manager.storage.paths[index]);
             clear_challenge(manager, i);
             result.status           = STATUS_OK;
             result.handle           = handle_at(manager, index);
@@ -1754,15 +1808,21 @@ pub fun publish_send(manager: *Manager, token: SendToken) OperationResult {
     ret result;
 }
 
+fun end_validation(path: *Path) {
+    path.validation_started_ns  = 0;
+    path.validation_deadline_ns = 0;
+    path.validation_purpose     = 0;
+    path.challenge_resend_ns    = 0;
+    path.challenge_backoff_ns   = 0;
+}
+
 fun timeout_path(manager: *Manager, index: usize) TimeoutResult {
     var result:     TimeoutResult;
     val generation: u64 = manager.storage.paths[index].generation;
-    result.status                                       = STATUS_OK;
-    result.failed                                       = handle_at(manager, index);
-    manager.storage.paths[index].state                  = PATH_FAILED;
-    manager.storage.paths[index].validation_started_ns  = 0;
-    manager.storage.paths[index].validation_deadline_ns = 0;
-    manager.storage.paths[index].validation_purpose     = 0;
+    result.status                      = STATUS_OK;
+    result.failed                      = handle_at(manager, index);
+    manager.storage.paths[index].state = PATH_FAILED;
+    end_validation(?manager.storage.paths[index]);
     free_path_challenges(manager, index, generation, true);
     free_path_responses(manager, index, generation, true);
     if (!manager.storage.paths[index].selected) { ret result; }
@@ -1807,13 +1867,21 @@ pub fun on_timeout(manager: *Manager, now_ns: u64) TimeoutResult {
                 ret timeout_path(manager, i);
             }
             val generation: u64 = manager.storage.paths[i].generation;
-            manager.storage.paths[i].validation_started_ns  = 0;
-            manager.storage.paths[i].validation_deadline_ns = 0;
-            manager.storage.paths[i].validation_purpose     = 0;
+            end_validation(?manager.storage.paths[i]);
             free_path_challenges(manager, i, generation, true);
             result.status                = STATUS_OK;
             result.failed                = handle_at(manager, i);
             result.mtu_validation_failed = true;
+            ret result;
+        }
+        # rfc 9000 8.2.1 and 9.4: the challenge went unanswered for its wait,
+        # so the caller sends one with fresh data
+        if (manager.storage.paths[i].valid && manager.storage.paths[i].challenge_resend_ns != 0 &&
+            now_ns >= manager.storage.paths[i].challenge_resend_ns) {
+            manager.storage.paths[i].challenge_resend_ns = 0;
+            result.status                                = STATUS_OK;
+            result.resend                                = handle_at(manager, i);
+            result.resend_purpose                        = manager.storage.paths[i].validation_purpose;
             ret result;
         }
         i = i + 1;

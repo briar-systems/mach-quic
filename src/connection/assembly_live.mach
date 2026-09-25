@@ -2299,6 +2299,57 @@ test "quic.connection.assembly: a rebound client's new address is validated and 
     ret 0;
 }
 
+# rfc 9000 8.2.1 and 9.4: the first challenge to a rebound client's new port is
+# lost, and a fresh one sent a probe timeout later validates the port
+test "quic.connection.assembly: a lost path challenge is sent again and the rebound port validates" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val bound:   ip.Endpoint = nat_endpoint(1);
+    var request: transport.Stream;
+    val asked:   i32         = request_from(bound, ?request, ?clock, ?moved);
+    if (asked != 0) { ret asked; }
+    var drops:    usize = 1;
+    val answered: i32   = await_answer(bound, bound, ?drops, request, ?clock, ?moved);
+    if (answered != 0) { ret report_paths(answered); }
+    val path: *path_api.Path = listener_path(bound);
+    if (drops != 0 || path == nil || !path.address_validated || !path.selected) {
+        ret report_paths(45);
+    }
+    ret 0;
+}
+
+# rfc 9000 8.2.1: the amplification limit keeps the challenge that validates a
+# rebound client's new port small, and a padded one then validates its mtu
+test "quic.connection.assembly: a port validated by an unpadded challenge then has its mtu validated" {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val bound:   ip.Endpoint = nat_endpoint(1);
+    var request: transport.Stream;
+    val asked:   i32         = request_from(bound, ?request, ?clock, ?moved);
+    if (asked != 0) { ret asked; }
+    var drops:    usize          = 0;
+    var unpadded: bool           = false;
+    var rounds:   usize          = 0;
+    var path:     *path_api.Path = nil;
+    for (rounds < 64) {
+        if (nat_round(bound, bound, ?drops, ?clock, ?moved) != 0) { ret report_paths(46); }
+        path = listener_path(bound);
+        if (path != nil && path.address_validated && !path.mtu_validated) { unpadded = true; }
+        if (path != nil && path.mtu_validated)                            { brk; }
+        rounds = rounds + 1;
+    }
+    if (!unpadded || path == nil || !path.address_validated || !path.mtu_validated) {
+        ret report_paths(47);
+    }
+    ret await_answer(bound, bound, ?drops, request, ?clock, ?moved);
+}
+
 fun sent_owner(value: *assembly.Connection, number: u64) *core.Owner {
     var i: usize = 0;
     for (i < value.core.owner_capacity) {
@@ -2780,7 +2831,7 @@ test "quic.connection.assembly: a full window survives 10% loss and reordering w
 # for each other: the fixed records every connection carries, and the chunks a
 # live idle connection holds. a failure means that cost moved. decide it
 # deliberately, and update these numbers, the changelog and the readme together
-val GUARD_STORAGE_BYTES:    usize = 4560;
+val GUARD_STORAGE_BYTES:    usize = 4656;
 val GUARD_CONNECTION_BYTES: usize = 16976;
 # established, no streams
 val GUARD_IDLE_CHUNKS: usize = 0;
