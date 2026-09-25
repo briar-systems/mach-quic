@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A path whose validation failed no longer blocks its address for the rest of the connection (#238). `path.observe` answered every later packet from a PATH_FAILED address with STATUS_BLOCKED and offered no retry, so a peer that returned to it, for example after its challenges were lost, could never use that address again. A server now releases the failed path on a non-probing packet from its address, once the handshake is confirmed and nothing the path sent is still owned, and handles the packet as one from a new address. That creates a fresh path and starts a fresh validation, subject to the same limits: amplification, the highest-numbered non-probing packet rule for migration, and a fresh generation, so stale tokens stay stale (RFC 9000 9.3). A probing packet from a failed address, a packet before handshake confirmation, one on a client, and one arriving while the failed path still has owners are still answered with STATUS_BLOCKED.
+
 ## [0.20.0] - 2026-09-25
 
 ### Changed
