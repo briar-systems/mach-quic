@@ -301,6 +301,9 @@ pub rec ValidationResult {
     reset_congestion: bool;
     reset_rtt:        bool;
     reset_ecn:        bool;
+    # the path's address is validated but not its mtu, so a padded challenge
+    # is due (rfc 9000 8.2.1)
+    validate_mtu: bool;
 }
 
 pub rec TimeoutResult {
@@ -1302,6 +1305,7 @@ pub fun receive_response(manager: *Manager, data: [8]u8, now_ns: u64) Validation
             if (manager.storage.challenges[i].sent_padded) {
                 manager.storage.paths[index].mtu_validated = true;
             }
+            result.validate_mtu = !manager.storage.paths[index].mtu_validated;
             end_validation(?manager.storage.paths[index]);
             clear_challenge(manager, i);
             result.status           = STATUS_OK;
