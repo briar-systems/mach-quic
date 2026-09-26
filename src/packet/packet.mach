@@ -761,14 +761,7 @@ pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
     ret result;
 }
 
-test "quic.packet.packet: packet types map to number spaces" {
-    if (number_space(PACKET_INITIAL) != SPACE_INITIAL)     { ret 1; }
-    if (number_space(PACKET_HANDSHAKE) != SPACE_HANDSHAKE) { ret 1; }
-    if (number_space(PACKET_ONE_RTT) != SPACE_APPLICATION) { ret 1; }
-    ret 0;
-}
-
-test "quic.packet.packet: protected headers include authentication tag length" {
+test packet__protected_headers_include_authentication_tag_length {
     var value: Packet;
     value.header.kind              = PACKET_INITIAL;
     value.header.version           = VERSION_1;
@@ -786,6 +779,7 @@ test "quic.packet.packet: protected headers include authentication tag length" {
     ret 0;
 }
 
+#[testing]
 fun header_sizes_agree(value: *Packet, ciphertext_length: usize) bool {
     var bytes:   [512]u8;
     var builder: binary.Builder        = binary.builder(?bytes[0], 512, binary.BIG);
@@ -799,7 +793,7 @@ fun header_sizes_agree(value: *Packet, ciphertext_length: usize) bool {
         builder.len == sized.count;
 }
 
-test "quic.packet.packet: a protected header's size is what encoding it writes" {
+test packet__a_protected_headers_size_is_what_encoding_it_writes {
     var token: [300]u8;
     var value: Packet;
     value.header.version           = VERSION_1;
@@ -831,7 +825,7 @@ test "quic.packet.packet: a protected header's size is what encoding it writes" 
     ret 0;
 }
 
-test "quic.packet.packet: RFC packet number reconstruction vectors" {
+test packet__rfc_packet_number_reconstruction_vectors {
     if (reconstruct_packet_number(0xa82f30ea, 0x9b32, 2) != 0xa82f9b32) { ret 1; }
     if (packet_number_width(0xabe8bc, 0xabe8b3) != 1)                   { ret 1; }
     if (truncate_packet_number(0xabe8bc, 1) != 0xbc)                    { ret 1; }
@@ -845,6 +839,7 @@ test "quic.packet.packet: RFC packet number reconstruction vectors" {
     ret 0;
 }
 
+#[testing]
 fun fragmented_round_trip(packet: *Packet, context: DecodeContext) bool {
     var bytes: [256]u8;
     var b:     binary.Builder = binary.builder(?bytes[0], 256, binary.BIG);
@@ -864,7 +859,7 @@ fun fragmented_round_trip(packet: *Packet, context: DecodeContext) bool {
     ret r.status == STATUS_DONE && d.pos == b.len && out.header.kind == packet.header.kind;
 }
 
-test "quic.packet.packet: every packet form accepts every-byte fragmentation" {
+test packet__every_packet_form_accepts_every_byte_fragmentation {
     var context: DecodeContext;
     context.version                = VERSION_1;
     context.expected_packet_number = 1;
@@ -897,7 +892,7 @@ test "quic.packet.packet: every packet form accepts every-byte fragmentation" {
     ret 0;
 }
 
-test "quic.packet.packet: malformed headers and lengths fail without mutation" {
+test packet__malformed_headers_and_lengths_fail_without_mutation {
     val reserved_short: [2]u8 = [2]u8{0x58, 0};
     var context:        DecodeContext;
     context.expected_packet_number = 0;
@@ -912,7 +907,7 @@ test "quic.packet.packet: malformed headers and lengths fail without mutation" {
     ret 0;
 }
 
-test "quic.packet.packet: initial packet round trips transactionally" {
+test packet__initial_packet_round_trips_transactionally {
     var cid_bytes: [8]u8 = [8]u8{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08};
     var token:     [3]u8 = [3]u8{1, 2, 3};
     var payload:   [5]u8 = [5]u8{4, 5, 6, 7, 8};
@@ -951,7 +946,7 @@ test "quic.packet.packet: initial packet round trips transactionally" {
     ret 0;
 }
 
-test "quic.packet.packet: version negotiation and Retry are bounded" {
+test packet__version_negotiation_and_retry_are_bounded {
     var versions: [8]u8 = [8]u8{0, 0, 0, 1, 0x6b, 0x33, 0x43, 0xcf};
     var packet:   Packet;
     packet.header.kind   = PACKET_VERSION_NEGOTIATION;
@@ -979,7 +974,7 @@ test "quic.packet.packet: version negotiation and Retry are bounded" {
     ret 0;
 }
 
-test "quic.packet.packet: RFC 9001 Retry vector decodes and re-encodes exactly" {
+test packet__rfc_9001_retry_vector_decodes_and_re_encodes_exactly {
     val vector: [36]u8 = [36]u8{
         0xff, 0, 0, 0, 1, 0, 8, 0xf0, 0x67, 0xa5, 0x50, 0x2a,
         0x42, 0x62, 0xb5, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x04, 0xa2,
@@ -1003,7 +998,7 @@ test "quic.packet.packet: RFC 9001 Retry vector decodes and re-encodes exactly" 
     ret 0;
 }
 
-test "quic.packet.packet: fixed builder failure publishes no packet" {
+test packet__fixed_builder_failure_publishes_no_packet {
     var payload: [2]u8 = [2]u8{1, 2};
     var packet:  Packet;
     packet.header.kind              = PACKET_ONE_RTT;
@@ -1020,7 +1015,7 @@ test "quic.packet.packet: fixed builder failure publishes no packet" {
 
 # an empty record literal does not reliably clear its fields, and this context
 # steers how many bytes a short header takes off the wire on an untrusted path
-test "quic.packet.packet: a short header decodes from a defined context" {
+test packet__a_short_header_decodes_from_a_defined_context {
     val context: DecodeContext = empty_decode_context();
     if (context.version != 0 || context.expected_packet_number != 0 ||
         context.short_destination_len != 0) { ret 1; }

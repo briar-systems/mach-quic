@@ -2686,7 +2686,7 @@ pub fun snapshot(adapter: *Adapter) Snapshot {
     ret value;
 }
 
-test "quic.connection.handshake: mach-tls levels suites and directions map exactly" {
+test handshake__mach_tls_levels_suites_and_directions_map_exactly {
     var level:     Level;
     var direction: u8;
     var algorithm: protection.Algorithm;
@@ -2708,7 +2708,7 @@ test "quic.connection.handshake: mach-tls levels suites and directions map exact
     ret 0;
 }
 
-test "quic.connection.handshake: restart is a client-only provider member" {
+test handshake__restart_is_a_client_only_provider_member {
     var adapter: Adapter;
     adapter.tls_role  = SERVER;
     adapter.tls_error = 0;

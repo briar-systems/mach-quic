@@ -86,7 +86,7 @@ pub fun bytes(key: Key, data: *u8, length: usize) u64 {
     ret state.v0 ^ state.v1 ^ state.v2 ^ state.v3;
 }
 
-test "quic.storage.hash: siphash-2-4 matches the reference vectors" {
+test hash__siphash_2_4_matches_the_reference_vectors {
     val key:     Key   = Key{k0: 0x0706050403020100, k1: 0x0f0e0d0c0b0a0908};
     var message: [15]u8;
     var i:       usize = 0;
@@ -100,7 +100,7 @@ test "quic.storage.hash: siphash-2-4 matches the reference vectors" {
     ret 0;
 }
 
-test "quic.storage.hash: random keys differ" {
+test hash__random_keys_differ {
     val first:  opt[Key] = random_key();
     val second: opt[Key] = random_key();
     if (!sel first.some)                                                    { ret 1; }

@@ -545,7 +545,7 @@ pub fun encode(b: *binary.Builder, parameters: *Parameters, role: u8, limits: Li
     ret measured;
 }
 
-test "quic.transport_parameters: client parameters and unknown extensions round trip" {
+test transport_parameters__client_parameters_and_unknown_extensions_round_trip {
     var cid:            [4]u8 = [4]u8{1, 2, 3, 4};
     var extension_data: [3]u8 = [3]u8{5, 6, 7};
     var extensions:     [1]Parameter;
@@ -591,7 +591,7 @@ test "quic.transport_parameters: client parameters and unknown extensions round 
     ret 0;
 }
 
-test "quic.transport_parameters: server preferred address round trips" {
+test transport_parameters__server_preferred_address_round_trips {
     var cid:        [4]u8      = [4]u8{8, 7, 6, 5};
     var parameters: Parameters = defaults();
     set_present(?parameters, INITIAL_SOURCE_CONNECTION_ID);
@@ -615,7 +615,7 @@ test "quic.transport_parameters: server preferred address round trips" {
     ret 0;
 }
 
-test "quic.transport_parameters: duplicate, role, value, and truncation failures are transactional" {
+test transport_parameters__duplicate_role_value_and_truncation_failures_are_transactional {
     val duplicate: [6]u8 = [6]u8{0x0f, 0, 0x0f, 0, 0x01, 0};
     var storage:   Storage;
     var out:       Parameters;
@@ -637,7 +637,7 @@ test "quic.transport_parameters: duplicate, role, value, and truncation failures
     ret 0;
 }
 
-test "quic.transport_parameters: fixed-buffer failure publishes nothing" {
+test transport_parameters__fixed_buffer_failure_publishes_nothing {
     var parameters: Parameters = defaults();
     set_present(?parameters, INITIAL_SOURCE_CONNECTION_ID);
     var byte: [1]u8;

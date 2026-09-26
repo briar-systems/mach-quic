@@ -6,6 +6,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 
+#[testing]
 fun initialize_manager(config: path.Config, storage: path.Storage,
     initial: path.Endpoint) path.Manager {
     var manager: path.Manager;
@@ -13,6 +14,7 @@ fun initialize_manager(config: path.Config, storage: path.Storage,
     ret manager;
 }
 
+#[testing]
 fun config(source: u64, role: u8, validated: bool) path.Config {
     var result: path.Config;
     result.source                      = source;
@@ -29,6 +31,7 @@ fun config(source: u64, role: u8, validated: bool) path.Config {
     ret result;
 }
 
+#[testing]
 fun endpoint(local_host: u8, local_port: u16, peer_host: u8, peer_port: u16) path.Endpoint {
     var result: path.Endpoint;
     result.local = path.ipv4(192, 0, 2, local_host, local_port);
@@ -36,12 +39,13 @@ fun endpoint(local_host: u8, local_port: u16, peer_host: u8, peer_port: u16) pat
     ret result;
 }
 
+#[testing]
 fun challenge(seed: u8) [8]u8 {
     ret [8]u8{seed, seed + 1, seed + 2, seed + 3,
         seed + 4, seed + 5, seed + 6, seed + 7};
 }
 
-test "quic.path.simulated: address identity includes ports, family, and IPv6 scope" {
+test path__address_identity_includes_ports_family_and_ipv6_scope {
     val first:  path.Address = path.ipv4(192, 0, 2, 1, 4433);
     val second: path.Address = path.ipv4(192, 0, 2, 1, 4434);
     if (path.address_equal(first, second) || !path.same_address_without_port(first, second)) { ret 1; }
@@ -57,7 +61,7 @@ test "quic.path.simulated: address identity includes ports, family, and IPv6 sco
     ret 0;
 }
 
-test "quic.path.simulated: unauthenticated, duplicate, and pre-handshake peer changes publish nothing" {
+test path__unauthenticated_duplicate_and_pre_handshake_peer_changes_publish_nothing {
     var paths:      [3]path.Path;
     var challenges: [4]path.Challenge;
     var responses:  [4]path.Response;
@@ -80,7 +84,7 @@ test "quic.path.simulated: unauthenticated, duplicate, and pre-handshake peer ch
     ret 0;
 }
 
-test "quic.path.simulated: NAT rebinding selects, preserves policy state, and enforces amplification" {
+test path__nat_rebinding_selects_preserves_policy_state_and_enforces_amplification {
     var paths:      [4]path.Path;
     var challenges: [8]path.Challenge;
     var responses:  [4]path.Response;
@@ -153,7 +157,7 @@ test "quic.path.simulated: NAT rebinding selects, preserves policy state, and en
     ret 0;
 }
 
-test "quic.path.simulated: disabled migration still permits rebinding and preferred addresses" {
+test path__disabled_migration_still_permits_rebinding_and_preferred_addresses {
     var paths:      [5]path.Path;
     var challenges: [6]path.Challenge;
     var responses:  [4]path.Response;
@@ -219,7 +223,7 @@ test "quic.path.simulated: disabled migration still permits rebinding and prefer
     ret 0;
 }
 
-test "quic.path.simulated: packet number ordering prevents migration rollback" {
+test path__packet_number_ordering_prevents_migration_rollback {
     var paths:      [4]path.Path;
     var challenges: [4]path.Challenge;
     var responses:  [4]path.Response;
@@ -260,7 +264,7 @@ test "quic.path.simulated: packet number ordering prevents migration rollback" {
     ret 0;
 }
 
-test "quic.path.simulated: challenge and response ownership rejects stale generations" {
+test path__challenge_and_response_ownership_rejects_stale_generations {
     var paths:      [3]path.Path;
     var challenges: [1]path.Challenge;
     var responses:  [1]path.Response;
@@ -297,7 +301,7 @@ test "quic.path.simulated: challenge and response ownership rejects stale genera
     ret 0;
 }
 
-test "quic.path.simulated: PATH_RESPONSE queuing is exact and amplification aware" {
+test path__path_response_queuing_is_exact_and_amplification_aware {
     var paths:      [2]path.Path;
     var challenges: [2]path.Challenge;
     var responses:  [2]path.Response;
@@ -331,7 +335,7 @@ test "quic.path.simulated: PATH_RESPONSE queuing is exact and amplification awar
     ret 0;
 }
 
-test "quic.path.simulated: validation timeout reverts and preserves prepared-token ownership" {
+test path__validation_timeout_reverts_and_preserves_prepared_token_ownership {
     var paths:      [4]path.Path;
     var challenges: [3]path.Challenge;
     var responses:  [2]path.Response;
@@ -369,7 +373,7 @@ test "quic.path.simulated: validation timeout reverts and preserves prepared-tok
     ret 0;
 }
 
-test "quic.path.simulated: MTU-only validation timeout does not invalidate an address" {
+test path__mtu_only_validation_timeout_does_not_invalidate_an_address {
     var paths:      [2]path.Path;
     var challenges: [2]path.Challenge;
     var responses:  [1]path.Response;
@@ -394,7 +398,7 @@ test "quic.path.simulated: MTU-only validation timeout does not invalidate an ad
     ret 0;
 }
 
-test "quic.path.simulated: send reservations cannot overspend or alias a reused slot" {
+test path__send_reservations_cannot_overspend_or_alias_a_reused_slot {
     var paths:      [2]path.Path;
     var challenges: [1]path.Challenge;
     var responses:  [1]path.Response;
@@ -429,7 +433,7 @@ test "quic.path.simulated: send reservations cannot overspend or alias a reused 
     ret 0;
 }
 
-test "quic.path.simulated: DPLPMTUD retries, black-hole fallback, and PTB hints are bounded" {
+test path__dplpmtud_retries_black_hole_fallback_and_ptb_hints_are_bounded {
     var paths:      [2]path.Path;
     var challenges: [1]path.Challenge;
     var responses:  [1]path.Response;
@@ -490,7 +494,7 @@ test "quic.path.simulated: DPLPMTUD retries, black-hole fallback, and PTB hints 
     ret 0;
 }
 
-test "quic.path.simulated: duplicate paths and capacity failure are transactional" {
+test path__duplicate_paths_and_capacity_failure_are_transactional {
     var paths:      [2]path.Path;
     var challenges: [1]path.Challenge;
     var responses:  [1]path.Response;
@@ -516,7 +520,7 @@ test "quic.path.simulated: duplicate paths and capacity failure are transactiona
     ret 0;
 }
 
-test "quic.path.simulated: multi-path validation faults revert to the last validated path" {
+test path__multi_path_validation_faults_revert_to_the_last_validated_path {
     var paths:      [4]path.Path;
     var challenges: [4]path.Challenge;
     var responses:  [2]path.Response;
@@ -552,7 +556,7 @@ test "quic.path.simulated: multi-path validation faults revert to the last valid
     ret 0;
 }
 
-test "quic.path.simulated: two-phase close drains every external owner" {
+test path__two_phase_close_drains_every_external_owner {
     var paths:      [2]path.Path;
     var challenges: [2]path.Challenge;
     var responses:  [2]path.Response;
@@ -582,7 +586,7 @@ test "quic.path.simulated: two-phase close drains every external owner" {
     ret 0;
 }
 
-test "quic.path.simulated: probing paths cannot carry non-probing server traffic early" {
+test path__probing_paths_cannot_carry_non_probing_server_traffic_early {
     var paths:      [3]path.Path;
     var challenges: [2]path.Challenge;
     var responses:  [2]path.Response;
@@ -623,7 +627,7 @@ test "quic.path.simulated: probing paths cannot carry non-probing server traffic
     ret 0;
 }
 
-test "quic.path.simulated: failed prior-path revalidation defeats forwarding attacks" {
+test path__failed_prior_path_revalidation_defeats_forwarding_attacks {
     var paths:      [3]path.Path;
     var challenges: [3]path.Challenge;
     var responses:  [1]path.Response;
@@ -668,6 +672,7 @@ test "quic.path.simulated: failed prior-path revalidation defeats forwarding att
     ret 0;
 }
 
+#[testing]
 rec Held {
     manager:    path.Manager;
     paths:      [2]path.Path;
@@ -676,11 +681,12 @@ rec Held {
     sends:      [2]path.SendReservation;
 }
 
+#[testing]
 fun same(a: *Held, b: *Held) bool {
     ret memory.equal[Held](a, b, 1);
 }
 
-test "quic.path.simulated: a peek answers what the prepare after it does and changes nothing" {
+test path__a_peek_answers_what_the_prepare_after_it_does_and_changes_nothing {
     var held:    Held;
     var before:  Held;
     val storage: path.Storage = path.Storage{paths: ?held.paths[0], path_capacity: 2,
@@ -737,7 +743,7 @@ test "quic.path.simulated: a peek answers what the prepare after it does and cha
     ret 0;
 }
 
-test "quic.path.simulated: an MTU probe peek names the probe the prepare after it takes" {
+test path__an_mtu_probe_peek_names_the_probe_the_prepare_after_it_takes {
     var held:    Held;
     var before:  Held;
     val storage: path.Storage = path.Storage{paths: ?held.paths[0], path_capacity: 2,

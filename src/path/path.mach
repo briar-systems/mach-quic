@@ -2916,6 +2916,7 @@ pub fun finish_close_scoped(manager: *Manager, source: u64) OperationResult {
     ret result;
 }
 
+#[testing]
 fun initialized_for_test(config: Config, storage: Storage,
     initial: Endpoint) Manager {
     var manager: Manager;
@@ -2923,7 +2924,7 @@ fun initialized_for_test(config: Config, storage: Storage,
     ret manager;
 }
 
-test "quic.path.path: owned regions reject maximum-address descriptors" {
+test path__owned_regions_reject_maximum_address_descriptors {
     var paths:      [1]Path;
     var challenges: [1]Challenge;
     var responses:  [1]Response;

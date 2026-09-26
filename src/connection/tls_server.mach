@@ -41,10 +41,13 @@ pub fun initialize(adapter: *handshake_api.Adapter,
         configuration.entropy_secret_context_size);
 }
 
-var adapter_chunk_pool:    supply.TestPool;
+#[testing]
+var adapter_chunk_pool: supply.TestPool;
+#[testing]
 var adapter_chunk_account: supply.Account;
 
 # one pool for every adapter these tests build, which may outlive a test
+#[testing]
 fun adapter_account() *supply.Account {
     if (!supply.test_made(?adapter_chunk_pool)) {
         supply.make_test(?adapter_chunk_pool, 256);
@@ -56,16 +59,21 @@ fun adapter_account() *supply.Account {
 
 # the lease every test engine charges: the adapters' shared account, on tls's
 # lane
+#[testing]
 fun adapter_lease() buffer.Lease {
     ret buffer.Lease{source: ?adapter_chunk_pool.provider, account: adapter_account(),
         lane: supply.TLS};
 }
 
+#[testing]
 var listener_attempts: [8]handshake_api.Attempt;
-var dialer_attempts:   [8]handshake_api.Attempt;
+#[testing]
+var dialer_attempts: [8]handshake_api.Attempt;
 
+#[testing]
 var listener_transport: [5]u8 = [5]u8{0x0a, 0x0b, 0x0c, 0x0d, 0x0e};
-var dialer_transport:   [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
+#[testing]
+var dialer_transport: [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
 
 # what one side observed across the whole exchange, so an assertion names the
 # event that carried it rather than a state the engine happens to expose
@@ -91,11 +99,13 @@ fun adapter_config(source: u64) handshake_api.Config {
         max_event_data: 4096, max_peer_identity: 4096};
 }
 
+#[testing]
 fun listener_storage() handshake_api.Storage {
     ret handshake_api.Storage{attempts: ?listener_attempts[0], attempt_capacity: 8,
         account: adapter_account(), chunks: ?adapter_chunk_pool.provider};
 }
 
+#[testing]
 fun dialer_storage() handshake_api.Storage {
     ret handshake_api.Storage{attempts: ?dialer_attempts[0], attempt_capacity: 8,
         account: adapter_account(), chunks: ?adapter_chunk_pool.provider};
@@ -189,6 +199,7 @@ fun drain(adapter: *handshake_api.Adapter, peer: *handshake_api.Adapter,
     ret 6;
 }
 
+#[testing]
 fun exchange(dialer_adapter: *handshake_api.Adapter,
     listener_adapter: *handshake_api.Adapter,
     dialer_seen: *Observed, listener_seen: *Observed,
@@ -216,6 +227,7 @@ fun exchange(dialer_adapter: *handshake_api.Adapter,
     ret 70;
 }
 
+#[testing]
 fun parameters_match(observed: *Observed, expected: *u8,
     length: usize) bool {
     if (!observed.parameters_seen || observed.parameters_length != length) {
@@ -229,7 +241,7 @@ fun parameters_match(observed: *Observed, expected: *u8,
     ret true;
 }
 
-test "quic.connection.tls_server: a real client and server complete a QUIC handshake through the adapter pair" {
+test tls_server__a_real_client_and_server_complete_a_quic_handshake_through_the_adapter_pair {
     var owner:         secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
@@ -453,7 +465,7 @@ var alert_parameters:   [256]u8;
 
 # a malformed first flight must reach the QUIC layer as the exact TLS alert the
 # engine chose, not as a flattened binding failure
-test "quic.connection.tls_server: a terminal alert keeps its identity through the server binding" {
+test tls_server__a_terminal_alert_keeps_its_identity_through_the_server_binding {
     var owner:         secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
@@ -595,7 +607,7 @@ var ranges_parameters:   [256]u8;
 # mach-tls copies the configuration and entropy into the provider record and
 # repoints config at those copies, so reporting them as ranges disjoint from
 # that record makes the whole set overlap and every binding fail
-test "quic.connection.tls_server: reported provider ranges are internally disjoint" {
+test tls_server__reported_provider_ranges_are_internally_disjoint {
     var owner:         secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;

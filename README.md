@@ -588,8 +588,8 @@ wake to `transport.storage_ready`, which retries the same call. Once the
 handshake has handed everything over, the adapter moves tls's established
 core out of the engine and the engine holds no memory.
 
-Memory per connection is measured two ways, and a test pins both. The fixed
-records are `assembly.Storage` at 4,656 bytes and `Connection` at 16,976,
+Memory per connection is measured two ways, and tests pin the chunks it holds.
+The fixed records are `assembly.Storage` at 4,656 bytes and `Connection` at 16,976,
 which includes tls's established core and the expanded 1-RTT key contexts
 (1,992 bytes to send, 4,008 to receive). On a live connection that has gone
 idle, an established connection with no streams holds no chunks at all, and
@@ -848,7 +848,7 @@ true from that instant.
 
 ## Development
 
-quic requires mach 5.12 and mach-std 8. Dependencies are version ranges, pinned
+quic requires mach 6 and mach-std 9. Dependencies are version ranges, pinned
 by their committed gitlinks.
 
 ```sh
