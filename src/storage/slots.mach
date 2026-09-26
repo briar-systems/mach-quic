@@ -32,6 +32,7 @@ pub rec Slots[T] {
     free_head: usize;
 }
 
+#[testing]
 rec Probe {
     value: u64;
 }

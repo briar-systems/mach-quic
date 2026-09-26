@@ -6,6 +6,7 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
+#[testing]
 fun event(kind: u8, sent_at_ns: u64, bytes: usize) recovery.Event {
     var value: recovery.Event;
     value.kind          = kind;
@@ -16,6 +17,7 @@ fun event(kind: u8, sent_at_ns: u64, bytes: usize) recovery.Event {
     ret value;
 }
 
+#[testing]
 fun signals(events: *recovery.Event, count: usize, flight: u64, now_ns: u64, rtt_ns: u64) controller.Signals {
     var value: controller.Signals;
     value.events                 = events;

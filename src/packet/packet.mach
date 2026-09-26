@@ -779,6 +779,7 @@ test packet__protected_headers_include_authentication_tag_length {
     ret 0;
 }
 
+#[testing]
 fun header_sizes_agree(value: *Packet, ciphertext_length: usize) bool {
     var bytes:   [512]u8;
     var builder: binary.Builder        = binary.builder(?bytes[0], 512, binary.BIG);
@@ -838,6 +839,7 @@ test packet__rfc_packet_number_reconstruction_vectors {
     ret 0;
 }
 
+#[testing]
 fun fragmented_round_trip(packet: *Packet, context: DecodeContext) bool {
     var bytes: [256]u8;
     var b:     binary.Builder = binary.builder(?bytes[0], 256, binary.BIG);

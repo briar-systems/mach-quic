@@ -28,6 +28,7 @@ pub rec Heap {
     count:    usize;
 }
 
+#[testing]
 rec Probe {
     deadline: u64;
     position: usize;
@@ -146,6 +147,7 @@ pub fun destroy(heap: *Heap, backing: *allocator.Allocator) bool {
     ret true;
 }
 
+#[testing]
 fun probe_position(value: *Probe) *usize {
     ret ?value.position;
 }

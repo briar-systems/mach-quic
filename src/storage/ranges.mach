@@ -269,6 +269,7 @@ pub fun clear(set: *RangeSet, source: *Source) {
     shrink(set, source);
 }
 
+#[testing]
 fun sound(set: *RangeSet) bool {
     var i: usize = 0;
     for (i < set.count) {
@@ -280,6 +281,7 @@ fun sound(set: *RangeSet) bool {
     ret set.count <= set.cap;
 }
 
+#[testing]
 rec Fixture {
     memory:   limited.Limited;
     pool:     buffers.Pool;
@@ -288,12 +290,14 @@ rec Fixture {
     account:  supply.Account;
 }
 
+#[testing]
 fun test_pool(fixture: *Fixture) bool {
     if (!supply.test_pool(?fixture.pool, ?fixture.classes[0], ?fixture.memory, 8)) { ret false; }
     fixture.provider = buffers.source(?fixture.pool);
     ret supply.open(?fixture.provider, ?fixture.account, 1, 4, 4, 0);
 }
 
+#[testing]
 fun test_done(fixture: *Fixture) bool {
     val done: bool = supply.close(?fixture.provider, ?fixture.account) &&
         buffers.destroy(?fixture.pool) && limited.clean(?fixture.memory);

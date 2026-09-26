@@ -30,6 +30,7 @@ pub rec Index {
     count:    usize;
 }
 
+#[testing]
 rec Probe {
     key:   u64;
     value: u64;
@@ -165,6 +166,7 @@ pub fun destroy(index: *Index, backing: *allocator.Allocator) bool {
     ret true;
 }
 
+#[testing]
 fun probe_equal(value: *Probe, key: *u64) bool {
     ret value.key == @key;
 }
@@ -174,6 +176,7 @@ fun probe_hash(key: u64) u64 {
     ret 0xfffffffffffffffc + key % 5;
 }
 
+#[testing]
 fun probe_insert(index: *Index, table: *slots.Slots[Probe],
     backing: *allocator.Allocator, key: u64) bool {
     if (!slots.reserve[Probe](table, backing, 1) ||
@@ -185,6 +188,7 @@ fun probe_insert(index: *Index, table: *slots.Slots[Probe],
     ret true;
 }
 
+#[testing]
 fun probe_find(index: *Index, table: *slots.Slots[Probe], key: u64) usize {
     var wanted: u64 = key;
     ret find[Probe, u64](index, table, probe_hash(key), ?wanted, probe_equal);

@@ -2916,6 +2916,7 @@ pub fun finish_close_scoped(manager: *Manager, source: u64) OperationResult {
     ret result;
 }
 
+#[testing]
 fun initialized_for_test(config: Config, storage: Storage,
     initial: Endpoint) Manager {
     var manager: Manager;

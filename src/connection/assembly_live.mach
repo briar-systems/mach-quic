@@ -53,36 +53,60 @@ use tls.tls13;
 
 # assembled controls and backing are far past a stack frame
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
-var front_memory:     allocator_testing.Testing;
-var dialer:           assembly.Connection;
-var listener:         assembly.Connection;
-var dialer_storage:   assembly.Storage;
+#[testing]
+var front_memory: allocator_testing.Testing;
+#[testing]
+var dialer: assembly.Connection;
+#[testing]
+var listener: assembly.Connection;
+#[testing]
+var dialer_storage: assembly.Storage;
+#[testing]
 var listener_storage: assembly.Storage;
-var copied_storage:   assembly.Storage;
+#[testing]
+var copied_storage: assembly.Storage;
 # both ends run on this test's one pump, so they share its scratch pair
-var pump_scratch:     assembly.Scratch;
-var pump_secret:      assembly.SecretScratch;
-var dialer_tls:       client.Handshake;
-var listener_tls:     server.Handshake;
-var dialer_tls_two:   client.Handshake;
+#[testing]
+var pump_scratch: assembly.Scratch;
+#[testing]
+var pump_secret: assembly.SecretScratch;
+#[testing]
+var dialer_tls: client.Handshake;
+#[testing]
+var listener_tls: server.Handshake;
+#[testing]
+var dialer_tls_two: client.Handshake;
+#[testing]
 var listener_tls_two: server.Handshake;
-var rollback_tls:     client.Handshake;
+#[testing]
+var rollback_tls: client.Handshake;
 
-var dialer_parameters:   [512]u8;
+#[testing]
+var dialer_parameters: [512]u8;
+#[testing]
 var listener_parameters: [512]u8;
-var wire:                [1500]u8;
-var dialer_scope:        cancel.Scope;
-var listener_scope:      cancel.Scope;
+#[testing]
+var wire: [1500]u8;
+#[testing]
+var dialer_scope: cancel.Scope;
+#[testing]
+var listener_scope: cancel.Scope;
 
-var secret_storage_delegate:         secret.ArrayAllocator[assembly.SecretScratch];
-var secret_storage_deallocations:    usize;
-var secret_storage_zeroed_releases:  usize;
+#[testing]
+var secret_storage_delegate: secret.ArrayAllocator[assembly.SecretScratch];
+#[testing]
+var secret_storage_deallocations: usize;
+#[testing]
+var secret_storage_zeroed_releases: usize;
+#[testing]
 var secret_storage_nonzero_releases: usize;
 
+#[testing]
 fun secret_storage_allocate(context: ptr, secret_context: *^u8, count: usize,
     bytes: usize, alignment: usize,
     output: **assembly.SecretScratch) i64 {
@@ -91,6 +115,7 @@ fun secret_storage_allocate(context: ptr, secret_context: *^u8, count: usize,
         output);
 }
 
+#[testing]
 fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
     data: *assembly.SecretScratch, count: usize,
     bytes: usize, alignment: usize) i64 {
@@ -123,12 +148,14 @@ fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
 }
 
 # marks a stream attempt as escaped, which keeps the rollback from reclaiming
+#[testing]
 rec RollbackProbe {
     attempt_state: *u8;
     calls:         usize;
     armed:         bool;
 }
 
+#[testing]
 #[oblivious]
 fun rollback_entropy(context: ptr, secret_context: *^u8,
     destination: *^u8, length: usize) i64 {
@@ -146,26 +173,39 @@ fun rollback_entropy(context: ptr, secret_context: *^u8,
     ret 0;
 }
 
+#[testing]
 var chunk_pool: supply.TestPool;
 
 # a pool small enough for a test to exhaust, and whether connections use it
+#[testing]
 var small_pool: supply.TestPool;
-var starving:   bool;
+#[testing]
+var starving: bool;
 
 # the caller composes each account: its own handle and two lanes after quic's
-val COMPOSED_LANES:           usize    = 2;
-val COMPOSED_DIALER_HANDLE:   u64      = 0xC0DE01;
-val COMPOSED_LISTENER_HANDLE: u64      = 0xC0DE02;
-var composed_budgets:         [2]usize = [2]usize{8192, 4096};
-var composed:                 bool;
+#[testing]
+val COMPOSED_LANES: usize = 2;
+#[testing]
+val COMPOSED_DIALER_HANDLE: u64 = 0xC0DE01;
+#[testing]
+val COMPOSED_LISTENER_HANDLE: u64 = 0xC0DE02;
+#[testing]
+var composed_budgets: [2]usize = [2]usize{8192, 4096};
+#[testing]
+var composed: bool;
 
 # how a test misdeclares the caller's lanes, and which stage refuses it
-val LANES_OK:       u8 = 0;
-val LANES_OVER:     u8 = 1;
+#[testing]
+val LANES_OK: u8 = 0;
+#[testing]
+val LANES_OVER: u8 = 1;
+#[testing]
 val LANES_MISMATCH: u8 = 2;
-var lane_fault:     u8;
+#[testing]
+var lane_fault: u8;
 
 # one pool serves every connection a test assembles
+#[testing]
 fun test_chunks() buffers.Source {
     var extra: usize = 0;
     if (composed) { extra = COMPOSED_LANES; }
@@ -182,6 +222,7 @@ fun test_chunks() buffers.Source {
 }
 
 # the secret side of whichever pool test_chunks serves
+#[testing]
 fun test_secret_chunks() buffers.SecretSource {
     test_chunks();
     if (starving) { ret small_pool.secret; }
@@ -189,23 +230,33 @@ fun test_secret_chunks() buffers.SecretSource {
 }
 
 # which lease establish_direct gives the dialer's engine
-val LEASE_OWN:      u8 = 0;
-val LEASE_PEER:     u8 = 1;
-val LEASE_NONE:     u8 = 2;
+#[testing]
+val LEASE_OWN: u8 = 0;
+#[testing]
+val LEASE_PEER: u8 = 1;
+#[testing]
+val LEASE_NONE: u8 = 2;
+#[testing]
 val LEASE_ORIGINAL: u8 = 3;
-var mislease:       u8;
+#[testing]
+var mislease: u8;
 # a connection the dialer is copied from after its lease was taken
+#[testing]
 var original: assembly.Connection;
 # what establish_direct returns once the dialer's engine was refused
+#[testing]
 val REFUSED: i32 = 99;
 # whether the listener answers the first Initial with a stateless refusal
 # instead of a connection, and what establish_direct returns once it did
-var refusing:       bool;
+#[testing]
+var refusing: bool;
+#[testing]
 val REFUSAL_CLOSED: i32 = 98;
 
 # the front listener answers the dialer's Initial the way a busy server would,
 # then the dialer must be draining on CONNECTION_REFUSED with nothing else
 # having happened to it
+#[testing]
 fun refused_start(clock: *u64, length: usize) i32 {
     val front_made: err[allocator.Error] = allocator_testing.make(?front_memory);
     if (sel front_made.err) { ret 50; }
@@ -272,6 +323,7 @@ fun refused_start(clock: *u64, length: usize) i32 {
     ret 0;
 }
 
+#[testing]
 fun dialer_engine_lease() tls_buffer.Lease {
     if (mislease == LEASE_PEER) { ret assembly.tls_lease(?listener); }
     if (mislease == LEASE_NONE) { ret tls_buffer.no_lease(); }
@@ -284,13 +336,17 @@ fun dialer_engine_lease() tls_buffer.Lease {
 }
 
 # chunks another account holds on the small pool
+#[testing]
 var hog_account: supply.Account;
-var hog_chunks:  [256]supply.Chunk;
-var hog_count:   usize;
+#[testing]
+var hog_chunks: [256]supply.Chunk;
+#[testing]
+var hog_count: usize;
 
 # holds every chunk of the small pool but two, which the dialer's handshake
 # block and its Initial keys' contexts take, so its tls start finds no memory
 # at all
+#[testing]
 fun hog() bool {
     test_chunks();
     var extra:   usize  = 0;
@@ -316,6 +372,7 @@ fun hog() bool {
         supply.give(?from, hog_chunks[hog_count + 1]);
 }
 
+#[testing]
 fun unhog() bool {
     var from: supply.Source = supply.Source{provider: ?small_pool.provider,
         account: ?hog_account, lane: supply.SEND};
@@ -328,6 +385,7 @@ fun unhog() bool {
 
 # the dialer's tls start waited for memory: nothing goes out and polling stops
 # until the pool wakes the connection, and then the same start runs again
+#[testing]
 fun starved_start(clock: *u64) i32 {
     clock[0] = clock[0] + 1000;
     val waiting: transport.Generated = checked_generate(?dialer, ?dialer_scope, ?wire[0], 1500, instants.instant(clock[0]), 0);
@@ -353,16 +411,25 @@ fun starved_start(clock: *u64) i32 {
 
 # a failing exit code is one byte, so the detail lands here and the assertion
 # returns only which step refused
-var fault_side:   u64;
-var fault_step:   u64;
+#[testing]
+var fault_side: u64;
+#[testing]
+var fault_step: u64;
+#[testing]
 var fault_status: u64;
-var fault_error:  u64;
+#[testing]
+var fault_error: u64;
 
-var dialer_source:       [8]u8 = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
-var listener_source:     [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
+#[testing]
+var dialer_source: [8]u8 = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+#[testing]
+var listener_source: [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
+#[testing]
 var initial_destination: [8]u8 =
     [8]u8{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
-var alpn:        [2]u8  = [2]u8{'h', '3'};
+#[testing]
+var alpn: [2]u8 = [2]u8{'h', '3'};
+#[testing]
 var server_name: [15]u8 = [15]u8{'a', 'p', 'i', '.', 'e', 'x', 'a', 'm',
     'p', 'l', 'e', '.', 'c', 'o', 'm'};
 
@@ -374,11 +441,13 @@ fun clamped(value: u64, ceiling: u64) u64 {
     ret value;
 }
 
+#[testing]
 fun refusal() i32 {
     ret (100 + fault_side * 50 + fault_step * 8 +
         clamped(fault_status, 3) * 2 + clamped(fault_error, 1))::i32;
 }
 
+#[testing]
 fun endpoint(host: u8, port: u16) ip.Endpoint {
     var value: ip.Endpoint;
     value.addr.v4.octets[0] = 192;
@@ -389,14 +458,17 @@ fun endpoint(host: u8, port: u16) ip.Endpoint {
     ret value;
 }
 
+#[testing]
 fun dialer_endpoint() ip.Endpoint {
     ret endpoint(1, 55000);
 }
 
+#[testing]
 fun listener_endpoint() ip.Endpoint {
     ret endpoint(2, 4433);
 }
 
+#[testing]
 fun embedded_scope(data: *u8, length: usize) *cancel.Scope {
     if (data == nil || length < $size_of(cancel.Scope)) { ret nil; }
     val alignment: usize = $align_of(cancel.Scope);
@@ -408,6 +480,7 @@ fun embedded_scope(data: *u8, length: usize) *cancel.Scope {
     ret aligned::*cancel.Scope;
 }
 
+#[testing]
 fun connection_id(data: *u8, length: usize) packet_api.ConnectionId {
     var value: packet_api.ConnectionId;
     packet_api.set_connection_id(?value, data, length);
@@ -415,12 +488,15 @@ fun connection_id(data: *u8, length: usize) packet_api.ConnectionId {
 }
 
 # absolute tls handshake deadline for connections built here, zero for none
+#[testing]
 var handshake_deadline_ns: u64;
 
 # both sides describe the same connection; only the identity fields differ
 # the DATAGRAM frame size both ends advertise, 0 for none
+#[testing]
 var datagram_frame_size: usize;
 
+#[testing]
 fun connection_config(role: transport.Role) assembly.Config {
     var value: assembly.Config;
     if (role == transport.CLIENT) {
@@ -468,8 +544,10 @@ fun connection_config(role: transport.Role) assembly.Config {
 }
 
 # when set, every driver call in carry records what both ends hold after it
+#[testing]
 var observed: *Peak;
 
+#[testing]
 fun watch() {
     if (observed != nil) { observe(observed); }
 }
@@ -478,6 +556,7 @@ fun watch() {
 # before it. a datagram the query did not predict, or a prediction the
 # generate did not bear out outside the query's documented edges, reads as an
 # error to the test that made the call
+#[testing]
 val MISPREDICTED: u8 = 0xee;
 
 # the public state a query could touch: every record of the connection but
@@ -485,6 +564,7 @@ val MISPREDICTED: u8 = 0xee;
 # the public state a query could touch: every record of the connection
 # that holds no secret, the storage it lent, its account, and what the
 # driver and the handshake adapter keep beside their secret-bearing context
+#[testing]
 rec Public {
     core:              core.Core;
     cids:              cid_api.Manager;
@@ -504,6 +584,7 @@ rec Public {
 }
 
 # fills a zeroed record field by field, so padding compares equal
+#[testing]
 fun public_of(value: *assembly.Connection, output: *Public) {
     output.core              = value.core;
     output.cids              = value.cids;
@@ -522,6 +603,7 @@ fun public_of(value: *assembly.Connection, output: *Public) {
     output.handshake_closing = value.handshake.closing;
 }
 
+#[testing]
 fun checked_generate(value: *assembly.Connection, scope: *cancel.Scope, buffer: *u8,
     capacity: usize, now: time.Instant, context: usize) transport.Generated {
     val handshake_work: bool = core.handshake_pending(?value.core);
@@ -555,6 +637,7 @@ fun checked_generate(value: *assembly.Connection, scope: *cancel.Scope, buffer: 
 
 # one generated datagram, completed on the sender and delivered to the peer,
 # exactly as an owner's scheduling loop would move it
+#[testing]
 fun carry(source: *assembly.Connection, sink: *assembly.Connection,
     source_scope: *cancel.Scope, sink_local: ip.Endpoint,
     sink_peer: ip.Endpoint, clock: *u64, moved: *usize) i64 {
@@ -615,6 +698,7 @@ fun carry(source: *assembly.Connection, sink: *assembly.Connection,
 
 # carries both directions for a fixed number of rounds, with no completion
 # condition, so a caller that is past the handshake is not relying on one
+#[testing]
 fun pump(clock: *u64, moved: *usize, rounds: usize) i64 {
     var round: usize = 0;
     for (round < rounds) {
@@ -635,6 +719,7 @@ fun pump(clock: *u64, moved: *usize, rounds: usize) i64 {
     ret 0;
 }
 
+#[testing]
 fun exchange(clock: *u64, moved: *usize, rounds: usize) i64 {
     var round: usize = 0;
     for (round < rounds) {
@@ -1413,11 +1498,14 @@ test assembly__typed_secret_pools_retain_wiped_deallocation_for_retry {
     ret 0;
 }
 
+#[testing]
 var response_bytes: [1400]u8;
-var reply_bytes:    [1400]u8;
+#[testing]
+var reply_bytes: [1400]u8;
 
 # a direct server acceptance with no retry, so the test drives only the path
 # under scrutiny
+#[testing]
 fun establish_direct(dialer_payload: usize, listener_payload: usize,
     dialer_cid: usize, clock: *u64, moved: *usize) i32 {
     var owner:         secret.Allocator = secret.system_allocator();
@@ -1611,6 +1699,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     ret 0;
 }
 
+#[testing]
 fun drain_stream(driver: *transport.Driver[binding.Binding], value: transport.Stream,
     output: *u8, capacity: usize, fin: *bool) usize {
     var total: usize = 0;
@@ -1631,6 +1720,7 @@ fun drain_stream(driver: *transport.Driver[binding.Binding], value: transport.St
 # the server's control and qpack streams open before the client has opened
 # anything, as an h3 server facing quic-go does, and the response is larger
 # than the base mtu
+#[testing]
 fun stream_flow(dialer_payload: usize, listener_payload: usize,
     dialer_cid: usize) i32 {
     var clock:       u64   = 1000;
@@ -1721,8 +1811,10 @@ test assembly__a_client_with_a_zero_length_connection_id_exchanges_streams {
     ret 0;
 }
 
+#[testing]
 var datagram_bytes: [1000]u8;
 
+#[testing]
 fun datagram_flow() i32 {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
@@ -1761,9 +1853,11 @@ test assembly__an_application_datagram_holds_chunks_only_while_queued {
     ret flowed;
 }
 
+#[testing]
 var bulk_bytes: [4096]u8;
 
 # one datagram moved at a frozen instant, so only the pacer's budget changes
+#[testing]
 fun hop(source: *assembly.Connection, sink: *assembly.Connection,
     source_scope: *cancel.Scope, sink_local: ip.Endpoint, sink_peer: ip.Endpoint,
     now_ns: u64) u8 {
@@ -1820,6 +1914,7 @@ test assembly__a_pacing_delay_arms_the_connection_timer {
 }
 
 # one stream byte from the source, carried at the current instant
+#[testing]
 fun send_byte(source: *assembly.Connection, sink: *assembly.Connection,
     source_scope: *cancel.Scope, sink_local: ip.Endpoint, sink_peer: ip.Endpoint,
     value: transport.Stream, clock: *u64) u8 {
@@ -1830,6 +1925,7 @@ fun send_byte(source: *assembly.Connection, sink: *assembly.Connection,
     ret hop(source, sink, source_scope, sink_local, sink_peer, clock[0]);
 }
 
+#[testing]
 fun secret_clear(data: *^u8, length: usize) bool {
     var i: usize = 0;
     for (i < length) {
@@ -2056,10 +2152,12 @@ test assembly__an_acknowledged_mtu_probe_keeps_a_connection_whose_window_passed_
 }
 
 # the client behind a nat that moved it to a new port, as the listener sees it
+#[testing]
 fun rebound_endpoint() ip.Endpoint {
     ret endpoint(1, 55001);
 }
 
+#[testing]
 fun rebound_pump(clock: *u64, moved: *usize, rounds: usize) i64 {
     var round: usize = 0;
     for (round < rounds) {
@@ -2080,6 +2178,7 @@ fun rebound_pump(clock: *u64, moved: *usize, rounds: usize) i64 {
     ret 0;
 }
 
+#[testing]
 fun listener_challenged(value: path_api.Handle) bool {
     var i: usize = 0;
     for (i < 4) {
@@ -2093,11 +2192,13 @@ fun listener_challenged(value: path_api.Handle) bool {
 }
 
 # the client behind a nat that has moved it `hops` ports from where it started
+#[testing]
 fun nat_endpoint(hops: u16) ip.Endpoint {
     ret endpoint(1, 55000 + hops);
 }
 
 # the listener's live path to `peer`, or nil
+#[testing]
 fun listener_path(peer: ip.Endpoint) *path_api.Path {
     var i: usize = 0;
     for (i < 2) {
@@ -2109,6 +2210,7 @@ fun listener_path(peer: ip.Endpoint) *path_api.Path {
 }
 
 # whether the listener published a challenge to `peer` at `now_ns`
+#[testing]
 fun challenge_sent(peer: ip.Endpoint, now_ns: u64) bool {
     var i: usize = 0;
     for (i < 4) {
@@ -2127,6 +2229,7 @@ fun challenge_sent(peer: ip.Endpoint, now_ns: u64) bool {
 # the listener from there, and of the listener's only those sent to `bound` or
 # `also` reach it. the next `drops` of them that carry a challenge to `bound`
 # are lost. the round ends on the next timer either end has due
+#[testing]
 fun nat_round(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize, clock: *u64,
     moved: *usize) i64 {
     if (carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(), bound, clock,
@@ -2169,6 +2272,7 @@ fun nat_round(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize, clock: *u64,
 
 # the dialer asks from `bound` on a new stream, and the listener answers with
 # 4000 bytes, more than three times what the request carried
+#[testing]
 fun request_from(bound: ip.Endpoint, request: *transport.Stream, clock: *u64,
     moved: *usize) i32 {
     var request_byte: [1]u8                = [1]u8{'q'};
@@ -2192,12 +2296,14 @@ fun request_from(bound: ip.Endpoint, request: *transport.Stream, clock: *u64,
     ret 0;
 }
 
+#[testing]
 fun flag(value: bool) u64 {
     if (value) { ret 1; }
     ret 0;
 }
 
 # the listener's paths and close error beside a failed nat test's code
+#[testing]
 fun report_paths(code: i32) i32 {
     var i: usize = 0;
     for (i < 2) {
@@ -2212,6 +2318,7 @@ fun report_paths(code: i32) i32 {
 }
 
 # nat rounds until the dialer has read the whole answer to `request`
+#[testing]
 fun await_answer(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize,
     request: transport.Stream, clock: *u64, moved: *usize) i32 {
     var total:  usize = 0;
@@ -2323,6 +2430,7 @@ test assembly__a_port_validated_by_an_unpadded_challenge_then_has_its_mtu_valida
     ret await_answer(bound, bound, ?drops, request, ?clock, ?moved);
 }
 
+#[testing]
 fun sent_owner(value: *assembly.Connection, number: u64) *core.Owner {
     var i: usize = 0;
     for (i < value.core.owner_capacity) {
@@ -2409,6 +2517,7 @@ test assembly__a_fired_ack_timer_is_not_reported_again {
     ret 0;
 }
 
+#[testing]
 fun generate_status(value: *assembly.Connection, scope: *cancel.Scope, now_ns: u64) u8 {
     var scratch:   [1500]u8;
     val generated: transport.Generated = checked_generate(value, scope, ?scratch[0], 1500, instants.instant(now_ns), 0);
@@ -2419,15 +2528,18 @@ fun generate_status(value: *assembly.Connection, scope: *cancel.Scope, now_ns: u
     ret generated.status;
 }
 
+#[testing]
 fun output_pending(value: *assembly.Connection, now_ns: u64) bool {
     ret transport.pending_output[binding.Binding](?value.driver, instants.instant(now_ns));
 }
 
+#[testing]
 fun news_pending(value: *assembly.Connection) bool {
     ret transport.pending_stream_news[binding.Binding](?value.driver);
 }
 
 # sends until generate finds nothing, and answers whether it ended empty
+#[testing]
 fun drain(value: *assembly.Connection, scope: *cancel.Scope, now_ns: u64) bool {
     var sends: usize = 0;
     for (sends < 64) {
@@ -2525,6 +2637,7 @@ test assembly__stream_news_is_pending_until_the_owner_takes_it {
     ret 0;
 }
 
+#[testing]
 rec Lossy {
     seed:        u64;
     loss:        u64;
@@ -2535,11 +2648,13 @@ rec Lossy {
     reordered:   usize;
 }
 
+#[testing]
 fun lossy_roll(lossy: *Lossy) u64 {
     lossy.seed = lossy.seed * 6364136223846793005 + 1442695040888963407;
     ret (lossy.seed >> 33) % 1000;
 }
 
+#[testing]
 fun deliver(sink: *assembly.Connection, local: ip.Endpoint, peer: ip.Endpoint,
     data: *u8, length: usize, now_ns: u64) bool {
     var input: transport.Datagram;
@@ -2554,6 +2669,7 @@ fun deliver(sink: *assembly.Connection, local: ip.Endpoint, peer: ip.Endpoint,
 
 # moves every datagram the source has, dropping some and swapping the order of
 # others. a held datagram goes out after the next one
+#[testing]
 fun lossy_carry(source: *assembly.Connection, sink: *assembly.Connection,
     source_scope: *cancel.Scope, sink_local: ip.Endpoint, sink_peer: ip.Endpoint,
     now_ns: u64, lossy: *Lossy) bool {
@@ -2592,6 +2708,7 @@ fun lossy_carry(source: *assembly.Connection, sink: *assembly.Connection,
     ret true;
 }
 
+#[testing]
 fun fire_due(c: *assembly.Connection, now_ns: u64) bool {
     val due: transport.Timer = transport.timer[binding.Binding](?c.driver);
     if (!due.armed || instants.nanos(due.deadline) > now_ns) { ret true; }
@@ -2599,6 +2716,7 @@ fun fire_due(c: *assembly.Connection, now_ns: u64) bool {
         transport.STATUS_ERROR;
 }
 
+#[testing]
 fun next_deadline(clock: u64) u64 {
     var next:   u64             = clock + 50000000;
     val dialed: transport.Timer = transport.timer[binding.Binding](?dialer.driver);
@@ -2609,12 +2727,16 @@ fun next_deadline(clock: u64) u64 {
     ret next;
 }
 
+#[testing]
 var lossy_streams: [10]transport.Stream;
+#[testing]
 var lossy_payload: [4096]u8;
-var lossy_sink:    [4096]u8;
+#[testing]
+var lossy_sink: [4096]u8;
 
 # ten request streams each fill their whole window through a lossy, reordering
 # path, and every byte arrives without a storage refusal
+#[testing]
 fun lossy_transfer(loss: u64, seed: u64) i32 {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
@@ -2710,11 +2832,15 @@ test assembly__a_full_window_survives_10_loss_and_reordering_without_storage_ref
 # the chunks a live idle connection holds. a failure means that cost moved.
 # decide it deliberately, and update these numbers and the readme together
 # established, no streams
+#[testing]
 val GUARD_IDLE_CHUNKS: usize = 0;
 # established, the six h3 control streams open and drained: one record block
-val GUARD_H3_SEND_CHUNKS:    usize = 1;
+#[testing]
+val GUARD_H3_SEND_CHUNKS: usize = 1;
+#[testing]
 val GUARD_H3_RECEIVE_CHUNKS: usize = 0;
 
+#[testing]
 fun settle(clock: *u64, moved: *usize) i32 {
     var i: usize = 0;
     for (i < 20) {
@@ -2726,6 +2852,7 @@ fun settle(clock: *u64, moved: *usize) i32 {
     ret 0;
 }
 
+#[testing]
 fun holds(c: *assembly.Connection, send: usize, receive: usize) bool {
     ret supply.held(?c.account, supply.SEND) == send &&
         supply.held(?c.account, supply.RECEIVE) == receive;
@@ -2804,9 +2931,12 @@ test assembly__an_idle_connection_costs_what_was_measured {
     ret 0;
 }
 
+#[testing]
 var transfer_source: [4096]u8;
-var transfer_sink:   [4096]u8;
+#[testing]
+var transfer_sink: [4096]u8;
 
+#[testing]
 rec Peak {
     dialer_send:      usize;
     dialer_receive:   usize;
@@ -2817,6 +2947,7 @@ rec Peak {
     listener_tls: usize;
 }
 
+#[testing]
 fun observe(peak: *Peak) {
     val a: usize = supply.held(?dialer.account, supply.SEND);
     val b: usize = supply.held(?dialer.account, supply.RECEIVE);
@@ -2834,6 +2965,7 @@ fun observe(peak: *Peak) {
 
 # sends `total` bytes on one stream from the dialer, reading as they arrive,
 # and reports the most chunks either end held after any driver call
+#[testing]
 fun active_transfer(total: usize, peak: *Peak, clock: *u64, moved: *usize) i32 {
     observed = peak;
     val result: i32 = transfer_observed(total, peak, clock, moved);
@@ -2841,6 +2973,7 @@ fun active_transfer(total: usize, peak: *Peak, clock: *u64, moved: *usize) i32 {
     ret result;
 }
 
+#[testing]
 fun transfer_observed(total: usize, peak: *Peak, clock: *u64, moved: *usize) i32 {
     val opened: transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
@@ -2902,9 +3035,13 @@ fun transfer_observed(total: usize, peak: *Peak, clock: *u64, moved: *usize) i32
 # the attempt block (stream data for the sender, MAX_STREAM_DATA for the
 # receiver). on top of that the sender holds one data chunk on the send lane,
 # never more because of STREAM_STRIDE, and the receiver one on the receive lane
-val GUARD_ACTIVE_DIALER_SEND:      usize = 5;
-val GUARD_ACTIVE_DIALER_RECEIVE:   usize = 0;
-val GUARD_ACTIVE_LISTENER_SEND:    usize = 4;
+#[testing]
+val GUARD_ACTIVE_DIALER_SEND: usize = 5;
+#[testing]
+val GUARD_ACTIVE_DIALER_RECEIVE: usize = 0;
+#[testing]
+val GUARD_ACTIVE_LISTENER_SEND: usize = 4;
+#[testing]
 val GUARD_ACTIVE_LISTENER_RECEIVE: usize = 1;
 
 test assembly__a_64_kib_transfer_costs_what_was_measured {
@@ -3021,10 +3158,14 @@ test assembly__a_connection_copied_after_its_lease_was_taken_is_refused {
 # what a handshake holds after any driver call, in chunks per lane and tls
 # bytes. a failure means that cost moved. decide it deliberately, and update
 # these numbers and the readme together
-val GUARD_HANDSHAKE_DIALER_SEND:   usize = 6;
+#[testing]
+val GUARD_HANDSHAKE_DIALER_SEND: usize = 6;
+#[testing]
 val GUARD_HANDSHAKE_LISTENER_SEND: usize = 8;
-val GUARD_HANDSHAKE_DIALER_TLS:    usize = 8704;
-val GUARD_HANDSHAKE_LISTENER_TLS:  usize = 18944;
+#[testing]
+val GUARD_HANDSHAKE_DIALER_TLS: usize = 8704;
+#[testing]
+val GUARD_HANDSHAKE_LISTENER_TLS: usize = 18944;
 
 test assembly__a_handshake_costs_what_was_measured {
     var clock: u64   = 1000;

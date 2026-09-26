@@ -12,6 +12,7 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
+#[testing]
 rec PublicEvent {
     token:         u64;
     kind:          u8;
@@ -26,6 +27,7 @@ rec PublicEvent {
     alert:         u64;
 }
 
+#[testing]
 rec Provider {
     events:          [16]PublicEvent;
     event_count:     usize;
@@ -46,12 +48,17 @@ rec Provider {
     destroyed:        bool;
 }
 
-var reentry_adapter:    *handshake.Adapter;
-var reentry_rejected:   bool;
+#[testing]
+var reentry_adapter: *handshake.Adapter;
+#[testing]
+var reentry_rejected: bool;
+#[testing]
 var mutate_start_input: bool;
 # ingests the provider refuses for memory before it takes one
+#[testing]
 var waiting_ingests: usize;
 
+#[testing]
 rec Fixture {
     chunk_pool: supply.TestPool;
     account:    supply.Account;
@@ -61,10 +68,12 @@ rec Fixture {
     adapter:    handshake.Adapter;
 }
 
+#[testing]
 fun provider_result(status: u8, error: u64) handshake.ProviderResult {
     ret handshake.ProviderResult{status: status, error: error};
 }
 
+#[testing]
 fun start_provider(context: ptr, secret_context: *^u8,
     value: *handshake.Start) handshake.ProviderResult {
     val provider: *Provider = context::*Provider;
@@ -81,6 +90,7 @@ fun start_provider(context: ptr, secret_context: *^u8,
     ret provider_result(handshake.STATUS_OK, 0);
 }
 
+#[testing]
 fun ingest_provider(context: ptr, secret_context: *^u8, level: u8, offset: u64,
     data: *u8, length: usize, now_ns: u64) handshake.ProviderResult {
     val provider: *Provider = context::*Provider;
@@ -110,6 +120,7 @@ fun ingest_provider(context: ptr, secret_context: *^u8, level: u8, offset: u64,
     ret provider_result(handshake.STATUS_OK, 0);
 }
 
+#[testing]
 fun restart_provider(context: ptr, secret_context: *^u8, reason: u8,
     version: u32, now_ns: u64) handshake.ProviderResult {
     val provider: *Provider = context::*Provider;
@@ -126,6 +137,7 @@ fun restart_provider(context: ptr, secret_context: *^u8, reason: u8,
     ret provider_result(handshake.STATUS_OK, 0);
 }
 
+#[testing]
 fun poll_provider(context: ptr, secret_context: *^u8,
     now_ns: u64) handshake.ProviderResult {
     if (now_ns == 0 - 1::u64) {
@@ -134,6 +146,7 @@ fun poll_provider(context: ptr, secret_context: *^u8,
     ret provider_result(handshake.STATUS_EMPTY, 0);
 }
 
+#[testing]
 fun next_provider_event(context: ptr, secret_context: *^u8,
     output: *handshake.ProviderEvent) bool {
     val provider: *Provider = context::*Provider;
@@ -156,6 +169,7 @@ fun next_provider_event(context: ptr, secret_context: *^u8,
     ret true;
 }
 
+#[testing]
 fun complete_provider_event(context: ptr, secret_context: *^u8,
     token: u64, accepted: bool) bool {
     val provider: *Provider = context::*Provider;
@@ -167,6 +181,7 @@ fun complete_provider_event(context: ptr, secret_context: *^u8,
     ret true;
 }
 
+#[testing]
 fun close_provider(context: ptr, secret_context: *^u8, alert: u64,
     now_ns: u64) handshake.ProviderResult {
     val provider: *Provider = context::*Provider;
@@ -177,6 +192,7 @@ fun close_provider(context: ptr, secret_context: *^u8, alert: u64,
     ret provider_result(handshake.STATUS_OK, 0);
 }
 
+#[testing]
 fun destroy_provider(context: ptr, secret_context: *^u8) bool {
     val provider: *Provider = context::*Provider;
     if (provider.active_token != 0 || provider.destroyed) { ret false; }
@@ -184,6 +200,7 @@ fun destroy_provider(context: ptr, secret_context: *^u8) bool {
     ret true;
 }
 
+#[testing]
 fun make_fixture(fixture: *Fixture, source: u64) bool {
     reentry_adapter  = ?fixture.adapter;
     reentry_rejected = false;
@@ -223,6 +240,7 @@ fun make_fixture(fixture: *Fixture, source: u64) bool {
     ret handshake.start(?fixture.adapter, ?start).status == handshake.STATUS_OK;
 }
 
+#[testing]
 fun queue_event(provider: *Provider, event: handshake.ProviderEvent) bool {
     if (provider.event_count >= 16) { ret false; }
     val index: usize = provider.event_count;
@@ -241,6 +259,7 @@ fun queue_event(provider: *Provider, event: handshake.ProviderEvent) bool {
     ret true;
 }
 
+#[testing]
 fun accept_next(adapter: *handshake.Adapter, expected: u8) bool {
     val event: handshake.Event = handshake.next_event(adapter);
     if (event.status != handshake.STATUS_OK || event.kind != expected) { ret false; }
@@ -251,6 +270,7 @@ fun accept_next(adapter: *handshake.Adapter, expected: u8) bool {
 # than zero (briar-systems/mach#3108), which in argument position hands the
 # adapter a level, offset or alert the test never chose. one constructor per
 # event kind names every field
+#[testing]
 fun event_of(token: u64, kind: handshake.EventKind) handshake.ProviderEvent {
     var value: handshake.ProviderEvent;
     value.token = token;
@@ -258,6 +278,7 @@ fun event_of(token: u64, kind: handshake.EventKind) handshake.ProviderEvent {
     ret value;
 }
 
+#[testing]
 fun crypto_event(token: u64, level: handshake.Level, offset: u64,
     data: handshake.View) handshake.ProviderEvent {
     var value: handshake.ProviderEvent = event_of(token, handshake.EVENT_CRYPTO);
@@ -267,6 +288,7 @@ fun crypto_event(token: u64, level: handshake.Level, offset: u64,
     ret value;
 }
 
+#[testing]
 fun secret_event(token: u64, level: handshake.Level, direction: u8,
     algorithm: protection.Algorithm, generation: u64,
     secret: handshake.SecretView) handshake.ProviderEvent {
@@ -280,6 +302,7 @@ fun secret_event(token: u64, level: handshake.Level, direction: u8,
     ret value;
 }
 
+#[testing]
 fun parameters_event(token: u64, data: handshake.View) handshake.ProviderEvent {
     var value: handshake.ProviderEvent = event_of(token,
         handshake.EVENT_PEER_TRANSPORT_PARAMETERS);
@@ -287,6 +310,7 @@ fun parameters_event(token: u64, data: handshake.View) handshake.ProviderEvent {
     ret value;
 }
 
+#[testing]
 fun early_event(token: u64, disposition: u8) handshake.ProviderEvent {
     var value: handshake.ProviderEvent = event_of(token,
         handshake.EVENT_EARLY_DATA);
@@ -294,6 +318,7 @@ fun early_event(token: u64, disposition: u8) handshake.ProviderEvent {
     ret value;
 }
 
+#[testing]
 fun authentication_event(token: u64, disposition: u8,
     data: handshake.View) handshake.ProviderEvent {
     var value: handshake.ProviderEvent = event_of(token,
@@ -303,6 +328,7 @@ fun authentication_event(token: u64, disposition: u8,
     ret value;
 }
 
+#[testing]
 fun handshake_complete_event(token: u64) handshake.ProviderEvent {
     ret event_of(token, handshake.EVENT_HANDSHAKE_COMPLETE);
 }
@@ -556,6 +582,7 @@ test handshake__acknowledged_crypto_gives_its_chunk_back_and_ack_gaps_are_kept {
     ret 0;
 }
 
+#[testing]
 fun attempts_same(a: *handshake.Attempt, b: *handshake.Attempt) bool {
     ret memory.equal[handshake.Attempt](a, b, 16);
 }

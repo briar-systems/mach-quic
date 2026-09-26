@@ -409,6 +409,7 @@ val INITIAL_ACKS_AT:      usize = PEER_EXTENSIONS_AT +
     EXTENSION_CAPACITY * $size_of(transport_parameters.Parameter);
 val HANDSHAKE_ACKS_AT: usize = INITIAL_ACKS_AT +
     HANDSHAKE_ACK_RANGES * $size_of(ack_api.Range);
+#[testing]
 val HANDSHAKE_BLOCK_END: usize = HANDSHAKE_ACKS_AT +
     HANDSHAKE_ACK_RANGES * $size_of(ack_api.Range);
 

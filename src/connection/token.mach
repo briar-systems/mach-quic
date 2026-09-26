@@ -717,6 +717,7 @@ pub fun snapshot(manager: *Manager) Snapshot {
     ret value;
 }
 
+#[testing]
 #[oblivious]
 fun test_key(value: u8) [32]^u8 {
     var key: [32]^u8;
@@ -728,6 +729,7 @@ fun test_key(value: u8) [32]^u8 {
     ret key;
 }
 
+#[testing]
 fun test_id(value: u8) packet.ConnectionId {
     var id: packet.ConnectionId;
     id.len = 8;
@@ -739,6 +741,7 @@ fun test_id(value: u8) packet.ConnectionId {
     ret id;
 }
 
+#[testing]
 fun test_config(source: u64, max_replay: usize) Config {
     var config: Config;
     config.source          = source;
@@ -749,11 +752,13 @@ fun test_config(source: u64, max_replay: usize) Config {
     ret config;
 }
 
+#[testing]
 fun test_retry(manager: *Manager, output: *u8, issued_at_ns: u64, nonce: u64) bool {
     ret seal(manager, PURPOSE_RETRY, ip.endpoint(192, 0, 2, 44, 4433), test_id(9),
         test_id(19), clock.instant(issued_at_ns), nonce, output, TOKEN_SIZE).status == STATUS_OK;
 }
 
+#[testing]
 fun test_open(manager: *Manager, input: *u8, now_ns: u64) Result {
     ret open(manager, input, TOKEN_SIZE, ip.endpoint(192, 0, 2, 44, 4433), clock.instant(now_ns));
 }

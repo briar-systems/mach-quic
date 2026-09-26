@@ -913,6 +913,7 @@ pub fun snapshot(manager: *Manager) Snapshot {
     ret result;
 }
 
+#[testing]
 fun make_id(value: u8) packet.ConnectionId {
     var id: packet.ConnectionId;
     id.len     = 4;
@@ -923,6 +924,7 @@ fun make_id(value: u8) packet.ConnectionId {
     ret id;
 }
 
+#[testing]
 fun make_token(value: u8) [16]u8 {
     var token: [16]u8;
     token[0]  = value;

@@ -9,10 +9,13 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
-var chunk_pool:    supply.TestPool;
+#[testing]
+var chunk_pool: supply.TestPool;
+#[testing]
 var chunk_account: supply.Account;
 
 # every manager a test builds draws on one pool and account
+#[testing]
 fun test_chunks() *supply.Provider {
     if (!supply.test_made(?chunk_pool)) {
         supply.make_test(?chunk_pool, 512);
@@ -21,11 +24,13 @@ fun test_chunks() *supply.Provider {
     ret ?chunk_pool.provider;
 }
 
+#[testing]
 fun test_account() *supply.Account {
     test_chunks();
     ret ?chunk_account;
 }
 
+#[testing]
 fun initialize_manager(config: stream.Config,
     storage: stream.Storage) stream.Manager {
     var manager: stream.Manager;
@@ -33,6 +38,7 @@ fun initialize_manager(config: stream.Config,
     ret manager;
 }
 
+#[testing]
 fun config(source: u64, streams: u64, data: u64) stream.Config {
     var value: stream.Config;
     value.source                            = source;
@@ -447,6 +453,7 @@ test stream__consumed_credit_frames_survive_loss_and_stream_release {
     ret 0;
 }
 
+#[testing]
 fun credit_storage(records: *stream.Stream, attempts: *stream.Attempt) stream.Storage {
     ret stream.Storage{
         streams:  records, stream_capacity: 1,
@@ -455,6 +462,7 @@ fun credit_storage(records: *stream.Stream, attempts: *stream.Attempt) stream.St
     };
 }
 
+#[testing]
 fun credit_limits(source: u64) stream.Config {
     var limits: stream.Config = config(source, 1, 8);
     limits.receive_max_data                  = 8;
@@ -614,6 +622,7 @@ test stream__a_send_reserved_across_a_ring_lap_never_claims_the_next_lap {
     ret 0;
 }
 
+#[testing]
 fun ready_manager(records: *stream.Stream, attempts: *stream.Attempt, limit: usize) stream.Manager {
     var limits: stream.Config = config(31, 4, 8);
     limits.receive_max_data                  = 32;
@@ -700,6 +709,7 @@ test stream__a_connection_credit_or_buffer_release_reports_every_blocked_stream 
     ret 0;
 }
 
+#[testing]
 var fragment_bytes: [65536]u8;
 
 # a peer that sends every other byte of its window hits the interval cap. its
@@ -768,11 +778,13 @@ test stream__a_fragmenting_peer_is_held_at_the_interval_cap {
     ret 0;
 }
 
+#[testing]
 var lifetime_bytes: [4096]u8;
 
 # a pool whose classes each keep one released chunk, so a class's next take
 # reuses the chunk, and its slot, that its last release gave back. a pool that
 # keeps none hands out a slot never used before one given back
+#[testing]
 fun retaining_chunks(chunks: *supply.TestPool, account: *supply.Account) bool {
     supply.classes(?chunks.classes[0], 1);
     val bytes: usize = 16 * supply.BYTES;
@@ -842,6 +854,7 @@ test stream__a_reused_chunk_is_untouched_by_the_stream_that_released_it {
 }
 
 # a manager whose records and attempts come from their own small pool
+#[testing]
 fun demand_manager(chunks: *supply.TestPool, account: *supply.Account, send: usize,
     manager: *stream.Manager) bool {
     if (!supply.make_test(chunks, 64) ||
@@ -1012,6 +1025,7 @@ test stream__a_peer_stream_opened_by_a_bare_fin_is_news_through_accept {
     ret 0;
 }
 
+#[testing]
 rec Snapshot {
     manager:  stream.Manager;
     records:  [4]stream.Stream;

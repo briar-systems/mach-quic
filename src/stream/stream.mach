@@ -2517,6 +2517,7 @@ pub fun finish_close_scoped(manager: *Manager, source: u64) OperationResult {
     ret result;
 }
 
+#[testing]
 fun initialized_for_test(config: Config, storage: Storage) Manager {
     var manager: Manager;
     initialize(?manager, config, storage);
@@ -2527,6 +2528,7 @@ var test_pool:    supply.TestPool;
 var test_account: supply.Account;
 
 # a pool and account for a stream manager under test
+#[testing]
 fun test_storage(streams: *Stream, stream_capacity: usize, attempts: *Attempt,
     attempt_capacity: usize) Storage {
     if (!supply.test_made(?test_pool)) {

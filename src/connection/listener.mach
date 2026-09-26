@@ -1331,6 +1331,7 @@ pub fun finish_close(listener: *Listener) bool {
     ret finish_close_result(listener).status == CLEANUP_COMPLETE;
 }
 
+#[testing]
 fun test_admission_config(source: u64, max_connections: usize,
     per_peer: usize) admission.Config {
     var config: admission.Config;
@@ -1340,10 +1341,12 @@ fun test_admission_config(source: u64, max_connections: usize,
     ret config;
 }
 
+#[testing]
 fun pending_of(listener: *Listener, value: Acceptance) *Pending {
     ret slots.at[Pending](?listener.pending, value.index);
 }
 
+#[testing]
 fun test_token_config(source: u64) token.Config {
     var config: token.Config;
     config.source          = source;
@@ -1428,6 +1431,7 @@ fun no_connection_id() ConnectionId {
     ret value;
 }
 
+#[testing]
 fun classified_id_equal(value: *ConnectionId,
     expected: *packet.ConnectionId) bool {
     if (value == nil || expected == nil ||
@@ -2172,6 +2176,7 @@ rec Harness {
 
 var harness: Harness;
 
+#[testing]
 fun harness_open(admission_source: u64, require_retry: bool) bool {
     if (!limited.make(?harness.admission_memory, 1 << 24) ||
         !limited.make(?harness.token_memory, 1 << 24) ||
@@ -2209,6 +2214,7 @@ fun harness_request(input: *u8, peer: u8, now_ns: u64) Request {
     ret request;
 }
 
+#[testing]
 fun harness_close() bool {
     ret begin_close(?harness.listener) && finish_close(?harness.listener) &&
         admission.begin_close(?harness.admission_manager) &&
@@ -2418,6 +2424,7 @@ test listener__a_retry_answers_a_zero_length_source_id_with_an_empty_destination
 }
 
 # a retried initial for one peer, carrying the token its retry handed out
+#[testing]
 fun flood_client(peer: u8, now_ns: u64, nonce: u64, retry_id: *packet.ConnectionId,
     retried: *u8) bool {
     var initial:  [1200]u8;
@@ -2505,6 +2512,7 @@ test listener__a_flood_of_valid_tokens_is_held_at_the_replay_bound {
 
 # opens a refusal with the keys the client holds and checks it is exactly one
 # CONNECTION_CLOSE carrying `error_code`, addressed back to the client
+#[testing]
 fun refusal_reads(output: *u8, count: usize, version: u32,
     client_destination: packet.ConnectionId, client_source: packet.ConnectionId,
     error_code: u64) bool {

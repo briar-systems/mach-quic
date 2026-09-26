@@ -349,6 +349,7 @@ pub fun release_all(chunks: *Chunks, from: *ranges.Source) {
     release_below(chunks, from, 0 - 1::u64);
 }
 
+#[testing]
 rec Fixture {
     backing:  limited.Limited;
     pool:     buffers.Pool;
@@ -357,6 +358,7 @@ rec Fixture {
     account:  supply.Account;
 }
 
+#[testing]
 fun test_pool(fixture: *Fixture) bool {
     if (!supply.test_pool(?fixture.pool, ?fixture.class, ?fixture.backing, 16)) { ret false; }
     fixture.provider = buffers.source(?fixture.pool);

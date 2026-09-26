@@ -640,6 +640,7 @@ pub fun encode(b: *binary.Builder, frame: *Frame, limits: Limits) EncodeResult {
     ret measured;
 }
 
+#[testing]
 fun fragmented_round_trip(frame: *Frame) bool {
     var bytes: [256]u8;
     var b:     binary.Builder = binary.builder(?bytes[0], 256, binary.BIG);

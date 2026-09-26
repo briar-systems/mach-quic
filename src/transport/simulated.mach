@@ -28,14 +28,17 @@ use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
 
+#[testing]
 rec Core {
     driver:            *transport_api.Driver[Core];
     streams:           *stream_api.Manager;
@@ -62,6 +65,7 @@ rec Core {
     reentry_rejected:  bool;
 }
 
+#[testing]
 rec Fixture {
     stream_records:  [32]stream_api.Stream;
     chunks:          supply.TestPool;
@@ -77,6 +81,7 @@ rec Fixture {
     driver:          transport_api.Driver[Core];
 }
 
+#[testing]
 fun stream_config(source: u64, role: u8) stream_api.Config {
     var value: stream_api.Config;
     value.source                            = source;
@@ -100,19 +105,23 @@ fun stream_config(source: u64, role: u8) stream_api.Config {
 # than zero (briar-systems/mach#3108), so every result names all four
 # the protocol answers for its own memory, because a context the driver cannot
 # cast to bytes is the whole reason the entry exists
+#[testing]
 fun core_range(core: *Core) ownership.Range {
     ret ownership.record[Core](core);
 }
 
+#[testing]
 fun core_outcome(status: u8, error: u64, state: u8) transport_api.CoreResult {
     ret transport_api.CoreResult{status: status, error: error,
         provider_error: 0, state: state};
 }
 
+#[testing]
 fun core_result(status: u8, state: u8) transport_api.CoreResult {
     ret core_outcome(status, 0, state);
 }
 
+#[testing]
 fun core_receive(core: *Core, input: *transport_api.CoreInput) transport_api.CoreResult {
     if (core.closed || input == nil || input.length == 0 || input.data == nil) {
         ret core_outcome(transport_api.STATUS_ERROR, 1, transport_api.ACTIVE);
@@ -166,6 +175,7 @@ fun core_receive(core: *Core, input: *transport_api.CoreInput) transport_api.Cor
     ret core_outcome(transport_api.STATUS_ERROR, 2, transport_api.ACTIVE);
 }
 
+#[testing]
 fun core_timeout(core: *Core, generation: u64, now_ns: u64) transport_api.CoreResult {
     if (!core.timer_armed || core.timer_generation != generation ||
         now_ns < core.timer_deadline_ns) {
@@ -177,6 +187,7 @@ fun core_timeout(core: *Core, generation: u64, now_ns: u64) transport_api.CoreRe
     ret core_result(transport_api.STATUS_OK, transport_api.ACTIVE);
 }
 
+#[testing]
 fun core_generate(core: *Core, output: *u8, capacity: usize,
     now_ns: u64) transport_api.CoreDatagram {
     var result: transport_api.CoreDatagram;
@@ -219,6 +230,7 @@ fun core_generate(core: *Core, output: *u8, capacity: usize,
     ret result;
 }
 
+#[testing]
 fun core_complete(core: *Core, owner: u64, status: u8, count: usize,
     now_ns: u64) transport_api.CoreResult {
     val index: usize = (owner % 64)::usize;
@@ -243,6 +255,7 @@ fun core_complete(core: *Core, owner: u64, status: u8, count: usize,
     ret core_result(transport_api.STATUS_OK, state);
 }
 
+#[testing]
 fun core_begin_close(core: *Core, abortive: bool, application_error: u64,
     reason: *u8, reason_length: usize, now_ns: u64) transport_api.CoreResult {
     if (reason_length > 0 && reason == nil) {
@@ -256,14 +269,17 @@ fun core_begin_close(core: *Core, abortive: bool, application_error: u64,
     ret core_result(transport_api.STATUS_OK, transport_api.DRAINING);
 }
 
+#[testing]
 fun core_storage_ready(core: *Core) {
     core.storage_wakes = core.storage_wakes + 1;
 }
 
+#[testing]
 fun core_ready(core: *Core) bool {
     ret core.closing && core.active_count == 0 && core.outbound == 0;
 }
 
+#[testing]
 fun core_finish(core: *Core) bool {
     if (!core_ready(core)) { ret false; }
     if (stream_api.finish_close(core.streams).status != stream_api.STATUS_OK ||
@@ -274,16 +290,19 @@ fun core_finish(core: *Core) bool {
 }
 
 # what core_generate would answer, given a buffer it accepts
+#[testing]
 fun core_pending(core: *Core, now_ns: u64) bool {
     ret core.outbound != 0 && !core.oversize && core.next_owner != 0 - 1::u64 &&
         !core.active_owners[(core.next_owner % 64)::usize];
 }
 
+#[testing]
 fun core_timer(core: *Core) transport_api.CoreTimer {
     ret transport_api.CoreTimer{deadline_ns: core.timer_deadline_ns,
         generation: core.timer_generation, armed: core.timer_armed};
 }
 
+#[testing]
 fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     # a fixture made again reuses its record, so its previous pool goes first
     if (supply.test_made(?fixture.chunks)) {
@@ -340,6 +359,7 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
         ?fixture.streams, ?fixture.datagrams, ?fixture.scope, storage);
 }
 
+#[testing]
 fun input(driver: *transport_api.Driver[Core], bytes: *u8, length: usize,
     now_ns: u64) transport_api.OperationResult {
     var datagram: transport_api.Datagram;
@@ -351,6 +371,7 @@ fun input(driver: *transport_api.Driver[Core], bytes: *u8, length: usize,
     ret transport_api.receive_datagram[Core](driver, ?datagram);
 }
 
+#[testing]
 fun close_fixture(fixture: *Fixture, now_ns: u64) bool {
     if (transport_api.snapshot[Core](?fixture.driver).state != transport_api.DRAINING) {
         if (transport_api.begin_close[Core](?fixture.driver, 0, nil, 0, clock.instant(now_ns)).status !=
@@ -546,12 +567,14 @@ test transport__protocol_callbacks_cannot_reenter_or_mutate_driver {
     ret 0;
 }
 
+#[testing]
 rec CancelRace {
     driver: *transport_api.Driver[Core];
     go:     *i64;
     result: *i64;
 }
 
+#[testing]
 fun cancel_worker(arg: *u8) {
     val race: *CancelRace = arg::*CancelRace;
     for (atomic.load(race.go) == 0) { atomic.spin_hint(); }
@@ -843,12 +866,14 @@ test native__a_refused_native_send_batch_fails_only_that_send {
 }
 
 # a real native send, completed by the runtime, for a test to reshape
+#[testing]
 rec NativeSend {
     completion: io_runtime.Completion;
     length:     usize;
     ok:         bool;
 }
 
+#[testing]
 fun native_send(fixture: *Fixture, network: *net_async.Driver, sender: *udp.Socket,
     target: ip.Endpoint, output: *u8, at: u64) NativeSend {
     var result: NativeSend;
@@ -1024,6 +1049,7 @@ test transport__a_settled_close_answers_closed_to_every_later_call {
     ret 0;
 }
 
+#[testing]
 fun pending(fixture: *Fixture, now_ns: u64) bool {
     ret transport_api.pending_output[Core](?fixture.driver, clock.instant(now_ns));
 }

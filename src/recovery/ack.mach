@@ -479,6 +479,7 @@ test ack__frame_construction_preserves_descending_ranges_and_delay {
     ret 0;
 }
 
+#[testing]
 fun built_size(tracker: *Tracker, pn_space: u8, now_ns: u64, ranges: *frame.AckRange,
     capacity: usize) usize {
     var ack:   frame.Frame;

@@ -263,6 +263,7 @@ pub fun test_made(fixture: *TestPool) bool {
 
 # ends a test pool once every account on it is closed, keeping its memory for
 # the next make
+#[testing]
 pub fun end_test(fixture: *TestPool) bool {
     if (!test_made(fixture) || !buffers.destroy(?fixture.pool)) { ret false; }
     var none:      Provider;
@@ -313,6 +314,7 @@ test source__a_source_with_other_than_three_lanes_opens_no_account {
 }
 
 # a source that claims more lanes than std allows
+#[testing]
 fun nine_lanes(ctx: ptr) usize {
     ret 9;
 }

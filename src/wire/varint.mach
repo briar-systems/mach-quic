@@ -6,6 +6,7 @@ use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
+#[testing]
 fun is_err_usize_u8(outcome: res[usize, u8]) bool {
     ret sel outcome.err;
 }
@@ -14,6 +15,7 @@ fun is_ok_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun is_ok_usize_u8(outcome: res[usize, u8]) bool {
     ret sel outcome.ok;
 }

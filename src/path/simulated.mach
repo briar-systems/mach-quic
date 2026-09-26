@@ -6,6 +6,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 
+#[testing]
 fun initialize_manager(config: path.Config, storage: path.Storage,
     initial: path.Endpoint) path.Manager {
     var manager: path.Manager;
@@ -13,6 +14,7 @@ fun initialize_manager(config: path.Config, storage: path.Storage,
     ret manager;
 }
 
+#[testing]
 fun config(source: u64, role: u8, validated: bool) path.Config {
     var result: path.Config;
     result.source                      = source;
@@ -29,6 +31,7 @@ fun config(source: u64, role: u8, validated: bool) path.Config {
     ret result;
 }
 
+#[testing]
 fun endpoint(local_host: u8, local_port: u16, peer_host: u8, peer_port: u16) path.Endpoint {
     var result: path.Endpoint;
     result.local = path.ipv4(192, 0, 2, local_host, local_port);
@@ -36,6 +39,7 @@ fun endpoint(local_host: u8, local_port: u16, peer_host: u8, peer_port: u16) pat
     ret result;
 }
 
+#[testing]
 fun challenge(seed: u8) [8]u8 {
     ret [8]u8{seed, seed + 1, seed + 2, seed + 3,
         seed + 4, seed + 5, seed + 6, seed + 7};
@@ -668,6 +672,7 @@ test path__failed_prior_path_revalidation_defeats_forwarding_attacks {
     ret 0;
 }
 
+#[testing]
 rec Held {
     manager:    path.Manager;
     paths:      [2]path.Path;
@@ -676,6 +681,7 @@ rec Held {
     sends:      [2]path.SendReservation;
 }
 
+#[testing]
 fun same(a: *Held, b: *Held) bool {
     ret memory.equal[Held](a, b, 1);
 }

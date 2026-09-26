@@ -696,6 +696,7 @@ var test_chunks:  supply.TestPool;
 var test_account: supply.Account;
 
 # storage over a shared test pool, whose account holds every chunk the tests take
+#[testing]
 fun test_storage(send: *Entry, send_capacity: usize, send_stride: usize,
     receive: *Entry, receive_capacity: usize, receive_stride: usize) Storage {
     if (!supply.test_made(?test_chunks)) {
@@ -708,6 +709,7 @@ fun test_storage(send: *Entry, send_capacity: usize, send_stride: usize,
         chunks:           ?test_chunks.provider, account: ?test_account};
 }
 
+#[testing]
 fun initialized_for_test(config: Config, storage: Storage) Queue {
     var queue: Queue;
     initialize(?queue, config, storage);

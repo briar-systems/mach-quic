@@ -410,6 +410,7 @@ pub fun snapshot(manager: *Manager) Snapshot {
     ret value;
 }
 
+#[testing]
 fun limits(max_connections: usize, per_peer: usize) Config {
     var config: Config;
     config.source                   = 0;
@@ -420,12 +421,14 @@ fun limits(max_connections: usize, per_peer: usize) Config {
     ret config;
 }
 
+#[testing]
 fun limited_config(source: u64, max_connections: usize, per_peer: usize) Config {
     var config: Config = limits(max_connections, per_peer);
     config.source = source;
     ret config;
 }
 
+#[testing]
 fun test_peer(value: usize) ip.Endpoint {
     ret ip.endpoint(10, (value >> 16)::u8, (value >> 8)::u8, value::u8, 4000);
 }
@@ -629,6 +632,7 @@ test admission__limits_are_counts_and_absent_limits_are_unbounded {
     ret 0;
 }
 
+#[testing]
 fun manager_spare(manager: *Manager) usize {
     ret manager.charges.capacity - manager.charges.live;
 }

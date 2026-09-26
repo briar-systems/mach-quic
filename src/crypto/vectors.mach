@@ -10,6 +10,7 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
+#[testing]
 fun secret_matches(actual: *^u8, expected: *u8, len: usize) bool {
     if (actual == nil || expected == nil) { ret false; }
     var i: usize = 0;
@@ -20,6 +21,7 @@ fun secret_matches(actual: *^u8, expected: *u8, len: usize) bool {
     ret true;
 }
 
+#[testing]
 fun public_matches(actual: *u8, expected: *u8, len: usize) bool {
     if (actual == nil || expected == nil) { ret false; }
     var i: usize = 0;
@@ -682,6 +684,7 @@ test protection__aes_256_dispatch_agrees_with_the_pinned_aead {
 }
 
 $if ($mach.build.mode == $mach.mode.debug) {
+    #[testing]
     fun counted_seal(send: *protection.SendKeys, number: u64, phase: u8,
         wire: *u8) bool {
         var header:  [2]u8;
@@ -699,6 +702,7 @@ $if ($mach.build.mode == $mach.mode.debug) {
         ret sealed.error == protection.OK;
     }
 
+    #[testing]
     fun counted_open(receive: *protection.ReceiveKeys, number: u64,
         wire: *u8) protection.Error {
         var scratch: [5]u8;
