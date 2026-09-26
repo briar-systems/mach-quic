@@ -848,7 +848,7 @@ true from that instant.
 
 ## Development
 
-quic requires mach 5.12 and mach-std 8. Dependencies are version ranges, pinned
+quic requires mach 6 and mach-std 9. Dependencies are version ranges, pinned
 by their committed gitlinks.
 
 ```sh
