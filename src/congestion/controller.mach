@@ -546,7 +546,7 @@ pub fun set_max_datagram_size(state: *State, max_datagram_size: u64, now_ns: u64
     ret result;
 }
 
-test "quic.congestion.controller: RFC initial window and independent admission" {
+test controller__rfc_initial_window_and_independent_admission {
     var state: State = init(default_config(ALGORITHM_NEW_RENO, 1200), 0);
     if (!state.valid || state.congestion_window != 12000 || state.mode != MODE_SLOW_START) { ret 1; }
     val flow: Admission = admit(?state, 12000, 0, 1200, 1000, true, false);
@@ -562,7 +562,7 @@ test "quic.congestion.controller: RFC initial window and independent admission" 
     ret 0;
 }
 
-test "quic.congestion.controller: invalid configuration is rejected" {
+test controller__invalid_configuration_is_rejected {
     var config: Config = default_config(ALGORITHM_CUBIC, 1200);
     config.maximum_window = 0 - 1::u64;
     if (init(config, 0).valid) { ret 1; }

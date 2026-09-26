@@ -307,7 +307,7 @@ fun handshake_complete_event(token: u64) handshake.ProviderEvent {
     ret event_of(token, handshake.EVENT_HANDSHAKE_COMPLETE);
 }
 
-test "quic.connection.handshake: every-byte crypto fragmentation is reassembled exactly once" {
+test handshake__every_byte_crypto_fragmentation_is_reassembled_exactly_once {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 401)) { ret 1; }
     var message: [16]u8;
@@ -348,7 +348,7 @@ test "quic.connection.handshake: every-byte crypto fragmentation is reassembled 
     ret 0;
 }
 
-test "quic.connection.handshake: event transitions expose secrets and peer decisions serially" {
+test handshake__event_transitions_expose_secrets_and_peer_decisions_serially {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 402)) { ret 1; }
     var secret:     [32]^u8;
@@ -386,7 +386,7 @@ test "quic.connection.handshake: event transitions expose secrets and peer decis
     ret 0;
 }
 
-test "quic.connection.handshake: crypto output survives cancellation, loss, retry, and ack" {
+test handshake__crypto_output_survives_cancellation_loss_retry_and_ack {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 403)) { ret 1; }
     var output: [8]u8 = [8]u8{'c', 'l', 'i', 'e', 'n', 't', '-', 'h'};
@@ -426,7 +426,7 @@ test "quic.connection.handshake: crypto output survives cancellation, loss, retr
     ret 0;
 }
 
-test "quic.connection.handshake: invalid provider events and rejection are terminal" {
+test handshake__invalid_provider_events_and_rejection_are_terminal {
     var invalid: Fixture;
     if (!make_fixture(?invalid, 404)) { ret 1; }
     var secret: [32]^u8;
@@ -447,7 +447,7 @@ test "quic.connection.handshake: invalid provider events and rejection are termi
     ret 0;
 }
 
-test "quic.connection.handshake: Version Negotiation replaces rather than retransmits crypto" {
+test handshake__version_negotiation_replaces_rather_than_retransmits_crypto {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 406)) { ret 1; }
     var old: [4]u8 = [4]u8{'o', 'l', 'd', '!'};
@@ -475,7 +475,7 @@ test "quic.connection.handshake: Version Negotiation replaces rather than retran
     ret 0;
 }
 
-test "quic.connection.handshake: provider failures retain exact native errors" {
+test handshake__provider_failures_retain_exact_native_errors {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 407)) { ret 1; }
     val failed: handshake.Result = handshake.poll(?fixture.adapter,
@@ -487,7 +487,7 @@ test "quic.connection.handshake: provider failures retain exact native errors" {
     ret 0;
 }
 
-test "quic.connection.handshake: provider cannot mutate accepted start identity" {
+test handshake__provider_cannot_mutate_accepted_start_identity {
     var fixture: Fixture;
     mutate_start_input = true;
     if (!make_fixture(?fixture, 408) || fixture.adapter.role != handshake.CLIENT ||
@@ -497,7 +497,7 @@ test "quic.connection.handshake: provider cannot mutate accepted start identity"
     ret 0;
 }
 
-test "quic.connection.handshake: acknowledged crypto gives its chunk back and ack gaps are kept" {
+test handshake__acknowledged_crypto_gives_its_chunk_back_and_ack_gaps_are_kept {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 404)) { ret 1; }
     var output: [32]u8;
@@ -560,7 +560,7 @@ fun attempts_same(a: *handshake.Attempt, b: *handshake.Attempt) bool {
     ret memory.equal[handshake.Attempt](a, b, 16);
 }
 
-test "quic.connection.handshake: a crypto peek names what the prepare after it takes and changes nothing" {
+test handshake__a_crypto_peek_names_what_the_prepare_after_it_takes_and_changes_nothing {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 406)) { ret 1; }
     var output: [32]u8;
@@ -594,7 +594,7 @@ test "quic.connection.handshake: a crypto peek names what the prepare after it t
     ret 0;
 }
 
-test "quic.connection.handshake: key discard releases a level with retransmits in flight" {
+test handshake__key_discard_releases_a_level_with_retransmits_in_flight {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 405)) { ret 1; }
     var output: [16]u8;
@@ -638,7 +638,7 @@ test "quic.connection.handshake: key discard releases a level with retransmits i
     ret 0;
 }
 
-test "quic.connection.handshake: crypto storage refusals change nothing and resume" {
+test handshake__crypto_storage_refusals_change_nothing_and_resume {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 406)) { ret 1; }
     # the whole budget is taken in both directions
@@ -697,7 +697,7 @@ test "quic.connection.handshake: crypto storage refusals change nothing and resu
     ret 0;
 }
 
-test "quic.connection.handshake: a provider waiting for memory is fed the same bytes in level order" {
+test handshake__a_provider_waiting_for_memory_is_fed_the_same_bytes_in_level_order {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 412)) { ret 1; }
     var initial: [4]u8 = [4]u8{1, 2, 3, 4};

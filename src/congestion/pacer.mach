@@ -316,7 +316,7 @@ pub fun reset(state: *State, congestion_window: u64, smoothed_rtt_ns: u64, now_n
     ret result;
 }
 
-test "quic.congestion.pacer: initial burst is bounded and subsequent sends are paced" {
+test pacer__initial_burst_is_bounded_and_subsequent_sends_are_paced {
     var state: State = init(default_config(1200, 12000), 12000, 100000000, 0);
     var i:     u8    = 0;
     for (i < 10) {
@@ -332,7 +332,7 @@ test "quic.congestion.pacer: initial burst is bounded and subsequent sends are p
     ret 0;
 }
 
-test "quic.congestion.pacer: one stable reservation and ACK-only sends cannot spend twice" {
+test pacer__one_stable_reservation_and_ack_only_sends_cannot_spend_twice {
     var state:  State    = init(default_config(1200, 1200), 1200, 100000000, 0);
     val first:  Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
     val second: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
@@ -346,7 +346,7 @@ test "quic.congestion.pacer: one stable reservation and ACK-only sends cannot sp
     ret 0;
 }
 
-test "quic.congestion.pacer: a probe larger than the datagram size is paced, not refused" {
+test pacer__a_probe_larger_than_the_datagram_size_is_paced_not_refused {
     var state: State    = init(default_config(1200, 2400), 2400, 100000000, 0);
     val probe: Schedule = schedule(?state, 0, 2400, 100000000, 1452, false);
     if (!probe.ok || !probe.ready ||
@@ -359,7 +359,7 @@ test "quic.congestion.pacer: a probe larger than the datagram size is paced, not
     ret 0;
 }
 
-test "quic.congestion.pacer: controller and RTT updates preserve a queued send" {
+test pacer__controller_and_rtt_updates_preserve_a_queued_send {
     var state:  State    = init(default_config(1200, 1200), 1200, 100000000, 0);
     var queued: Schedule = schedule(?state, 0, 1200, 100000000, 1200, false);
     if (publish(?state, queued, 0, 1200, 100000000).status != PUBLISH_OK) { ret 1; }
@@ -376,7 +376,7 @@ test "quic.congestion.pacer: controller and RTT updates preserve a queued send" 
     ret 0;
 }
 
-test "quic.congestion.pacer: reconfiguration is bounded and transactional" {
+test pacer__reconfiguration_is_bounded_and_transactional {
     var state:      State  = init(default_config(1200, 12000), 12000, 100000000, 0);
     val generation: u64    = state.generation;
     var invalid:    Config = default_config(1200, 12000);

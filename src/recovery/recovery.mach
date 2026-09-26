@@ -1127,7 +1127,7 @@ pub fun discard_all(recovery: *Recovery, now_ns: u64, events: *Event,
     ret result;
 }
 
-test "quic.recovery.recovery: RFC RTT estimator and PTO arithmetic" {
+test recovery__rfc_rtt_estimator_and_pto_arithmetic {
     var initial:     [4]SentPacket;
     var handshake:   [4]SentPacket;
     var application: [4]SentPacket;
@@ -1146,7 +1146,7 @@ test "quic.recovery.recovery: RFC RTT estimator and PTO arithmetic" {
     ret 0;
 }
 
-test "quic.recovery.recovery: bounded histories reject overflow transactionally" {
+test recovery__bounded_histories_reject_overflow_transactionally {
     var initial:     [1]SentPacket;
     var handshake:   [1]SentPacket;
     var application: [1]SentPacket;

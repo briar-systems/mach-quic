@@ -1440,7 +1440,7 @@ fun classified_id_equal(value: *ConnectionId,
     ret true;
 }
 
-test "quic.connection.listener: datagram classification copies v1 v2 and short destinations" {
+test listener__datagram_classification_copies_v1_v2_and_short_destinations {
     val destination: packet.ConnectionId = test_id(11);
     val source:      packet.ConnectionId = test_id(31);
     var input:       [1200]u8;
@@ -1495,7 +1495,7 @@ test "quic.connection.listener: datagram classification copies v1 v2 and short d
     ret 0;
 }
 
-test "quic.connection.listener: datagram classification distinguishes negotiation and fails closed" {
+test listener__datagram_classification_distinguishes_negotiation_and_fails_closed {
     val destination: packet.ConnectionId = test_id(51);
     val source:      packet.ConnectionId = test_id(71);
     var unknown:     [27]u8;
@@ -1577,7 +1577,7 @@ test "quic.connection.listener: datagram classification distinguishes negotiatio
     ret 0;
 }
 
-test "quic.connection.listener: Retry source setter copies transactionally" {
+test listener__retry_source_setter_copies_transactionally {
     var request: Request;
     request.retry_source = no_connection_id();
     var source: [8]u8;
@@ -1604,7 +1604,7 @@ test "quic.connection.listener: Retry source setter copies transactionally" {
     ret 0;
 }
 
-test "quic.connection.listener: unsupported versions produce bounded negotiation" {
+test listener__unsupported_versions_produce_bounded_negotiation {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
@@ -1681,7 +1681,7 @@ test "quic.connection.listener: unsupported versions produce bounded negotiation
     ret 0;
 }
 
-test "quic.connection.listener: retry identity, replay, cancellation, and admission are atomic" {
+test listener__retry_identity_replay_cancellation_and_admission_are_atomic {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
@@ -1768,7 +1768,7 @@ test "quic.connection.listener: retry identity, replay, cancellation, and admiss
     ret 0;
 }
 
-test "quic.connection.listener: saturated admission precedes token authentication" {
+test listener__saturated_admission_precedes_token_authentication {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
@@ -1824,7 +1824,7 @@ test "quic.connection.listener: saturated admission precedes token authenticatio
     ret 0;
 }
 
-test "quic.connection.listener: hostile configuration aliases acquire no leases" {
+test listener__hostile_configuration_aliases_acquire_no_leases {
     val maximum:      usize = ~(0::usize);
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
@@ -1863,7 +1863,7 @@ test "quic.connection.listener: hostile configuration aliases acquire no leases"
     ret 0;
 }
 
-test "quic.connection.listener: failed Acceptance cleanup retains each owned leg" {
+test listener__failed_acceptance_cleanup_retains_each_owned_leg {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
@@ -1995,7 +1995,7 @@ test "quic.connection.listener: failed Acceptance cleanup retains each owned leg
     ret 0;
 }
 
-test "quic.connection.listener: unpublished lease cleanup retains each manager leg" {
+test listener__unpublished_lease_cleanup_retains_each_manager_leg {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 22)) { ret 1; }
     var admission_manager: admission.Manager;
@@ -2220,7 +2220,7 @@ fun harness_close() bool {
         limited.clean(?harness.listener_memory);
 }
 
-test "quic.connection.listener: pending storage grows and acceptances survive growth" {
+test listener__pending_storage_grows_and_acceptances_survive_growth {
     if (!harness_open(561, false)) { ret 1; }
     var input: [1200]u8;
     if (!test_initial(?input[0], test_id(3), test_id(23), nil, 0)) { ret 2; }
@@ -2257,7 +2257,7 @@ test "quic.connection.listener: pending storage grows and acceptances survive gr
     ret 0;
 }
 
-test "quic.connection.listener: a refused growth blocks one Initial and holds nothing" {
+test listener__a_refused_growth_blocks_one_initial_and_holds_nothing {
     if (!harness_open(571, false)) { ret 1; }
     var input: [1200]u8;
     if (!test_initial(?input[0], test_id(5), test_id(25), nil, 0)) { ret 2; }
@@ -2303,7 +2303,7 @@ test "quic.connection.listener: a refused growth blocks one Initial and holds no
     ret 0;
 }
 
-test "quic.connection.listener: a refused replay growth blocks and releases the admission charge" {
+test listener__a_refused_replay_growth_blocks_and_releases_the_admission_charge {
     if (!harness_open(581, false)) { ret 1; }
     val peer:   ip.Endpoint = ip.endpoint(198, 18, 0, 1, 443);
     var tokens: [9][token.TOKEN_SIZE]u8;
@@ -2348,7 +2348,7 @@ test "quic.connection.listener: a refused replay growth blocks and releases the 
     ret 0;
 }
 
-test "quic.connection.listener: an acceptance whose retry token expires before commit still closes" {
+test listener__an_acceptance_whose_retry_token_expires_before_commit_still_closes {
     if (!harness_open(591, false)) { ret 1; }
     val peer:  ip.Endpoint = ip.endpoint(198, 18, 0, 1, 443);
     var first: [token.TOKEN_SIZE]u8;
@@ -2379,7 +2379,7 @@ test "quic.connection.listener: an acceptance whose retry token expires before c
     ret 0;
 }
 
-test "quic.connection.listener: an Initial with a zero-length source id is accepted" {
+test listener__an_initial_with_a_zero_length_source_id_is_accepted {
     if (!harness_open(591, false)) { ret 1; }
     var input: [1200]u8;
     var empty: packet.ConnectionId;
@@ -2396,7 +2396,7 @@ test "quic.connection.listener: an Initial with a zero-length source id is accep
     ret 0;
 }
 
-test "quic.connection.listener: a Retry answers a zero-length source id with an empty destination" {
+test listener__a_retry_answers_a_zero_length_source_id_with_an_empty_destination {
     if (!harness_open(594, true)) { ret 1; }
     var input: [1200]u8;
     var empty: packet.ConnectionId;
@@ -2439,7 +2439,7 @@ fun flood_client(peer: u8, now_ns: u64, nonce: u64, retry_id: *packet.Connection
         retry_packet.token.len);
 }
 
-test "quic.connection.listener: a flood of valid tokens is held at the replay bound" {
+test listener__a_flood_of_valid_tokens_is_held_at_the_replay_bound {
     if (!harness_open(611, true)) { ret 1; }
     # a store that remembers four nonces
     harness.token_manager.config.max_replay = 4;
@@ -2566,7 +2566,7 @@ fun refusal_reads(output: *u8, count: usize, version: u32,
         close.data.len == 0;
 }
 
-test "quic.connection.listener: a refusal is one CONNECTION_CLOSE under the client's Initial keys" {
+test listener__a_refusal_is_one_connection_close_under_the_clients_initial_keys {
     if (!harness_open(600, false)) { ret 1; }
     harness.versions[0] = packet.VERSION_1;
     var input:       [1200]u8;
@@ -2603,7 +2603,7 @@ test "quic.connection.listener: a refusal is one CONNECTION_CLOSE under the clie
     ret 0;
 }
 
-test "quic.connection.listener: a refusal answers v2 under v2 Initial keys" {
+test listener__a_refusal_answers_v2_under_v2_initial_keys {
     if (!harness_open(610, false)) { ret 1; }
     harness.versions[0] = packet.VERSION_2;
     var input:       [1200]u8;
@@ -2623,7 +2623,7 @@ test "quic.connection.listener: a refusal answers v2 under v2 Initial keys" {
     ret 0;
 }
 
-test "quic.connection.listener: a refusal drops what it cannot answer and holds nothing" {
+test listener__a_refusal_drops_what_it_cannot_answer_and_holds_nothing {
     if (!harness_open(620, false)) { ret 1; }
     harness.versions[0] = packet.VERSION_1;
     var input:       [1200]u8;

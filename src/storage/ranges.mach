@@ -301,7 +301,7 @@ fun test_done(fixture: *Fixture) bool {
     ret done;
 }
 
-test "quic.storage.ranges: inserts merge overlaps and neighbours and removes split" {
+test ranges__inserts_merge_overlaps_and_neighbours_and_removes_split {
     var fixture: Fixture;
     if (!test_pool(?fixture)) { ret 1; }
     var source: Source = Source{provider: ?fixture.provider, account: ?fixture.account,
@@ -332,7 +332,7 @@ test "quic.storage.ranges: inserts merge overlaps and neighbours and removes spl
     ret 0;
 }
 
-test "quic.storage.ranges: a set spills into a pool chunk and gives it back" {
+test ranges__a_set_spills_into_a_pool_chunk_and_gives_it_back {
     var fixture: Fixture;
     if (!test_pool(?fixture)) { ret 1; }
     var source: Source = Source{provider: ?fixture.provider, account: ?fixture.account,
@@ -364,7 +364,7 @@ test "quic.storage.ranges: a set spills into a pool chunk and gives it back" {
     ret 0;
 }
 
-test "quic.storage.ranges: the cap and a refused spill leave the set untouched" {
+test ranges__the_cap_and_a_refused_spill_leave_the_set_untouched {
     var fixture: Fixture;
     if (!test_pool(?fixture)) { ret 1; }
     var source: Source = Source{provider: ?fixture.provider, account: ?fixture.account,

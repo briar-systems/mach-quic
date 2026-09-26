@@ -439,7 +439,7 @@ pub fun detach_space(tracker: *Tracker, pn_space: u8) bool {
     ret true;
 }
 
-test "quic.recovery.ack: reordering, gaps, and duplication produce bounded ranges" {
+test ack__reordering_gaps_and_duplication_produce_bounded_ranges {
     var initial:     [4]Range;
     var handshake:   [4]Range;
     var application: [4]Range;
@@ -458,7 +458,7 @@ test "quic.recovery.ack: reordering, gaps, and duplication produce bounded range
     ret 0;
 }
 
-test "quic.recovery.ack: frame construction preserves descending ranges and delay" {
+test ack__frame_construction_preserves_descending_ranges_and_delay {
     var initial:     [2]Range;
     var handshake:   [2]Range;
     var application: [3]Range;
@@ -489,7 +489,7 @@ fun built_size(tracker: *Tracker, pn_space: u8, now_ns: u64, ranges: *frame.AckR
     ret encoded.count;
 }
 
-test "quic.recovery.ack: an ACK frame's size is what building it writes" {
+test ack__an_ack_frames_size_is_what_building_it_writes {
     var initial:     [2]Range;
     var handshake:   [2]Range;
     var application: [8]Range;
@@ -521,7 +521,7 @@ test "quic.recovery.ack: an ACK frame's size is what building it writes" {
     ret 0;
 }
 
-test "quic.recovery.ack: capacity eviction advances the acceptance floor" {
+test ack__capacity_eviction_advances_the_acceptance_floor {
     var initial:     [1]Range;
     var handshake:   [1]Range;
     var application: [2]Range;
@@ -538,7 +538,7 @@ test "quic.recovery.ack: capacity eviction advances the acceptance floor" {
     ret 0;
 }
 
-test "quic.recovery.ack: spaces schedule independently and discard is terminal" {
+test ack__spaces_schedule_independently_and_discard_is_terminal {
     var initial:     [2]Range;
     var handshake:   [2]Range;
     var application: [2]Range;
@@ -556,7 +556,7 @@ test "quic.recovery.ack: spaces schedule independently and discard is terminal" 
     ret 0;
 }
 
-test "quic.recovery.ack: zero delay, ECN counts, and send publication are race safe" {
+test ack__zero_delay_ecn_counts_and_send_publication_are_race_safe {
     var initial:     [2]Range;
     var handshake:   [2]Range;
     var application: [3]Range;
@@ -582,7 +582,7 @@ test "quic.recovery.ack: zero delay, ECN counts, and send publication are race s
     ret 0;
 }
 
-test "quic.recovery.ack: output and terminal packet-number bounds are transactional" {
+test ack__output_and_terminal_packet_number_bounds_are_transactional {
     var initial:     [1]Range;
     var handshake:   [1]Range;
     var application: [2]Range;

@@ -663,7 +663,7 @@ fun fragmented_round_trip(frame: *Frame) bool {
     ret r.status == STATUS_DONE && d.pos == b.len && out.kind == frame.kind;
 }
 
-test "quic.frame.frame: every registered frame family round trips" {
+test frame__every_registered_frame_family_round_trips {
     var frames:        [22]Frame;
     var datagram_data: [4]u8 = [4]u8{9, 8, 7, 6};
     frames[0].kind          = PADDING;
@@ -741,7 +741,7 @@ test "quic.frame.frame: every registered frame family round trips" {
     ret 0;
 }
 
-test "quic.frame.frame: DATAGRAM length and payload failures are transactional" {
+test frame__datagram_length_and_payload_failures_are_transactional {
     val truncated: [3]u8          = [3]u8{0x31, 3, 1};
     var d:         binary.Decoder = binary.decoder(?truncated[0], 3, binary.BIG);
     var storage:   Storage;
@@ -765,7 +765,7 @@ test "quic.frame.frame: DATAGRAM length and payload failures are transactional" 
     ret 0;
 }
 
-test "quic.frame.frame: ACK ECN ranges validate and round trip" {
+test frame__ack_ecn_ranges_validate_and_round_trip {
     var ranges: [2]AckRange;
     ranges[0].gap   = 1;
     ranges[0].range = 2;
@@ -796,7 +796,7 @@ test "quic.frame.frame: ACK ECN ranges validate and round trip" {
     ret 0;
 }
 
-test "quic.frame.frame: payload frames and connection IDs round trip" {
+test frame__payload_frames_and_connection_ids_round_trip {
     var data:   [4]u8 = [4]u8{1, 2, 3, 4};
     var cid:    [4]u8 = [4]u8{5, 6, 7, 8};
     var frames: [4]Frame;
@@ -834,7 +834,7 @@ test "quic.frame.frame: payload frames and connection IDs round trip" {
     ret 0;
 }
 
-test "quic.frame.frame: fragmentation and failures never publish" {
+test frame__fragmentation_and_failures_never_publish {
     var data:  [5]u8 = [5]u8{1, 2, 3, 4, 5};
     var frame: Frame;
     frame.kind      = CRYPTO;

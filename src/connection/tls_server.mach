@@ -229,7 +229,7 @@ fun parameters_match(observed: *Observed, expected: *u8,
     ret true;
 }
 
-test "quic.connection.tls_server: a real client and server complete a QUIC handshake through the adapter pair" {
+test tls_server__a_real_client_and_server_complete_a_quic_handshake_through_the_adapter_pair {
     var owner:         secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
@@ -453,7 +453,7 @@ var alert_parameters:   [256]u8;
 
 # a malformed first flight must reach the QUIC layer as the exact TLS alert the
 # engine chose, not as a flattened binding failure
-test "quic.connection.tls_server: a terminal alert keeps its identity through the server binding" {
+test tls_server__a_terminal_alert_keeps_its_identity_through_the_server_binding {
     var owner:         secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
@@ -595,7 +595,7 @@ var ranges_parameters:   [256]u8;
 # mach-tls copies the configuration and entropy into the provider record and
 # repoints config at those copies, so reporting them as ranges disjoint from
 # that record makes the whole set overlap and every binding fail
-test "quic.connection.tls_server: reported provider ranges are internally disjoint" {
+test tls_server__reported_provider_ranges_are_internally_disjoint {
     var owner:         secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;

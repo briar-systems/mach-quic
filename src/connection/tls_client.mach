@@ -79,7 +79,7 @@ fun deterministic_entropy(context: ptr, secret_context: *^u8,
     ret 0;
 }
 
-test "quic.connection.tls_client: exact client hello ownership survives loss and restarts" {
+test tls_client__exact_client_hello_ownership_survives_loss_and_restarts {
     var entropy_counter: u8             = 1;
     var entropy:         secret.Entropy = secret.Entropy{context: ?entropy_counter,
         secret_context: nil, fill_fn: deterministic_entropy, initialized: true};

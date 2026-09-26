@@ -279,7 +279,7 @@ pub fun misuse(pool: *buffers.Pool) u64 {
     ret view.misuse;
 }
 
-test "quic.storage.source: a source with other than three lanes opens no account" {
+test source__a_source_with_other_than_three_lanes_opens_no_account {
     var wide:    TestPool;
     var configs: [CLASS_COUNT]buffers.ClassConfig;
     classes(?configs[0], 0);
@@ -317,7 +317,7 @@ fun nine_lanes(ctx: ptr) usize {
     ret 9;
 }
 
-test "quic.storage.source: caller lanes open only when the count matches exactly" {
+test source__caller_lanes_open_only_when_the_count_matches_exactly {
     var fixture: TestPool;
     if (!make_test_lanes(?fixture, 16, 2)) { ret 1; }
     var account: Account;

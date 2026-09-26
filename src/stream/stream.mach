@@ -2523,7 +2523,7 @@ fun initialized_for_test(config: Config, storage: Storage) Manager {
     ret manager;
 }
 
-test "quic.stream.stream: stream id bits expose ownership and direction" {
+test stream__stream_id_bits_expose_ownership_and_direction {
     if (initiated_by_server(0))  { ret 1; }
     if (!initiated_by_server(1)) { ret 1; }
     if (!unidirectional(2))      { ret 1; }
@@ -2545,7 +2545,7 @@ fun test_storage(streams: *Stream, stream_capacity: usize, attempts: *Attempt,
         chunks:   ?test_pool.provider, account: ?test_account, send_buffer_limit: 4};
 }
 
-test "quic.stream.stream: owned regions reject maximum addresses and aliases" {
+test stream__owned_regions_reject_maximum_addresses_and_aliases {
     var streams:  [1]Stream;
     var attempts: [1]Attempt;
     var config:   Config;
@@ -2580,7 +2580,7 @@ test "quic.stream.stream: owned regions reject maximum addresses and aliases" {
     ret 0;
 }
 
-test "quic.stream.stream: authenticated peer limits bind from exact zero once" {
+test stream__authenticated_peer_limits_bind_from_exact_zero_once {
     var streams:  [1]Stream;
     var attempts: [1]Attempt;
     var config:   Config;
@@ -2607,7 +2607,7 @@ test "quic.stream.stream: authenticated peer limits bind from exact zero once" {
     ret 0;
 }
 
-test "quic.stream: an idle h3 connection's control streams fit one record block" {
+test stream__an_idle_h3_connections_control_streams_fit_one_record_block {
     if (RECORDS_PER_BLOCK < RECORDS_PACKED) {
         print.eprintln("Stream grew past one chunk / RECORDS_PACKED: an idle h3 connection now holds two record chunks. restore the packing, or lower RECORDS_PACKED and the size guard's idle count deliberately");
         ret 1;

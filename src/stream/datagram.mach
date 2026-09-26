@@ -714,7 +714,7 @@ fun initialized_for_test(config: Config, storage: Storage) Queue {
     ret queue;
 }
 
-test "quic.stream.datagram: optional queues copy, order, cancel, and publish" {
+test datagram__optional_queues_copy_order_cancel_and_publish {
     var send_entries:    [2]Entry;
     var receive_entries: [2]Entry;
     val storage:         Storage = test_storage(?send_entries[0], 2, 8, ?receive_entries[0], 2, 8);
@@ -736,7 +736,7 @@ test "quic.stream.datagram: optional queues copy, order, cancel, and publish" {
     ret 0;
 }
 
-test "quic.stream.datagram: capacity and close preserve delivered ownership" {
+test datagram__capacity_and_close_preserve_delivered_ownership {
     var send_entries:    [1]Entry;
     var receive_entries: [1]Entry;
     val storage:         Storage = test_storage(?send_entries[0], 1, 4, ?receive_entries[0], 1, 4);
@@ -751,7 +751,7 @@ test "quic.stream.datagram: capacity and close preserve delivered ownership" {
     ret 0;
 }
 
-test "quic.stream.datagram: authenticated limits bind once and close preserves sends" {
+test datagram__authenticated_limits_bind_once_and_close_preserves_sends {
     var send_entries:    [1]Entry;
     var receive_entries: [1]Entry;
     var queue:           Queue = initialized_for_test(Config{source: 12,
@@ -771,7 +771,7 @@ test "quic.stream.datagram: authenticated limits bind once and close preserves s
     ret 0;
 }
 
-test "quic.stream.datagram: a peek names the datagram the prepare after it takes and changes nothing" {
+test datagram__a_peek_names_the_datagram_the_prepare_after_it_takes_and_changes_nothing {
     var send_entries:    [2]Entry;
     var receive_entries: [1]Entry;
     var queue:           Queue = initialized_for_test(Config{source: 13,
@@ -799,7 +799,7 @@ test "quic.stream.datagram: a peek names the datagram the prepare after it takes
     ret 0;
 }
 
-test "quic.stream.datagram: disabled mode needs no storage" {
+test datagram__disabled_mode_needs_no_storage {
     var empty_storage:   Storage;
     var disabled_config: Config;
     disabled_config.source  = 9;
@@ -811,7 +811,7 @@ test "quic.stream.datagram: disabled mode needs no storage" {
     ret 0;
 }
 
-test "quic.stream.datagram: frame and sequence bounds are transactional" {
+test datagram__frame_and_sequence_bounds_are_transactional {
     var byte:            [1]u8   = [1]u8{7};
     var send_entries:    [1]Entry;
     var receive_entries: [1]Entry;
@@ -828,7 +828,7 @@ test "quic.stream.datagram: frame and sequence bounds are transactional" {
     ret 0;
 }
 
-test "quic.stream.datagram: close preserves prepared publication ownership" {
+test datagram__close_preserves_prepared_publication_ownership {
     var send_entries:    [1]Entry;
     var receive_entries: [1]Entry;
     val storage:         Storage = test_storage(?send_entries[0], 1, 4, ?receive_entries[0], 1, 4);
@@ -845,7 +845,7 @@ test "quic.stream.datagram: close preserves prepared publication ownership" {
     ret 0;
 }
 
-test "quic.stream.datagram: owned regions reject maximum addresses and aliases" {
+test datagram__owned_regions_reject_maximum_addresses_and_aliases {
     var entries: [2]Entry;
     val config:  Config = Config{source: 90, peer_max_frame_size: 8,
         local_max_frame_size: 8, enabled: true};
@@ -862,7 +862,7 @@ test "quic.stream.datagram: owned regions reject maximum addresses and aliases" 
 
 # an empty record literal does not reliably clear its fields, and these become
 # ownership ranges: a stale pointer here makes a valid queue look overlapping
-test "quic.stream.datagram: empty storage is fully cleared" {
+test datagram__empty_storage_is_fully_cleared {
     val value: Storage = empty_storage();
     if (value.send_entries != nil || value.receive_entries != nil ||
         value.chunks != nil || value.account != nil) { ret 1; }
@@ -878,7 +878,7 @@ test "quic.stream.datagram: empty storage is fully cleared" {
     ret 0;
 }
 
-test "quic.stream.datagram: payload chunks are held only while a datagram is queued" {
+test datagram__payload_chunks_are_held_only_while_a_datagram_is_queued {
     var fixture: supply.TestPool;
     var account: supply.Account;
     if (!supply.make_test(?fixture, 8) ||

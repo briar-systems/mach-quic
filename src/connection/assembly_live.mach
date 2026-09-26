@@ -673,7 +673,7 @@ fun exchange(clock: *u64, moved: *usize, rounds: usize) i64 {
     ret 7;
 }
 
-test "quic.connection.assembly: production H3 capacity, routing, and close share one binding" {
+test assembly__production_h3_capacity_routing_and_close_share_one_binding {
     var owner:         secret.Allocator = secret.system_allocator();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
@@ -1363,7 +1363,7 @@ test "quic.connection.assembly: production H3 capacity, routing, and close share
     ret 0;
 }
 
-test "quic.connection.assembly: public storage supports ordinary dynamic pools" {
+test assembly__public_storage_supports_ordinary_dynamic_pools {
     val count:   usize             = 2;
     val bytes:   usize             = $size_of(assembly.Storage) * count;
     val storage: *assembly.Storage = os.allocate(bytes)::*assembly.Storage;
@@ -1381,7 +1381,7 @@ test "quic.connection.assembly: public storage supports ordinary dynamic pools" 
     ret 0;
 }
 
-test "quic.connection.assembly: typed secret pools retain wiped deallocation for retry" {
+test assembly__typed_secret_pools_retain_wiped_deallocation_for_retry {
     var control_owner: secret.ArrayAllocator[assembly.Connection] =
         secret.system_array_allocator[assembly.Connection]();
     secret_storage_delegate =
@@ -1715,32 +1715,32 @@ fun stream_flow(dialer_payload: usize, listener_payload: usize,
     ret 0;
 }
 
-test "quic.connection.assembly: streams flow when both ends declare 1200" {
+test assembly__streams_flow_when_both_ends_declare_1200 {
     ret stream_flow(1200, 1200, 8);
 }
 
-test "quic.connection.assembly: streams flow when both ends declare 1280" {
+test assembly__streams_flow_when_both_ends_declare_1280 {
     ret stream_flow(1280, 1280, 8);
 }
 
-test "quic.connection.assembly: streams flow when both ends declare 1452" {
+test assembly__streams_flow_when_both_ends_declare_1452 {
     ret stream_flow(1452, 1452, 8);
 }
 
-test "quic.connection.assembly: streams flow when both ends declare 1500" {
+test assembly__streams_flow_when_both_ends_declare_1500 {
     ret stream_flow(1500, 1500, 8);
 }
 
-test "quic.connection.assembly: streams flow when only the client declares above 1200" {
+test assembly__streams_flow_when_only_the_client_declares_above_1200 {
     ret stream_flow(1500, 1200, 8);
 }
 
-test "quic.connection.assembly: streams flow when only the server declares above 1200" {
+test assembly__streams_flow_when_only_the_server_declares_above_1200 {
     ret stream_flow(1200, 1500, 8);
 }
 
 # rfc 9000 5.1: the server addresses such a client by its path alone
-test "quic.connection.assembly: a client with a zero-length connection id exchanges streams" {
+test assembly__a_client_with_a_zero_length_connection_id_exchanges_streams {
     val flowed: i32 = stream_flow(1500, 1500, 0);
     if (flowed != 0) { ret flowed; }
     val route: assembly.Route = assembly.route_at(?dialer, 0);
@@ -1781,7 +1781,7 @@ fun datagram_flow() i32 {
     ret 0;
 }
 
-test "quic.connection.assembly: an application datagram holds chunks only while queued" {
+test assembly__an_application_datagram_holds_chunks_only_while_queued {
     datagram_frame_size = assembly.DATAGRAM_STRIDE;
     val flowed: i32 = datagram_flow();
     datagram_frame_size = 0;
@@ -1812,7 +1812,7 @@ fun hop(source: *assembly.Connection, sink: *assembly.Connection,
     ret transport.STATUS_OK;
 }
 
-test "quic.connection.assembly: a pacing delay arms the connection timer" {
+test assembly__a_pacing_delay_arms_the_connection_timer {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(assembly.MAX_UDP_PAYLOAD,
@@ -1866,7 +1866,7 @@ fun secret_clear(data: *^u8, length: usize) bool {
     ret true;
 }
 
-test "quic.connection.assembly: a NEW_TOKEN holds a chunk only while it waits" {
+test assembly__a_new_token_holds_a_chunk_only_while_it_waits {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
@@ -1917,7 +1917,7 @@ test "quic.connection.assembly: a NEW_TOKEN holds a chunk only while it waits" {
     ret 0;
 }
 
-test "quic.connection.assembly: connections sharing a scratch pair cannot run at once" {
+test assembly__connections_sharing_a_scratch_pair_cannot_run_at_once {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
@@ -1964,7 +1964,7 @@ test "quic.connection.assembly: connections sharing a scratch pair cannot run at
     ret 0;
 }
 
-test "quic.connection.assembly: a peer key update moves our send keys before we acknowledge it" {
+test assembly__a_peer_key_update_moves_our_send_keys_before_we_acknowledge_it {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
@@ -2016,7 +2016,7 @@ test "quic.connection.assembly: a peer key update moves our send keys before we 
     ret 0;
 }
 
-test "quic.connection.assembly: an established connection outlives the handshake deadline" {
+test assembly__an_established_connection_outlives_the_handshake_deadline {
     var clock: u64   = 1000;
     var moved: usize = 0;
     # the handshake finishes well inside the deadline, and the transfer
@@ -2055,7 +2055,7 @@ test "quic.connection.assembly: an established connection outlives the handshake
     ret 0;
 }
 
-test "quic.connection.assembly: a stateless refusal drains the client in the same receive" {
+test assembly__a_stateless_refusal_drains_the_client_in_the_same_receive {
     var clock: u64   = 1000;
     var moved: usize = 0;
     refusing = true;
@@ -2064,7 +2064,7 @@ test "quic.connection.assembly: a stateless refusal drains the client in the sam
     ret 0;
 }
 
-test "quic.connection.assembly: an acknowledged MTU probe keeps a connection whose window passed ten datagrams" {
+test assembly__an_acknowledged_mtu_probe_keeps_a_connection_whose_window_passed_ten_datagrams {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
@@ -2256,7 +2256,7 @@ fun await_answer(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize,
 
 # hedge#293: a response larger than three times what the rebound client sent
 # from its new port reaches it only once the listener validated that port
-test "quic.connection.assembly: a rebound client's new address is validated and lifts the amplification limit" {
+test assembly__a_rebound_clients_new_address_is_validated_and_lifts_the_amplification_limit {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
@@ -2301,7 +2301,7 @@ test "quic.connection.assembly: a rebound client's new address is validated and 
 
 # rfc 9000 8.2.1 and 9.4: the first challenge to a rebound client's new port is
 # lost, and a fresh one sent a probe timeout later validates the port
-test "quic.connection.assembly: a lost path challenge is sent again and the rebound port validates" {
+test assembly__a_lost_path_challenge_is_sent_again_and_the_rebound_port_validates {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
@@ -2323,7 +2323,7 @@ test "quic.connection.assembly: a lost path challenge is sent again and the rebo
 
 # rfc 9000 8.2.1: the amplification limit keeps the challenge that validates a
 # rebound client's new port small, and a padded one then validates its mtu
-test "quic.connection.assembly: a port validated by an unpadded challenge then has its mtu validated" {
+test assembly__a_port_validated_by_an_unpadded_challenge_then_has_its_mtu_validated {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
@@ -2361,7 +2361,7 @@ fun sent_owner(value: *assembly.Connection, number: u64) *core.Owner {
     ret nil;
 }
 
-test "quic.connection.assembly: a failed recovery event still settles every owner and close completes" {
+test assembly__a_failed_recovery_event_still_settles_every_owner_and_close_completes {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
@@ -2408,7 +2408,7 @@ test "quic.connection.assembly: a failed recovery event still settles every owne
 
 # a fired ack timer hands the ack to generate. reporting the same expired
 # deadline again would make an owner that re-arms first spin
-test "quic.connection.assembly: a fired ack timer is not reported again" {
+test assembly__a_fired_ack_timer_is_not_reported_again {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
@@ -2448,7 +2448,7 @@ fun generate_status(value: *assembly.Connection, scope: *cancel.Scope, now_ns: u
 
 # an idle connection's generate does no selection work, and every way send
 # work can appear still reaches it
-test "quic.connection.assembly: an idle generate does no selection work until something changes" {
+test assembly__an_idle_generate_does_no_selection_work_until_something_changes {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
@@ -2526,7 +2526,7 @@ fun drain(value: *assembly.Connection, scope: *cancel.Scope, now_ns: u64) bool {
     ret false;
 }
 
-test "quic.connection.assembly: output is pending from the work that makes it until generate sends it" {
+test assembly__output_is_pending_from_the_work_that_makes_it_until_generate_sends_it {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
@@ -2567,7 +2567,7 @@ test "quic.connection.assembly: output is pending from the work that makes it un
     ret 0;
 }
 
-test "quic.connection.assembly: stream news is pending until the owner takes it" {
+test assembly__stream_news_is_pending_until_the_owner_takes_it {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
@@ -2612,7 +2612,7 @@ test "quic.connection.assembly: stream news is pending until the owner takes it"
     ret 0;
 }
 
-test "quic.connection.assembly: a peer stream opened by a bare fin is news through accept" {
+test assembly__a_peer_stream_opened_by_a_bare_fin_is_news_through_accept {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
@@ -2819,11 +2819,11 @@ fun lossy_transfer(loss: u64, seed: u64) i32 {
     ret 0;
 }
 
-test "quic.connection.assembly: a full window survives 5% loss and reordering without storage refusals" {
+test assembly__a_full_window_survives_5_loss_and_reordering_without_storage_refusals {
     ret lossy_transfer(50, 11);
 }
 
-test "quic.connection.assembly: a full window survives 10% loss and reordering without storage refusals" {
+test assembly__a_full_window_survives_10_loss_and_reordering_without_storage_refusals {
     ret lossy_transfer(100, 29);
 }
 
@@ -2855,7 +2855,7 @@ fun holds(c: *assembly.Connection, send: usize, receive: usize) bool {
         supply.held(?c.account, supply.RECEIVE) == receive;
 }
 
-test "quic.connection.assembly: an idle connection costs what was measured" {
+test assembly__an_idle_connection_costs_what_was_measured {
     if ($size_of(assembly.Storage) != GUARD_STORAGE_BYTES ||
         $size_of(assembly.Connection) != GUARD_CONNECTION_BYTES) {
         print.eprintlnf("assembly.Storage is {} bytes (guard {}), Connection {} (guard {})",
@@ -3038,7 +3038,7 @@ val GUARD_ACTIVE_DIALER_RECEIVE:   usize = 0;
 val GUARD_ACTIVE_LISTENER_SEND:    usize = 4;
 val GUARD_ACTIVE_LISTENER_RECEIVE: usize = 1;
 
-test "quic.connection.assembly: a 64 KiB transfer costs what was measured" {
+test assembly__a_64_kib_transfer_costs_what_was_measured {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
@@ -3064,7 +3064,7 @@ test "quic.connection.assembly: a 64 KiB transfer costs what was measured" {
     ret 0;
 }
 
-test "quic.connection.assembly: a tls start refused for memory resumes when the pool wakes it" {
+test assembly__a_tls_start_refused_for_memory_resumes_when_the_pool_wakes_it {
     var clock: u64   = 1000;
     var moved: usize = 0;
     starving = true;
@@ -3084,7 +3084,7 @@ test "quic.connection.assembly: a tls start refused for memory resumes when the 
 # refused in turn
 # the caller's lanes ride on the connection's account, and its handle is what
 # the pool reports, so the caller routes the wake to storage_ready itself
-test "quic.connection.assembly: a composed account wakes on the caller's handle" {
+test assembly__a_composed_account_wakes_on_the_callers_handle {
     var clock: u64   = 1000;
     var moved: usize = 0;
     starving = true;
@@ -3101,7 +3101,7 @@ test "quic.connection.assembly: a composed account wakes on the caller's handle"
     ret 0;
 }
 
-test "quic.connection.assembly: a composed account carries the caller's lanes through a transfer" {
+test assembly__a_composed_account_carries_the_callers_lanes_through_a_transfer {
     var clock: u64   = 1000;
     var moved: usize = 0;
     composed = true;
@@ -3112,28 +3112,28 @@ test "quic.connection.assembly: a composed account carries the caller's lanes th
     ret 0;
 }
 
-test "quic.connection.assembly: more caller lanes than a source can declare is refused at config" {
+test assembly__more_caller_lanes_than_a_source_can_declare_is_refused_at_config {
     var clock: u64   = 1000;
     var moved: usize = 0;
     lane_fault = LANES_OVER;
     ret establish_direct(1500, 1500, 8, ?clock, ?moved) - REFUSED;
 }
 
-test "quic.connection.assembly: caller lanes the source does not declare are refused at storage" {
+test assembly__caller_lanes_the_source_does_not_declare_are_refused_at_storage {
     var clock: u64   = 1000;
     var moved: usize = 0;
     lane_fault = LANES_MISMATCH;
     ret establish_direct(1500, 1500, 8, ?clock, ?moved) - REFUSED;
 }
 
-test "quic.connection.assembly: an engine holding another connection's lease is refused" {
+test assembly__an_engine_holding_another_connections_lease_is_refused {
     var clock: u64   = 1000;
     var moved: usize = 0;
     mislease = LEASE_PEER;
     ret establish_direct(1500, 1500, 8, ?clock, ?moved) - REFUSED;
 }
 
-test "quic.connection.assembly: an engine holding no lease is refused" {
+test assembly__an_engine_holding_no_lease_is_refused {
     var clock: u64   = 1000;
     var moved: usize = 0;
     mislease = LEASE_NONE;
@@ -3142,7 +3142,7 @@ test "quic.connection.assembly: an engine holding no lease is refused" {
 
 # the lease points into the connection, so a copy made after it was taken is
 # not the connection the engine charges
-test "quic.connection.assembly: a connection copied after its lease was taken is refused" {
+test assembly__a_connection_copied_after_its_lease_was_taken_is_refused {
     var clock: u64   = 1000;
     var moved: usize = 0;
     mislease = LEASE_ORIGINAL;
@@ -3160,7 +3160,7 @@ val GUARD_HANDSHAKE_LISTENER_TLS:  usize = 18944;
 val GUARD_CLIENT_HANDSHAKE_BYTES:  usize = 6424;
 val GUARD_SERVER_HANDSHAKE_BYTES:  usize = 6224;
 
-test "quic.connection.assembly: a handshake costs what was measured" {
+test assembly__a_handshake_costs_what_was_measured {
     if ($size_of(client.Handshake) != GUARD_CLIENT_HANDSHAKE_BYTES ||
         $size_of(server.Handshake) != GUARD_SERVER_HANDSHAKE_BYTES) {
         print.eprintlnf("tls handshake records are {} and {} bytes (guard {} and {})",
@@ -3193,7 +3193,7 @@ $if ($mach.build.mode == $mach.mode.debug) {
     # an aead and a header protection key in each
     val INSTALL_EXPANSIONS: u64 = 24;
 
-    test "quic.connection.assembly: every level expands its keys at install alone" {
+    test assembly__every_level_expands_its_keys_at_install_alone {
         var clock:       u64   = 1000;
         var moved:       usize = 0;
         val start:       u64   = protection.expansion_count();
@@ -3215,7 +3215,7 @@ $if ($mach.build.mode == $mach.mode.debug) {
 # rfc 9000 9.3: every challenge to a rebound client's new port is lost, so its
 # validation fails and the listener falls back to the port the client left.
 # the client keeps sending from the new port, and the listener validates it again
-test "quic.connection.assembly: a port whose validation failed is validated again when the peer sends from it" {
+test assembly__a_port_whose_validation_failed_is_validated_again_when_the_peer_sends_from_it {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
@@ -3259,7 +3259,7 @@ test "quic.connection.assembly: a port whose validation failed is validated agai
 # and each answer reaches it at the port it was last moved to. a request the
 # listener cannot place yet is refused without closing, and the dialer's
 # retransmission gets through once the path it replaces has drained
-test "quic.connection.assembly: a client rebound three times is answered at its last port" {
+test assembly__a_client_rebound_three_times_is_answered_at_its_last_port {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);

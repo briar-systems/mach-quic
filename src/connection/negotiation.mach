@@ -324,7 +324,7 @@ pub fun finish(client: *Client) bool {
     ret true;
 }
 
-test "quic.connection.negotiation: spoofed and downgrade version packets are ignored" {
+test negotiation__spoofed_and_downgrade_version_packets_are_ignored {
     var versions:    [2]u32 = [2]u32{packet.VERSION_2, packet.VERSION_1};
     var retry_token: [256]u8;
     var pseudo:      [256]u8;
@@ -357,7 +357,7 @@ test "quic.connection.negotiation: spoofed and downgrade version packets are ign
     ret 0;
 }
 
-test "quic.connection.negotiation: hostile ranges and aliases do not publish state" {
+test negotiation__hostile_ranges_and_aliases_do_not_publish_state {
     val maximum:     usize  = ~(0::usize);
     var versions:    [1]u32 = [1]u32{packet.VERSION_1};
     var retry_token: [128]u8;

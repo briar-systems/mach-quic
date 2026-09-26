@@ -34,7 +34,7 @@ fwd quic.transport.simulated;
 
 # CI proves the constant matches the manifest, so the test only pins the shape:
 # three dot-separated numeric components
-test "quic: exported version is major.minor.patch" {
+test quic__exported_version_is_major_minor_patch {
     var dots:   usize = 0;
     var digits: usize = 0;
     var i:      usize = 0;

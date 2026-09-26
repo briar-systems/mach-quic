@@ -466,7 +466,7 @@ fun secret_clear(data: *^u8, length: usize) bool {
     ret true;
 }
 
-test "quic.connection.core: Initial send ownership is padded and transactional" {
+test core__initial_send_ownership_is_padded_and_transactional {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     var output:    [1200]u8;
@@ -503,7 +503,7 @@ test "quic.connection.core: Initial send ownership is padded and transactional" 
     ret 0;
 }
 
-test "quic.connection.core: unvalidated server send is amplification bounded" {
+test core__unvalidated_server_send_is_amplification_bounded {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.SERVER, false, 1)) { ret 1; }
     var output: [1200]u8;
@@ -523,7 +523,7 @@ test "quic.connection.core: unvalidated server send is amplification bounded" {
     ret 0;
 }
 
-test "quic.connection.core: partial UDP success cancels every prepared owner" {
+test core__partial_udp_success_cancels_every_prepared_owner {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     var output:    [1200]u8;
@@ -541,7 +541,7 @@ test "quic.connection.core: partial UDP success cancels every prepared owner" {
     ret 0;
 }
 
-test "quic.connection.core: graceful close preserves send completion before draining" {
+test core__graceful_close_preserves_send_completion_before_draining {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     var output:    [1200]u8;
@@ -564,7 +564,7 @@ test "quic.connection.core: graceful close preserves send completion before drai
     ret 0;
 }
 
-test "quic.connection.core: Version Negotiation releases sent and prepared Initial ownership" {
+test core__version_negotiation_releases_sent_and_prepared_initial_ownership {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     var output: [1200]u8;
@@ -615,7 +615,7 @@ test "quic.connection.core: Version Negotiation releases sent and prepared Initi
     ret 0;
 }
 
-test "quic.connection.core: authenticated Retry rotates Initial identity and ownership" {
+test core__authenticated_retry_rotates_initial_identity_and_ownership {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     var output: [1200]u8;
@@ -678,7 +678,7 @@ test "quic.connection.core: authenticated Retry rotates Initial identity and own
     ret 0;
 }
 
-test "quic.connection.core: abortive close drains ownership before secret teardown" {
+test core__abortive_close_drains_ownership_before_secret_teardown {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     var output:    [1200]u8;
@@ -704,7 +704,7 @@ test "quic.connection.core: abortive close drains ownership before secret teardo
     ret 0;
 }
 
-test "quic.connection.core: idle timer enters bounded draining" {
+test core__idle_timer_enters_bounded_draining {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 10)) { ret 1; }
     val armed: transport.CoreTimer = core.timer(?fixture.engine);
@@ -728,7 +728,7 @@ test "quic.connection.core: idle timer enters bounded draining" {
     ret 0;
 }
 
-test "quic.connection.core: public descriptors reject wrapping maximum ranges" {
+test core__public_descriptors_reject_wrapping_maximum_ranges {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     val maximum: usize = 0 - 1::usize;
@@ -748,7 +748,7 @@ test "quic.connection.core: public descriptors reject wrapping maximum ranges" {
     ret 0;
 }
 
-test "quic.connection.core: initialization rejects cross-component ownership overlap" {
+test core__initialization_rejects_cross_component_ownership_overlap {
     var fixture: Fixture;
     if (initialize_with_fault(?fixture, transport.CLIENT, true, 1,
         FAULT_COMPONENT_OVERLAP) ||
@@ -766,7 +766,7 @@ test "quic.connection.core: initialization rejects cross-component ownership ove
     ret 0;
 }
 
-test "quic.connection.core: a refused initialization names the check that rejected" {
+test core__a_refused_initialization_names_the_check_that_rejected {
     var capacity: Fixture;
     if (initialize_with_fault(?capacity, transport.CLIENT, true, 1,
         FAULT_STORAGE_CAPACITY) ||
@@ -809,7 +809,7 @@ test "quic.connection.core: a refused initialization names the check that reject
     ret 0;
 }
 
-test "quic.connection.core: external plaintext cannot alias welded keys" {
+test core__external_plaintext_cannot_alias_welded_keys {
     var receive: Fixture;
     if (initialize_with_fault(?receive, transport.CLIENT, true, 1,
         FAULT_RECEIVE_KEYS) ||
@@ -823,7 +823,7 @@ test "quic.connection.core: external plaintext cannot alias welded keys" {
     ret 0;
 }
 
-test "quic.connection.core: failed provider start rolls back every manager lease" {
+test core__failed_provider_start_rolls_back_every_manager_lease {
     var fixture: Fixture;
     if (initialize_with_fault(?fixture, transport.CLIENT, true, 1,
         FAULT_PROVIDER_START) ||
@@ -849,7 +849,7 @@ fun key_set_blank(value: *protection.KeySet) bool {
         value.secret_len == 0 && value.hp_len == 0;
 }
 
-test "quic.connection.core: initial keys derive in place and a refusal leaves none behind" {
+test core__initial_keys_derive_in_place_and_a_refusal_leaves_none_behind {
     var clean: Fixture;
     if (!initialize(?clean, transport.CLIENT, true, 1) ||
         clean.secrets.initial_keys.state != protection.STATE_ACTIVE ||
@@ -866,7 +866,7 @@ test "quic.connection.core: initial keys derive in place and a refusal leaves no
     ret 0;
 }
 
-test "quic.connection.core: active manager leases reject unscoped protocol mutation" {
+test core__active_manager_leases_reject_unscoped_protocol_mutation {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     if (handshake.poll(?fixture.adapter, 1).status != handshake.STATUS_ERROR ||
@@ -881,7 +881,7 @@ test "quic.connection.core: active manager leases reject unscoped protocol mutat
     ret 0;
 }
 
-test "quic.connection.core: public path operations retain the core lease" {
+test core__public_path_operations_retain_the_core_lease {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1) ||
         path.confirm_handshake_scoped(?fixture.paths,
@@ -926,7 +926,7 @@ fun deliver_alert(fixture: *Fixture, alert: u64) i64 {
     ret 0;
 }
 
-test "quic.connection.core: handshake_failure reaches CONNECTION_CLOSE unflattened" {
+test core__handshake_failure_reaches_connection_close_unflattened {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     val delivered: i64 = deliver_alert(?fixture, 0x28);
@@ -935,7 +935,7 @@ test "quic.connection.core: handshake_failure reaches CONNECTION_CLOSE unflatten
     ret 0;
 }
 
-test "quic.connection.core: bad_certificate reaches CONNECTION_CLOSE unflattened" {
+test core__bad_certificate_reaches_connection_close_unflattened {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     val delivered: i64 = deliver_alert(?fixture, 0x2a);
@@ -962,7 +962,7 @@ fun dirty_frame(seed: u64) u64 {
     ret total;
 }
 
-test "quic.connection.core: a refusal reports every field it did not set" {
+test core__a_refusal_reports_every_field_it_did_not_set {
     var fixture: Fixture;
     var payload: [16]u8;
     var input:   transport.CoreInput = transport.CoreInput{
@@ -990,7 +990,7 @@ test "quic.connection.core: a refusal reports every field it did not set" {
     ret 0;
 }
 
-test "quic.connection.core: send completion after space discard does not fail protocol" {
+test core__send_completion_after_space_discard_does_not_fail_protocol {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
     var output:    [1200]u8;
@@ -1012,7 +1012,7 @@ test "quic.connection.core: send completion after space discard does not fail pr
     ret 0;
 }
 
-test "quic.connection.core: owner and history chunks are held only while packets are in flight" {
+test core__owner_and_history_chunks_are_held_only_while_packets_are_in_flight {
     var fixture: Fixture;
     if (!initialize_with_fault(?fixture, transport.CLIENT, true, 1, MODE_ON_DEMAND) ||
         fixture.engine.owners != nil || fixture.engine.owner_capacity != 0 ||
@@ -1094,7 +1094,7 @@ fun same_datagram(a: transport.CoreDatagram, b: transport.CoreDatagram,
 
 # two fixtures made the same way are the same connection, so asking one of
 # them any number of times must leave its next datagrams those of the other
-test "quic.connection.core: asking whether output is pending changes nothing generate sends" {
+test core__asking_whether_output_is_pending_changes_nothing_generate_sends {
     var asked:     Fixture;
     var plain:     Fixture;
     var asked_out: [1200]u8;
@@ -1138,7 +1138,7 @@ test "quic.connection.core: asking whether output is pending changes nothing gen
     ret 0;
 }
 
-test "quic.connection.core: a receive before the send completion keeps the history lent" {
+test core__a_receive_before_the_send_completion_keeps_the_history_lent {
     var fixture: Fixture;
     if (!initialize_with_fault(?fixture, transport.CLIENT, true, 1, MODE_ON_DEMAND)) { ret 1; }
     var output: [1200]u8;
@@ -1166,7 +1166,7 @@ test "quic.connection.core: a receive before the send completion keeps the histo
 
 # the owned ranges are kept, not rebuilt per call, so a chunk taken after init
 # has to reach them where it is taken
-test "quic.connection.core: a buffer aliasing an owner table or history taken after init is refused" {
+test core__a_buffer_aliasing_an_owner_table_or_history_taken_after_init_is_refused {
     var fixture: Fixture;
     if (!initialize_with_fault(?fixture, transport.CLIENT, true, 1, MODE_ON_DEMAND)) { ret 1; }
     var output: [1200]u8;

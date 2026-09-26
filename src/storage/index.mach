@@ -190,7 +190,7 @@ fun probe_find(index: *Index, table: *slots.Slots[Probe], key: u64) usize {
     ret find[Probe, u64](index, table, probe_hash(key), ?wanted, probe_equal);
 }
 
-test "quic.storage.index: lookups stay exact across rehash and backward-shift deletion" {
+test index__lookups_stay_exact_across_rehash_and_backward_shift_deletion {
     var state: testing.Testing;
     val made:  err[allocator.Error] = testing.make(?state);
     if (sel made.err) { ret 1; }
@@ -233,7 +233,7 @@ test "quic.storage.index: lookups stay exact across rehash and backward-shift de
     ret 0;
 }
 
-test "quic.storage.index: a refused rehash keeps every entry reachable" {
+test index__a_refused_rehash_keeps_every_entry_reachable {
     var state: testing.Testing;
     val made:  err[allocator.Error] = testing.make(?state);
     if (sel made.err) { ret 1; }

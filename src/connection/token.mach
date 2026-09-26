@@ -758,7 +758,7 @@ fun test_open(manager: *Manager, input: *u8, now_ns: u64) Result {
     ret open(manager, input, TOKEN_SIZE, ip.endpoint(192, 0, 2, 44, 4433), clock.instant(now_ns));
 }
 
-test "quic.connection.token: retry tokens bind address and are single use" {
+test token__retry_tokens_bind_address_and_are_single_use {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
     var key:     [32]^u8 = test_key(1);
@@ -785,7 +785,7 @@ test "quic.connection.token: retry tokens bind address and are single use" {
     ret 0;
 }
 
-test "quic.connection.token: reservation cancellation, expiry, and key rotation are bounded" {
+test token__reservation_cancellation_expiry_and_key_rotation_are_bounded {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
     var key_one: [32]^u8 = test_key(2);
@@ -816,7 +816,7 @@ test "quic.connection.token: reservation cancellation, expiry, and key rotation 
     ret 0;
 }
 
-test "quic.connection.token: invalid configuration and aliases never publish key state" {
+test token__invalid_configuration_and_aliases_never_publish_key_state {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
     val backing:     *allocator.Allocator  = limited.allocator_of(?memory_state);
@@ -839,7 +839,7 @@ test "quic.connection.token: invalid configuration and aliases never publish key
     ret 0;
 }
 
-test "quic.connection.token: replay storage grows and lookups survive rehash" {
+test token__replay_storage_grows_and_lookups_survive_rehash {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 24)) { ret 1; }
     var key:     [32]^u8 = test_key(8);
@@ -881,7 +881,7 @@ test "quic.connection.token: replay storage grows and lookups survive rehash" {
     ret 0;
 }
 
-test "quic.connection.token: expired nonces are forgotten and the replay limit is a count" {
+test token__expired_nonces_are_forgotten_and_the_replay_limit_is_a_count {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
     var key:     [32]^u8 = test_key(9);
@@ -917,7 +917,7 @@ test "quic.connection.token: expired nonces are forgotten and the replay limit i
     ret 0;
 }
 
-test "quic.connection.token: a reservation that expires before its owner finishes is still owned" {
+test token__a_reservation_that_expires_before_its_owner_finishes_is_still_owned {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
     var key:     [32]^u8 = test_key(10);
@@ -948,7 +948,7 @@ test "quic.connection.token: a reservation that expires before its owner finishe
     ret 0;
 }
 
-test "quic.connection.token: a refused growth refuses one token and remembers nothing" {
+test token__a_refused_growth_refuses_one_token_and_remembers_nothing {
     var memory_state: limited.Limited;
     if (!limited.make(?memory_state, 1 << 20)) { ret 1; }
     var key:     [32]^u8 = test_key(11);

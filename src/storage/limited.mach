@@ -91,7 +91,7 @@ pub fun dnit(state: *Limited) {
     testing.dnit(?state.inner);
 }
 
-test "quic.storage.limited: the budget refuses growth and releases can be refused" {
+test limited__the_budget_refuses_growth_and_releases_can_be_refused {
     var state: Limited;
     if (!make(?state, 64)) { ret 1; }
     val backing: *allocator.Allocator       = allocator_of(?state);
