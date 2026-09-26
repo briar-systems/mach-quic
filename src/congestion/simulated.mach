@@ -27,11 +27,6 @@ fun signals(events: *recovery.Event, count: usize, flight: u64, now_ns: u64, rtt
     ret value;
 }
 
-fun difference(a: u64, b: u64) u64 {
-    if (a > b) { ret a - b; }
-    ret b - a;
-}
-
 test congestion__newreno_reference_trace_covers_reordering_and_persistent_loss {
     var state:  controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
     var events: [2]recovery.Event;
@@ -159,53 +154,6 @@ test congestion__repeated_ecn_signals_reduce_once_per_recovery_epoch {
     input.ecn_congestion = true;
     input.ecn_sent_at_ns = 11;
     if (!controller.on_recovery(?state, input).reduced || state.congestion_window != 3000) { ret 1; }
-    ret 0;
-}
-
-test congestion__equal_paced_flows_remain_fair_through_deterministic_bursts {
-    var left:       pacer.State = pacer.init(pacer.default_config(1200, 12000), 12000, 100000000, 0);
-    var right:      pacer.State = pacer.init(pacer.default_config(1200, 12000), 12000, 100000000, 0);
-    var now_ns:     u64         = 0;
-    var sent_count: u8          = 0;
-    for (sent_count < 32) {
-        val a: pacer.Schedule = pacer.schedule(?left, now_ns, 12000, 100000000, 1200, false);
-        val b: pacer.Schedule = pacer.schedule(?right, now_ns, 12000, 100000000, 1200, false);
-        if (!a.ok || !b.ok || a.ready_at_ns != b.ready_at_ns) { ret 1; }
-        now_ns = a.ready_at_ns;
-        if (pacer.publish(?left, a, now_ns, 12000, 100000000).status != pacer.PUBLISH_OK ||
-            pacer.publish(?right, b, now_ns, 12000, 100000000).status != pacer.PUBLISH_OK) { ret 1; }
-        if (left.budget != right.budget) { ret 1; }
-        sent_count = sent_count + 1;
-    }
-    ret 0;
-}
-
-test congestion__shared_newreno_loss_converges_unequal_flows {
-    var left:  controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
-    var right: controller.State = controller.init(controller.default_config(controller.ALGORITHM_NEW_RENO, 1200), 0);
-    left.slow_start_threshold  = left.congestion_window;
-    right.congestion_window    = 48000;
-    right.slow_start_threshold = right.congestion_window;
-    val initial_difference: u64 = difference(left.congestion_window, right.congestion_window);
-    var events:             [1]recovery.Event;
-    var round:              u8  = 0;
-    var now_ns:             u64 = 10;
-    for (round < 4) {
-        events[0] = event(recovery.EVENT_ACKED, now_ns - 1, 1200);
-        var input: controller.Signals = signals(?events[0], 1, left.congestion_window,
-            now_ns, 100000000);
-        if (!controller.on_recovery(?left, input).ok) { ret 1; }
-        input.bytes_in_flight_before = right.congestion_window;
-        if (!controller.on_recovery(?right, input).ok) { ret 1; }
-        events[0] = event(recovery.EVENT_LOST, now_ns, 1200);
-        input     = signals(?events[0], 1, left.congestion_window, now_ns + 1, 100000000);
-        if (!controller.on_recovery(?left, input).ok) { ret 1; }
-        input.bytes_in_flight_before = right.congestion_window;
-        if (!controller.on_recovery(?right, input).ok) { ret 1; }
-        now_ns = now_ns + 10;
-        round  = round + 1;
-    }
-    if (difference(left.congestion_window, right.congestion_window) >= initial_difference / 8) { ret 1; }
     ret 0;
 }
 

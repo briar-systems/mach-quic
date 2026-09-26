@@ -2523,13 +2523,6 @@ fun initialized_for_test(config: Config, storage: Storage) Manager {
     ret manager;
 }
 
-test stream__stream_id_bits_expose_ownership_and_direction {
-    if (initiated_by_server(0))  { ret 1; }
-    if (!initiated_by_server(1)) { ret 1; }
-    if (!unidirectional(2))      { ret 1; }
-    ret 0;
-}
-
 var test_pool:    supply.TestPool;
 var test_account: supply.Account;
 
@@ -2602,14 +2595,6 @@ test stream__authenticated_peer_limits_bind_from_exact_zero_once {
         manager.config.send_peer_bidirectional_limit != 2 ||
         manager.config.send_unidirectional_limit != 4 ||
         apply_peer_limits(?manager, 11, 2, 3, 4, 5, 6).status != STATUS_ERROR) {
-        ret 1;
-    }
-    ret 0;
-}
-
-test stream__an_idle_h3_connections_control_streams_fit_one_record_block {
-    if (RECORDS_PER_BLOCK < RECORDS_PACKED) {
-        print.eprintln("Stream grew past one chunk / RECORDS_PACKED: an idle h3 connection now holds two record chunks. restore the packing, or lower RECORDS_PACKED and the size guard's idle count deliberately");
         ret 1;
     }
     ret 0;

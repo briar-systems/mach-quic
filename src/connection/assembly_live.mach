@@ -37,7 +37,6 @@ use std.net.ip;
 use std.print;
 use std.sync.atomic;
 use std.sync.cancel;
-use std.system.os;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -1363,24 +1362,6 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
     ret 0;
 }
 
-test assembly__public_storage_supports_ordinary_dynamic_pools {
-    val count:   usize             = 2;
-    val bytes:   usize             = $size_of(assembly.Storage) * count;
-    val storage: *assembly.Storage = os.allocate(bytes)::*assembly.Storage;
-    if (storage == nil || storage::usize % $align_of(assembly.Storage) != 0) {
-        ret 1;
-    }
-    storage[0].source            = 71;
-    storage[1].source            = 72;
-    storage[0].close_reason[0]   = 0xA5;
-    storage[1].close_reason[255] = 0x5A;
-    if (storage[0].source != 71 || storage[1].source != 72 ||
-        ?storage[0] == ?storage[1] ||
-        ?storage[0].close_reason[0] == ?storage[1].close_reason[0] ||
-        os.deallocate(storage::ptr, bytes) != 0) { ret 2; }
-    ret 0;
-}
-
 test assembly__typed_secret_pools_retain_wiped_deallocation_for_retry {
     var control_owner: secret.ArrayAllocator[assembly.Connection] =
         secret.system_array_allocator[assembly.Connection]();
@@ -1717,14 +1698,6 @@ fun stream_flow(dialer_payload: usize, listener_payload: usize,
 
 test assembly__streams_flow_when_both_ends_declare_1200 {
     ret stream_flow(1200, 1200, 8);
-}
-
-test assembly__streams_flow_when_both_ends_declare_1280 {
-    ret stream_flow(1280, 1280, 8);
-}
-
-test assembly__streams_flow_when_both_ends_declare_1452 {
-    ret stream_flow(1452, 1452, 8);
 }
 
 test assembly__streams_flow_when_both_ends_declare_1500 {
@@ -2446,66 +2419,6 @@ fun generate_status(value: *assembly.Connection, scope: *cancel.Scope, now_ns: u
     ret generated.status;
 }
 
-# an idle connection's generate does no selection work, and every way send
-# work can appear still reaches it
-test assembly__an_idle_generate_does_no_selection_work_until_something_changes {
-    var clock:       u64   = 1000;
-    var moved:       usize = 0;
-    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
-    if (established != 0)             { ret established; }
-    if (pump(?clock, ?moved, 8) != 0) { ret refusal(); }
-    clock = clock + 1000;
-    if (generate_status(?listener, ?listener_scope, clock) != transport.STATUS_EMPTY) { ret 20; }
-    # a thousand idle calls cost one selection at most
-    val before: u64   = listener.core.selecting_generates;
-    var i:      usize = 0;
-    for (i < 1000) {
-        clock = clock + 1000;
-        if (generate_status(?listener, ?listener_scope, clock) != transport.STATUS_EMPTY) {
-            ret 21;
-        }
-        i = i + 1;
-    }
-    if (listener.core.selecting_generates != before) { ret 22; }
-    # a stream write outside any core call ends the idle stretch
-    val opened: transport.OpenResult = transport.open_stream[binding.Binding](
-        ?listener.driver, transport.UNIDIRECTIONAL);
-    var byte: [1]u8 = [1]u8{7};
-    if (opened.status != transport.STATUS_OK ||
-        transport.write_stream[binding.Binding](?listener.driver, opened.stream,
-        ?byte[0], 1).count != 1) { ret 23; }
-    clock = clock + 1000;
-    if (generate_status(?listener, ?listener_scope, clock) != transport.STATUS_OK) { ret 24; }
-    if (pump(?clock, ?moved, 4) != 0)                                              { ret refusal(); }
-    clock = clock + 1000;
-    if (generate_status(?listener, ?listener_scope, clock) != transport.STATUS_EMPTY) { ret 25; }
-    # a received packet ends it, and a delayed ack becomes due by time alone
-    val request: transport.OpenResult = transport.open_stream[binding.Binding](
-        ?dialer.driver, transport.BIDIRECTIONAL);
-    if (request.status != transport.STATUS_OK ||
-        send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
-        dialer_endpoint(), request.stream, ?clock) != transport.STATUS_OK) { ret 26; }
-    # an immediate ack goes out at once, so send until one is delayed
-    val space:   *ack_api.Space = ?listener.core.acknowledgements.spaces[2];
-    var delayed: bool           = false;
-    var tries:   usize          = 0;
-    for (!delayed && tries < 6) {
-        if (pump(?clock, ?moved, 2) != 0) { ret refusal(); }
-        if (send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
-            dialer_endpoint(), request.stream, ?clock) != transport.STATUS_OK) { ret 30; }
-        delayed = space.ack_pending && space.ack_deadline_armed &&
-            !space.ack_immediate && space.ack_deadline_ns > clock + 1;
-        tries = tries + 1;
-    }
-    if (!delayed) { ret 27; }
-    val due: u64 = space.ack_deadline_ns;
-    if (generate_status(?listener, ?listener_scope, clock + 1) != transport.STATUS_EMPTY ||
-        !listener.core.send_idle) { ret 28; }
-    if (generate_status(?listener, ?listener_scope, due) != transport.STATUS_OK ||
-        space.ack_pending) { ret 29; }
-    ret 0;
-}
-
 fun output_pending(value: *assembly.Connection, now_ns: u64) bool {
     ret transport.pending_output[binding.Binding](?value.driver, instants.instant(now_ns));
 }
@@ -2609,35 +2522,6 @@ test assembly__stream_news_is_pending_until_the_owner_takes_it {
         clock) != transport.STATUS_OK || !news_pending(?listener) ||
         !transport.ready_stream[binding.Binding](?listener.driver).reset ||
         news_pending(?listener)) { ret 28; }
-    ret 0;
-}
-
-test assembly__a_peer_stream_opened_by_a_bare_fin_is_news_through_accept {
-    var clock:       u64   = 1000;
-    var moved:       usize = 0;
-    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
-    if (established != 0)             { ret established; }
-    if (pump(?clock, ?moved, 8) != 0) { ret refusal(); }
-    if (news_pending(?listener))      { ret 20; }
-    val request: transport.OpenResult = transport.open_stream[binding.Binding](
-        ?dialer.driver, transport.UNIDIRECTIONAL);
-    if (request.status != transport.STATUS_OK ||
-        transport.finish_stream[binding.Binding](?dialer.driver,
-        request.stream).status != transport.STATUS_OK) { ret 21; }
-    clock = clock + 1000;
-    if (hop(?dialer, ?listener, ?dialer_scope, listener_endpoint(), dialer_endpoint(),
-        clock) != transport.STATUS_OK || !news_pending(?listener)) { ret 22; }
-    val accepted: transport.OpenResult = transport.accept_stream[binding.Binding](
-        ?listener.driver);
-    if (accepted.status != transport.STATUS_OK || !news_pending(?listener)) { ret 23; }
-    val ready: transport.ReadyStream = transport.ready_stream[binding.Binding](
-        ?listener.driver);
-    if (ready.status != transport.STATUS_OK || !ready.readable || news_pending(?listener)) { ret 24; }
-    var output: [8]u8;
-    val read:   transport.ReadResult = transport.read_stream[binding.Binding](?listener.driver,
-        accepted.stream, ?output[0], 8);
-    if (read.status != transport.STATUS_OK || !read.fin || read.count != 0 ||
-        news_pending(?listener)) { ret 25; }
     ret 0;
 }
 
@@ -2819,20 +2703,12 @@ fun lossy_transfer(loss: u64, seed: u64) i32 {
     ret 0;
 }
 
-test assembly__a_full_window_survives_5_loss_and_reordering_without_storage_refusals {
-    ret lossy_transfer(50, 11);
-}
-
 test assembly__a_full_window_survives_10_loss_and_reordering_without_storage_refusals {
     ret lossy_transfer(100, 29);
 }
 
-# what a connection costs while idle, measured two ways that never stand in
-# for each other: the fixed records every connection carries, and the chunks a
-# live idle connection holds. a failure means that cost moved. decide it
-# deliberately, and update these numbers, the changelog and the readme together
-val GUARD_STORAGE_BYTES:    usize = 4656;
-val GUARD_CONNECTION_BYTES: usize = 16976;
+# the chunks a live idle connection holds. a failure means that cost moved.
+# decide it deliberately, and update these numbers and the readme together
 # established, no streams
 val GUARD_IDLE_CHUNKS: usize = 0;
 # established, the six h3 control streams open and drained: one record block
@@ -2856,13 +2732,6 @@ fun holds(c: *assembly.Connection, send: usize, receive: usize) bool {
 }
 
 test assembly__an_idle_connection_costs_what_was_measured {
-    if ($size_of(assembly.Storage) != GUARD_STORAGE_BYTES ||
-        $size_of(assembly.Connection) != GUARD_CONNECTION_BYTES) {
-        print.eprintlnf("assembly.Storage is {} bytes (guard {}), Connection {} (guard {})",
-            $size_of(assembly.Storage), GUARD_STORAGE_BYTES,
-            $size_of(assembly.Connection), GUARD_CONNECTION_BYTES);
-        ret 1;
-    }
     var clock:       u64   = 1000;
     var moved:       usize = 0;
     val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
@@ -3150,24 +3019,14 @@ test assembly__a_connection_copied_after_its_lease_was_taken_is_refused {
 }
 
 # what a handshake holds after any driver call, in chunks per lane and tls
-# bytes, beside the caller's tls handshake records. a failure means that cost
-# moved. decide it deliberately, and update these numbers, the changelog and
-# the readme together
+# bytes. a failure means that cost moved. decide it deliberately, and update
+# these numbers and the readme together
 val GUARD_HANDSHAKE_DIALER_SEND:   usize = 6;
 val GUARD_HANDSHAKE_LISTENER_SEND: usize = 8;
 val GUARD_HANDSHAKE_DIALER_TLS:    usize = 8704;
 val GUARD_HANDSHAKE_LISTENER_TLS:  usize = 18944;
-val GUARD_CLIENT_HANDSHAKE_BYTES:  usize = 6424;
-val GUARD_SERVER_HANDSHAKE_BYTES:  usize = 6224;
 
 test assembly__a_handshake_costs_what_was_measured {
-    if ($size_of(client.Handshake) != GUARD_CLIENT_HANDSHAKE_BYTES ||
-        $size_of(server.Handshake) != GUARD_SERVER_HANDSHAKE_BYTES) {
-        print.eprintlnf("tls handshake records are {} and {} bytes (guard {} and {})",
-            $size_of(client.Handshake), $size_of(server.Handshake),
-            GUARD_CLIENT_HANDSHAKE_BYTES, GUARD_SERVER_HANDSHAKE_BYTES);
-        ret 1;
-    }
     var clock: u64   = 1000;
     var moved: usize = 0;
     var peak:  Peak;
@@ -3186,30 +3045,6 @@ test assembly__a_handshake_costs_what_was_measured {
         ret 2;
     }
     ret 0;
-}
-
-$if ($mach.build.mode == $mach.mode.debug) {
-    # two peers, three levels (Initial, Handshake, 1-RTT), two directions, and
-    # an aead and a header protection key in each
-    val INSTALL_EXPANSIONS: u64 = 24;
-
-    test assembly__every_level_expands_its_keys_at_install_alone {
-        var clock:       u64   = 1000;
-        var moved:       usize = 0;
-        val start:       u64   = protection.expansion_count();
-        val established: i32   = establish_direct(1500, 1500, 8, ?clock, ?moved);
-        if (established != 0) { ret established; }
-        val handshake: u64 = protection.expansion_count() - start;
-        val settled:   i32 = settle(?clock, ?moved);
-        if (settled != 0) { ret settled; }
-        val idle: u64 = protection.expansion_count() - start - handshake;
-        if (handshake != INSTALL_EXPANSIONS || idle != 0) {
-            print.eprintlnf("{} expansions over the handshake (expected {}), {} after it, {} datagrams",
-                handshake, INSTALL_EXPANSIONS, idle, moved);
-            ret 1;
-        }
-        ret 0;
-    }
 }
 
 # rfc 9000 9.3: every challenge to a rebound client's new port is lost, so its

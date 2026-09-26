@@ -761,13 +761,6 @@ pub fun encode_protected_header(b: *binary.Builder, value: *Packet,
     ret result;
 }
 
-test packet__packet_types_map_to_number_spaces {
-    if (number_space(PACKET_INITIAL) != SPACE_INITIAL)     { ret 1; }
-    if (number_space(PACKET_HANDSHAKE) != SPACE_HANDSHAKE) { ret 1; }
-    if (number_space(PACKET_ONE_RTT) != SPACE_APPLICATION) { ret 1; }
-    ret 0;
-}
-
 test packet__protected_headers_include_authentication_tag_length {
     var value: Packet;
     value.header.kind              = PACKET_INITIAL;

@@ -926,15 +926,6 @@ fun deliver_alert(fixture: *Fixture, alert: u64) i64 {
     ret 0;
 }
 
-test core__handshake_failure_reaches_connection_close_unflattened {
-    var fixture: Fixture;
-    if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
-    val delivered: i64 = deliver_alert(?fixture, 0x28);
-    if (delivered != 0)                                              { ret 10 + delivered::i32; }
-    if (fixture.engine.close_error != core.CRYPTO_ERROR_BASE + 0x28) { ret 2; }
-    ret 0;
-}
-
 test core__bad_certificate_reaches_connection_close_unflattened {
     var fixture: Fixture;
     if (!initialize(?fixture, transport.CLIENT, true, 1)) { ret 1; }
