@@ -71,7 +71,7 @@ version = "^0.24"
 
 [dep.tls]
 git = "https://github.com/briar-systems/mach-tls"
-ref = "commit/76eb0767cadd3e684736be7d0562dd1ceb7168f8"
+version = "^0.13"
 
 # test-only: the library and every test module, run with `mach test . --lib tests`
 [artifact.tests]
