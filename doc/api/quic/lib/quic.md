@@ -3,6 +3,6 @@
 ## val VERSION
 
 ```mach
-pub val VERSION: str = "0.20.1"
+pub val VERSION: str = "0.21.0"
 ```
 

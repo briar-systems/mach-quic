@@ -32,6 +32,7 @@ pub rec Slots[T] {
     free_head: usize;
 }
 
+#[testing]
 rec Probe {
     value: u64;
 }
@@ -133,7 +134,7 @@ pub fun destroy[T](slots: *Slots[T], backing: *allocator.Allocator) bool {
     ret true;
 }
 
-test "quic.storage.slots: growth keeps records and hands out every index once" {
+test slots__growth_keeps_records_and_hands_out_every_index_once {
     var state: testing.Testing;
     val made:  err[allocator.Error] = testing.make(?state);
     if (sel made.err) { ret 1; }
@@ -163,7 +164,7 @@ test "quic.storage.slots: growth keeps records and hands out every index once" {
     ret 0;
 }
 
-test "quic.storage.slots: a refused growth leaves the directory intact" {
+test slots__a_refused_growth_leaves_the_directory_intact {
     var state: testing.Testing;
     val made:  err[allocator.Error] = testing.make(?state);
     if (sel made.err) { ret 1; }

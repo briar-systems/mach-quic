@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-26
+
+quic builds on mach 6, mach-std 9.0.0, mach-crypto 0.24.0 and mach-tls 0.13.0 (#264). Its protocol surface is unchanged.
+
+### Changed
+
+- Breaking: requires mach 6 (`mach = "^6"`), with `[dep.std] version = "^9.0"` realized at v9.0.0, `[dep.crypto] version = "^0.24"` at v0.24.0 and `[dep.tls] version = "^0.13"` at v0.13.0, all committed as gitlinks. Resolution is flat, so a consumer of quic moves to mach 6, std 9, crypto 0.24 and tls 0.13 with it. CI seeds mach v6.0.0 (#264).
+- Every test is named by identifier (`test subject__case`), as mach 6 requires, and `tools/test-selection` compares qualified names (`module#name`). Test-only helpers and fixtures are `#[testing]`, so ordinary builds omit them, and that includes `storage.source.end_test`. `connection.credentials_simulated` and `storage.source`'s `make_test` and `test_made` stay unmarked, since hedge and mach-http's h3 loopback harness link them (#264).
+- The suite is pruned to mach's test policy, from 306 tests to 292. One case per protocol rule, state transition and attack shape stays, as does every test that guards parsing of hostile input. Constant pins, duplicates, declared-payload and loss-rate sweeps, and the performance checks on the idle-generate selection count and install-time key expansion are gone. The memory cost tests keep their chunk and tls byte bounds and no longer pin the `$size_of` of `assembly.Storage`, `assembly.Connection` or the tls handshake records (#264).
+
+### Removed
+
+- Breaking: the `connection.core.Core.selecting_generates` counter, which only a removed test read (#264).
+
 ## [0.20.1] - 2026-09-25
 
 ### Changed

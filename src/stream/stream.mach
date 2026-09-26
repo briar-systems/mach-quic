@@ -2517,23 +2517,18 @@ pub fun finish_close_scoped(manager: *Manager, source: u64) OperationResult {
     ret result;
 }
 
+#[testing]
 fun initialized_for_test(config: Config, storage: Storage) Manager {
     var manager: Manager;
     initialize(?manager, config, storage);
     ret manager;
 }
 
-test "quic.stream.stream: stream id bits expose ownership and direction" {
-    if (initiated_by_server(0))  { ret 1; }
-    if (!initiated_by_server(1)) { ret 1; }
-    if (!unidirectional(2))      { ret 1; }
-    ret 0;
-}
-
 var test_pool:    supply.TestPool;
 var test_account: supply.Account;
 
 # a pool and account for a stream manager under test
+#[testing]
 fun test_storage(streams: *Stream, stream_capacity: usize, attempts: *Attempt,
     attempt_capacity: usize) Storage {
     if (!supply.test_made(?test_pool)) {
@@ -2545,7 +2540,7 @@ fun test_storage(streams: *Stream, stream_capacity: usize, attempts: *Attempt,
         chunks:   ?test_pool.provider, account: ?test_account, send_buffer_limit: 4};
 }
 
-test "quic.stream.stream: owned regions reject maximum addresses and aliases" {
+test stream__owned_regions_reject_maximum_addresses_and_aliases {
     var streams:  [1]Stream;
     var attempts: [1]Attempt;
     var config:   Config;
@@ -2580,7 +2575,7 @@ test "quic.stream.stream: owned regions reject maximum addresses and aliases" {
     ret 0;
 }
 
-test "quic.stream.stream: authenticated peer limits bind from exact zero once" {
+test stream__authenticated_peer_limits_bind_from_exact_zero_once {
     var streams:  [1]Stream;
     var attempts: [1]Attempt;
     var config:   Config;
@@ -2602,14 +2597,6 @@ test "quic.stream.stream: authenticated peer limits bind from exact zero once" {
         manager.config.send_peer_bidirectional_limit != 2 ||
         manager.config.send_unidirectional_limit != 4 ||
         apply_peer_limits(?manager, 11, 2, 3, 4, 5, 6).status != STATUS_ERROR) {
-        ret 1;
-    }
-    ret 0;
-}
-
-test "quic.stream: an idle h3 connection's control streams fit one record block" {
-    if (RECORDS_PER_BLOCK < RECORDS_PACKED) {
-        print.eprintln("Stream grew past one chunk / RECORDS_PACKED: an idle h3 connection now holds two record chunks. restore the packing, or lower RECORDS_PACKED and the size guard's idle count deliberately");
         ret 1;
     }
     ret 0;

@@ -349,6 +349,7 @@ pub fun release_all(chunks: *Chunks, from: *ranges.Source) {
     release_below(chunks, from, 0 - 1::u64);
 }
 
+#[testing]
 rec Fixture {
     backing:  limited.Limited;
     pool:     buffers.Pool;
@@ -357,13 +358,14 @@ rec Fixture {
     account:  supply.Account;
 }
 
+#[testing]
 fun test_pool(fixture: *Fixture) bool {
     if (!supply.test_pool(?fixture.pool, ?fixture.class, ?fixture.backing, 16)) { ret false; }
     fixture.provider = buffers.source(?fixture.pool);
     ret supply.open(?fixture.provider, ?fixture.account, 1, 5, 5, 0);
 }
 
-test "quic.storage.chunks: bytes round trip across chunks and the spill is given back" {
+test chunks__bytes_round_trip_across_chunks_and_the_spill_is_given_back {
     var fixture: Fixture;
     if (!test_pool(?fixture)) { ret 1; }
     var from: ranges.Source = ranges.Source{provider: ?fixture.provider,
@@ -390,7 +392,7 @@ test "quic.storage.chunks: bytes round trip across chunks and the spill is given
     ret 0;
 }
 
-test "quic.storage.chunks: a refused span takes nothing and retained chunks stay" {
+test chunks__a_refused_span_takes_nothing_and_retained_chunks_stay {
     var fixture: Fixture;
     if (!test_pool(?fixture)) { ret 1; }
     var from: ranges.Source = ranges.Source{provider: ?fixture.provider,

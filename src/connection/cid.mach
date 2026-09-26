@@ -913,6 +913,7 @@ pub fun snapshot(manager: *Manager) Snapshot {
     ret result;
 }
 
+#[testing]
 fun make_id(value: u8) packet.ConnectionId {
     var id: packet.ConnectionId;
     id.len     = 4;
@@ -923,6 +924,7 @@ fun make_id(value: u8) packet.ConnectionId {
     ret id;
 }
 
+#[testing]
 fun make_token(value: u8) [16]u8 {
     var token: [16]u8;
     token[0]  = value;
@@ -930,7 +932,7 @@ fun make_token(value: u8) [16]u8 {
     ret token;
 }
 
-test "quic.connection.cid: new ids retire transactionally and preserve a current destination" {
+test cid__new_ids_retire_transactionally_and_preserve_a_current_destination {
     var local:   [4]Entry;
     var peer:    [6]Entry;
     var manager: Manager;
@@ -946,7 +948,7 @@ test "quic.connection.cid: new ids retire transactionally and preserve a current
     ret 0;
 }
 
-test "quic.connection.cid: malformed duplicates and active limits do not mutate state" {
+test cid__malformed_duplicates_and_active_limits_do_not_mutate_state {
     var local:   [3]Entry;
     var peer:    [4]Entry;
     var manager: Manager;
@@ -964,7 +966,7 @@ test "quic.connection.cid: malformed duplicates and active limits do not mutate 
     ret 0;
 }
 
-test "quic.connection.cid: retirement follows the packet destination across active ids" {
+test cid__retirement_follows_the_packet_destination_across_active_ids {
     var local:   [3]Entry;
     var peer:    [4]Entry;
     var manager: Manager;
@@ -984,7 +986,7 @@ test "quic.connection.cid: retirement follows the packet destination across acti
     ret 0;
 }
 
-test "quic.connection.cid: migration consumes one peer id and bounds local advertisements" {
+test cid__migration_consumes_one_peer_id_and_bounds_local_advertisements {
     var local:   [3]Entry;
     var peer:    [6]Entry;
     var manager: Manager;
@@ -1006,7 +1008,7 @@ test "quic.connection.cid: migration consumes one peer id and bounds local adver
     ret 0;
 }
 
-test "quic.connection.cid: initial reset token and bounded storage remain explicit" {
+test cid__initial_reset_token_and_bounded_storage_remain_explicit {
     var local:   [3]Entry;
     var peer:    [4]Entry;
     var manager: Manager;
@@ -1039,7 +1041,7 @@ test "quic.connection.cid: initial reset token and bounded storage remain explic
     ret 0;
 }
 
-test "quic.connection.cid: hostile products and storage aliases are rejected atomically" {
+test cid__hostile_products_and_storage_aliases_are_rejected_atomically {
     val maximum: usize = ~(0::usize);
     var local:   [3]Entry;
     var peer:    [4]Entry;
@@ -1065,7 +1067,7 @@ test "quic.connection.cid: hostile products and storage aliases are rejected ato
     ret 0;
 }
 
-test "quic.connection.cid: zero-length ids issue nothing and refuse the peer's" {
+test cid__zero_length_ids_issue_nothing_and_refuse_the_peers {
     var local_entries: [4]Entry;
     var peer_entries:  [4]Entry;
     var manager:       Manager;

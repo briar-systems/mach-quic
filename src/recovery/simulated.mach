@@ -7,6 +7,7 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
+#[testing]
 fun ack_one(number: u64) frame.Frame {
     var ack: frame.Frame;
     ack.kind                 = frame.ACK;
@@ -14,6 +15,7 @@ fun ack_one(number: u64) frame.Frame {
     ret ack;
 }
 
+#[testing]
 fun sent(number: u64, at_ns: u64, owner: u64) recovery.SentPacket {
     var packet: recovery.SentPacket;
     packet.number        = number;
@@ -25,6 +27,7 @@ fun sent(number: u64, at_ns: u64, owner: u64) recovery.SentPacket {
     ret packet;
 }
 
+#[testing]
 fun path_sent(number: u64, at_ns: u64, owner: u64, source: u64,
     path_index: usize, generation: u64) recovery.SentPacket {
     var value: recovery.SentPacket = sent(number, at_ns, owner);
@@ -34,7 +37,7 @@ fun path_sent(number: u64, at_ns: u64, owner: u64, source: u64,
     ret value;
 }
 
-test "quic.recovery.simulated: reordering and duplicate ACKs preserve terminal ownership" {
+test recovery__reordering_and_duplicate_acks_preserve_terminal_ownership {
     var initial:     [8]recovery.SentPacket;
     var handshake:   [8]recovery.SentPacket;
     var application: [8]recovery.SentPacket;
@@ -65,7 +68,7 @@ test "quic.recovery.simulated: reordering and duplicate ACKs preserve terminal o
     ret 0;
 }
 
-test "quic.recovery.simulated: time threshold fires deterministically" {
+test recovery__time_threshold_fires_deterministically {
     var initial:     [4]recovery.SentPacket;
     var handshake:   [4]recovery.SentPacket;
     var application: [4]recovery.SentPacket;
@@ -90,7 +93,7 @@ test "quic.recovery.simulated: time threshold fires deterministically" {
     ret 0;
 }
 
-test "quic.recovery.simulated: timer generations close both ACK and timeout races" {
+test recovery__timer_generations_close_both_ack_and_timeout_races {
     var initial:     [4]recovery.SentPacket;
     var handshake:   [4]recovery.SentPacket;
     var application: [4]recovery.SentPacket;
@@ -120,7 +123,7 @@ test "quic.recovery.simulated: timer generations close both ACK and timeout race
     ret 0;
 }
 
-test "quic.recovery.simulated: packet spaces and key discard remain independent" {
+test recovery__packet_spaces_and_key_discard_remain_independent {
     var initial:     [4]recovery.SentPacket;
     var handshake:   [4]recovery.SentPacket;
     var application: [4]recovery.SentPacket;
@@ -142,7 +145,7 @@ test "quic.recovery.simulated: packet spaces and key discard remain independent"
     ret 0;
 }
 
-test "quic.recovery.simulated: Retry transfers owners without reusing packet numbers" {
+test recovery__retry_transfers_owners_without_reusing_packet_numbers {
     var initial:     [3]recovery.SentPacket;
     var handshake:   [3]recovery.SentPacket;
     var application: [3]recovery.SentPacket;
@@ -179,7 +182,7 @@ test "quic.recovery.simulated: Retry transfers owners without reusing packet num
     ret 0;
 }
 
-test "quic.recovery.simulated: packet-threshold loss never crosses number spaces" {
+test recovery__packet_threshold_loss_never_crosses_number_spaces {
     var initial:     [6]recovery.SentPacket;
     var handshake:   [2]recovery.SentPacket;
     var application: [2]recovery.SentPacket;
@@ -203,7 +206,7 @@ test "quic.recovery.simulated: packet-threshold loss never crosses number spaces
     ret 0;
 }
 
-test "quic.recovery.simulated: early, stale, and amplification timer transitions are deterministic" {
+test recovery__early_stale_and_amplification_timer_transitions_are_deterministic {
     var initial:     [3]recovery.SentPacket;
     var handshake:   [2]recovery.SentPacket;
     var application: [2]recovery.SentPacket;
@@ -228,7 +231,7 @@ test "quic.recovery.simulated: early, stale, and amplification timer transitions
     ret 0;
 }
 
-test "quic.recovery.simulated: malformed ACK and output exhaustion leave recovery unchanged" {
+test recovery__malformed_ack_and_output_exhaustion_leave_recovery_unchanged {
     var initial:     [2]recovery.SentPacket;
     var handshake:   [2]recovery.SentPacket;
     var application: [4]recovery.SentPacket;
@@ -254,7 +257,7 @@ test "quic.recovery.simulated: malformed ACK and output exhaustion leave recover
     ret 0;
 }
 
-test "quic.recovery.simulated: sustained loss establishes persistent congestion" {
+test recovery__sustained_loss_establishes_persistent_congestion {
     var initial:     [8]recovery.SentPacket;
     var handshake:   [8]recovery.SentPacket;
     var application: [8]recovery.SentPacket;
@@ -290,7 +293,7 @@ test "quic.recovery.simulated: sustained loss establishes persistent congestion"
     ret 0;
 }
 
-test "quic.recovery.simulated: arithmetic saturation cannot wrap timers or flight bytes" {
+test recovery__arithmetic_saturation_cannot_wrap_timers_or_flight_bytes {
     var initial:     [2]recovery.SentPacket;
     var handshake:   [2]recovery.SentPacket;
     var application: [2]recovery.SentPacket;
@@ -310,7 +313,7 @@ test "quic.recovery.simulated: arithmetic saturation cannot wrap timers or fligh
     ret 0;
 }
 
-test "quic.recovery.simulated: old path acknowledgements cannot update selected path RTT" {
+test recovery__old_path_acknowledgements_cannot_update_selected_path_rtt {
     var initial:     [2]recovery.SentPacket;
     var handshake:   [2]recovery.SentPacket;
     var application: [4]recovery.SentPacket;
@@ -338,7 +341,7 @@ test "quic.recovery.simulated: old path acknowledgements cannot update selected 
     ret 0;
 }
 
-test "quic.recovery.simulated: an acknowledged untracked packet number is accepted" {
+test recovery__an_acknowledged_untracked_packet_number_is_accepted {
     var initial:     [4]recovery.SentPacket;
     var handshake:   [4]recovery.SentPacket;
     var application: [8]recovery.SentPacket;
@@ -361,7 +364,7 @@ test "quic.recovery.simulated: an acknowledged untracked packet number is accept
     ret 0;
 }
 
-test "quic.recovery.simulated: an acknowledgement may precede the send completion" {
+test recovery__an_acknowledgement_may_precede_the_send_completion {
     var initial:     [4]recovery.SentPacket;
     var handshake:   [4]recovery.SentPacket;
     var application: [8]recovery.SentPacket;

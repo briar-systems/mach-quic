@@ -9,10 +9,13 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
-var chunk_pool:    supply.TestPool;
+#[testing]
+var chunk_pool: supply.TestPool;
+#[testing]
 var chunk_account: supply.Account;
 
 # every manager a test builds draws on one pool and account
+#[testing]
 fun test_chunks() *supply.Provider {
     if (!supply.test_made(?chunk_pool)) {
         supply.make_test(?chunk_pool, 512);
@@ -21,11 +24,13 @@ fun test_chunks() *supply.Provider {
     ret ?chunk_pool.provider;
 }
 
+#[testing]
 fun test_account() *supply.Account {
     test_chunks();
     ret ?chunk_account;
 }
 
+#[testing]
 fun initialize_manager(config: stream.Config,
     storage: stream.Storage) stream.Manager {
     var manager: stream.Manager;
@@ -33,6 +38,7 @@ fun initialize_manager(config: stream.Config,
     ret manager;
 }
 
+#[testing]
 fun config(source: u64, streams: u64, data: u64) stream.Config {
     var value: stream.Config;
     value.source                            = source;
@@ -52,7 +58,7 @@ fun config(source: u64, streams: u64, data: u64) stream.Config {
     ret value;
 }
 
-test "quic.stream.simulated: stream creation, implicit peer streams, and ordered delivery" {
+test stream__stream_creation_implicit_peer_streams_and_ordered_delivery {
     var records:  [6]stream.Stream;
     var attempts: [12]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -87,7 +93,7 @@ test "quic.stream.simulated: stream creation, implicit peer streams, and ordered
     ret 0;
 }
 
-test "quic.stream.simulated: final size, overlap, and connection flow failures are transactional" {
+test stream__final_size_overlap_and_connection_flow_failures_are_transactional {
     var records:  [3]stream.Stream;
     var attempts: [6]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -119,7 +125,7 @@ test "quic.stream.simulated: final size, overlap, and connection flow failures a
     ret 0;
 }
 
-test "quic.stream.simulated: exact send budgets and duplicate transmissions retain ownership" {
+test stream__exact_send_budgets_and_duplicate_transmissions_retain_ownership {
     var records:  [2]stream.Stream;
     var attempts: [8]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -169,7 +175,7 @@ test "quic.stream.simulated: exact send budgets and duplicate transmissions reta
     ret 0;
 }
 
-test "quic.stream.simulated: reset, stop-sending, and cancellation close both directions" {
+test stream__reset_stop_sending_and_cancellation_close_both_directions {
     var records:  [2]stream.Stream;
     var attempts: [8]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -217,7 +223,7 @@ test "quic.stream.simulated: reset, stop-sending, and cancellation close both di
     ret 0;
 }
 
-test "quic.stream.simulated: connection and stream flow budgets remain independent" {
+test stream__connection_and_stream_flow_budgets_remain_independent {
     var records:  [4]stream.Stream;
     var attempts: [8]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -270,7 +276,7 @@ test "quic.stream.simulated: connection and stream flow budgets remain independe
     ret 0;
 }
 
-test "quic.stream.simulated: unidirectional streams enforce ownership and ordered delivery" {
+test stream__unidirectional_streams_enforce_ownership_and_ordered_delivery {
     var records:  [2]stream.Stream;
     var attempts: [4]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -309,7 +315,7 @@ test "quic.stream.simulated: unidirectional streams enforce ownership and ordere
     ret 0;
 }
 
-test "quic.stream.simulated: close preserves reserved stream publication" {
+test stream__close_preserves_reserved_stream_publication {
     var records:  [1]stream.Stream;
     var attempts: [1]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -332,7 +338,7 @@ test "quic.stream.simulated: close preserves reserved stream publication" {
     ret 0;
 }
 
-test "quic.stream.simulated: flow-control frames create only permitted peer stream halves" {
+test stream__flow_control_frames_create_only_permitted_peer_stream_halves {
     var records:  [4]stream.Stream;
     var attempts: [4]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -360,7 +366,7 @@ test "quic.stream.simulated: flow-control frames create only permitted peer stre
     ret 0;
 }
 
-test "quic.stream.simulated: stream exhaustion and two-phase teardown are bounded" {
+test stream__stream_exhaustion_and_two_phase_teardown_are_bounded {
     var records:  [2]stream.Stream;
     var attempts: [4]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -389,7 +395,7 @@ test "quic.stream.simulated: stream exhaustion and two-phase teardown are bounde
     ret 0;
 }
 
-test "quic.stream.simulated: consumed credit frames survive loss and stream release" {
+test stream__consumed_credit_frames_survive_loss_and_stream_release {
     var records:  [1]stream.Stream;
     var attempts: [4]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -447,6 +453,7 @@ test "quic.stream.simulated: consumed credit frames survive loss and stream rele
     ret 0;
 }
 
+#[testing]
 fun credit_storage(records: *stream.Stream, attempts: *stream.Attempt) stream.Storage {
     ret stream.Storage{
         streams:  records, stream_capacity: 1,
@@ -455,6 +462,7 @@ fun credit_storage(records: *stream.Stream, attempts: *stream.Attempt) stream.St
     };
 }
 
+#[testing]
 fun credit_limits(source: u64) stream.Config {
     var limits: stream.Config = config(source, 1, 8);
     limits.receive_max_data                  = 8;
@@ -464,7 +472,7 @@ fun credit_limits(source: u64) stream.Config {
     ret limits;
 }
 
-test "quic.stream.simulated: cancellation reconciles delivered bytes exactly once" {
+test stream__cancellation_reconciles_delivered_bytes_exactly_once {
     var records:  [1]stream.Stream;
     var attempts: [4]stream.Attempt;
     var manager:  stream.Manager = initialize_manager(credit_limits(30),
@@ -487,7 +495,7 @@ test "quic.stream.simulated: cancellation reconciles delivered bytes exactly onc
     ret 0;
 }
 
-test "quic.stream.simulated: reset acknowledgement reconciles delivered bytes once" {
+test stream__reset_acknowledgement_reconciles_delivered_bytes_once {
     var records:  [1]stream.Stream;
     var attempts: [4]stream.Attempt;
     var manager:  stream.Manager = initialize_manager(credit_limits(31),
@@ -508,7 +516,7 @@ test "quic.stream.simulated: reset acknowledgement reconciles delivered bytes on
     ret 0;
 }
 
-test "quic.stream.simulated: release reconciles bytes the caller never returned" {
+test stream__release_reconciles_bytes_the_caller_never_returned {
     var records:  [1]stream.Stream;
     var attempts: [4]stream.Attempt;
     var manager:  stream.Manager = initialize_manager(credit_limits(32),
@@ -534,7 +542,7 @@ test "quic.stream.simulated: release reconciles bytes the caller never returned"
     ret 0;
 }
 
-test "quic.stream.simulated: a closing manager releases a stream whose fin was never acknowledged" {
+test stream__a_closing_manager_releases_a_stream_whose_fin_was_never_acknowledged {
     var records:  [1]stream.Stream;
     var attempts: [1]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -558,7 +566,7 @@ test "quic.stream.simulated: a closing manager releases a stream whose fin was n
 }
 
 # rfc 9000 2.2: every byte is sent at least once before it counts as delivered
-test "quic.stream.simulated: a send reserved across a ring lap never claims the next lap" {
+test stream__a_send_reserved_across_a_ring_lap_never_claims_the_next_lap {
     var records:  [2]stream.Stream;
     var attempts: [6]stream.Attempt;
     val storage:  stream.Storage = stream.Storage{
@@ -614,6 +622,7 @@ test "quic.stream.simulated: a send reserved across a ring lap never claims the 
     ret 0;
 }
 
+#[testing]
 fun ready_manager(records: *stream.Stream, attempts: *stream.Attempt, limit: usize) stream.Manager {
     var limits: stream.Config = config(31, 4, 8);
     limits.receive_max_data                  = 32;
@@ -628,7 +637,7 @@ fun ready_manager(records: *stream.Stream, attempts: *stream.Attempt, limit: usi
     });
 }
 
-test "quic.stream.simulated: the ready queue reports each kind of news once, oldest first" {
+test stream__the_ready_queue_reports_each_kind_of_news_once_oldest_first {
     var records:  [4]stream.Stream;
     var attempts: [8]stream.Attempt;
     var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 8);
@@ -664,7 +673,7 @@ test "quic.stream.simulated: the ready queue reports each kind of news once, old
     ret 0;
 }
 
-test "quic.stream.simulated: a connection credit or buffer release reports every blocked stream" {
+test stream__a_connection_credit_or_buffer_release_reports_every_blocked_stream {
     var records:  [4]stream.Stream;
     var attempts: [8]stream.Attempt;
     var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 4);
@@ -700,12 +709,13 @@ test "quic.stream.simulated: a connection credit or buffer release reports every
     ret 0;
 }
 
+#[testing]
 var fragment_bytes: [65536]u8;
 
 # a peer that sends every other byte of its window hits the interval cap. its
 # frames are refused for storage, the bookkeeping stays bounded, and the same
 # bytes sent in order still complete the stream
-test "quic.stream.simulated: a fragmenting peer is held at the interval cap" {
+test stream__a_fragmenting_peer_is_held_at_the_interval_cap {
     var records:  [2]stream.Stream;
     var attempts: [4]stream.Attempt;
     var limits:   stream.Config = config(41, 2, 65536);
@@ -768,11 +778,13 @@ test "quic.stream.simulated: a fragmenting peer is held at the interval cap" {
     ret 0;
 }
 
+#[testing]
 var lifetime_bytes: [4096]u8;
 
 # a pool whose classes each keep one released chunk, so a class's next take
 # reuses the chunk, and its slot, that its last release gave back. a pool that
 # keeps none hands out a slot never used before one given back
+#[testing]
 fun retaining_chunks(chunks: *supply.TestPool, account: *supply.Account) bool {
     supply.classes(?chunks.classes[0], 1);
     val bytes: usize = 16 * supply.BYTES;
@@ -785,7 +797,7 @@ fun retaining_chunks(chunks: *supply.TestPool, account: *supply.Account) bool {
 
 # a chunk released by one stream and taken by another is not reachable through
 # anything the first stream still holds
-test "quic.stream.simulated: a reused chunk is untouched by the stream that released it" {
+test stream__a_reused_chunk_is_untouched_by_the_stream_that_released_it {
     var chunks:  supply.TestPool;
     var account: supply.Account;
     if (!retaining_chunks(?chunks, ?account)) { ret 9; }
@@ -842,6 +854,7 @@ test "quic.stream.simulated: a reused chunk is untouched by the stream that rele
 }
 
 # a manager whose records and attempts come from their own small pool
+#[testing]
 fun demand_manager(chunks: *supply.TestPool, account: *supply.Account, send: usize,
     manager: *stream.Manager) bool {
     if (!supply.make_test(chunks, 64) ||
@@ -854,7 +867,7 @@ fun demand_manager(chunks: *supply.TestPool, account: *supply.Account, send: usi
     });
 }
 
-test "quic.stream.simulated: records and attempts are held only while in use" {
+test stream__records_and_attempts_are_held_only_while_in_use {
     var chunks:  supply.TestPool;
     var account: supply.Account;
     var manager: stream.Manager;
@@ -909,7 +922,7 @@ test "quic.stream.simulated: records and attempts are held only while in use" {
     ret 0;
 }
 
-test "quic.stream.simulated: a peer stream with no record chunk is refused unchanged" {
+test stream__a_peer_stream_with_no_record_chunk_is_refused_unchanged {
     var chunks:  supply.TestPool;
     var account: supply.Account;
     var manager: stream.Manager;
@@ -929,7 +942,7 @@ test "quic.stream.simulated: a peer stream with no record chunk is refused uncha
     ret 0;
 }
 
-test "quic.stream.simulated: news is reported until the owner takes it" {
+test stream__news_is_reported_until_the_owner_takes_it {
     var records:  [4]stream.Stream;
     var attempts: [8]stream.Attempt;
     var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 8);
@@ -966,7 +979,7 @@ test "quic.stream.simulated: news is reported until the owner takes it" {
     ret 0;
 }
 
-test "quic.stream.simulated: a bare fin after every byte was read is news" {
+test stream__a_bare_fin_after_every_byte_was_read_is_news {
     var records:  [4]stream.Stream;
     var attempts: [8]stream.Attempt;
     var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 8);
@@ -993,7 +1006,7 @@ test "quic.stream.simulated: a bare fin after every byte was read is news" {
     ret 0;
 }
 
-test "quic.stream.simulated: a peer stream opened by a bare fin is news through accept" {
+test stream__a_peer_stream_opened_by_a_bare_fin_is_news_through_accept {
     var records:  [4]stream.Stream;
     var attempts: [8]stream.Attempt;
     var manager:  stream.Manager = ready_manager(?records[0], ?attempts[0], 8);
@@ -1012,13 +1025,14 @@ test "quic.stream.simulated: a peer stream opened by a bare fin is news through 
     ret 0;
 }
 
+#[testing]
 rec Snapshot {
     manager:  stream.Manager;
     records:  [4]stream.Stream;
     attempts: [8]stream.Attempt;
 }
 
-test "quic.stream.simulated: a peek names what the prepare after it sends and changes nothing" {
+test stream__a_peek_names_what_the_prepare_after_it_sends_and_changes_nothing {
     var records:  [4]stream.Stream;
     var attempts: [8]stream.Attempt;
     var manager:  stream.Manager      = ready_manager(?records[0], ?attempts[0], 8);
@@ -1058,7 +1072,7 @@ test "quic.stream.simulated: a peek names what the prepare after it sends and ch
     ret 0;
 }
 
-test "quic.stream.simulated: attempts are held only while an attempt chunk is" {
+test stream__attempts_are_held_only_while_an_attempt_chunk_is {
     var chunks:  supply.TestPool;
     var account: supply.Account;
     var manager: stream.Manager;

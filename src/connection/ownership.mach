@@ -15,6 +15,7 @@ pub rec Range {
     valid:  bool;
 }
 
+#[testing]
 rec AnchoredFixture {
     secret: [8]^u8;
     anchor: u64;
@@ -199,7 +200,7 @@ pub fun disjoint_from(subject: Range, index: usize, ranges: *Range,
     ret value;
 }
 
-test "quic.connection.ownership: inclusive maximum ranges are checked without wrapping" {
+test ownership__inclusive_maximum_ranges_are_checked_without_wrapping {
     val maximum:        usize = ~(0::usize);
     val at_maximum:     *u8   = maximum::*u8;
     val before_maximum: *u8   = (maximum - 1)::*u8;
@@ -211,7 +212,7 @@ test "quic.connection.ownership: inclusive maximum ranges are checked without wr
     ret 0;
 }
 
-test "quic.connection.ownership: containment is inclusive and rejects overhang" {
+test ownership__containment_is_inclusive_and_rejects_overhang {
     var storage: [8]u8;
     val whole:   Range = bytes(?storage[0], 8, ZERO_FORBIDDEN);
     if (!contains(whole, whole) ||
@@ -226,7 +227,7 @@ test "quic.connection.ownership: containment is inclusive and rejects overhang" 
     ret 0;
 }
 
-test "quic.connection.ownership: zero and scaled ranges have explicit policies" {
+test ownership__zero_and_scaled_ranges_have_explicit_policies {
     val maximum: usize = ~(0::usize);
     if (bytes(nil, 0, ZERO_FORBIDDEN).valid ||
         !bytes(nil, 0, ZERO_ALLOWED).valid ||
@@ -243,7 +244,7 @@ test "quic.connection.ownership: zero and scaled ranges have explicit policies" 
     ret 0;
 }
 
-test "quic.connection.ownership: mixed records use checked numeric anchors" {
+test ownership__mixed_records_use_checked_numeric_anchors {
     var fixture: AnchoredFixture;
     val offset:  usize = $offset_of(AnchoredFixture, anchor);
     val value:   Range = anchored_record[AnchoredFixture, u64](?fixture.anchor,
@@ -267,7 +268,7 @@ test "quic.connection.ownership: mixed records use checked numeric anchors" {
     ret 0;
 }
 
-test "quic.connection.ownership: a refusal names the ranges that collided" {
+test ownership__a_refusal_names_the_ranges_that_collided {
     var storage: [16]u8;
     var ranges:  [4]Range;
     ranges[0] = bytes(?storage[0], 4, ZERO_FORBIDDEN);
@@ -287,7 +288,7 @@ test "quic.connection.ownership: a refusal names the ranges that collided" {
     ret 0;
 }
 
-test "quic.connection.ownership: a borrowed range names itself and its collision" {
+test ownership__a_borrowed_range_names_itself_and_its_collision {
     var storage: [16]u8;
     var ranges:  [4]Range;
     ranges[0] = bytes(?storage[0], 4, ZERO_FORBIDDEN);
@@ -311,7 +312,7 @@ test "quic.connection.ownership: a borrowed range names itself and its collision
     ret 0;
 }
 
-test "quic.connection.ownership: secret ranges overlap by address" {
+test ownership__secret_ranges_overlap_by_address {
     var fixture: AnchoredFixture;
     val base:    *^u8 = ?fixture.secret[0];
     val upper:   *^u8 = ?fixture.secret[4];

@@ -44,7 +44,7 @@ pub fun same(left: time.Instant, right: time.Instant) bool {
     ret nanos(left) == nanos(right);
 }
 
-test "quic.clock: instants and spans round trip through nanoseconds" {
+test clock__instants_and_spans_round_trip_through_nanoseconds {
     val at: time.Instant = time.Instant{sec: 3, nsec: 250};
     if (nanos(at) != 3000000250 || !same(instant(nanos(at)), at)) { ret 1; }
     if (nanos(time.Instant{sec: -1, nsec: 5}) != 0 ||

@@ -62,7 +62,7 @@ pub fun idle(public: *Scratch, secret: *SecretScratch) bool {
         atomic.load(?secret.holder) == 0;
 }
 
-test "quic.connection.scratch: a pair is lent to one holder at a time" {
+test scratch__a_pair_is_lent_to_one_holder_at_a_time {
     var public: Scratch;
     var secret: SecretScratch;
     if (!idle(?public, ?secret) || !lend(?public, ?secret, 7) ||

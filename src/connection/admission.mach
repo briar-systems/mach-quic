@@ -410,6 +410,7 @@ pub fun snapshot(manager: *Manager) Snapshot {
     ret value;
 }
 
+#[testing]
 fun limits(max_connections: usize, per_peer: usize) Config {
     var config: Config;
     config.source                   = 0;
@@ -420,17 +421,19 @@ fun limits(max_connections: usize, per_peer: usize) Config {
     ret config;
 }
 
+#[testing]
 fun limited_config(source: u64, max_connections: usize, per_peer: usize) Config {
     var config: Config = limits(max_connections, per_peer);
     config.source = source;
     ret config;
 }
 
+#[testing]
 fun test_peer(value: usize) ip.Endpoint {
     ret ip.endpoint(10, (value >> 16)::u8, (value >> 8)::u8, value::u8, 4000);
 }
 
-test "quic.connection.admission: global and peer limits are charged before commit" {
+test admission__global_and_peer_limits_are_charged_before_commit {
     var state: limited.Limited;
     if (!limited.make(?state, 1 << 20)) { ret 1; }
     var manager: Manager;
@@ -457,7 +460,7 @@ test "quic.connection.admission: global and peer limits are charged before commi
     ret 0;
 }
 
-test "quic.connection.admission: stale and cross-source charges cannot release capacity" {
+test admission__stale_and_cross_source_charges_cannot_release_capacity {
     var state: limited.Limited;
     if (!limited.make(?state, 1 << 20)) { ret 1; }
     var manager: Manager;
@@ -488,7 +491,7 @@ test "quic.connection.admission: stale and cross-source charges cannot release c
     ret 0;
 }
 
-test "quic.connection.admission: invalid limits and reinitialization publish nothing" {
+test admission__invalid_limits_and_reinitialization_publish_nothing {
     var state: limited.Limited;
     if (!limited.make(?state, 1 << 20)) { ret 1; }
     val backing:     *allocator.Allocator = limited.allocator_of(?state);
@@ -515,7 +518,7 @@ test "quic.connection.admission: invalid limits and reinitialization publish not
     ret 0;
 }
 
-test "quic.connection.admission: storage grows past its first directories under load" {
+test admission__storage_grows_past_its_first_directories_under_load {
     var state: limited.Limited;
     if (!limited.make(?state, 1 << 24)) { ret 1; }
     var manager: Manager;
@@ -557,7 +560,7 @@ test "quic.connection.admission: storage grows past its first directories under 
     ret 0;
 }
 
-test "quic.connection.admission: peer lookups stay exact across rehash and removal" {
+test admission__peer_lookups_stay_exact_across_rehash_and_removal {
     var state: limited.Limited;
     if (!limited.make(?state, 1 << 24)) { ret 1; }
     var manager: Manager;
@@ -595,7 +598,7 @@ test "quic.connection.admission: peer lookups stay exact across rehash and remov
     ret 0;
 }
 
-test "quic.connection.admission: limits are counts and absent limits are unbounded" {
+test admission__limits_are_counts_and_absent_limits_are_unbounded {
     var state: limited.Limited;
     if (!limited.make(?state, 1 << 24)) { ret 1; }
     val backing: *allocator.Allocator = limited.allocator_of(?state);
@@ -629,11 +632,12 @@ test "quic.connection.admission: limits are counts and absent limits are unbound
     ret 0;
 }
 
+#[testing]
 fun manager_spare(manager: *Manager) usize {
     ret manager.charges.capacity - manager.charges.live;
 }
 
-test "quic.connection.admission: a refused growth refuses one admission and corrupts nothing" {
+test admission__a_refused_growth_refuses_one_admission_and_corrupts_nothing {
     var state: limited.Limited;
     if (!limited.make(?state, 1 << 20)) { ret 1; }
     var manager: Manager;
@@ -678,7 +682,7 @@ test "quic.connection.admission: a refused growth refuses one admission and corr
     ret 0;
 }
 
-test "quic.connection.admission: a refused release keeps storage for a retried close" {
+test admission__a_refused_release_keeps_storage_for_a_retried_close {
     var state: limited.Limited;
     if (!limited.make(?state, 1 << 20)) { ret 1; }
     var manager: Manager;

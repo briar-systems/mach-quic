@@ -380,8 +380,6 @@ pub rec Core {
     idle_stream_revision:   u64;
     idle_datagram_revision: u64;
     idle_deadline_ns:       u64;
-    # generates that did the full selection work, for the idle-path test
-    selecting_generates: u64;
     # the last timer answer, valid until an input changes the core
     timer_cached:           bool;
     timer_cache:            transport_api.CoreTimer;
@@ -4281,9 +4279,8 @@ pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
         result.status = transport_api.STATUS_EMPTY;
         ret result;
     }
-    core.send_idle           = false;
-    core.timer_cached        = false;
-    core.selecting_generates = core.selecting_generates + 1;
+    core.send_idle    = false;
+    core.timer_cached = false;
     if (!core.closing && handshake_poll_due(core)) {
         val polled: transport_api.CoreResult = poll_handshake(core, secrets, now_ns);
         if (polled.status == transport_api.STATUS_ERROR) {

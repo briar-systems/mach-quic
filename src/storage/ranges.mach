@@ -269,6 +269,7 @@ pub fun clear(set: *RangeSet, source: *Source) {
     shrink(set, source);
 }
 
+#[testing]
 fun sound(set: *RangeSet) bool {
     var i: usize = 0;
     for (i < set.count) {
@@ -280,6 +281,7 @@ fun sound(set: *RangeSet) bool {
     ret set.count <= set.cap;
 }
 
+#[testing]
 rec Fixture {
     memory:   limited.Limited;
     pool:     buffers.Pool;
@@ -288,12 +290,14 @@ rec Fixture {
     account:  supply.Account;
 }
 
+#[testing]
 fun test_pool(fixture: *Fixture) bool {
     if (!supply.test_pool(?fixture.pool, ?fixture.classes[0], ?fixture.memory, 8)) { ret false; }
     fixture.provider = buffers.source(?fixture.pool);
     ret supply.open(?fixture.provider, ?fixture.account, 1, 4, 4, 0);
 }
 
+#[testing]
 fun test_done(fixture: *Fixture) bool {
     val done: bool = supply.close(?fixture.provider, ?fixture.account) &&
         buffers.destroy(?fixture.pool) && limited.clean(?fixture.memory);
@@ -301,7 +305,7 @@ fun test_done(fixture: *Fixture) bool {
     ret done;
 }
 
-test "quic.storage.ranges: inserts merge overlaps and neighbours and removes split" {
+test ranges__inserts_merge_overlaps_and_neighbours_and_removes_split {
     var fixture: Fixture;
     if (!test_pool(?fixture)) { ret 1; }
     var source: Source = Source{provider: ?fixture.provider, account: ?fixture.account,
@@ -332,7 +336,7 @@ test "quic.storage.ranges: inserts merge overlaps and neighbours and removes spl
     ret 0;
 }
 
-test "quic.storage.ranges: a set spills into a pool chunk and gives it back" {
+test ranges__a_set_spills_into_a_pool_chunk_and_gives_it_back {
     var fixture: Fixture;
     if (!test_pool(?fixture)) { ret 1; }
     var source: Source = Source{provider: ?fixture.provider, account: ?fixture.account,
@@ -364,7 +368,7 @@ test "quic.storage.ranges: a set spills into a pool chunk and gives it back" {
     ret 0;
 }
 
-test "quic.storage.ranges: the cap and a refused spill leave the set untouched" {
+test ranges__the_cap_and_a_refused_spill_leave_the_set_untouched {
     var fixture: Fixture;
     if (!test_pool(?fixture)) { ret 1; }
     var source: Source = Source{provider: ?fixture.provider, account: ?fixture.account,

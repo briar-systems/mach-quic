@@ -28,14 +28,17 @@ use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 
+#[testing]
 fun operation_ok(outcome: cancel.Operation) bool {
     ret sel outcome.ok;
 }
 
+#[testing]
 fun transition_ok(outcome: cancel.Transition) bool {
     ret (sel outcome.ok) && outcome.ok;
 }
 
+#[testing]
 rec Core {
     driver:            *transport_api.Driver[Core];
     streams:           *stream_api.Manager;
@@ -62,6 +65,7 @@ rec Core {
     reentry_rejected:  bool;
 }
 
+#[testing]
 rec Fixture {
     stream_records:  [32]stream_api.Stream;
     chunks:          supply.TestPool;
@@ -77,6 +81,7 @@ rec Fixture {
     driver:          transport_api.Driver[Core];
 }
 
+#[testing]
 fun stream_config(source: u64, role: u8) stream_api.Config {
     var value: stream_api.Config;
     value.source                            = source;
@@ -100,19 +105,23 @@ fun stream_config(source: u64, role: u8) stream_api.Config {
 # than zero (briar-systems/mach#3108), so every result names all four
 # the protocol answers for its own memory, because a context the driver cannot
 # cast to bytes is the whole reason the entry exists
+#[testing]
 fun core_range(core: *Core) ownership.Range {
     ret ownership.record[Core](core);
 }
 
+#[testing]
 fun core_outcome(status: u8, error: u64, state: u8) transport_api.CoreResult {
     ret transport_api.CoreResult{status: status, error: error,
         provider_error: 0, state: state};
 }
 
+#[testing]
 fun core_result(status: u8, state: u8) transport_api.CoreResult {
     ret core_outcome(status, 0, state);
 }
 
+#[testing]
 fun core_receive(core: *Core, input: *transport_api.CoreInput) transport_api.CoreResult {
     if (core.closed || input == nil || input.length == 0 || input.data == nil) {
         ret core_outcome(transport_api.STATUS_ERROR, 1, transport_api.ACTIVE);
@@ -166,6 +175,7 @@ fun core_receive(core: *Core, input: *transport_api.CoreInput) transport_api.Cor
     ret core_outcome(transport_api.STATUS_ERROR, 2, transport_api.ACTIVE);
 }
 
+#[testing]
 fun core_timeout(core: *Core, generation: u64, now_ns: u64) transport_api.CoreResult {
     if (!core.timer_armed || core.timer_generation != generation ||
         now_ns < core.timer_deadline_ns) {
@@ -177,6 +187,7 @@ fun core_timeout(core: *Core, generation: u64, now_ns: u64) transport_api.CoreRe
     ret core_result(transport_api.STATUS_OK, transport_api.ACTIVE);
 }
 
+#[testing]
 fun core_generate(core: *Core, output: *u8, capacity: usize,
     now_ns: u64) transport_api.CoreDatagram {
     var result: transport_api.CoreDatagram;
@@ -219,6 +230,7 @@ fun core_generate(core: *Core, output: *u8, capacity: usize,
     ret result;
 }
 
+#[testing]
 fun core_complete(core: *Core, owner: u64, status: u8, count: usize,
     now_ns: u64) transport_api.CoreResult {
     val index: usize = (owner % 64)::usize;
@@ -243,6 +255,7 @@ fun core_complete(core: *Core, owner: u64, status: u8, count: usize,
     ret core_result(transport_api.STATUS_OK, state);
 }
 
+#[testing]
 fun core_begin_close(core: *Core, abortive: bool, application_error: u64,
     reason: *u8, reason_length: usize, now_ns: u64) transport_api.CoreResult {
     if (reason_length > 0 && reason == nil) {
@@ -256,14 +269,17 @@ fun core_begin_close(core: *Core, abortive: bool, application_error: u64,
     ret core_result(transport_api.STATUS_OK, transport_api.DRAINING);
 }
 
+#[testing]
 fun core_storage_ready(core: *Core) {
     core.storage_wakes = core.storage_wakes + 1;
 }
 
+#[testing]
 fun core_ready(core: *Core) bool {
     ret core.closing && core.active_count == 0 && core.outbound == 0;
 }
 
+#[testing]
 fun core_finish(core: *Core) bool {
     if (!core_ready(core)) { ret false; }
     if (stream_api.finish_close(core.streams).status != stream_api.STATUS_OK ||
@@ -274,16 +290,19 @@ fun core_finish(core: *Core) bool {
 }
 
 # what core_generate would answer, given a buffer it accepts
+#[testing]
 fun core_pending(core: *Core, now_ns: u64) bool {
     ret core.outbound != 0 && !core.oversize && core.next_owner != 0 - 1::u64 &&
         !core.active_owners[(core.next_owner % 64)::usize];
 }
 
+#[testing]
 fun core_timer(core: *Core) transport_api.CoreTimer {
     ret transport_api.CoreTimer{deadline_ns: core.timer_deadline_ns,
         generation: core.timer_generation, armed: core.timer_armed};
 }
 
+#[testing]
 fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
     # a fixture made again reuses its record, so its previous pool goes first
     if (supply.test_made(?fixture.chunks)) {
@@ -340,6 +359,7 @@ fun make_fixture(fixture: *Fixture, source: u64, role: u8) bool {
         ?fixture.streams, ?fixture.datagrams, ?fixture.scope, storage);
 }
 
+#[testing]
 fun input(driver: *transport_api.Driver[Core], bytes: *u8, length: usize,
     now_ns: u64) transport_api.OperationResult {
     var datagram: transport_api.Datagram;
@@ -351,6 +371,7 @@ fun input(driver: *transport_api.Driver[Core], bytes: *u8, length: usize,
     ret transport_api.receive_datagram[Core](driver, ?datagram);
 }
 
+#[testing]
 fun close_fixture(fixture: *Fixture, now_ns: u64) bool {
     if (transport_api.snapshot[Core](?fixture.driver).state != transport_api.DRAINING) {
         if (transport_api.begin_close[Core](?fixture.driver, 0, nil, 0, clock.instant(now_ns)).status !=
@@ -360,7 +381,7 @@ fun close_fixture(fixture: *Fixture, now_ns: u64) bool {
     ret operation_ok(cancel.destroy(?fixture.scope));
 }
 
-test "quic.transport.simulated: client and server expose only application contracts" {
+test transport__client_and_server_expose_only_application_contracts {
     var client: Fixture;
     var server: Fixture;
     if (!make_fixture(?client, 101, stream_api.ROLE_CLIENT) ||
@@ -416,7 +437,7 @@ test "quic.transport.simulated: client and server expose only application contra
     ret 0;
 }
 
-test "quic.transport.simulated: output saturation, loss, reordering, and stale tokens preserve ownership" {
+test transport__output_saturation_loss_reordering_and_stale_tokens_preserve_ownership {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 103, stream_api.ROLE_CLIENT)) { ret 1; }
     var queue: [2]u8 = [2]u8{4, 4};
@@ -456,7 +477,7 @@ test "quic.transport.simulated: output saturation, loss, reordering, and stale t
     ret 0;
 }
 
-test "quic.transport.simulated: terminal release preserves generations across record reuse" {
+test transport__terminal_release_preserves_generations_across_record_reuse {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 119, stream_api.ROLE_CLIENT)) { ret 1; }
     if (transport_api.release_closed[Core](?fixture.driver).status !=
@@ -507,7 +528,7 @@ test "quic.transport.simulated: terminal release preserves generations across re
     ret 0;
 }
 
-test "quic.transport.simulated: malformed generation and scope inputs publish no owner" {
+test transport__malformed_generation_and_scope_inputs_publish_no_owner {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 109, stream_api.ROLE_CLIENT)) { ret 1; }
     fixture.core.outbound = 1;
@@ -531,7 +552,7 @@ test "quic.transport.simulated: malformed generation and scope inputs publish no
     ret 0;
 }
 
-test "quic.transport.simulated: protocol callbacks cannot reenter or mutate driver" {
+test transport__protocol_callbacks_cannot_reenter_or_mutate_driver {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 111, stream_api.ROLE_CLIENT)) { ret 1; }
     var command:  [1]u8                         = [1]u8{6};
@@ -546,12 +567,14 @@ test "quic.transport.simulated: protocol callbacks cannot reenter or mutate driv
     ret 0;
 }
 
+#[testing]
 rec CancelRace {
     driver: *transport_api.Driver[Core];
     go:     *i64;
     result: *i64;
 }
 
+#[testing]
 fun cancel_worker(arg: *u8) {
     val race: *CancelRace = arg::*CancelRace;
     for (atomic.load(race.go) == 0) { atomic.spin_hint(); }
@@ -560,7 +583,7 @@ fun cancel_worker(arg: *u8) {
     atomic.store(race.result, result);
 }
 
-test "quic.transport.simulated: send completion and connection cancellation race exactly once" {
+test transport__send_completion_and_connection_cancellation_race_exactly_once {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 110, stream_api.ROLE_CLIENT)) { ret 1; }
     fixture.core.outbound = 1;
@@ -586,7 +609,7 @@ test "quic.transport.simulated: send completion and connection cancellation race
     ret 0;
 }
 
-test "quic.transport.simulated: timers reject early and stale work transactionally" {
+test transport__timers_reject_early_and_stale_work_transactionally {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 104, stream_api.ROLE_CLIENT)) { ret 1; }
     var set_first: [2]u8 = [2]u8{5, 20};
@@ -610,7 +633,7 @@ test "quic.transport.simulated: timers reject early and stale work transactional
     ret 0;
 }
 
-test "quic.transport.simulated: cancellation and graceful close retain exact borrowers" {
+test transport__cancellation_and_graceful_close_retain_exact_borrowers {
     var cancelled: Fixture;
     if (!make_fixture(?cancelled, 105, stream_api.ROLE_CLIENT)) { ret 1; }
     var queue: [2]u8 = [2]u8{4, 1};
@@ -649,7 +672,7 @@ test "quic.transport.simulated: cancellation and graceful close retain exact bor
     ret 0;
 }
 
-test "quic.transport.simulated: sustained independent streams remain bounded" {
+test transport__sustained_independent_streams_remain_bounded {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 107, stream_api.ROLE_CLIENT)) { ret 1; }
     var active: [1]u8 = [1]u8{1};
@@ -674,7 +697,7 @@ test "quic.transport.simulated: sustained independent streams remain bounded" {
     ret 0;
 }
 
-test "quic.transport.native: loopback udp preserves generated and received datagrams" {
+test native__loopback_udp_preserves_generated_and_received_datagrams {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 108, stream_api.ROLE_CLIENT)) { ret 1; }
     val bound: res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
@@ -715,7 +738,7 @@ test "quic.transport.native: loopback udp preserves generated and received datag
     ret 0;
 }
 
-test "quic.transport.simulated: a cancelled scope closes on the owner's next call" {
+test transport__a_cancelled_scope_closes_on_the_owners_next_call {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 111, stream_api.ROLE_CLIENT)) { ret 1; }
     if (!transition_ok(cancel.cancel(?fixture.scope)))        { ret 2; }
@@ -738,7 +761,7 @@ test "quic.transport.simulated: a cancelled scope closes on the owner's next cal
     ret 0;
 }
 
-test "quic.transport.simulated: a datagram above max_udp_payload is dropped without failing" {
+test transport__a_datagram_above_max_udp_payload_is_dropped_without_failing {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 110, stream_api.ROLE_CLIENT)) { ret 1; }
     var oversized: [1501]u8;
@@ -754,7 +777,7 @@ test "quic.transport.simulated: a datagram above max_udp_payload is dropped with
     ret 0;
 }
 
-test "quic.transport.simulated: native submission refusals name their kind" {
+test transport__native_submission_refusals_name_their_kind {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 111, stream_api.ROLE_CLIENT)) { ret 1; }
     var token:   transport_api.Token;
@@ -770,7 +793,7 @@ test "quic.transport.simulated: native submission refusals name their kind" {
 
 # std 4.0.1 refuses a whole send batch whose packet is malformed, before any
 # native call. the refusal settles the send as failed and nothing else changes
-test "quic.transport.native: a refused native send batch fails only that send" {
+test native__a_refused_native_send_batch_fails_only_that_send {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 112, stream_api.ROLE_CLIENT)) { ret 1; }
     var pages:      allocator.Allocator;
@@ -843,12 +866,14 @@ test "quic.transport.native: a refused native send batch fails only that send" {
 }
 
 # a real native send, completed by the runtime, for a test to reshape
+#[testing]
 rec NativeSend {
     completion: io_runtime.Completion;
     length:     usize;
     ok:         bool;
 }
 
+#[testing]
 fun native_send(fixture: *Fixture, network: *net_async.Driver, sender: *udp.Socket,
     target: ip.Endpoint, output: *u8, at: u64) NativeSend {
     var result: NativeSend;
@@ -883,7 +908,7 @@ fun native_send(fixture: *Fixture, network: *net_async.Driver, sender: *udp.Sock
 # the sends are real, but each completion's error and transfer are set by
 # hand, so this proves quic reads that completion shape correctly. that std
 # produces the shape on this path is proven by std's own tests
-test "quic.transport.native: a cancelled send that went out whole is sent" {
+test native__a_cancelled_send_that_went_out_whole_is_sent {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 113, stream_api.ROLE_CLIENT)) { ret 1; }
     var pages:      allocator.Allocator;
@@ -978,7 +1003,7 @@ test "quic.transport.native: a cancelled send that went out whole is sent" {
     ret 0;
 }
 
-test "quic.transport.simulated: a settled close answers closed to every later call" {
+test transport__a_settled_close_answers_closed_to_every_later_call {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 131, stream_api.ROLE_CLIENT)) { ret 1; }
     fixture.core.outbound = 1;
@@ -1024,11 +1049,12 @@ test "quic.transport.simulated: a settled close answers closed to every later ca
     ret 0;
 }
 
+#[testing]
 fun pending(fixture: *Fixture, now_ns: u64) bool {
     ret transport_api.pending_output[Core](?fixture.driver, clock.instant(now_ns));
 }
 
-test "quic.transport.simulated: the driver answers for output it would refuse and for a recorded cancellation" {
+test transport__the_driver_answers_for_output_it_would_refuse_and_for_a_recorded_cancellation {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 112, stream_api.ROLE_CLIENT)) { ret 1; }
     var buffers: [5][16]u8;
