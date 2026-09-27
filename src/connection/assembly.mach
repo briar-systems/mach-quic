@@ -56,7 +56,7 @@ pub val STREAM_WINDOW:                usize = STREAM_CAPACITY * STREAM_STRIDE;
 pub val STREAM_ATTEMPT_CAPACITY:      usize = STREAM_CAPACITY * 2;
 pub val DATAGRAM_CAPACITY:            usize = 4;
 pub val DATAGRAM_STRIDE:              usize = 1200;
-pub val CONNECTION_ID_CAPACITY:       usize = 4;
+pub val CONNECTION_ID_CAPACITY:       usize = binding_api.ROUTING_ID_CAPACITY;
 pub val OWNER_CAPACITY:               usize = 16;
 pub val TOKEN_CAPACITY:               usize = 512;
 pub val PARAMETER_CAPACITY:           usize = 512;
@@ -106,6 +106,19 @@ pub rec RoutingSnapshot {
     capacity:    usize;
     active:      usize;
     initialized: bool;
+}
+
+# the local connection ids a host may still issue, and where their sequences
+# stand. `wanted` is zero until the peer's transport parameters set its limit
+pub rec ConnectionIds {
+    wanted:          usize;
+    next_sequence:   u64;
+    retire_prior_to: u64;
+}
+
+pub rec IssuedId {
+    ok:       bool;
+    sequence: u64;
 }
 
 pub rec Config {
@@ -1076,6 +1089,50 @@ pub fun route_valid(c: *Connection, route: *Route) bool {
     internal.id.length  = route.id.length;
     internal.active     = route.active;
     ret binding_api.route_valid(?c.binding, ?internal);
+}
+
+fun ids_open(c: *Connection) bool {
+    ret c != nil && c.initialized && c.core.initialized && !c.core.closing &&
+        c.core.peer_parameters_ready && c.cids.initialized && !c.cids.closing;
+}
+
+pub fun connection_ids(c: *Connection) ConnectionIds {
+    var value: ConnectionIds;
+    if (!ids_open(c)) { ret value; }
+    value.wanted          = cid_api.local_demand(?c.cids);
+    value.next_sequence   = c.cids.local_next_sequence;
+    value.retire_prior_to = c.cids.local_retire_prior_to;
+    ret value;
+}
+
+# issues a local connection id the host minted, with its stateless reset
+# token. its route is published before this returns, and the core advertises
+# it with NEW_CONNECTION_ID. refused while `connection_ids` wants none
+pub fun issue_connection_id(c: *Connection, id: *u8, length: usize,
+    reset_token: [16]u8) IssuedId {
+    var value: IssuedId;
+    if (!ids_open(c) || id == nil || length == 0 ||
+        length > packet.MAX_CONNECTION_ID ||
+        cid_api.local_demand(?c.cids) == 0) { ret value; }
+    val issued: cid_api.Result = core_api.issue_connection_id(?c.core,
+        connection_id(id, length), reset_token);
+    if (issued.status != cid_api.STATUS_OK) { ret value; }
+    binding_api.reconcile_routes(?c.binding);
+    value.ok       = true;
+    value.sequence = issued.handle.sequence;
+    ret value;
+}
+
+# asks the peer to retire every local id below `sequence`, carried by the next
+# NEW_CONNECTION_ID. an id the peer never learned leaves at once with its
+# route. the others keep their routes until the peer retires them
+pub fun retire_connection_ids_prior_to(c: *Connection, sequence: u64) bool {
+    if (!ids_open(c)) { ret false; }
+    val retired: cid_api.Result = core_api.retire_connection_ids_prior_to(?c.core,
+        sequence);
+    if (retired.status == cid_api.STATUS_ERROR) { ret false; }
+    binding_api.reconcile_routes(?c.binding);
+    ret true;
 }
 
 fun release_ready(c: *Connection) bool {
