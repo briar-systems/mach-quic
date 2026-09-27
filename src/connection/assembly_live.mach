@@ -1069,7 +1069,8 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
 
     val routes: assembly.RoutingSnapshot = assembly.routing_snapshot(?listener);
     val route:  assembly.Route           = assembly.route_at(?listener, 0);
-    if (!routes.initialized || routes.capacity != 1 || routes.active != 1 ||
+    if (!routes.initialized || routes.capacity != assembly.CONNECTION_ID_CAPACITY ||
+        routes.active != 1 ||
         !route.active || route.sequence != 0 || route.id.length != 8 ||
         route.id.length != routed_initial.destination.length ||
         !assembly.route_valid(?listener, ?route)) { ret 203; }
@@ -2121,6 +2122,93 @@ test assembly__an_established_connection_outlives_the_handshake_deadline {
     if (accepted.status != transport.STATUS_OK ||
         drain_stream(?listener.driver, accepted.stream, ?received[0], 16,
         ?fin) != sent) { ret 23; }
+    ret 0;
+}
+
+# the one active route of the listener, or an inactive route when it holds
+# none or more than one
+#[testing]
+fun only_route() assembly.Route {
+    var found: assembly.Route;
+    var count: usize = 0;
+    var i:     usize = 0;
+    for (i < assembly.CONNECTION_ID_CAPACITY) {
+        val route: assembly.Route = assembly.route_at(?listener, i);
+        if (route.active) {
+            found = route;
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    if (count != 1) {
+        var none: assembly.Route;
+        ret none;
+    }
+    ret found;
+}
+
+# one byte on `value` from the dialer, read at the listener on `accepted`,
+# which the first byte accepts
+#[testing]
+fun byte_arrives(value: transport.Stream, accepted: *transport.OpenResult,
+    clock: *u64, moved: *usize) bool {
+    if (send_byte(?dialer, ?listener, ?dialer_scope, listener_endpoint(),
+        dialer_endpoint(), value, clock) != transport.STATUS_OK ||
+        pump(clock, moved, 4) != 0) { ret false; }
+    if (accepted.status != transport.STATUS_OK) {
+        @accepted = transport.accept_stream[binding.Binding](?listener.driver);
+        if (accepted.status != transport.STATUS_OK) { ret false; }
+    }
+    var received: [4]u8;
+    var fin:      bool = false;
+    ret drain_stream(?listener.driver, accepted.stream, ?received[0], 4, ?fin) == 1;
+}
+
+# rfc 9000 5.1: the server issues a spare connection id, the client moves to
+# it, and raising retire_prior_to moves the client off it again. every live id
+# has a route and every retired one loses it
+test assembly__a_host_issued_connection_id_carries_the_connection_and_retires {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val before: assembly.ConnectionIds = assembly.connection_ids(?listener);
+    if (before.wanted != 1 || before.next_sequence != 1 ||
+        before.retire_prior_to != 0) { ret 20; }
+    var spare: [8]u8 = [8]u8{0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8};
+    var token: [16]u8;
+    token[0] = 0x51;
+    val issued: assembly.IssuedId = assembly.issue_connection_id(?listener,
+        ?spare[0], 8, token);
+    if (!issued.ok || issued.sequence != 1 ||
+        assembly.connection_ids(?listener).wanted != 0 ||
+        assembly.issue_connection_id(?listener, ?spare[0], 8, token).ok ||
+        assembly.routing_snapshot(?listener).active != 2) { ret 21; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    if (!cid_api.peer_rotation_available(?dialer.cids) ||
+        cid_api.rotate_peer_scoped(?dialer.cids,
+        dialer.core.config.source).status != cid_api.STATUS_OK) { ret 22; }
+    val opened: transport.OpenResult = transport.open_stream[binding.Binding](
+        ?dialer.driver, transport.BIDIRECTIONAL);
+    var accepted: transport.OpenResult;
+    if (opened.status != transport.STATUS_OK ||
+        !byte_arrives(opened.stream, ?accepted, ?clock, ?moved)) { ret 23; }
+    # the client retired the handshake id, so only the spare is routed
+    val moved_to: assembly.Route = only_route();
+    if (!moved_to.active || moved_to.sequence != 1 || moved_to.id.data[0] != 0xC1 ||
+        assembly.connection_ids(?listener).wanted != 1) { ret 24; }
+    if (!assembly.retire_connection_ids_prior_to(?listener, 2)) { ret 25; }
+    spare[0] = 0xD1;
+    token[0] = 0x52;
+    val next: assembly.IssuedId = assembly.issue_connection_id(?listener,
+        ?spare[0], 8, token);
+    if (!next.ok || next.sequence != 2) { ret 26; }
+    if (pump(?clock, ?moved, 4) != 0 ||
+        !byte_arrives(opened.stream, ?accepted, ?clock, ?moved)) { ret 27; }
+    val final: assembly.Route = only_route();
+    if (!final.active || final.sequence != 2 || final.id.data[0] != 0xD1 ||
+        assembly.connection_ids(?listener).retire_prior_to != 2) { ret 28; }
     ret 0;
 }
 
