@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-27
+
+A server host can issue its own connection IDs and advertise a stateless reset token for its handshake connection ID (#275, #276).
+
+### Added
+
+- Host-issued local connection IDs (#275). `connection.assembly` gains a pull API: `connection_ids` reports how many more IDs the peer's `active_connection_id_limit` allows (`ConnectionIds.wanted`, zero until the peer's transport parameters arrive), the next sequence and the local Retire Prior To. `issue_connection_id` issues an ID with its reset token and returns an `IssuedId`, and `retire_connection_ids_prior_to` raises the local Retire Prior To. The core behind them gains `issue_connection_id` and `retire_connection_ids_prior_to`, and `connection.cid` gains `local_demand`, `retire_local_prior_to` and `retire_local_prior_to_scoped`. An issued ID must be as long as the connection's current ID, since short headers carry no length. `local_demand` counts only IDs at or above the local Retire Prior To and is bounded by free slots (RFC 9000 5.1.2). An ID the peer never learned is dropped at once when retired, and one it learned stays live until the peer retires it. NEW_CONNECTION_ID carries the current Retire Prior To on first send and on resend. The binding publishes a route for every live local ID after each core operation and each issue or retire call, so an ID is routed before its NEW_CONNECTION_ID can leave.
+- `assembly.Config` gains `stateless_reset_token` and `stateless_reset_token_present` (#276). A server config that sets them writes the `stateless_reset_token` transport parameter, and `cid.install_initial_local_reset_token` puts the token on the sequence-0 local ID, so the collision checks see it and a later host-issued ID cannot reuse it. A client config that sets it is refused at `STAGE_CONFIG` (RFC 9000 18.2). The core requires the encoded token to match the handshake ID's token, and to be absent when that ID has none. `cid.current` reports `reset_token_present`.
+
+### Changed
+
+- Breaking: `cid.issue_local` and `cid.issue_local_scoped` no longer take a sequence. The manager assigns the next one itself (#275).
+- `transport.binding.ROUTING_ID_CAPACITY` is 4, up from 1, and `assembly.CONNECTION_ID_CAPACITY` is defined as it, so a binding holds a route per live local ID (#275).
+- Breaking: `[dep.std] version = "^9.1"`, realized at v9.1.0 and committed as a gitlink. Resolution is flat, so a consumer of quic moves to std 9.1 with it. `admission.Manager.hash_key` and `token.Manager.hash_key` are now std's `std.crypto.hash.siphash.Key`, the same two `u64` words (#273).
+
+### Fixed
+
+- Retiring the current local connection ID no longer leaves the connection with no current ID. The core parses every short header by that ID's length, so the next packet failed with INTERNAL_ERROR. When the current ID leaves, the destination ID of the packet being handled becomes current (#275).
+- A NEW_CONNECTION_ID with an older `retire_prior_to` is accepted, and a reordered ID below the one in force is queued for retirement (RFC 9000 19.15). A repeated RETIRE_CONNECTION_ID for a slot since reused is a duplicate, and only a sequence never issued is a PROTOCOL_VIOLATION (RFC 9000 19.16) (#275).
+
+### Removed
+
+- Breaking: the public `quic.storage.hash` module, a private SipHash copy, replaced by `std.crypto.hash.siphash` with no shim (#273).
+
 ## [0.22.0] - 2026-09-27
 
 quic builds on mach-tls 0.14.0 (#269). Its protocol surface is unchanged.
