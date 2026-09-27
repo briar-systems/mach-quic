@@ -93,12 +93,13 @@ pub rec Result {
 }
 
 pub rec Selected {
-    status:          Status;
-    error:           Error;
-    handle:          Handle;
-    id:              packet.ConnectionId;
-    reset_token:     [16]u8;
-    retire_prior_to: u64;
+    status:              Status;
+    error:               Error;
+    handle:              Handle;
+    id:                  packet.ConnectionId;
+    reset_token:         [16]u8;
+    reset_token_present: bool;
+    retire_prior_to:     u64;
 }
 
 pub rec Snapshot {
@@ -533,6 +534,27 @@ pub fun install_initial_peer_reset_token_scoped(manager: *Manager,
     ret result;
 }
 
+# a server's token for its handshake id, which its transport parameters carry.
+# set once, before the core leases the manager
+pub fun install_initial_local_reset_token(manager: *Manager,
+    reset_token: [16]u8) Result {
+    var result: Result;
+    if (!physical(manager) || !manager.initialized || manager.closing ||
+        !scope_allowed(manager, 0) || local_zero_length(manager) ||
+        manager.storage.local[0].state != ENTRY_ACTIVE ||
+        manager.storage.local[0].sequence != 0 ||
+        manager.storage.local[0].reset_token_present) {
+        result.status = STATUS_ERROR;
+        result.error  = ERROR_STATE;
+        ret result;
+    }
+    manager.storage.local[0].reset_token         = reset_token;
+    manager.storage.local[0].reset_token_present = true;
+    result.status                                = STATUS_OK;
+    result.handle                                = handle(manager, 0, true);
+    ret result;
+}
+
 # applies the peer's active_connection_id_limit before any additional local id is issued
 pub fun update_local_limit(manager: *Manager, limit: u64) Result {
     ret update_local_limit_scoped(manager, 0, limit);
@@ -800,10 +822,11 @@ pub fun current(manager: *Manager, local: bool) Selected {
     var i:      usize  = 0;
     for (i < count) {
         if (values[i].state == ENTRY_ACTIVE && values[i].current) {
-            result.status      = STATUS_OK;
-            result.handle      = handle(manager, i, local);
-            result.id          = values[i].id;
-            result.reset_token = values[i].reset_token;
+            result.status              = STATUS_OK;
+            result.handle              = handle(manager, i, local);
+            result.id                  = values[i].id;
+            result.reset_token         = values[i].reset_token;
+            result.reset_token_present = values[i].reset_token_present;
             ret result;
         }
         i = i + 1;

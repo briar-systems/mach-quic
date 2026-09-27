@@ -987,6 +987,19 @@ fun validate_local_parameters(config: Config, parameters: *transport_parameters.
         }
         or (transport_parameters.has(parameters,
             transport_parameters.RETRY_SOURCE_CONNECTION_ID)) { ret false; }
+        # the advertised token is the handshake id's, or there is none
+        val initial:    cid_api.Selected = cid_api.current(cids, true);
+        val advertised: bool             = transport_parameters.has(parameters,
+            transport_parameters.STATELESS_RESET_TOKEN);
+        if (initial.status != cid_api.STATUS_OK ||
+            advertised != initial.reset_token_present) { ret false; }
+        var i: usize = 0;
+        for (advertised && i < 16) {
+            if (parameters.stateless_reset_token[i] != initial.reset_token[i]) {
+                ret false;
+            }
+            i = i + 1;
+        }
     }
     ret true;
 }
