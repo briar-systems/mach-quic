@@ -987,6 +987,19 @@ fun validate_local_parameters(config: Config, parameters: *transport_parameters.
         }
         or (transport_parameters.has(parameters,
             transport_parameters.RETRY_SOURCE_CONNECTION_ID)) { ret false; }
+        # the advertised token is the handshake id's, or there is none
+        val initial:    cid_api.Selected = cid_api.current(cids, true);
+        val advertised: bool             = transport_parameters.has(parameters,
+            transport_parameters.STATELESS_RESET_TOKEN);
+        if (initial.status != cid_api.STATUS_OK ||
+            advertised != initial.reset_token_present) { ret false; }
+        var i: usize = 0;
+        for (advertised && i < 16) {
+            if (parameters.stateless_reset_token[i] != initial.reset_token[i]) {
+                ret false;
+            }
+            i = i + 1;
+        }
     }
     ret true;
 }
@@ -3168,6 +3181,38 @@ pub fun probe_path(core: *Core, endpoint: path_api.Endpoint,
         preferred);
 }
 
+# a local id the host minted, advertised with NEW_CONNECTION_ID once the
+# application space can carry it
+pub fun issue_connection_id(core: *Core, id: packet.ConnectionId,
+    reset_token: [16]u8) cid_api.Result {
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
+        core.closing || !core.peer_parameters_ready) {
+        var failed: cid_api.Result;
+        failed.status = cid_api.STATUS_ERROR;
+        failed.error  = cid_api.ERROR_STATE;
+        ret failed;
+    }
+    val issued: cid_api.Result = cid_api.issue_local_scoped(core.cids,
+        core.config.source, id, reset_token);
+    if (issued.status == cid_api.STATUS_OK) { wake(core); }
+    ret issued;
+}
+
+# raises the retire_prior_to the next NEW_CONNECTION_ID carries
+pub fun retire_connection_ids_prior_to(core: *Core, sequence: u64) cid_api.Result {
+    if (!core_record_valid(core) || !core.initialized || core.destroyed ||
+        core.closing) {
+        var failed: cid_api.Result;
+        failed.status = cid_api.STATUS_ERROR;
+        failed.error  = cid_api.ERROR_STATE;
+        ret failed;
+    }
+    val retired: cid_api.Result = cid_api.retire_local_prior_to_scoped(core.cids,
+        core.config.source, sequence);
+    if (retired.status == cid_api.STATUS_OK) { wake(core); }
+    ret retired;
+}
+
 pub fun migrate_path(core: *Core, value: path_api.Handle, preferred: bool,
     now_ns: u64) path_api.Observation {
     if (!core_record_valid(core) || !core.initialized || core.destroyed ||
@@ -3788,7 +3833,7 @@ fun select_frame(core: *Core, secrets: *Secrets, now_ns: u64, maximum: usize,
         if (advertisement.status == cid_api.STATUS_OK) {
             choice.value.kind                  = frame.NEW_CONNECTION_ID;
             choice.value.sequence              = advertisement.handle.sequence;
-            choice.value.retire_prior_to       = 0;
+            choice.value.retire_prior_to       = advertisement.retire_prior_to;
             choice.value.connection_id         = advertisement.id;
             choice.value.stateless_reset_token = advertisement.reset_token;
             choice.source                      = SOURCE_NEW_CID;

@@ -6,9 +6,11 @@
 # only ever be implemented by a test double whose context holds no secrets.
 # with Protocol[T] the context is simply typed and the binding is thin.
 
+use cid_api:  quic.connection.cid;
 use core_api: quic.connection.core;
 use quic.connection.ownership;
 use quic.connection.scratch;
+use quic.packet.packet;
 use transport_api: quic.transport;
 
 use std.sync.atomic;
@@ -17,7 +19,8 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 
-pub val ROUTING_ID_CAPACITY: usize = 1;
+# one route for each local connection id a connection may hold at once
+pub val ROUTING_ID_CAPACITY: usize = 4;
 pub val ROUTING_ID_LENGTH:   usize = 20;
 
 pub rec RoutingId {
@@ -57,10 +60,12 @@ pub rec Binding {
     secrets:        *core_api.Secrets;
     scratch:        *scratch.Scratch;
     secret_scratch: *scratch.SecretScratch;
-    routing:        [1]RoutingEntry;
+    routing:        [ROUTING_ID_CAPACITY]RoutingEntry;
     routing_source: u64;
-    initialized:    bool;
-    released:       bool;
+    # routes follow the local ids once the initial route is published
+    routing_live: bool;
+    initialized:  bool;
+    released:     bool;
 }
 
 fun next_epoch(value: i64) i64 {
@@ -80,6 +85,45 @@ fun retire_routes(binding: *Binding) {
         val epoch: i64           = atomic.load(?entry.epoch);
         if ((epoch & 1) == 1) {
             atomic.store(?entry.epoch, next_epoch(epoch));
+        }
+        i = i + 1;
+    }
+}
+
+# publishes a route for every live local id and retires every other. each
+# operation that can issue, retire or advertise an id reconciles before it
+# returns, so a route is visible before its NEW_CONNECTION_ID can leave
+pub fun reconcile_routes(binding: *Binding) {
+    if (!bound(binding) || !binding.routing_live) { ret; }
+    val cids: *cid_api.Manager = binding.core.cids;
+    if (cids == nil || !cids.initialized || cids.closing ||
+        cids.storage.local_capacity > ROUTING_ID_CAPACITY) { ret; }
+    var i: usize = 0;
+    for (i < ROUTING_ID_CAPACITY) {
+        val entry:    *RoutingEntry = ?binding.routing[i];
+        val epoch:    i64           = atomic.load(?entry.epoch);
+        val live:     bool          = (epoch & 1) == 1;
+        var want:     bool          = false;
+        var sequence: u64           = 0;
+        if (i < cids.storage.local_capacity) {
+            want     = cids.storage.local[i].state == cid_api.ENTRY_ACTIVE;
+            sequence = cids.storage.local[i].sequence;
+        }
+        if (live && (!want || entry.sequence != sequence)) {
+            atomic.store(?entry.epoch, next_epoch(epoch));
+        }
+        if (want && (!live || entry.sequence != sequence)) {
+            val id:   *packet.ConnectionId = ?cids.storage.local[i].id;
+            var byte: usize                = 0;
+            for (byte < ROUTING_ID_LENGTH) {
+                entry.id.data[byte] = 0;
+                if (byte < id.len::usize) { entry.id.data[byte] = id.data[byte]; }
+                byte = byte + 1;
+            }
+            entry.id.length = id.len::usize;
+            entry.sequence  = sequence;
+            entry.prepared  = true;
+            atomic.store(?entry.epoch, next_epoch(atomic.load(?entry.epoch)));
         }
         i = i + 1;
     }
@@ -151,6 +195,7 @@ fun on_receive(binding: *Binding,
     val result: transport_api.CoreResult = core_api.receive(binding.core,
         binding.secrets, input);
     give_back(binding);
+    reconcile_routes(binding);
     ret result;
 }
 
@@ -161,6 +206,7 @@ fun on_timeout(binding: *Binding, generation: u64,
     val result: transport_api.CoreResult = core_api.on_timeout(binding.core,
         binding.secrets, generation, now_ns);
     give_back(binding);
+    reconcile_routes(binding);
     ret result;
 }
 
@@ -171,6 +217,7 @@ fun on_generate(binding: *Binding, output: *u8, capacity: usize,
     val result: transport_api.CoreDatagram = core_api.generate(binding.core,
         binding.secrets, output, capacity, now_ns);
     give_back(binding);
+    reconcile_routes(binding);
     ret result;
 }
 
@@ -182,6 +229,7 @@ fun on_complete_send(binding: *Binding, owner: u64,
     val result: transport_api.CoreResult = core_api.complete_send(binding.core,
         binding.secrets, owner, status, count, now_ns);
     give_back(binding);
+    reconcile_routes(binding);
     ret result;
 }
 
@@ -245,6 +293,7 @@ pub fun bind(binding: *Binding, core: *core_api.Core,
     binding.routing_source = core.config.source;
     binding.initialized    = true;
     binding.released       = false;
+    binding.routing_live   = false;
     ret true;
 }
 
@@ -294,6 +343,7 @@ pub fun abandon_initialization(binding: *Binding) bool {
     binding.routing_source = 0;
     binding.initialized    = false;
     binding.released       = true;
+    binding.routing_live   = false;
     ret true;
 }
 
@@ -303,6 +353,7 @@ pub fun publish_initial_route(binding: *Binding) bool {
     val epoch: i64           = atomic.load(?entry.epoch);
     if (!entry.prepared || (epoch & 1) == 1) { ret false; }
     atomic.store(?entry.epoch, next_epoch(epoch));
+    binding.routing_live = true;
     ret true;
 }
 
@@ -368,6 +419,7 @@ pub fun release_closed(binding: *Binding) bool {
     binding.routing_source = 0;
     binding.initialized    = false;
     binding.released       = true;
+    binding.routing_live   = false;
     ret true;
 }
 

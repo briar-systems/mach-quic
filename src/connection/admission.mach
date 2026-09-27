@@ -4,12 +4,12 @@
 # connection limits are policy counts, and an absent limit is unbounded
 
 use quic.connection.ownership;
-use quic.storage.hash;
 use quic.storage.index;
 use quic.storage.limited;
 use quic.storage.slots;
 
 use std.allocator;
+use std.crypto.hash.siphash;
 use std.memory;
 use std.net.ip;
 use std.types.bool.bool;
@@ -73,7 +73,7 @@ pub rec Manager {
     peers:          slots.Slots[PeerSlot];
     peer_index:     index.Index;
     charges:        slots.Slots[ChargeSlot];
-    hash_key:       hash.Key;
+    hash_key:       siphash.Key;
     active:         usize;
     reserved:       usize;
     generation:     u64;
@@ -146,7 +146,7 @@ fun peer_hash(manager: *Manager, key: *PeerKey) u64 {
     encoded[18] = (key.scope >> 16)::u8;
     encoded[19] = (key.scope >> 24)::u8;
     encoded[20] = key.is_v6;
-    ret hash.bytes(manager.hash_key, ?encoded[0], 21);
+    ret siphash.bytes(manager.hash_key, ?encoded[0], 21);
 }
 
 fun limit_valid(limit: opt[usize]) bool {
@@ -197,7 +197,7 @@ pub fun initialize(manager: *Manager, config: Config,
         ownership.ZERO_FORBIDDEN).valid || manager.initialized) {
         ret false;
     }
-    val key: opt[hash.Key] = hash.random_key();
+    val key: opt[siphash.Key] = siphash.random_key();
     if (!sel key.some) { ret false; }
     var next: Manager;
     next.config         = config;

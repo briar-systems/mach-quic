@@ -56,7 +56,7 @@ pub val STREAM_WINDOW:                usize = STREAM_CAPACITY * STREAM_STRIDE;
 pub val STREAM_ATTEMPT_CAPACITY:      usize = STREAM_CAPACITY * 2;
 pub val DATAGRAM_CAPACITY:            usize = 4;
 pub val DATAGRAM_STRIDE:              usize = 1200;
-pub val CONNECTION_ID_CAPACITY:       usize = 4;
+pub val CONNECTION_ID_CAPACITY:       usize = binding_api.ROUTING_ID_CAPACITY;
 pub val OWNER_CAPACITY:               usize = 16;
 pub val TOKEN_CAPACITY:               usize = 512;
 pub val PARAMETER_CAPACITY:           usize = 512;
@@ -108,6 +108,19 @@ pub rec RoutingSnapshot {
     initialized: bool;
 }
 
+# the local connection ids a host may still issue, and where their sequences
+# stand. `wanted` is zero until the peer's transport parameters set its limit
+pub rec ConnectionIds {
+    wanted:          usize;
+    next_sequence:   u64;
+    retire_prior_to: u64;
+}
+
+pub rec IssuedId {
+    ok:       bool;
+    sequence: u64;
+}
+
 pub rec Config {
     source:                      u64;
     version:                     u32;
@@ -155,11 +168,15 @@ pub rec Config {
     # caller composes the account into its own space. a wake the source reports
     # for this handle must reach transport.storage_ready for this connection.
     # a stale or foreign wake is harmless. it is fixed for the account's life
-    account_handle:            u64;
-    peer_validated:            bool;
-    retry_source_present:      bool;
-    server_acceptance_applied: bool;
-    enable_early_data:         bool;
+    account_handle: u64;
+    # the server's stateless reset token for its handshake connection id, sent
+    # as the stateless_reset_token transport parameter. a client sets none
+    stateless_reset_token:         [16]u8;
+    stateless_reset_token_present: bool;
+    peer_validated:                bool;
+    retry_source_present:          bool;
+    server_acceptance_applied:     bool;
+    enable_early_data:             bool;
 }
 
 pub fun default_config(source: u64, local: ip.Endpoint,
@@ -352,6 +369,10 @@ fun config_valid(config: *Config, role: transport_api.Role) bool {
         config.receive_max_data == 0 ||
         config.receive_max_data > STREAM_WINDOW::u64 ||
         config.max_datagram_frame_size > DATAGRAM_STRIDE) { ret false; }
+    # rfc 9000 18.2: a client must not send a stateless reset token
+    if (role == transport_api.CLIENT && config.stateless_reset_token_present) {
+        ret false;
+    }
     if (role == transport_api.SERVER) {
         if (!config.server_acceptance_applied ||
             config.initial_destination == nil ||
@@ -757,6 +778,11 @@ fun local_parameters(config: *Config,
             config.original_destination, config.original_destination_length);
         transport_parameters.set_present(?value,
             transport_parameters.ORIGINAL_DESTINATION_CONNECTION_ID);
+        if (config.stateless_reset_token_present) {
+            value.stateless_reset_token = config.stateless_reset_token;
+            transport_parameters.set_present(?value,
+                transport_parameters.STATELESS_RESET_TOKEN);
+        }
         if (config.retry_source_present) {
             value.retry_source_connection_id = connection_id(
                 config.retry_source, config.retry_source_length);
@@ -896,7 +922,10 @@ fun build_managers(c: *Connection, config: *Config,
     if (!cid_api.initialize(?c.cids, cid_api.Config{source: config.source,
         local_active_limit: config.active_connection_id_limit::usize,
         peer_active_limit:  config.active_connection_id_limit::usize},
-        public_cid_storage(c.storage), local_id, peer_id)) {
+        public_cid_storage(c.storage), local_id, peer_id) ||
+        (config.stateless_reset_token_present &&
+        cid_api.install_initial_local_reset_token(?c.cids,
+        config.stateless_reset_token).status != cid_api.STATUS_OK)) {
         ret STAGE_CONNECTION_IDS;
     }
     var path_role: u8 = path_api.ROLE_CLIENT;
@@ -1076,6 +1105,50 @@ pub fun route_valid(c: *Connection, route: *Route) bool {
     internal.id.length  = route.id.length;
     internal.active     = route.active;
     ret binding_api.route_valid(?c.binding, ?internal);
+}
+
+fun ids_open(c: *Connection) bool {
+    ret c != nil && c.initialized && c.core.initialized && !c.core.closing &&
+        c.core.peer_parameters_ready && c.cids.initialized && !c.cids.closing;
+}
+
+pub fun connection_ids(c: *Connection) ConnectionIds {
+    var value: ConnectionIds;
+    if (!ids_open(c)) { ret value; }
+    value.wanted          = cid_api.local_demand(?c.cids);
+    value.next_sequence   = c.cids.local_next_sequence;
+    value.retire_prior_to = c.cids.local_retire_prior_to;
+    ret value;
+}
+
+# issues a local connection id the host minted, with its stateless reset
+# token. its route is published before this returns, and the core advertises
+# it with NEW_CONNECTION_ID. refused while `connection_ids` wants none
+pub fun issue_connection_id(c: *Connection, id: *u8, length: usize,
+    reset_token: [16]u8) IssuedId {
+    var value: IssuedId;
+    if (!ids_open(c) || id == nil || length == 0 ||
+        length > packet.MAX_CONNECTION_ID ||
+        cid_api.local_demand(?c.cids) == 0) { ret value; }
+    val issued: cid_api.Result = core_api.issue_connection_id(?c.core,
+        connection_id(id, length), reset_token);
+    if (issued.status != cid_api.STATUS_OK) { ret value; }
+    binding_api.reconcile_routes(?c.binding);
+    value.ok       = true;
+    value.sequence = issued.handle.sequence;
+    ret value;
+}
+
+# asks the peer to retire every local id below `sequence`, carried by the next
+# NEW_CONNECTION_ID. an id the peer never learned leaves at once with its
+# route. the others keep their routes until the peer retires them
+pub fun retire_connection_ids_prior_to(c: *Connection, sequence: u64) bool {
+    if (!ids_open(c)) { ret false; }
+    val retired: cid_api.Result = core_api.retire_connection_ids_prior_to(?c.core,
+        sequence);
+    if (retired.status == cid_api.STATUS_ERROR) { ret false; }
+    binding_api.reconcile_routes(?c.binding);
+    ret true;
 }
 
 fun release_ready(c: *Connection) bool {
