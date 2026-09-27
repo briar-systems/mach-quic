@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-27
+
+quic builds on mach-tls 0.14.0 (#269). Its protocol surface is unchanged.
+
+### Changed
+
+- Breaking: `[dep.tls] version = "^0.14"`, realized at v0.14.0 and committed as a gitlink. Resolution is flat, so a consumer of quic moves to tls 0.14 with it. tls 0.14 adds the public trust-bundle loader `tls.cert.bundle` and changes nothing quic uses (#269).
+
 ## [0.21.0] - 2026-09-26
 
 quic builds on mach 6, mach-std 9.0.0, mach-crypto 0.24.0 and mach-tls 0.13.0 (#264). Its protocol surface is unchanged.
