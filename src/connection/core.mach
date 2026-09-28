@@ -3181,8 +3181,12 @@ pub fun probe_path(core: *Core, endpoint: path_api.Endpoint,
         ret failed;
     }
     wake(core);
-    ret path_api.probe_scoped(core.paths, core.config.source, endpoint,
-        preferred);
+    # rfc 9000 9.3: a restarted failed path leaves its packets in flight
+    # settling without charging it, as a failed path the server gives up does
+    val probed: path_api.PathResult = path_api.probe_scoped(core.paths, core.config.source,
+        endpoint, preferred);
+    detach_path(core, probed.released);
+    ret probed;
 }
 
 # a local id the host minted, advertised with NEW_CONNECTION_ID once the

@@ -243,6 +243,10 @@ pub rec PathResult {
     status: u8;
     error:  u8;
     handle: Handle;
+    # a restart gave up the failed path while packets sent on it were in
+    # flight. they no longer count toward any path, and the caller settles
+    # them that way
+    released: Handle;
 }
 
 pub rec Observation {
@@ -1035,7 +1039,7 @@ pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult
     val rebinding: bool = selected_port_rebinding(manager, endpoint);
     if (!failed) { ret create_path(manager, endpoint, true, preferred, rebinding); }
     # rfc 9000 8.2 and 9.1: a local address whose validation failed is probed
-    # afresh, as a new one, once nothing holds the failed path
+    # afresh, as a new one, once no prepared work holds the failed path
     var restarted: PathResult = restart(manager, current.handle);
     if (restarted.status == STATUS_OK) {
         manager.storage.paths[restarted.handle.index].locally_created = true;
@@ -2369,12 +2373,18 @@ fun path_has_owners(manager: *Manager, index: usize, generation: u64) bool {
 pub fun restart(manager: *Manager, value: Handle) PathResult {
     if (!handle_valid(manager, value) || manager.closing ||
         manager.storage.paths[value.index].state != PATH_FAILED) { ret path_error(ERROR_TOKEN); }
-    if (manager.storage.paths[value.index].selected ||
-        path_has_owners(manager, value.index, value.generation)) {
+    # rfc 9000 9.3 and 9.4: only prepared work holds the failed path. packets
+    # in flight on it do not, since the path they were sent on is gone, and
+    # the handle is returned so the caller can settle them that way
+    if (manager.storage.paths[value.index].selected || path_committed(manager, value.index)) {
         var blocked: PathResult;
         blocked.status = STATUS_BLOCKED;
         ret blocked;
     }
+    var result: PathResult;
+    if (manager.storage.paths[value.index].recovery_owners != 0) { result.released = handle_at(manager, value.index); }
+    free_path_challenges(manager, value.index, value.generation, false);
+    free_path_responses(manager, value.index, value.generation, false);
     val endpoint:        Endpoint = manager.storage.paths[value.index].endpoint;
     val locally_created: bool     = manager.storage.paths[value.index].locally_created;
     val preferred:       bool     = manager.storage.paths[value.index].preferred;
@@ -2393,7 +2403,6 @@ pub fun restart(manager: *Manager, value: Handle) PathResult {
         manager.fallback_index      = invalid_index();
         manager.fallback_generation = 0;
     }
-    var result: PathResult;
     result.status = STATUS_OK;
     result.handle = handle_at(manager, value.index);
     ret result;
