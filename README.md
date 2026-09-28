@@ -275,7 +275,10 @@ responses, send reservations, and MTU probes remain completion-owned until they
 publish, cancel, or become stale. `finish_close` refuses to invalidate storage
 while any owner remains. Failed paths likewise cannot be released or restarted
 until their owners drain. Restart increments the path generation before accepting
-traffic again. A server that receives a packet from a failed path's address once
+traffic again. A client that probes a local address whose validation failed
+restarts that path under the same limits as a new probe, so it is validated
+afresh with new challenge data. `probe` returns STATUS_BLOCKED while owners still
+hold the failed path (RFC 9000 8.2 and 9.1). A server that receives a packet from a failed path's address once
 the handshake is confirmed, probing or not, gives up that path and validates the
 address afresh as it would a new one, answering any challenge the packet carries
 (RFC 9000 8.2.2, 9.1 and 9.3). Only a non-probing packet migrates to it. Only prepared work, a
