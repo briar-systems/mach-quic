@@ -59,50 +59,50 @@ fun operation_ok(outcome: cancel.Operation) bool {
 }
 
 #[testing]
-var front_memory: allocator_testing.Testing;
+var front_memory:     allocator_testing.Testing;
 #[testing]
-var dialer: assembly.Connection;
+var dialer:           assembly.Connection;
 #[testing]
-var listener: assembly.Connection;
+var listener:         assembly.Connection;
 #[testing]
-var dialer_storage: assembly.Storage;
+var dialer_storage:   assembly.Storage;
 #[testing]
 var listener_storage: assembly.Storage;
 #[testing]
-var copied_storage: assembly.Storage;
+var copied_storage:   assembly.Storage;
 # both ends run on this test's one pump, so they share its scratch pair
 #[testing]
-var pump_scratch: assembly.Scratch;
+var pump_scratch:     assembly.Scratch;
 #[testing]
-var pump_secret: assembly.SecretScratch;
+var pump_secret:      assembly.SecretScratch;
 #[testing]
-var dialer_tls: client.Handshake;
+var dialer_tls:       client.Handshake;
 #[testing]
-var listener_tls: server.Handshake;
+var listener_tls:     server.Handshake;
 #[testing]
-var dialer_tls_two: client.Handshake;
+var dialer_tls_two:   client.Handshake;
 #[testing]
 var listener_tls_two: server.Handshake;
 #[testing]
-var rollback_tls: client.Handshake;
+var rollback_tls:     client.Handshake;
 
 #[testing]
-var dialer_parameters: [512]u8;
+var dialer_parameters:   [512]u8;
 #[testing]
 var listener_parameters: [512]u8;
 #[testing]
-var wire: [1500]u8;
+var wire:                [1500]u8;
 #[testing]
-var dialer_scope: cancel.Scope;
+var dialer_scope:        cancel.Scope;
 #[testing]
-var listener_scope: cancel.Scope;
+var listener_scope:      cancel.Scope;
 
 #[testing]
-var secret_storage_delegate: secret.ArrayAllocator[assembly.SecretScratch];
+var secret_storage_delegate:         secret.ArrayAllocator[assembly.SecretScratch];
 #[testing]
-var secret_storage_deallocations: usize;
+var secret_storage_deallocations:    usize;
 #[testing]
-var secret_storage_zeroed_releases: usize;
+var secret_storage_zeroed_releases:  usize;
 #[testing]
 var secret_storage_nonzero_releases: usize;
 
@@ -180,29 +180,29 @@ var chunk_pool: supply.TestPool;
 #[testing]
 var small_pool: supply.TestPool;
 #[testing]
-var starving: bool;
+var starving:   bool;
 
 # the caller composes each account: its own handle and two lanes after quic's
 #[testing]
-val COMPOSED_LANES: usize = 2;
+val COMPOSED_LANES:           usize    = 2;
 #[testing]
-val COMPOSED_DIALER_HANDLE: u64 = 0xC0DE01;
+val COMPOSED_DIALER_HANDLE:   u64      = 0xC0DE01;
 #[testing]
-val COMPOSED_LISTENER_HANDLE: u64 = 0xC0DE02;
+val COMPOSED_LISTENER_HANDLE: u64      = 0xC0DE02;
 #[testing]
-var composed_budgets: [2]usize = [2]usize{8192, 4096};
+var composed_budgets:         [2]usize = [2]usize{8192, 4096};
 #[testing]
-var composed: bool;
+var composed:                 bool;
 
 # how a test misdeclares the caller's lanes, and which stage refuses it
 #[testing]
-val LANES_OK: u8 = 0;
+val LANES_OK:       u8 = 0;
 #[testing]
-val LANES_OVER: u8 = 1;
+val LANES_OVER:     u8 = 1;
 #[testing]
 val LANES_MISMATCH: u8 = 2;
 #[testing]
-var lane_fault: u8;
+var lane_fault:     u8;
 
 # one pool serves every connection a test assembles
 #[testing]
@@ -231,15 +231,15 @@ fun test_secret_chunks() buffers.SecretSource {
 
 # which lease establish_direct gives the dialer's engine
 #[testing]
-val LEASE_OWN: u8 = 0;
+val LEASE_OWN:      u8 = 0;
 #[testing]
-val LEASE_PEER: u8 = 1;
+val LEASE_PEER:     u8 = 1;
 #[testing]
-val LEASE_NONE: u8 = 2;
+val LEASE_NONE:     u8 = 2;
 #[testing]
 val LEASE_ORIGINAL: u8 = 3;
 #[testing]
-var mislease: u8;
+var mislease:       u8;
 # a connection the dialer is copied from after its lease was taken
 #[testing]
 var original: assembly.Connection;
@@ -254,7 +254,7 @@ var refusing: bool;
 #[testing]
 var reset_token_advertised: bool;
 #[testing]
-val REFUSAL_CLOSED: i32 = 98;
+val REFUSAL_CLOSED:         i32 = 98;
 
 # the front listener answers the dialer's Initial the way a busy server would,
 # then the dialer must be draining on CONNECTION_REFUSED with nothing else
@@ -342,9 +342,9 @@ fun dialer_engine_lease() tls_buffer.Lease {
 #[testing]
 var hog_account: supply.Account;
 #[testing]
-var hog_chunks: [256]supply.Chunk;
+var hog_chunks:  [256]supply.Chunk;
 #[testing]
-var hog_count: usize;
+var hog_count:   usize;
 
 # holds every chunk of the small pool but two, which the dialer's handshake
 # block and its Initial keys' contexts take, so its tls start finds no memory
@@ -415,23 +415,23 @@ fun starved_start(clock: *u64) i32 {
 # a failing exit code is one byte, so the detail lands here and the assertion
 # returns only which step refused
 #[testing]
-var fault_side: u64;
+var fault_side:   u64;
 #[testing]
-var fault_step: u64;
+var fault_step:   u64;
 #[testing]
 var fault_status: u64;
 #[testing]
-var fault_error: u64;
+var fault_error:  u64;
 
 #[testing]
-var dialer_source: [8]u8 = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+var dialer_source:       [8]u8 = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
 #[testing]
-var listener_source: [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
+var listener_source:     [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
 #[testing]
 var initial_destination: [8]u8 =
     [8]u8{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
 #[testing]
-var alpn: [2]u8 = [2]u8{'h', '3'};
+var alpn:        [2]u8  = [2]u8{'h', '3'};
 #[testing]
 var server_name: [15]u8 = [15]u8{'a', 'p', 'i', '.', 'e', 'x', 'a', 'm',
     'p', 'l', 'e', '.', 'c', 'o', 'm'};
@@ -1510,7 +1510,7 @@ test assembly__typed_secret_pools_retain_wiped_deallocation_for_retry {
 #[testing]
 var response_bytes: [1400]u8;
 #[testing]
-var reply_bytes: [1400]u8;
+var reply_bytes:    [1400]u8;
 
 # a direct server acceptance with no retry, so the test drives only the path
 # under scrutiny
@@ -2853,7 +2853,7 @@ var lossy_streams: [10]transport.Stream;
 #[testing]
 var lossy_payload: [4096]u8;
 #[testing]
-var lossy_sink: [4096]u8;
+var lossy_sink:    [4096]u8;
 
 # ten request streams each fill their whole window through a lossy, reordering
 # path, and every byte arrives without a storage refusal
@@ -2957,7 +2957,7 @@ test assembly__a_full_window_survives_10_loss_and_reordering_without_storage_ref
 val GUARD_IDLE_CHUNKS: usize = 0;
 # established, the six h3 control streams open and drained: one record block
 #[testing]
-val GUARD_H3_SEND_CHUNKS: usize = 1;
+val GUARD_H3_SEND_CHUNKS:    usize = 1;
 #[testing]
 val GUARD_H3_RECEIVE_CHUNKS: usize = 0;
 
@@ -3055,7 +3055,7 @@ test assembly__an_idle_connection_costs_what_was_measured {
 #[testing]
 var transfer_source: [4096]u8;
 #[testing]
-var transfer_sink: [4096]u8;
+var transfer_sink:   [4096]u8;
 
 #[testing]
 rec Peak {
@@ -3157,11 +3157,11 @@ fun transfer_observed(total: usize, peak: *Peak, clock: *u64, moved: *usize) i32
 # receiver). on top of that the sender holds one data chunk on the send lane,
 # never more because of STREAM_STRIDE, and the receiver one on the receive lane
 #[testing]
-val GUARD_ACTIVE_DIALER_SEND: usize = 5;
+val GUARD_ACTIVE_DIALER_SEND:      usize = 5;
 #[testing]
-val GUARD_ACTIVE_DIALER_RECEIVE: usize = 0;
+val GUARD_ACTIVE_DIALER_RECEIVE:   usize = 0;
 #[testing]
-val GUARD_ACTIVE_LISTENER_SEND: usize = 4;
+val GUARD_ACTIVE_LISTENER_SEND:    usize = 4;
 #[testing]
 val GUARD_ACTIVE_LISTENER_RECEIVE: usize = 1;
 
@@ -3280,13 +3280,13 @@ test assembly__a_connection_copied_after_its_lease_was_taken_is_refused {
 # bytes. a failure means that cost moved. decide it deliberately, and update
 # these numbers and the readme together
 #[testing]
-val GUARD_HANDSHAKE_DIALER_SEND: usize = 6;
+val GUARD_HANDSHAKE_DIALER_SEND:   usize = 6;
 #[testing]
 val GUARD_HANDSHAKE_LISTENER_SEND: usize = 8;
 #[testing]
-val GUARD_HANDSHAKE_DIALER_TLS: usize = 8704;
+val GUARD_HANDSHAKE_DIALER_TLS:    usize = 8704;
 #[testing]
-val GUARD_HANDSHAKE_LISTENER_TLS: usize = 18944;
+val GUARD_HANDSHAKE_LISTENER_TLS:  usize = 18944;
 
 test assembly__a_handshake_costs_what_was_measured {
     var clock: u64   = 1000;

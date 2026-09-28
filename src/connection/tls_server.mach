@@ -42,7 +42,7 @@ pub fun initialize(adapter: *handshake_api.Adapter,
 }
 
 #[testing]
-var adapter_chunk_pool: supply.TestPool;
+var adapter_chunk_pool:    supply.TestPool;
 #[testing]
 var adapter_chunk_account: supply.Account;
 
@@ -68,12 +68,12 @@ fun adapter_lease() buffer.Lease {
 #[testing]
 var listener_attempts: [8]handshake_api.Attempt;
 #[testing]
-var dialer_attempts: [8]handshake_api.Attempt;
+var dialer_attempts:   [8]handshake_api.Attempt;
 
 #[testing]
 var listener_transport: [5]u8 = [5]u8{0x0a, 0x0b, 0x0c, 0x0d, 0x0e};
 #[testing]
-var dialer_transport: [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
+var dialer_transport:   [4]u8 = [4]u8{0x01, 0x02, 0x03, 0x04};
 
 # what one side observed across the whole exchange, so an assertion names the
 # event that carried it rather than a state the engine happens to expose

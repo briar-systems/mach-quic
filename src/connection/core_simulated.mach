@@ -248,25 +248,25 @@ fun parameter_role(role: u8) u8 {
 # each fault is one specific wiring mistake, so a test can assert that
 # initialization named that mistake rather than merely refused
 #[testing]
-val FAULT_NONE: u8 = 0;
+val FAULT_NONE:               u8 = 0;
 #[testing]
-val FAULT_STORAGE_CAPACITY: u8 = 1;
+val FAULT_STORAGE_CAPACITY:   u8 = 1;
 #[testing]
-val FAULT_STORAGE_OVERLAP: u8 = 2;
+val FAULT_STORAGE_OVERLAP:    u8 = 2;
 #[testing]
-val FAULT_STORAGE_BORROWED: u8 = 3;
+val FAULT_STORAGE_BORROWED:   u8 = 3;
 #[testing]
-val FAULT_COMPONENT_OVERLAP: u8 = 4;
+val FAULT_COMPONENT_OVERLAP:  u8 = 4;
 #[testing]
 val FAULT_COMPONENT_BORROWED: u8 = 5;
 #[testing]
-val FAULT_PROVIDER_SECRETS: u8 = 6;
+val FAULT_PROVIDER_SECRETS:   u8 = 6;
 #[testing]
-val FAULT_PROVIDER_START: u8 = 7;
+val FAULT_PROVIDER_START:     u8 = 7;
 #[testing]
-val FAULT_RECEIVE_KEYS: u8 = 8;
+val FAULT_RECEIVE_KEYS:       u8 = 8;
 #[testing]
-val FAULT_SEND_KEYS: u8 = 9;
+val FAULT_SEND_KEYS:          u8 = 9;
 # not a fault: owners and histories come from the fixture's pool on demand
 #[testing]
 val MODE_ON_DEMAND: u8 = 10;

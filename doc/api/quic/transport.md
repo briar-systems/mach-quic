@@ -675,3 +675,33 @@ pub fun release_closed[T](driver: *Driver[T]) OperationResult;
 pub fun snapshot[T](driver: *Driver[T]) Snapshot;
 ```
 
+## fun pending_output
+
+```mach
+pub fun pending_output[T](driver: *Driver[T], now: time.Instant) bool;
+```
+
+whether generate at `now` would produce a datagram, answered with nothing
+changed and nothing allocated, for a buffer of at least the connection's
+maximum UDP payload. a host's audit uses it to find a connection that holds
+output nobody will generate.
+
+false for a closed or abortively closing driver, a scope no longer active,
+a time before the driver's last call, or no free send slot, where generate
+answers without a datagram. true for a cancellation recorded but not yet
+applied: the next call applies it, an abortive close the host must give the
+connection a turn for, though the generate that applies it sends nothing.
+otherwise the protocol answers, and connection.core's answer is exact but
+for its two documented edges, pending handshake work and a standing pool
+refusal
+
+## fun pending_stream_news
+
+```mach
+pub fun pending_stream_news[T](driver: *Driver[T]) bool;
+```
+
+whether ready_stream or accept_stream has anything to hand the owner: a
+stream with data, a fin, a reset or a flow-control opening it has not taken,
+or a peer stream it has not accepted. O(1), with nothing changed
+

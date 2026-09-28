@@ -425,6 +425,16 @@ pub fun next_ready(manager: *Manager) Ready;
 
 hands the owner the oldest stream with news, O(1)
 
+## fun pending_news
+
+```mach
+pub fun pending_news(manager: *Manager) bool;
+```
+
+whether next_ready or accept has anything to hand the owner, O(1): a stream
+with news it has not taken, or a peer stream it has not accepted. it changes
+nothing
+
 ## fun storage_released
 
 ```mach
@@ -657,6 +667,33 @@ pub fun prepare_control_scoped(manager: *Manager, source: u64) Prepared;
 pub fun prepare_scoped(manager: *Manager, source: u64, value: Handle,
 maximum_bytes: usize, probe: bool) Prepared;
 ```
+
+## fun peek_control_scoped
+
+```mach
+pub fun peek_control_scoped(manager: *Manager, source: u64) Prepared;
+```
+
+what prepare_control_scoped would answer, with no token and nothing
+changed. it assumes the attempt's chunk is granted, see attempts_held
+
+## fun peek_scoped
+
+```mach
+pub fun peek_scoped(manager: *Manager, source: u64, value: Handle,
+maximum_bytes: usize, probe: bool) Prepared;
+```
+
+what prepare_scoped would answer on `value`, with no token and nothing
+changed. it assumes the attempt's chunk is granted, see attempts_held
+
+## fun attempts_held
+
+```mach
+pub fun attempts_held(manager: *Manager) bool;
+```
+
+whether a prepare can claim an attempt without taking a chunk from the pool
 
 ## fun cancel_prepared_scoped
 
