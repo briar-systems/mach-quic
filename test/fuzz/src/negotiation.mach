@@ -1,0 +1,139 @@
+# the client's answers to what a server sends before any key: version
+# negotiation and retry
+
+use crypto.contracts;
+use quic.connection.negotiation;
+use quic.crypto.protection;
+use quic.packet.packet;
+use std.encoding.binary;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+use fuzz.verdict;
+
+val TOKEN_CAPACITY: usize = 16384;
+val PSEUDO:         usize = 20480;
+
+var versions:      [2]u32;
+var retry_token:   [TOKEN_CAPACITY]u8;
+var retry_scratch: [PSEUDO]u8;
+var check_scratch: [PSEUDO]u8;
+
+# the rfc 9001 appendix a client: original destination 8394c8f03e515708 and an
+# empty source, starting at `version`
+fun client(value: *negotiation.Client, version: u32) bool {
+    versions[0] = packet.VERSION_1;
+    versions[1] = packet.VERSION_2;
+    var original: packet.ConnectionId;
+    original.len     = 8;
+    original.data[0] = 0x83;
+    original.data[1] = 0x94;
+    original.data[2] = 0xc8;
+    original.data[3] = 0xf0;
+    original.data[4] = 0x3e;
+    original.data[5] = 0x51;
+    original.data[6] = 0x57;
+    original.data[7] = 0x08;
+    var local:  packet.ConnectionId;
+    var config: negotiation.Config;
+    config.supported_versions      = ?versions[0];
+    config.supported_version_count = 2;
+    var storage: negotiation.Storage;
+    storage.retry_token           = ?retry_token[0];
+    storage.retry_token_capacity  = TOKEN_CAPACITY;
+    storage.retry_pseudo          = ?retry_scratch[0];
+    storage.retry_pseudo_capacity = PSEUDO;
+    var fresh: negotiation.Client;
+    @value = fresh;
+    ret negotiation.initialize(value, config, storage, version, original, local);
+}
+
+fun decoded(data: *u8, len: usize, value: *packet.Packet) bool {
+    var d: binary.Decoder = binary.decoder(data, len, binary.BIG);
+    ret packet.decode(?d, true, packet.empty_decode_context(), packet.default_limits(),
+        value).status == packet.STATUS_DONE && d.pos == len;
+}
+
+fun lists(value: *packet.Packet, version: u32) bool {
+    var i: usize = 0;
+    for (i < value.versions.len / 4) {
+        if (packet.version_at(value, i) == version) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# a restart moves only to a version the client supports and the server listed,
+# never the one it started at, and only for a packet addressed to it
+fun negotiate_one(data: *u8, len: usize, version: u32, outcome: *u64) bool {
+    var c: negotiation.Client;
+    if (!client(?c, version)) { ret false; }
+    val result: negotiation.Result = negotiation.version_negotiation(?c, data, len);
+    @outcome = verdict.mix(@outcome, (result.status::u64 << 8) | result.error::u64);
+    var ok: bool = true;
+    if (result.status == negotiation.STATUS_RESTART) {
+        verdict.accept();
+        var value: packet.Packet;
+        ok = result.restart == negotiation.RESTART_VERSION && result.version != version &&
+            (result.version == packet.VERSION_1 || result.version == packet.VERSION_2) &&
+            c.version == result.version && decoded(data, len, ?value) &&
+            value.header.kind == packet.PACKET_VERSION_NEGOTIATION &&
+            lists(?value, result.version) && !lists(?value, version) &&
+            value.header.destination.len == 0 &&
+            packet.connection_id_equal(?value.header.source, ?c.original_destination);
+    }
+    or { ok = c.version == version && !c.version_negotiated; }
+    ret negotiation.finish(?c) && ok;
+}
+
+pub fun answer_version_negotiation(data: *u8, len: usize) verdict.Verdict {
+    var outcome: u64 = 0;
+    if (!negotiate_one(data, len, packet.VERSION_1, ?outcome) ||
+        !negotiate_one(data, len, packet.VERSION_2, ?outcome)) {
+        ret verdict.violated("version-negotiation: a client restarted to a version it may not, or for a packet not addressed to it");
+    }
+    ret verdict.answered(outcome);
+}
+
+# a retry is taken only when its tag verifies over the client's original
+# destination, and what it hands back is the token and source it carried
+fun retry_one(data: *u8, len: usize, version: u32, outcome: *u64) bool {
+    var c: negotiation.Client;
+    if (!client(?c, version)) { ret false; }
+    val result: negotiation.Result = negotiation.retry(?c, data, len);
+    @outcome = verdict.mix(@outcome, (result.status::u64 << 8) | result.error::u64);
+    var ok: bool = true;
+    if (result.status == negotiation.STATUS_RESTART) {
+        verdict.accept();
+        var value: packet.Packet;
+        ok = result.restart == negotiation.RESTART_RETRY && result.version == version &&
+            decoded(data, len, ?value) && value.header.kind == packet.PACKET_RETRY &&
+            value.header.version == version &&
+            result.token.len == value.token.len && result.token.data == ?retry_token[0] &&
+            packet.connection_id_equal(?result.peer_destination, ?value.header.source) &&
+            protection.verify_retry(version,
+            contracts.Bytes{data: ?c.original_destination.data[0], len: 8},
+            contracts.Bytes{data: data, len: len - packet.RETRY_INTEGRITY_TAG},
+            contracts.Bytes{data: ?data[len - packet.RETRY_INTEGRITY_TAG],
+            len: packet.RETRY_INTEGRITY_TAG},
+            contracts.Buffer{data: ?check_scratch[0], capacity: PSEUDO}) == protection.OK;
+        var i: usize = 0;
+        for (ok && i < value.token.len) {
+            ok = retry_token[i] == value.token.data[i];
+            i  = i + 1;
+        }
+    }
+    or { ok = !c.retry_accepted && c.retry_token_length == 0; }
+    ret negotiation.finish(?c) && ok;
+}
+
+pub fun answer_retry(data: *u8, len: usize) verdict.Verdict {
+    var outcome: u64 = 0;
+    if (!retry_one(data, len, packet.VERSION_1, ?outcome) ||
+        !retry_one(data, len, packet.VERSION_2, ?outcome)) {
+        ret verdict.violated("retry: a client took a retry whose tag, token or source is not what it carried");
+    }
+    ret verdict.answered(outcome);
+}

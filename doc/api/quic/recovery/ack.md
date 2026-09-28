@@ -158,6 +158,16 @@ pub fun ack_due(tracker: *Tracker, pn_space: u8, now_ns: u64) bool;
 pub fun build(tracker: *Tracker, pn_space: u8, now_ns: u64, ranges: *frame.AckRange, capacity: usize, out: *frame.Frame) BuildResult;
 ```
 
+## fun frame_size
+
+```mach
+pub fun frame_size(tracker: *Tracker, pn_space: u8, now_ns: u64, capacity: usize) usize;
+```
+
+the bytes the frame build would write with the same arguments, or 0 where
+build refuses. it writes nothing, so a send can be sized before the frame is
+taken
+
 ## fun on_ack_sent
 
 ```mach

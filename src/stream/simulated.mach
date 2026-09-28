@@ -10,7 +10,7 @@ use std.types.bool.true;
 use std.types.size.usize;
 
 #[testing]
-var chunk_pool: supply.TestPool;
+var chunk_pool:    supply.TestPool;
 #[testing]
 var chunk_account: supply.Account;
 

@@ -456,6 +456,22 @@ pub fun abandon_initialization(core: *Core, secrets: *Secrets) bool;
 
 rolls back a successful core init before the assembly becomes observable
 
+## val LEVEL_CONTEXT_SLOTS
+
+```mach
+pub val LEVEL_CONTEXT_SLOTS: usize = 3
+```
+
+the handshake levels that hold a secret chunk for their contexts
+
+## fun release_secret_chunks
+
+```mach
+pub fun release_secret_chunks(core: *Core, secrets: *Secrets);
+```
+
+a dead core's secret chunks, given back whatever they hold
+
 ## fun release_chunks
 
 ```mach
@@ -507,6 +523,24 @@ none is waiting. when `capacity` is too small nothing is released, and
 pub fun probe_path(core: *Core, endpoint: path_api.Endpoint,
 preferred: bool) path_api.PathResult;
 ```
+
+## fun issue_connection_id
+
+```mach
+pub fun issue_connection_id(core: *Core, id: packet.ConnectionId,
+reset_token: [16]u8) cid_api.Result;
+```
+
+a local id the host minted, advertised with NEW_CONNECTION_ID once the
+application space can carry it
+
+## fun retire_connection_ids_prior_to
+
+```mach
+pub fun retire_connection_ids_prior_to(core: *Core, sequence: u64) cid_api.Result;
+```
+
+raises the retire_prior_to the next NEW_CONNECTION_ID carries
 
 ## fun migrate_path
 
@@ -560,6 +594,32 @@ pub fun snapshot(core: *Core) Snapshot;
 pub fun generate(core: *Core, secrets: *Secrets, output: *u8,
 capacity: usize, now_ns: u64) transport_api.CoreDatagram;
 ```
+
+## fun handshake_pending
+
+```mach
+pub fun handshake_pending(core: *Core) bool;
+```
+
+whether the provider may hand over crypto or events on its next poll: new
+crypto arrived, the pool woke a provider it refused, or its last poll did
+not end waiting for input. pending_output answers true while it holds
+
+## fun pending_output
+
+```mach
+pub fun pending_output(core: *Core, secrets: *Secrets, now_ns: u64) bool;
+```
+
+whether the next generate at `now_ns` would produce a datagram, answered with
+nothing changed and nothing allocated, for a caller buffer of at least the
+connection's maximum UDP payload. it is exact but for two edges, each where
+generate learns its answer only by acting:
+- handshake work pending (handshake_pending) answers true, since only
+  running the provider tells whether it yields a flight
+- storage: while the pool's last refusal on the send path stands (until
+  storage_ready), a send needing a chunk the connection does not hold
+  answers false. otherwise the pool is assumed to grant it
 
 ## fun complete_send
 

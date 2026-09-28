@@ -373,7 +373,9 @@ test path__validation_timeout_reverts_and_preserves_prepared_token_ownership {
     ret 0;
 }
 
-test path__mtu_only_validation_timeout_does_not_invalidate_an_address {
+# rfc 9000 8.2.4 and 14: a path whose mtu validation fails is failed, and with
+# no validated fallback the connection has no viable path
+test path__a_failed_mtu_validation_fails_the_path {
     var paths:      [2]path.Path;
     var challenges: [2]path.Challenge;
     var responses:  [1]path.Response;
@@ -392,8 +394,9 @@ test path__mtu_only_validation_timeout_does_not_invalidate_an_address {
     path.publish_challenge(?manager, prepared.token, 20);
     val timeout: path.TimeoutResult = path.on_timeout(?manager, 320);
     val state:   path.Snapshot      = path.snapshot(?manager, handle);
-    if (!timeout.mtu_validation_failed || timeout.reverted || state.state != path.PATH_VALIDATED ||
-        !state.address_validated || state.mtu_validated ||
+    if (!timeout.mtu_validation_failed || timeout.reverted || !timeout.connection_lost ||
+        timeout.failed.index != handle.index || state.state != path.PATH_FAILED || state.mtu_validated ||
+        path.selected(?manager).status != path.STATUS_ERROR ||
         path.receive_response(?manager, data, 321).status != path.STATUS_DROPPED) { ret 1; }
     ret 0;
 }
@@ -652,23 +655,28 @@ test path__failed_prior_path_revalidation_defeats_forwarding_attacks {
     val new_challenge: path.PreparedChallenge = path.prepare_challenge(?manager, moved.handle);
     path.publish_challenge(?manager, new_challenge.token, 10);
     val prior_failed: path.TimeoutResult = path.on_timeout(?manager, 310);
-    # a probing packet does not revive the failed path. a non-probing one would
-    # validate it afresh (#238)
     if (prior_failed.failed.index != old.index || prior_failed.reverted || prior_failed.connection_lost ||
-        path.selected(?manager).handle.index != moved.handle.index ||
-        path.observe(?manager, initial, 12, 100, false, true, true, true, 311).status != path.STATUS_BLOCKED) {
-        ret 1;
-    }
+        path.selected(?manager).handle.index != moved.handle.index) { ret 1; }
+    # a probing packet from the failed address takes a fresh path to be
+    # validated, as a new address would, and migrates nothing
+    val probed: path.Observation = path.observe(?manager, initial, 12, 100,
+        false, true, true, true, 311);
+    if (probed.status != path.STATUS_OK || !probed.created || !probed.needs_validation ||
+        probed.selected || probed.handle.generation == old.generation ||
+        path.snapshot(?manager, probed.handle).state != path.PATH_VALIDATING ||
+        path.selected(?manager).handle.index != moved.handle.index) { ret 2; }
     val candidate_failed: path.TimeoutResult = path.on_timeout(?manager, 310);
     if (!candidate_failed.connection_lost || path.selected(?manager).status != path.STATUS_ERROR ||
         path.cancel_challenge(?manager, old_challenge.token).status != path.STATUS_STALE ||
-        path.cancel_challenge(?manager, new_challenge.token).status != path.STATUS_STALE) { ret 1; }
-    val restarted: path.PathResult = path.restart(?manager, old);
-    if (restarted.status != path.STATUS_OK || restarted.handle.generation == old.generation) { ret 1; }
-    val recovered: path.Observation = path.observe(?manager, initial, 12, 100,
+        path.cancel_challenge(?manager, new_challenge.token).status != path.STATUS_STALE) { ret 3; }
+    val restarted: path.PathResult = path.restart(?manager, moved.handle);
+    if (restarted.status != path.STATUS_OK || restarted.handle.generation == moved.handle.generation) {
+        ret 4;
+    }
+    val recovered: path.Observation = path.observe(?manager, candidate, 13, 100,
         true, true, true, true, 312);
     if (!recovered.selected || recovered.handle.generation != restarted.handle.generation ||
-        !recovered.needs_validation) { ret 1; }
+        !recovered.needs_validation) { ret 5; }
     ret 0;
 }
 

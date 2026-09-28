@@ -59,50 +59,50 @@ fun operation_ok(outcome: cancel.Operation) bool {
 }
 
 #[testing]
-var front_memory: allocator_testing.Testing;
+var front_memory:     allocator_testing.Testing;
 #[testing]
-var dialer: assembly.Connection;
+var dialer:           assembly.Connection;
 #[testing]
-var listener: assembly.Connection;
+var listener:         assembly.Connection;
 #[testing]
-var dialer_storage: assembly.Storage;
+var dialer_storage:   assembly.Storage;
 #[testing]
 var listener_storage: assembly.Storage;
 #[testing]
-var copied_storage: assembly.Storage;
+var copied_storage:   assembly.Storage;
 # both ends run on this test's one pump, so they share its scratch pair
 #[testing]
-var pump_scratch: assembly.Scratch;
+var pump_scratch:     assembly.Scratch;
 #[testing]
-var pump_secret: assembly.SecretScratch;
+var pump_secret:      assembly.SecretScratch;
 #[testing]
-var dialer_tls: client.Handshake;
+var dialer_tls:       client.Handshake;
 #[testing]
-var listener_tls: server.Handshake;
+var listener_tls:     server.Handshake;
 #[testing]
-var dialer_tls_two: client.Handshake;
+var dialer_tls_two:   client.Handshake;
 #[testing]
 var listener_tls_two: server.Handshake;
 #[testing]
-var rollback_tls: client.Handshake;
+var rollback_tls:     client.Handshake;
 
 #[testing]
-var dialer_parameters: [512]u8;
+var dialer_parameters:   [512]u8;
 #[testing]
 var listener_parameters: [512]u8;
 #[testing]
-var wire: [1500]u8;
+var wire:                [1500]u8;
 #[testing]
-var dialer_scope: cancel.Scope;
+var dialer_scope:        cancel.Scope;
 #[testing]
-var listener_scope: cancel.Scope;
+var listener_scope:      cancel.Scope;
 
 #[testing]
-var secret_storage_delegate: secret.ArrayAllocator[assembly.SecretScratch];
+var secret_storage_delegate:         secret.ArrayAllocator[assembly.SecretScratch];
 #[testing]
-var secret_storage_deallocations: usize;
+var secret_storage_deallocations:    usize;
 #[testing]
-var secret_storage_zeroed_releases: usize;
+var secret_storage_zeroed_releases:  usize;
 #[testing]
 var secret_storage_nonzero_releases: usize;
 
@@ -180,29 +180,29 @@ var chunk_pool: supply.TestPool;
 #[testing]
 var small_pool: supply.TestPool;
 #[testing]
-var starving: bool;
+var starving:   bool;
 
 # the caller composes each account: its own handle and two lanes after quic's
 #[testing]
-val COMPOSED_LANES: usize = 2;
+val COMPOSED_LANES:           usize    = 2;
 #[testing]
-val COMPOSED_DIALER_HANDLE: u64 = 0xC0DE01;
+val COMPOSED_DIALER_HANDLE:   u64      = 0xC0DE01;
 #[testing]
-val COMPOSED_LISTENER_HANDLE: u64 = 0xC0DE02;
+val COMPOSED_LISTENER_HANDLE: u64      = 0xC0DE02;
 #[testing]
-var composed_budgets: [2]usize = [2]usize{8192, 4096};
+var composed_budgets:         [2]usize = [2]usize{8192, 4096};
 #[testing]
-var composed: bool;
+var composed:                 bool;
 
 # how a test misdeclares the caller's lanes, and which stage refuses it
 #[testing]
-val LANES_OK: u8 = 0;
+val LANES_OK:       u8 = 0;
 #[testing]
-val LANES_OVER: u8 = 1;
+val LANES_OVER:     u8 = 1;
 #[testing]
 val LANES_MISMATCH: u8 = 2;
 #[testing]
-var lane_fault: u8;
+var lane_fault:     u8;
 
 # one pool serves every connection a test assembles
 #[testing]
@@ -231,15 +231,15 @@ fun test_secret_chunks() buffers.SecretSource {
 
 # which lease establish_direct gives the dialer's engine
 #[testing]
-val LEASE_OWN: u8 = 0;
+val LEASE_OWN:      u8 = 0;
 #[testing]
-val LEASE_PEER: u8 = 1;
+val LEASE_PEER:     u8 = 1;
 #[testing]
-val LEASE_NONE: u8 = 2;
+val LEASE_NONE:     u8 = 2;
 #[testing]
 val LEASE_ORIGINAL: u8 = 3;
 #[testing]
-var mislease: u8;
+var mislease:       u8;
 # a connection the dialer is copied from after its lease was taken
 #[testing]
 var original: assembly.Connection;
@@ -254,7 +254,7 @@ var refusing: bool;
 #[testing]
 var reset_token_advertised: bool;
 #[testing]
-val REFUSAL_CLOSED: i32 = 98;
+val REFUSAL_CLOSED:         i32 = 98;
 
 # the front listener answers the dialer's Initial the way a busy server would,
 # then the dialer must be draining on CONNECTION_REFUSED with nothing else
@@ -342,9 +342,9 @@ fun dialer_engine_lease() tls_buffer.Lease {
 #[testing]
 var hog_account: supply.Account;
 #[testing]
-var hog_chunks: [256]supply.Chunk;
+var hog_chunks:  [256]supply.Chunk;
 #[testing]
-var hog_count: usize;
+var hog_count:   usize;
 
 # holds every chunk of the small pool but two, which the dialer's handshake
 # block and its Initial keys' contexts take, so its tls start finds no memory
@@ -415,23 +415,23 @@ fun starved_start(clock: *u64) i32 {
 # a failing exit code is one byte, so the detail lands here and the assertion
 # returns only which step refused
 #[testing]
-var fault_side: u64;
+var fault_side:   u64;
 #[testing]
-var fault_step: u64;
+var fault_step:   u64;
 #[testing]
 var fault_status: u64;
 #[testing]
-var fault_error: u64;
+var fault_error:  u64;
 
 #[testing]
-var dialer_source: [8]u8 = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+var dialer_source:       [8]u8 = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
 #[testing]
-var listener_source: [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
+var listener_source:     [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
 #[testing]
 var initial_destination: [8]u8 =
     [8]u8{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
 #[testing]
-var alpn: [2]u8 = [2]u8{'h', '3'};
+var alpn:        [2]u8  = [2]u8{'h', '3'};
 #[testing]
 var server_name: [15]u8 = [15]u8{'a', 'p', 'i', '.', 'e', 'x', 'a', 'm',
     'p', 'l', 'e', '.', 'c', 'o', 'm'};
@@ -1510,7 +1510,7 @@ test assembly__typed_secret_pools_retain_wiped_deallocation_for_retry {
 #[testing]
 var response_bytes: [1400]u8;
 #[testing]
-var reply_bytes: [1400]u8;
+var reply_bytes:    [1400]u8;
 
 # a direct server acceptance with no retry, so the test drives only the path
 # under scrutiny
@@ -2353,6 +2353,14 @@ fun challenge_sent(peer: ip.Endpoint, now_ns: u64) bool {
 #[testing]
 fun nat_round(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize, clock: *u64,
     moved: *usize) i64 {
+    ret narrow_nat_round(bound, also, drops, 1501, clock, moved);
+}
+
+# a nat round in which the listener's datagrams of `ceiling` bytes or more to
+# `bound` are lost as well, as on a path whose mtu is below `ceiling`
+#[testing]
+fun narrow_nat_round(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize, ceiling: usize,
+    clock: *u64, moved: *usize) i64 {
     if (carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(), bound, clock,
         moved) != 0) {
         fault_side = 1;
@@ -2376,6 +2384,7 @@ fun nat_round(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize, clock: *u64,
         if (drops[0] > 0 && challenge_sent(bound, clock[0])) {
             drops[0] = drops[0] - 1;
         }
+        or (generated.peer.port == bound.port && generated.count >= ceiling) {}
         or (generated.peer.port == bound.port || generated.peer.port == also.port) {
             if (!deliver(?dialer, dialer_endpoint(), listener_endpoint(), ?wire[0],
                 generated.count, clock[0])) {
@@ -2549,6 +2558,42 @@ test assembly__a_port_validated_by_an_unpadded_challenge_then_has_its_mtu_valida
         ret report_paths(47);
     }
     ret await_answer(bound, bound, ?drops, request, ?clock, ?moved);
+}
+
+# rfc 9000 8.2.4 and 14: a rebound client's new port carries no datagram of
+# 1200 bytes or more. its address validates by an unpadded challenge, the
+# padded mtu challenge that follows is lost until its deadline, and the
+# listener then fails the port and reverts to the validated port the client left
+test assembly__a_port_whose_mtu_validation_fails_is_failed_and_the_listener_reverts {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val bound:   ip.Endpoint = nat_endpoint(1);
+    var request: transport.Stream;
+    val asked:   i32         = request_from(bound, ?request, ?clock, ?moved);
+    if (asked != 0) { ret asked; }
+    var drops:     usize          = 0;
+    var validated: bool           = false;
+    var failed:    bool           = false;
+    var rounds:    usize          = 0;
+    var path:      *path_api.Path = nil;
+    for (!failed && rounds < 256) {
+        if (narrow_nat_round(bound, dialer_endpoint(), ?drops, 1200, ?clock, ?moved) != 0) {
+            ret report_paths(64);
+        }
+        path = listener_path(bound);
+        if (path != nil && path.address_validated) { validated = true; }
+        failed = path != nil && path.state == path_api.PATH_FAILED;
+        rounds = rounds + 1;
+    }
+    val selected: path_api.PathResult = path_api.selected(?listener.paths);
+    if (!validated || !failed || path.mtu_validated || path.selected ||
+        selected.status != path_api.STATUS_OK ||
+        listener.storage.path_values[selected.handle.index].endpoint.peer.port !=
+        dialer_endpoint().port || listener.core.close_error != 0) { ret report_paths(65); }
+    ret 0;
 }
 
 #[testing]
@@ -2853,7 +2898,7 @@ var lossy_streams: [10]transport.Stream;
 #[testing]
 var lossy_payload: [4096]u8;
 #[testing]
-var lossy_sink: [4096]u8;
+var lossy_sink:    [4096]u8;
 
 # ten request streams each fill their whole window through a lossy, reordering
 # path, and every byte arrives without a storage refusal
@@ -2957,7 +3002,7 @@ test assembly__a_full_window_survives_10_loss_and_reordering_without_storage_ref
 val GUARD_IDLE_CHUNKS: usize = 0;
 # established, the six h3 control streams open and drained: one record block
 #[testing]
-val GUARD_H3_SEND_CHUNKS: usize = 1;
+val GUARD_H3_SEND_CHUNKS:    usize = 1;
 #[testing]
 val GUARD_H3_RECEIVE_CHUNKS: usize = 0;
 
@@ -3055,7 +3100,7 @@ test assembly__an_idle_connection_costs_what_was_measured {
 #[testing]
 var transfer_source: [4096]u8;
 #[testing]
-var transfer_sink: [4096]u8;
+var transfer_sink:   [4096]u8;
 
 #[testing]
 rec Peak {
@@ -3157,11 +3202,11 @@ fun transfer_observed(total: usize, peak: *Peak, clock: *u64, moved: *usize) i32
 # receiver). on top of that the sender holds one data chunk on the send lane,
 # never more because of STREAM_STRIDE, and the receiver one on the receive lane
 #[testing]
-val GUARD_ACTIVE_DIALER_SEND: usize = 5;
+val GUARD_ACTIVE_DIALER_SEND:      usize = 5;
 #[testing]
-val GUARD_ACTIVE_DIALER_RECEIVE: usize = 0;
+val GUARD_ACTIVE_DIALER_RECEIVE:   usize = 0;
 #[testing]
-val GUARD_ACTIVE_LISTENER_SEND: usize = 4;
+val GUARD_ACTIVE_LISTENER_SEND:    usize = 4;
 #[testing]
 val GUARD_ACTIVE_LISTENER_RECEIVE: usize = 1;
 
@@ -3280,13 +3325,13 @@ test assembly__a_connection_copied_after_its_lease_was_taken_is_refused {
 # bytes. a failure means that cost moved. decide it deliberately, and update
 # these numbers and the readme together
 #[testing]
-val GUARD_HANDSHAKE_DIALER_SEND: usize = 6;
+val GUARD_HANDSHAKE_DIALER_SEND:   usize = 6;
 #[testing]
 val GUARD_HANDSHAKE_LISTENER_SEND: usize = 8;
 #[testing]
-val GUARD_HANDSHAKE_DIALER_TLS: usize = 8704;
+val GUARD_HANDSHAKE_DIALER_TLS:    usize = 8704;
 #[testing]
-val GUARD_HANDSHAKE_LISTENER_TLS: usize = 18944;
+val GUARD_HANDSHAKE_LISTENER_TLS:  usize = 18944;
 
 test assembly__a_handshake_costs_what_was_measured {
     var clock: u64   = 1000;
@@ -3352,10 +3397,174 @@ test assembly__a_port_whose_validation_failed_is_validated_again_when_the_peer_s
     ret 0;
 }
 
+# one round in which the dialer sends from both its own port and `probe`, and
+# each datagram of either end reaches the other at the port it was sent to.
+# while the network is not `up`, every datagram either way is lost
+#[testing]
+fun split_round(probe: ip.Endpoint, up: bool, clock: *u64, moved: *usize) i32 {
+    var guard: usize = 0;
+    for (guard < 128) {
+        clock[0] = clock[0] + 1000;
+        var source:    *assembly.Connection = ?dialer;
+        var scope:     *cancel.Scope        = ?dialer_scope;
+        var sink:      *assembly.Connection = ?listener;
+        var generated: transport.Generated  = checked_generate(source, scope, ?wire[0], 1500,
+            instants.instant(clock[0]), 0);
+        if (generated.status == transport.STATUS_EMPTY ||
+            generated.status == transport.STATUS_BLOCKED) {
+            source    = ?listener;
+            scope     = ?listener_scope;
+            sink      = ?dialer;
+            generated = checked_generate(source, scope, ?wire[0], 1500,
+                instants.instant(clock[0]), 0);
+            if (generated.status == transport.STATUS_EMPTY ||
+                generated.status == transport.STATUS_BLOCKED) { brk; }
+        }
+        clock[0] = clock[0] + 1000;
+        if (generated.status != transport.STATUS_OK ||
+            transport.complete_send[binding.Binding](?source.driver, generated.token,
+            transport.SEND_SENT, generated.count, instants.instant(clock[0])).status !=
+            transport.STATUS_OK) { ret 56; }
+        var client: ip.Endpoint = dialer_endpoint();
+        if (sink == ?listener && generated.local.port == probe.port) { client = probe; }
+        if (sink == ?dialer && generated.peer.port == probe.port)    { client = probe; }
+        var delivered: bool = false;
+        if (!up) {
+            delivered = true;
+        }
+        or (sink == ?listener) {
+            delivered = deliver(?listener, listener_endpoint(), client, ?wire[0],
+                generated.count, clock[0]);
+        }
+        or {
+            delivered = deliver(?dialer, client, listener_endpoint(), ?wire[0],
+                generated.count, clock[0]);
+        }
+        if (!delivered) { ret 57; }
+        moved[0] = moved[0] + 1;
+        guard    = guard + 1;
+    }
+    clock[0] = next_deadline(clock[0]);
+    if (!fire_due(?dialer, clock[0]) || !fire_due(?listener, clock[0])) { ret 58; }
+    ret 0;
+}
+
+# rfc 9000 8.2.2 and 9.1: once the listener's validation of a port fails, the
+# client probes from that port with a packet carrying only a path challenge.
+# the listener takes the port as a new address and answers the challenge, and
+# the client's probe of the port succeeds without the listener migrating to it
+test assembly__a_probe_from_a_port_whose_validation_failed_is_answered {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val bound:   ip.Endpoint = nat_endpoint(1);
+    var request: transport.Stream;
+    val asked:   i32         = request_from(bound, ?request, ?clock, ?moved);
+    if (asked != 0) { ret asked; }
+    var drops:  usize = 1000;
+    var failed: bool  = false;
+    var rounds: usize = 0;
+    for (!failed && rounds < 256) {
+        if (nat_round(bound, dialer_endpoint(), ?drops, ?clock, ?moved) != 0) {
+            ret report_paths(59);
+        }
+        val path: *path_api.Path = listener_path(bound);
+        failed = path != nil && path.state == path_api.PATH_FAILED;
+        rounds = rounds + 1;
+    }
+    if (!failed) { ret report_paths(60); }
+    val probed: path_api.PathResult = core.probe_path(?dialer.core,
+        path_api.Endpoint{local: path_api.ipv4(192, 0, 2, 1, bound.port),
+        peer: path_api.ipv4(192, 0, 2, 2, listener_endpoint().port)}, false);
+    var data: [8]u8 = [8]u8{2, 5, 5, 2, 5, 5, 2, 5};
+    if (probed.status != path_api.STATUS_OK ||
+        core.queue_path_challenge(?dialer.core, probed.handle, data, true,
+        path_api.VALIDATION_PATH).status != path_api.STATUS_OK) { ret report_paths(61); }
+    rounds = 0;
+    val probe: *path_api.Path = ?dialer.storage.path_values[probed.handle.index];
+    for (!probe.address_validated && rounds < 64) {
+        if (split_round(bound, true, ?clock, ?moved) != 0) { ret report_paths(62); }
+        rounds = rounds + 1;
+    }
+    val path: *path_api.Path = listener_path(bound);
+    if (!probe.address_validated || path == nil || path.state == path_api.PATH_FAILED ||
+        path.selected || listener.core.close_error != 0) { ret report_paths(63); }
+    ret 0;
+}
+
+# whether a packet `value` sent still charges its path
+#[testing]
+fun charged(value: *assembly.Connection, path: path_api.Handle) bool {
+    var i: usize = 0;
+    for (i < value.core.owner_capacity) {
+        val owner: *core.Owner = ?value.core.owners[i];
+        if (owner.state == core.OWNER_SENT && owner.path_send.source == path.source &&
+            owner.path_send.path_index == path.index &&
+            owner.path_send.path_generation == path.generation) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# the dialer's own path from `local` to the listener
+#[testing]
+fun dialer_probe(local: ip.Endpoint) path_api.PathResult {
+    ret core.probe_path(?dialer.core,
+        path_api.Endpoint{local: path_api.ipv4(192, 0, 2, 1, local.port),
+        peer: path_api.ipv4(192, 0, 2, 2, listener_endpoint().port)}, false);
+}
+
+# rfc 9000 8.2, 9.1 and 9.3: the network drops everything while the client
+# probes from a new port, so its validation of the port fails with the probes
+# still in flight. the client probes the port again at once, without waiting
+# for loss detection, and the old probes settle without charging the new path.
+# once the network recovers, the fresh challenge validates the port
+test assembly__a_client_probes_a_port_whose_validation_failed_again {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val port:  ip.Endpoint         = nat_endpoint(1);
+    val first: path_api.PathResult = dialer_probe(port);
+    var data:  [8]u8               = [8]u8{2, 8, 9, 2, 8, 9, 2, 8};
+    if (first.status != path_api.STATUS_OK ||
+        core.queue_path_challenge(?dialer.core, first.handle, data, true,
+        path_api.VALIDATION_PATH).status != path_api.STATUS_OK) { ret report_paths(66); }
+    val probe:  *path_api.Path = ?dialer.storage.path_values[first.handle.index];
+    var rounds: usize          = 0;
+    for (probe.state != path_api.PATH_FAILED && rounds < 256) {
+        if (split_round(port, false, ?clock, ?moved) != 0) { ret report_paths(67); }
+        rounds = rounds + 1;
+    }
+    if (probe.state != path_api.PATH_FAILED || probe.recovery_owners == 0) { ret report_paths(68); }
+    val again: path_api.PathResult = dialer_probe(port);
+    data[0] = 3;
+    if (again.status != path_api.STATUS_OK || again.handle.index != first.handle.index ||
+        again.handle.generation == first.handle.generation ||
+        again.released.index != first.handle.index ||
+        again.released.generation != first.handle.generation || probe.recovery_owners != 0 ||
+        charged(?dialer, first.handle) ||
+        core.queue_path_challenge(?dialer.core, again.handle, data, true,
+        path_api.VALIDATION_PATH).status != path_api.STATUS_OK) { ret report_paths(70); }
+    rounds = 0;
+    for (!probe.address_validated && rounds < 64) {
+        if (split_round(port, true, ?clock, ?moved) != 0) { ret report_paths(71); }
+        rounds = rounds + 1;
+    }
+    if (!probe.address_validated || probe.state != path_api.PATH_VALIDATED ||
+        dialer.core.close_error != 0 || listener.core.close_error != 0) { ret report_paths(72); }
+    ret 0;
+}
+
 # rfc 9000 9.3: a client whose nat moves it three times keeps its connection,
 # and each answer reaches it at the port it was last moved to. a request the
 # listener cannot place yet is refused without closing, and the dialer's
-# retransmission gets through once the path it replaces has drained
+# retransmission gets through once the path it replaces has drained. each move
+# waits for the port's mtu to validate, since until then the port the client
+# left stays the fallback and holds the second path slot (rfc 9000 14)
 test assembly__a_client_rebound_three_times_is_answered_at_its_last_port {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
@@ -3389,8 +3598,14 @@ test assembly__a_client_rebound_three_times_is_answered_at_its_last_port {
             accepted.stream).status != transport.STATUS_OK) { ret report_paths(54); }
         val answered: i32 = await_answer(bound, bound, ?drops, opened.stream, ?clock, ?moved);
         if (answered != 0) { ret report_paths(answered); }
-        val path: *path_api.Path = listener_path(bound);
-        if (path == nil || !path.address_validated || !path.selected) {
+        var path: *path_api.Path = listener_path(bound);
+        rounds = 0;
+        for (path != nil && !path.mtu_validated && rounds < 64) {
+            if (nat_round(bound, bound, ?drops, ?clock, ?moved) != 0) { ret report_paths(53); }
+            path   = listener_path(bound);
+            rounds = rounds + 1;
+        }
+        if (path == nil || !path.address_validated || !path.mtu_validated || !path.selected) {
             ret report_paths(55);
         }
         hops = hops + 1;

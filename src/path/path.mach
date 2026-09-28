@@ -243,6 +243,10 @@ pub rec PathResult {
     status: u8;
     error:  u8;
     handle: Handle;
+    # a restart gave up the failed path while packets sent on it were in
+    # flight. they no longer count toward any path, and the caller settles
+    # them that way
+    released: Handle;
 }
 
 pub rec Observation {
@@ -691,6 +695,12 @@ fun free_path_index(manager: *Manager) usize {
     ret invalid_index();
 }
 
+# rfc 9000 8.2.4 and 14: a path the connection can fall back to has both its
+# address and its mtu validated
+fun path_viable(path: *Path) bool {
+    ret path.address_validated && path.mtu_validated;
+}
+
 # whether work prepared on the path at `index` is still owned: a prepared
 # challenge or response, a send reservation or an mtu probe. queued and
 # unanswered challenges, queued responses and packets in flight are not, and
@@ -814,7 +824,8 @@ fun activate(manager: *Manager, index: usize, migration: u8) Observation {
         result.previous                                = handle_at(manager, previous_index);
         manager.storage.paths[previous_index].selected = false;
         if (manager.storage.paths[previous_index].address_validated) {
-            if (!manager.storage.paths[index].address_validated) {
+            if (path_viable(?manager.storage.paths[previous_index]) &&
+                !path_viable(?manager.storage.paths[index])) {
                 manager.fallback_index      = previous_index;
                 manager.fallback_generation = manager.storage.paths[previous_index].generation;
             }
@@ -826,7 +837,7 @@ fun activate(manager: *Manager, index: usize, migration: u8) Observation {
     manager.storage.paths[index].selected = true;
     manager.selected_index                = index;
     manager.selected_generation           = manager.storage.paths[index].generation;
-    if (manager.storage.paths[index].address_validated) {
+    if (path_viable(?manager.storage.paths[index])) {
         manager.fallback_index      = index;
         manager.fallback_generation = manager.storage.paths[index].generation;
     }
@@ -888,11 +899,12 @@ pub fun observe(manager: *Manager, endpoint: Endpoint, packet_number: u64, bytes
     var index: usize      = invalid_index();
     if (found.status == STATUS_OK) {
         index = found.handle.index;
-        # rfc 9000 9.3: a peer that moves back to an address whose validation
-        # failed is validated afresh, as at a new address. the failed path
-        # gives up its slot once no prepared work holds it
+        # rfc 9000 8.2.2, 9.1 and 9.3: a packet from an address whose
+        # validation failed, probing or not, is taken as one from a new
+        # address. the failed path gives up its slot once no prepared work
+        # holds it, and the fresh path is validated and answers challenges
         if (manager.storage.paths[index].state == PATH_FAILED) {
-            if (!non_probing || !manager.handshake_confirmed ||
+            if (!manager.handshake_confirmed ||
                 manager.config.role == ROLE_CLIENT ||
                 !abandon_path(manager, index, ?result.released)) {
                 result.status           = STATUS_BLOCKED;
@@ -1013,15 +1025,9 @@ pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult
     if (manager.config.role != ROLE_CLIENT)                              { ret path_error(ERROR_MIGRATION_DISABLED); }
     if (!valid_address(endpoint.local) || !valid_address(endpoint.peer)) { ret path_error(ERROR_ADDRESS); }
     val current: PathResult = find(manager, endpoint);
-    if (current.status == STATUS_OK) {
-        if (manager.storage.paths[current.handle.index].state == PATH_FAILED) {
-            var blocked: PathResult;
-            blocked.status = STATUS_BLOCKED;
-            blocked.handle = current.handle;
-            ret blocked;
-        }
-        ret current;
-    }
+    val failed:  bool       = current.status == STATUS_OK &&
+        manager.storage.paths[current.handle.index].state == PATH_FAILED;
+    if (current.status == STATUS_OK && !failed) { ret current; }
     if (!preferred && manager.selected_index < manager.storage.path_capacity &&
         manager.storage.paths[manager.selected_index].valid &&
         !address_equal(endpoint.peer, manager.storage.paths[manager.selected_index].endpoint.peer)) {
@@ -1030,7 +1036,20 @@ pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult
     if (manager.config.peer_disabled_active_migration && !preferred) {
         ret path_error(ERROR_MIGRATION_DISABLED);
     }
-    ret create_path(manager, endpoint, true, preferred, selected_port_rebinding(manager, endpoint));
+    val rebinding: bool = selected_port_rebinding(manager, endpoint);
+    if (!failed) { ret create_path(manager, endpoint, true, preferred, rebinding); }
+    # rfc 9000 8.2 and 9.1: a local address whose validation failed is probed
+    # afresh, as a new one, once no prepared work holds the failed path
+    var restarted: PathResult = restart(manager, current.handle);
+    if (restarted.status == STATUS_OK) {
+        manager.storage.paths[restarted.handle.index].locally_created = true;
+        manager.storage.paths[restarted.handle.index].preferred       = preferred;
+        manager.storage.paths[restarted.handle.index].port_rebinding  = rebinding;
+    }
+    or (restarted.status == STATUS_BLOCKED) {
+        restarted.handle = current.handle;
+    }
+    ret restarted;
 }
 
 pub fun migrate(manager: *Manager, value: Handle, preferred: bool,
@@ -1426,7 +1445,7 @@ pub fun receive_response(manager: *Manager, data: [8]u8, now_ns: u64) Validation
             or {
                 result.migration = MIGRATION_PEER;
             }
-            if (manager.storage.paths[index].selected) {
+            if (manager.storage.paths[index].selected && path_viable(?manager.storage.paths[index])) {
                 manager.fallback_index      = index;
                 manager.fallback_generation = generation;
             }
@@ -1863,16 +1882,13 @@ pub fun on_timeout(manager: *Manager, now_ns: u64) TimeoutResult {
     for (i < manager.storage.path_capacity) {
         if (manager.storage.paths[i].valid && manager.storage.paths[i].validation_deadline_ns != 0 &&
             now_ns >= manager.storage.paths[i].validation_deadline_ns) {
-            if (manager.storage.paths[i].validation_purpose == VALIDATION_PATH) {
-                ret timeout_path(manager, i);
-            }
-            val generation: u64 = manager.storage.paths[i].generation;
-            end_validation(?manager.storage.paths[i]);
-            free_path_challenges(manager, i, generation, true);
-            result.status                = STATUS_OK;
-            result.failed                = handle_at(manager, i);
-            result.mtu_validation_failed = true;
-            ret result;
+            # rfc 9000 14: a path that cannot carry 1200-byte datagrams is not
+            # used, so a failed mtu validation fails the path as a failed
+            # address validation does (rfc 9000 8.2.4)
+            val purpose: u8            = manager.storage.paths[i].validation_purpose;
+            var failed:  TimeoutResult = timeout_path(manager, i);
+            failed.mtu_validation_failed = purpose == VALIDATION_MTU;
+            ret failed;
         }
         # rfc 9000 8.2.1 and 9.4: the challenge went unanswered for its wait,
         # so the caller sends one with fresh data
@@ -2357,12 +2373,18 @@ fun path_has_owners(manager: *Manager, index: usize, generation: u64) bool {
 pub fun restart(manager: *Manager, value: Handle) PathResult {
     if (!handle_valid(manager, value) || manager.closing ||
         manager.storage.paths[value.index].state != PATH_FAILED) { ret path_error(ERROR_TOKEN); }
-    if (manager.storage.paths[value.index].selected ||
-        path_has_owners(manager, value.index, value.generation)) {
+    # rfc 9000 9.3 and 9.4: only prepared work holds the failed path. packets
+    # in flight on it do not, since the path they were sent on is gone, and
+    # the handle is returned so the caller can settle them that way
+    if (manager.storage.paths[value.index].selected || path_committed(manager, value.index)) {
         var blocked: PathResult;
         blocked.status = STATUS_BLOCKED;
         ret blocked;
     }
+    var result: PathResult;
+    if (manager.storage.paths[value.index].recovery_owners != 0) { result.released = handle_at(manager, value.index); }
+    free_path_challenges(manager, value.index, value.generation, false);
+    free_path_responses(manager, value.index, value.generation, false);
     val endpoint:        Endpoint = manager.storage.paths[value.index].endpoint;
     val locally_created: bool     = manager.storage.paths[value.index].locally_created;
     val preferred:       bool     = manager.storage.paths[value.index].preferred;
@@ -2381,7 +2403,6 @@ pub fun restart(manager: *Manager, value: Handle) PathResult {
         manager.fallback_index      = invalid_index();
         manager.fallback_generation = 0;
     }
-    var result: PathResult;
     result.status = STATUS_OK;
     result.handle = handle_at(manager, value.index);
     ret result;

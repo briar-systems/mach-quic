@@ -868,6 +868,61 @@ pub fun on_timeout_scoped(manager: *Manager, source: u64,
 now_ns: u64) TimeoutResult;
 ```
 
+## fun peek_challenge_scoped
+
+```mach
+pub fun peek_challenge_scoped(manager: *Manager, source: u64,
+value: Handle) PreparedChallenge;
+```
+
+what prepare_challenge_scoped would answer, with nothing changed
+
+## fun validating_scoped
+
+```mach
+pub fun validating_scoped(manager: *Manager, source: u64, value: Handle) bool;
+```
+
+whether `value` is validating or holds a challenge. false for a stale handle
+
+## fun peek_response_scoped
+
+```mach
+pub fun peek_response_scoped(manager: *Manager, source: u64,
+value: Handle) PreparedResponse;
+```
+
+what prepare_response_scoped would answer, with nothing changed
+
+## fun peek_mtu_probe_scoped
+
+```mach
+pub fun peek_mtu_probe_scoped(manager: *Manager, source: u64,
+value: Handle) MtuPrepared;
+```
+
+what prepare_mtu_probe_scoped would answer, with nothing changed
+
+## fun peek_send_scoped
+
+```mach
+pub fun peek_send_scoped(manager: *Manager, source: u64, value: Handle,
+bytes: u64, non_probing: bool) SendResult;
+```
+
+whether reserve_send_scoped would reserve `bytes` on `value`, and what it
+would refuse with, with nothing changed. the token is left empty
+
+## fun peek_mtu_send_scoped
+
+```mach
+pub fun peek_mtu_send_scoped(manager: *Manager, source: u64, value: Handle,
+bytes: u64, non_probing: bool, size: u16) SendResult;
+```
+
+whether an MTU probe of `bytes` that prepare_mtu_probe_scoped would issue
+could then be reserved, with nothing changed
+
 ## fun prepare_mtu_probe_scoped
 
 ```mach
@@ -933,6 +988,17 @@ pub fun configure_transport_scoped(manager: *Manager, source: u64,
 value: Handle, smoothed_rtt_ns: u64,
 now_ns: u64) OperationResult;
 ```
+
+## fun peek_transport_scoped
+
+```mach
+pub fun peek_transport_scoped(manager: *Manager, source: u64, value: Handle,
+smoothed_rtt_ns: u64, now_ns: u64, congestion: *congestion_api.State,
+pacer: *pacer_api.State) bool;
+```
+
+the congestion controller and pacer configure_transport_scoped would leave
+`value` sending under, with nothing changed
 
 ## fun unconfigure_transport_scoped
 

@@ -1,0 +1,139 @@
+# packets: the unprotected header decoder over a coalesced datagram
+
+use quic.packet.packet;
+use std.encoding.binary;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+use fuzz.verdict;
+
+# the largest packet a round trip writes back
+val SCRATCH: usize = 20480;
+
+var first_pass:  [SCRATCH]u8;
+var second_pass: [SCRATCH]u8;
+
+pub fun context(version: u32, short_destination_len: u8, expected: u64) packet.DecodeContext {
+    var value: packet.DecodeContext = packet.empty_decode_context();
+    value.version                = version;
+    value.short_destination_len  = short_destination_len;
+    value.expected_packet_number = expected;
+    ret value;
+}
+
+# every view a decoded packet publishes lies inside the bytes it came from, and
+# every field it copies is within its bound
+pub fun sound(value: *packet.Packet, base: *u8, base_len: usize) bool {
+    if (!verdict.inside(value.token.data, value.token.len, base, base_len) ||
+        !verdict.inside(value.payload.data, value.payload.len, base, base_len) ||
+        !verdict.inside(value.versions.data, value.versions.len, base, base_len)) { ret false; }
+    if (value.header.destination.len::usize > packet.MAX_CONNECTION_ID ||
+        value.header.source.len::usize > packet.MAX_CONNECTION_ID) { ret false; }
+    val kind: u8 = value.header.kind;
+    if (kind == packet.PACKET_VERSION_NEGOTIATION) {
+        ret value.header.version == 0 && value.versions.len != 0 && (value.versions.len & 3) == 0;
+    }
+    if (kind == packet.PACKET_RETRY || kind == packet.PACKET_UNKNOWN_VERSION) { ret true; }
+    ret value.header.packet_number_len >= 1 && value.header.packet_number_len <= 4 &&
+        value.header.packet_number <= packet.MAX_PACKET_NUMBER;
+}
+
+fun same(a: *u8, b: *u8, len: usize) bool {
+    var i: usize = 0;
+    for (i < len) {
+        if (a[i] != b[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# a decoded packet of a known version writes back, and what it writes decodes
+# to a packet that writes back to the same bytes
+fun round_trip(value: *packet.Packet, decode_context: packet.DecodeContext) bool {
+    if (value.header.kind == packet.PACKET_UNKNOWN_VERSION) { ret true; }
+    val limits:   packet.Limits       = packet.default_limits();
+    val measured: packet.EncodeResult = packet.encoded_size(value, limits);
+    var b:        binary.Builder      = binary.builder(?first_pass[0], SCRATCH, binary.BIG);
+    val encoded:  packet.EncodeResult = packet.encode(?b, value, limits);
+    if (!measured.ok || !encoded.ok || measured.count != encoded.count || b.len != encoded.count) {
+        ret false;
+    }
+    var d:     binary.Decoder      = binary.decoder(?first_pass[0], encoded.count, binary.BIG);
+    var again: packet.Packet;
+    val read:  packet.DecodeResult = packet.decode(?d, true, decode_context, limits, ?again);
+    if (read.status != packet.STATUS_DONE || read.consumed != encoded.count ||
+        again.header.kind != value.header.kind) { ret false; }
+    var c:      binary.Builder      = binary.builder(?second_pass[0], SCRATCH, binary.BIG);
+    val second: packet.EncodeResult = packet.encode(?c, ?again, limits);
+    ret second.ok && second.count == encoded.count &&
+        same(?first_pass[0], ?second_pass[0], encoded.count);
+}
+
+# decode the datagram's packets one after another, as a receiver walks a
+# coalesced datagram. the first packet's kind and how the walk ended fold into the
+# outcome
+fun walk(data: *u8, len: usize, decode_context: packet.DecodeContext, outcome: *u64) bool {
+    val limits: packet.Limits  = packet.default_limits();
+    var d:      binary.Decoder = binary.decoder(data, len, binary.BIG);
+    var first:  u64            = 0xff;
+    var count:  usize          = 0;
+    var ended:  u64            = 0;
+    for (d.pos < d.len) {
+        val before: usize               = d.pos;
+        var value:  packet.Packet;
+        val read:   packet.DecodeResult = packet.decode(?d, true, decode_context, limits, ?value);
+        if (read.status != packet.STATUS_DONE) {
+            # a refusal leaves the cursor where it was
+            if (d.pos != before || read.status != packet.STATUS_ERROR) { ret false; }
+            ended = read.error::u64;
+            brk;
+        }
+        verdict.accept();
+        if (read.consumed == 0 || d.pos != before + read.consumed || !sound(?value, data, len) ||
+            !round_trip(?value, decode_context)) { ret false; }
+        if (count == 0) { first = value.header.kind::u64; }
+        count = count + 1;
+        if (count > len) { ret false; }
+    }
+    @outcome = verdict.mix(verdict.mix(@outcome, first), ended);
+    ret true;
+}
+
+# a decode told more may follow agrees with the final decode wherever it answers
+fun incremental(data: *u8, len: usize, decode_context: packet.DecodeContext, outcome: *u64) bool {
+    val limits:  packet.Limits       = packet.default_limits();
+    var partial: binary.Decoder      = binary.decoder(data, len, binary.BIG);
+    var whole:   binary.Decoder      = binary.decoder(data, len, binary.BIG);
+    var a:       packet.Packet;
+    var b:       packet.Packet;
+    val more:    packet.DecodeResult = packet.decode(?partial, false, decode_context, limits, ?a);
+    val done:    packet.DecodeResult = packet.decode(?whole, true, decode_context, limits, ?b);
+    @outcome = verdict.mix(@outcome, more.status::u64);
+    if (more.status == packet.STATUS_MORE) { ret partial.pos == 0 && more.needed != 0; }
+    if (more.status == packet.STATUS_DONE) {
+        ret done.status == packet.STATUS_DONE && done.consumed == more.consumed &&
+            partial.pos == more.consumed && sound(?a, data, len);
+    }
+    ret partial.pos == 0 && done.status == packet.STATUS_ERROR && done.error == more.error;
+}
+
+pub fun answer(data: *u8, len: usize) verdict.Verdict {
+    var outcome:  u64 = 0;
+    var contexts: [3]packet.DecodeContext;
+    contexts[0] = context(packet.VERSION_1, 0, 0);
+    contexts[1] = context(packet.VERSION_1, 8, 0x1234);
+    contexts[2] = context(packet.VERSION_2, 20, packet.MAX_PACKET_NUMBER - 5);
+    var i: usize = 0;
+    for (i < 3) {
+        if (!walk(data, len, contexts[i], ?outcome)) {
+            ret verdict.violated("packet: a decode published a view outside its input, moved its cursor on a refusal, or does not write back");
+        }
+        if (!incremental(data, len, contexts[i], ?outcome)) {
+            ret verdict.violated("packet: a decode told more may follow disagrees with the final decode");
+        }
+        i = i + 1;
+    }
+    ret verdict.answered(outcome);
+}

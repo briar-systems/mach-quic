@@ -45,7 +45,7 @@ pub fun initialize(adapter: *handshake_api.Adapter,
 }
 
 #[testing]
-var adapter_chunk_pool: supply.TestPool;
+var adapter_chunk_pool:    supply.TestPool;
 #[testing]
 var adapter_chunk_account: supply.Account;
 

@@ -33,9 +33,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.error.err;
-use std.types.result.res;
 use std.types.size.usize;
-use std.types.string.str;
 
 pub val NO_ERROR:                  u64 = 0x00;
 pub val INTERNAL_ERROR:            u64 = 0x01;
@@ -2521,6 +2519,8 @@ fun process_frame(core: *Core, secrets: *Secrets,
     if (value.kind == frame.ACK || value.kind == frame.ACK_ECN) {
         ret handle_ack(core, secrets, space, value, now_ns);
     }
+    # an empty CRYPTO frame carries nothing for the provider
+    if (value.kind == frame.CRYPTO && value.data.len == 0) { ret true; }
     if (value.kind == frame.CRYPTO) {
         core.crypto_received = true;
         val received: handshake_api.Result = handshake_api.receive_scoped(
@@ -2748,7 +2748,9 @@ fun apply_plaintext(core: *Core, secrets: *Secrets,
             !process_frame(core, secrets, level, space, receive_path,
             receive_destination,
             ?value, decoder.pos - frame_begin, now_ns)) { ret false; }
-        if (core.peer_close_received || core.packet_refused) { brk; }
+        # a frame that closed the connection, such as crypto data the provider
+        # answered with an alert, ends the packet with the close it chose
+        if (core.closing || core.packet_refused) { brk; }
     }
     ret true;
 }
@@ -2936,6 +2938,8 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     var non_probing:   bool = false;
     if (!scan_plaintext(core, plaintext, opened.written, ?ack_eliciting,
         ?non_probing)) { ret fail(core, FRAME_ENCODING_ERROR, input.received_at_ns); }
+    # rfc 9000 12.4: a packet that carries no frames
+    if (opened.written == 0) { ret fail(core, PROTOCOL_VIOLATION, input.received_at_ns); }
     # the packet is recorded for acknowledgement only once its frames were
     # taken. a packet refused for storage stays unacknowledged, so its sender
     # retransmits what it carried
@@ -3177,8 +3181,12 @@ pub fun probe_path(core: *Core, endpoint: path_api.Endpoint,
         ret failed;
     }
     wake(core);
-    ret path_api.probe_scoped(core.paths, core.config.source, endpoint,
-        preferred);
+    # rfc 9000 9.3: a restarted failed path leaves its packets in flight
+    # settling without charging it, as a failed path the server gives up does
+    val probed: path_api.PathResult = path_api.probe_scoped(core.paths, core.config.source,
+        endpoint, preferred);
+    detach_path(core, probed.released);
+    ret probed;
 }
 
 # a local id the host minted, advertised with NEW_CONNECTION_ID once the

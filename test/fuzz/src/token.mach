@@ -1,0 +1,59 @@
+# address and retry tokens: what a server opens from a client's initial
+
+use quic.connection.token;
+use quic.packet.packet;
+use std.encoding.binary;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+use fuzz.server;
+use fuzz.verdict;
+
+var ready:   u8;
+var manager: token.Manager;
+
+fun setup() bool {
+    if (ready == 1) { ret true; }
+    if (ready == 2) { ret false; }
+    ready = 2;
+    if (!server.make_tokens(?manager, 601)) { ret false; }
+    ready = 1;
+    ret true;
+}
+
+fun id_is(value: *packet.ConnectionId, data: *u8, len: usize) bool {
+    if (value.len::usize != len) { ret false; }
+    var i: usize = 0;
+    for (i < len) {
+        if (value.data[i] != data[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# a token opens only whole and authentic, and its claims are the fields it carries
+pub fun answer(data: *u8, len: usize) verdict.Verdict {
+    if (!setup()) { ret verdict.violated("token: the fixed token manager could not be set up"); }
+    val opened:  token.Result = token.open(?manager, data, len, server.peer(), server.now());
+    var outcome: u64          = verdict.mix(0, (opened.status::u64 << 8) | opened.error::u64);
+    if (opened.status != token.STATUS_OK) { ret verdict.answered(outcome); }
+    verdict.accept();
+    val claims: token.Claims = opened.claims;
+    outcome = verdict.mix(outcome, claims.purpose::u64);
+    if (len != token.TOKEN_SIZE || claims.purpose != data[4] ||
+        claims.issued_at_ns != binary.get_uint(?data[13], 8, binary.BIG) ||
+        claims.nonce != binary.get_uint(?data[21], 8, binary.BIG) ||
+        !id_is(?claims.original_destination, ?data[53], data[52]::usize) ||
+        !id_is(?claims.retry_source, ?data[74], data[73]::usize)) {
+        ret verdict.violated("token: an opened token claims what it does not carry");
+    }
+    # a retry token reserves its nonce, which is given back so the next answer
+    # starts from the same manager
+    if (claims.purpose == token.PURPOSE_RETRY &&
+        token.cancel(?manager, claims.reservation).status != token.STATUS_OK) {
+        ret verdict.violated("token: a reservation an open made cannot be cancelled");
+    }
+    ret verdict.answered(outcome);
+}

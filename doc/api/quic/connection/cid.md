@@ -212,19 +212,47 @@ pub fun lease_core(manager: *Manager, source: u64) bool;
 pub fun release_core(manager: *Manager, source: u64) bool;
 ```
 
+## fun local_demand
+
+```mach
+pub fun local_demand(manager: *Manager) usize;
+```
+
+how many more local ids may be issued now: the peer's limit less the ids it
+counts, bounded by free storage. none for a zero-length id
+
 ## fun issue_local
 
 ```mach
-pub fun issue_local(manager: *Manager, sequence: u64, id: packet.ConnectionId,
+pub fun issue_local(manager: *Manager, id: packet.ConnectionId,
 reset_token: [16]u8) Result;
 ```
+
+issues a local id under the next sequence, to be advertised by
+NEW_CONNECTION_ID
 
 ## fun issue_local_scoped
 
 ```mach
-pub fun issue_local_scoped(manager: *Manager, core_source: u64, sequence: u64,
-id: packet.ConnectionId,
-reset_token: [16]u8) Result;
+pub fun issue_local_scoped(manager: *Manager, core_source: u64,
+id: packet.ConnectionId, reset_token: [16]u8) Result;
+```
+
+## fun retire_local_prior_to
+
+```mach
+pub fun retire_local_prior_to(manager: *Manager, sequence: u64) Result;
+```
+
+raises the local retire_prior_to, which every later NEW_CONNECTION_ID
+carries. an id below it that the peer never learned leaves at once, and one
+it did learn stays routable until the peer retires it
+
+## fun retire_local_prior_to_scoped
+
+```mach
+pub fun retire_local_prior_to_scoped(manager: *Manager, core_source: u64,
+sequence: u64) Result;
 ```
 
 ## fun replace_initial_peer
@@ -256,6 +284,16 @@ pub fun install_initial_peer_reset_token_scoped(manager: *Manager,
 core_source: u64,
 reset_token: [16]u8) Result;
 ```
+
+## fun install_initial_local_reset_token
+
+```mach
+pub fun install_initial_local_reset_token(manager: *Manager,
+reset_token: [16]u8) Result;
+```
+
+a server's token for its handshake id, which its transport parameters carry.
+set once, before the core leases the manager
 
 ## fun update_local_limit
 

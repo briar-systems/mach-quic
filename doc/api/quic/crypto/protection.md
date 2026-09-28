@@ -216,6 +216,14 @@ pub rec OpenResult;
 pub rec KeySet;
 ```
 
+## rec Contexts
+
+```mach
+pub rec Contexts;
+```
+
+one direction's expanded aead and header protection keys, never copied
+
 ## rec InitialKeys
 
 ```mach
@@ -246,11 +254,41 @@ pub fun hash_size(algorithm: Algorithm) usize;
 pub fun key_size(algorithm: Algorithm) usize;
 ```
 
+## fun expansion_count
+
+```mach
+pub fun expansion_count() u64;
+```
+
+packet protection key expansions since the process started, a debug hook
+for tests
+
 ## fun destroy
 
 ```mach
 pub fun destroy(value: *KeySet);
 ```
+
+wipes the key material and the contexts it was expanded into. the set stays
+bound to them
+
+## fun bind
+
+```mach
+pub fun bind(value: *KeySet, contexts: *Contexts) Error;
+```
+
+binds a set to the contexts it protects packets with, expanding its keys
+into them when it holds any
+
+## fun unbind
+
+```mach
+pub fun unbind(value: *KeySet);
+```
+
+wipes a set's contexts and forgets them, before their storage goes away.
+the key material is left as it is
 
 ## fun derive_tls
 

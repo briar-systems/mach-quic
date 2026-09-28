@@ -218,9 +218,13 @@ Challenge data is supplied by the connection's cryptographic random provider and
 must be unpredictable. Outstanding values are unique. Queue, prepare, cancel, and
 publish are distinct operations. The validation deadline starts only when the
 packet is published and is the configured factor times the larger PTO of the old
-and new paths. Path reachability and MTU confirmation have distinct purposes, so
-a failed prior-path revalidation invalidates that path while a failed MTU
-confirmation leaves address ownership intact. A matching PATH_RESPONSE can arrive
+and new paths. A path whose address or MTU validation fails is failed: a selected
+one reverts to the validated fallback, and with none the connection closes with
+NO_VIABLE_PATH, since a path that cannot carry 1200-byte datagrams is not used
+(RFC 9000 8.2.4 and 14). `TimeoutResult.mtu_validation_failed` marks an MTU
+failure. The fallback is the last selected path whose address and MTU are both
+validated, so a path validated by an unpadded challenge becomes it only once its
+padded challenge is answered. A matching PATH_RESPONSE can arrive
 on any path and validates the path on which its PATH_CHALLENGE was sent. A
 challenge below 1200 bytes validates only address ownership. MTU validation needs
 a padded challenge. A response that validates a path whose MTU is not yet
@@ -273,16 +277,22 @@ path.
 `begin_close` stops new work and discards unowned queues. Prepared challenges,
 responses, send reservations, and MTU probes remain completion-owned until they
 publish, cancel, or become stale. `finish_close` refuses to invalidate storage
-while any owner remains. Failed paths likewise cannot be released or restarted
-until their owners drain. Restart increments the path generation before accepting
-traffic again. A server that receives a non-probing packet from a failed path's
-address once the handshake is confirmed gives up that path and validates the
-address afresh as it would a new one (RFC 9000 9.3). Only prepared work, a
+while any owner remains. Failed paths likewise cannot be released until their
+owners drain. Restart increments the path generation before accepting traffic
+again, and only prepared work holds it back. Packets still in flight on the
+failed path do not: `PathResult.released` names the old generation, and the
+core detaches those packets' owners so they settle without charging any path. A
+client that probes a local address whose validation failed restarts that path
+under the same limits as a new probe, so it is validated afresh with new
+challenge data. `probe` returns STATUS_BLOCKED while prepared work still holds
+the failed path (RFC 9000 8.2, 9.1 and 9.3). A server that receives a packet from a failed path's address once
+the handshake is confirmed, probing or not, gives up that path and validates the
+address afresh as it would a new one, answering any challenge the packet carries
+(RFC 9000 8.2.2, 9.1 and 9.3). Only a non-probing packet migrates to it. Only prepared work, a
 prepared challenge or response, a send reservation or an MTU probe, holds it.
 Packets still in flight on it do not, since only the peer's packets from that
 address could settle them: `Observation.released` names the path, and the core
-detaches those packets' owners so they settle without charging any path. A
-probing packet from a failed address is still refused.
+detaches those packets' owners so they settle without charging any path.
 
 A server whose path slots are all held gives up a path the connection no longer
 needs to make room for a peer's new address: one that is not selected, is not

@@ -1,0 +1,135 @@
+# frames: the frame decoder walking a packet payload
+
+use quic.frame.frame;
+use quic.packet.packet;
+use std.encoding.binary;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+use fuzz.verdict;
+
+val SCRATCH: usize = 20480;
+val RANGES:  usize = 256;
+
+var first_pass:    [SCRATCH]u8;
+var second_pass:   [SCRATCH]u8;
+var ranges:        [RANGES]frame.AckRange;
+var second_ranges: [RANGES]frame.AckRange;
+
+fun storage(values: *frame.AckRange) frame.Storage {
+    var value: frame.Storage;
+    value.ack_ranges   = values;
+    value.ack_capacity = RANGES;
+    ret value;
+}
+
+fun same(a: *u8, b: *u8, len: usize) bool {
+    var i: usize = 0;
+    for (i < len) {
+        if (a[i] != b[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# a decoded frame publishes only views inside its input and ranges inside the
+# storage it was given, and its ack ranges describe packets that exist
+fun sound(value: *frame.Frame, base: *u8, base_len: usize, owned: *frame.AckRange) bool {
+    if (!verdict.inside(value.data.data, value.data.len, base, base_len) ||
+        value.connection_id.len::usize > packet.MAX_CONNECTION_ID) { ret false; }
+    if (value.kind != frame.ACK && value.kind != frame.ACK_ECN) { ret true; }
+    if (value.ack_range_count > RANGES || (value.ack_range_count != 0 && value.ack_ranges != owned) ||
+        value.first_ack_range > value.largest_acknowledged) { ret false; }
+    var smallest: u64   = value.largest_acknowledged - value.first_ack_range;
+    var i:        usize = 0;
+    for (i < value.ack_range_count) {
+        val range: frame.AckRange = value.ack_ranges[i];
+        if (smallest < 2 || range.gap > smallest - 2 || range.range > smallest - range.gap - 2) {
+            ret false;
+        }
+        smallest = smallest - range.gap - 2 - range.range;
+        i        = i + 1;
+    }
+    ret true;
+}
+
+# a decoded frame writes back, and what it writes decodes to a frame that
+# writes back to the same bytes
+fun round_trip(value: *frame.Frame) bool {
+    val limits:   frame.Limits       = frame.default_limits();
+    val measured: frame.EncodeResult = frame.encoded_size(value, limits);
+    var b:        binary.Builder     = binary.builder(?first_pass[0], SCRATCH, binary.BIG);
+    val encoded:  frame.EncodeResult = frame.encode(?b, value, limits);
+    if (!measured.ok || !encoded.ok || measured.count != encoded.count || b.len != encoded.count) {
+        ret false;
+    }
+    var d:     binary.Decoder     = binary.decoder(?first_pass[0], encoded.count, binary.BIG);
+    var again: frame.Frame;
+    val read:  frame.DecodeResult = frame.decode(?d, true, limits, storage(?second_ranges[0]), ?again);
+    if (read.status != frame.STATUS_DONE || read.consumed != encoded.count || again.kind != value.kind) {
+        ret false;
+    }
+    var c:      binary.Builder     = binary.builder(?second_pass[0], SCRATCH, binary.BIG);
+    val second: frame.EncodeResult = frame.encode(?c, ?again, limits);
+    ret second.ok && second.count == encoded.count &&
+        same(?first_pass[0], ?second_pass[0], encoded.count);
+}
+
+# decode frames one after another, as a receiver walks a payload. the first
+# frame's type and how the walk ended fold into the outcome
+fun walk(data: *u8, len: usize, outcome: *u64) bool {
+    val limits: frame.Limits   = frame.default_limits();
+    var d:      binary.Decoder = binary.decoder(data, len, binary.BIG);
+    var first:  u64            = 0xff;
+    var count:  usize          = 0;
+    var ended:  u64            = 0;
+    for (d.pos < d.len) {
+        val before: usize              = d.pos;
+        var value:  frame.Frame;
+        val read:   frame.DecodeResult = frame.decode(?d, true, limits, storage(?ranges[0]), ?value);
+        if (read.status != frame.STATUS_DONE) {
+            if (d.pos != before || read.status != frame.STATUS_ERROR) { ret false; }
+            ended = read.error::u64;
+            brk;
+        }
+        verdict.accept();
+        if (read.consumed == 0 || d.pos != before + read.consumed ||
+            !sound(?value, data, len, ?ranges[0]) || !round_trip(?value)) { ret false; }
+        if (count == 0) { first = value.kind; }
+        count = count + 1;
+        if (count > len) { ret false; }
+    }
+    @outcome = verdict.mix(verdict.mix(@outcome, first), ended);
+    ret true;
+}
+
+# a decode told more may follow agrees with the final decode wherever it answers
+fun incremental(data: *u8, len: usize, outcome: *u64) bool {
+    val limits:  frame.Limits       = frame.default_limits();
+    var partial: binary.Decoder     = binary.decoder(data, len, binary.BIG);
+    var whole:   binary.Decoder     = binary.decoder(data, len, binary.BIG);
+    var a:       frame.Frame;
+    var b:       frame.Frame;
+    val more:    frame.DecodeResult = frame.decode(?partial, false, limits, storage(?ranges[0]), ?a);
+    val done:    frame.DecodeResult = frame.decode(?whole, true, limits, storage(?second_ranges[0]), ?b);
+    @outcome = verdict.mix(@outcome, more.status::u64);
+    if (more.status == frame.STATUS_MORE) { ret partial.pos == 0 && more.needed != 0; }
+    if (more.status == frame.STATUS_DONE) {
+        ret done.status == frame.STATUS_DONE && done.consumed == more.consumed &&
+            partial.pos == more.consumed && a.kind == b.kind;
+    }
+    ret partial.pos == 0 && done.status == frame.STATUS_ERROR && done.error == more.error;
+}
+
+pub fun answer(data: *u8, len: usize) verdict.Verdict {
+    var outcome: u64 = 0;
+    if (!walk(data, len, ?outcome)) {
+        ret verdict.violated("frame: a decode published a view outside its input or invalid ack ranges, moved its cursor on a refusal, or does not write back");
+    }
+    if (!incremental(data, len, ?outcome)) {
+        ret verdict.violated("frame: a decode told more may follow disagrees with the final decode");
+    }
+    ret verdict.answered(outcome);
+}

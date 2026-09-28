@@ -49,9 +49,9 @@ rec Provider {
 }
 
 #[testing]
-var reentry_adapter: *handshake.Adapter;
+var reentry_adapter:    *handshake.Adapter;
 #[testing]
-var reentry_rejected: bool;
+var reentry_rejected:   bool;
 #[testing]
 var mutate_start_input: bool;
 # ingests the provider refuses for memory before it takes one
