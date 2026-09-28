@@ -2519,6 +2519,8 @@ fun process_frame(core: *Core, secrets: *Secrets,
     if (value.kind == frame.ACK || value.kind == frame.ACK_ECN) {
         ret handle_ack(core, secrets, space, value, now_ns);
     }
+    # an empty CRYPTO frame carries nothing for the provider
+    if (value.kind == frame.CRYPTO && value.data.len == 0) { ret true; }
     if (value.kind == frame.CRYPTO) {
         core.crypto_received = true;
         val received: handshake_api.Result = handshake_api.receive_scoped(

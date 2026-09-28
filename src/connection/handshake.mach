@@ -1811,8 +1811,9 @@ pub fun receive(adapter: *Adapter, level: Level, offset: u64, data: *u8,
     if (!adapter_valid(adapter) || adapter.transition_active ||
         adapter.core_lease != 0 || !adapter.started ||
         adapter.closing || adapter.event_active || !input.valid ||
-        !borrowed_disjoint(adapter, input) ||
-        !receive_bounds(adapter, level, offset, length)) { ret failed(ERROR_STATE); }
+        !borrowed_disjoint(adapter, input) || !valid_level(level)) { ret failed(ERROR_STATE); }
+    # rfc 9000 7.5: bytes past what a level buffers are the peer's to answer for
+    if (!receive_bounds(adapter, level, offset, length)) { ret failed(ERROR_LIMIT); }
     val state: *LevelState = ?adapter.levels[level_index(level)];
     if (state.discarded) { ret adapter_result(STATUS_OK, ERROR_NONE, 0, length); }
     val begin: u64 = state.receive_contiguous;
