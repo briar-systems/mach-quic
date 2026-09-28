@@ -11,6 +11,7 @@ use fuzz.negotiation;
 use fuzz.packet;
 use fuzz.parameters;
 use fuzz.protection;
+use fuzz.receive;
 use fuzz.token;
 use fuzz.varint;
 use fuzz.verdict;
@@ -43,6 +44,7 @@ pub fun all(out: *Boundary) usize {
     i = put(out, i, "version-negotiation", negotiation.answer_version_negotiation);
     i = put(out, i, "retry", negotiation.answer_retry);
     i = put(out, i, "packet-protection", protection.answer);
+    i = put(out, i, "receive", receive.answer);
     ret i;
 }
 
