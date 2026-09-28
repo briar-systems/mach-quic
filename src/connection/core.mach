@@ -2746,7 +2746,9 @@ fun apply_plaintext(core: *Core, secrets: *Secrets,
             !process_frame(core, secrets, level, space, receive_path,
             receive_destination,
             ?value, decoder.pos - frame_begin, now_ns)) { ret false; }
-        if (core.peer_close_received || core.packet_refused) { brk; }
+        # a frame that closed the connection, such as crypto data the provider
+        # answered with an alert, ends the packet with the close it chose
+        if (core.closing || core.packet_refused) { brk; }
     }
     ret true;
 }
