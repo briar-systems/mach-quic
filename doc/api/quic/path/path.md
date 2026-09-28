@@ -487,7 +487,8 @@ pub fun confirm_handshake(manager: *Manager) OperationResult;
 pub fun validate_address(manager: *Manager, value: Handle) OperationResult;
 ```
 
-receiving a handshake packet proves return routability on that path
+receiving a handshake packet proves return routability on that path, and
+rfc 9000 14.1 pads the initials both ways, so it proves the base mtu too
 
 ## fun observe
 

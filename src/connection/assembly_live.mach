@@ -499,6 +499,11 @@ var handshake_deadline_ns: u64;
 #[testing]
 var datagram_frame_size: usize;
 
+# when set, establish_direct accepts as a listener does an initial with no
+# token, so the handshake validates the client's address
+#[testing]
+var listener_unvalidated: bool;
+
 #[testing]
 fun connection_config(role: transport.Role) assembly.Config {
     var value: assembly.Config;
@@ -1667,7 +1672,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     direct.initial_source       = connection_id(?dialer_source[0], dialer_cid);
     direct.peer                 = dialer_endpoint();
     direct.version              = packet_api.VERSION_1;
-    direct.peer_validated       = true;
+    direct.peer_validated       = !listener_unvalidated;
     var listener_config: assembly.Config = connection_config(transport.SERVER);
     listener_config.max_udp_payload = listener_payload;
     if (!assembly.apply_server_acceptance(?listener_config, ?direct)) { ret 9; }
@@ -2269,6 +2274,22 @@ test assembly__an_acknowledged_mtu_probe_keeps_a_connection_whose_window_passed_
         transport.snapshot[binding.Binding](?listener.driver).state != transport.ACTIVE) {
         ret 21;
     }
+    ret 0;
+}
+
+# rfc 9000 8.1 and 14.1: the padded handshake that validates the client's
+# address also validates the initial path's mtu, so dplpmtud probes it
+test assembly__a_path_validated_by_the_handshake_probes_its_mtu {
+    var clock: u64   = 1000;
+    var moved: usize = 0;
+    listener_unvalidated = true;
+    val established: i32 = establish_direct(1500, 1500, 8, ?clock, ?moved);
+    if (established != 0) { ret established; }
+    val path: *path_api.Path = ?listener.storage.path_values[0];
+    if (!path.address_validated || !path.mtu_validated) { ret 20; }
+    path.congestion.congestion_window = 40000;
+    if (pump(?clock, ?moved, 12) != 0) { ret refusal(); }
+    if (path.current_mtu <= 1200)      { ret 21; }
     ret 0;
 }
 

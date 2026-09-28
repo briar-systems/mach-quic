@@ -860,7 +860,8 @@ pub fun confirm_handshake(manager: *Manager) OperationResult {
     ret result;
 }
 
-# receiving a handshake packet proves return routability on that path
+# receiving a handshake packet proves return routability on that path, and
+# rfc 9000 14.1 pads the initials both ways, so it proves the base mtu too
 pub fun validate_address(manager: *Manager, value: Handle) OperationResult {
     if (!handle_valid(manager, value) || manager.closing ||
         manager.core_lease != 0) {
@@ -868,6 +869,7 @@ pub fun validate_address(manager: *Manager, value: Handle) OperationResult {
     }
     val path: *Path = ?manager.storage.paths[value.index];
     path.address_validated      = true;
+    path.mtu_validated          = true;
     path.state                  = PATH_VALIDATED;
     manager.fallback_index      = value.index;
     manager.fallback_generation = value.generation;
