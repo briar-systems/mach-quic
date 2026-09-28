@@ -1,0 +1,802 @@
+# receive: a script of frame sequences and datagrams an established server
+# connection receives through connection.core.receive
+#
+# each input gets a fresh client and server driven through a real tls 1.3
+# handshake from the test chain, with fixed entropy, clock and connection ids,
+# so the connection every script starts from is the same one. the script then
+# plays the client: its frame sequences are sealed with the client's own
+# 1-rtt keys, so they reach the server's frame handling, and its datagrams go
+# in as they are. every datagram enters through the driver's receive, which is
+# the only caller of connection.core.receive and lends it the scratch it opens
+# packets into. the limits the server advertised are read from the transport
+# parameters the client received, not from the server's own bookkeeping
+
+use instants: quic.clock;
+use quic.connection.assembly;
+use quic.connection.core;
+use test_credentials: quic.connection.credentials_simulated;
+use listener_api:     quic.connection.listener;
+use quic.crypto.protection;
+use quic.frame.frame;
+use packet_api: quic.packet.packet;
+use quic.storage.ranges;
+use supply:     quic.storage.source;
+use stream_api: quic.stream.stream;
+use quic.transport;
+use quic.transport.binding;
+use quic.transport_parameters;
+
+use crypto.contracts;
+use crypto.encoding.keys;
+use crypto.secret;
+use std.chrono.duration;
+use std.chrono.time;
+use std.encoding.binary;
+use std.net.ip;
+use std.sync.cancel;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.option.opt;
+use std.types.size.usize;
+use std.types.string.str;
+use tls.cert;
+use tls.cert.credentials;
+use tls.client;
+use tls.config;
+use tls.server;
+use tls.tls13;
+
+use fuzz.verdict;
+
+# a script is a run of operations, each an op byte and, for frames and
+# datagrams, a two byte length and that many bytes
+val OP_FRAMES:     u8 = 0;
+val OP_DATAGRAM:   u8 = 1;
+val OP_FLUSH:      u8 = 2;
+val OP_KEY_UPDATE: u8 = 3;
+val OP_TIMER:      u8 = 4;
+val OPS:           u8 = 5;
+
+# bounds the work one input can ask for
+val MAX_OPS: usize = 64;
+# what a sealed 1-rtt packet carries inside a 1200 byte datagram
+val MAX_PAYLOAD: usize = 1100;
+val HEADER:      usize = 13;
+val WIRE:        usize = 1500;
+val TOUCHED:     usize = 32;
+
+val TICK: u64 = 1000000;
+
+var dialer:           assembly.Connection;
+var listener:         assembly.Connection;
+var dialer_storage:   assembly.Storage;
+var listener_storage: assembly.Storage;
+var pump_scratch:     assembly.Scratch;
+var pump_secret:      assembly.SecretScratch;
+var dialer_tls:       client.Handshake;
+var listener_tls:     server.Handshake;
+var dialer_scope:     cancel.Scope;
+var listener_scope:   cancel.Scope;
+var chunk_pool:       supply.TestPool;
+
+var dialer_parameters:   [512]u8;
+var listener_parameters: [512]u8;
+var wire:                [WIRE]u8;
+var sealed:              [WIRE]u8;
+var plaintext:           [WIRE]^u8;
+var ack_ranges:          [256]frame.AckRange;
+
+var dialer_source:       [8]u8  = [8]u8{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+var listener_source:     [8]u8  = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28};
+var initial_destination: [8]u8  = [8]u8{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
+var alpn:                [2]u8  = [2]u8{'h', '3'};
+var server_name:         [15]u8 = [15]u8{'a', 'p', 'i', '.', 'e', 'x', 'a', 'm',
+    'p', 'l', 'e', '.', 'c', 'o', 'm'};
+
+# the tls pieces every connection borrows, made once
+var owner:            secret.Allocator;
+var chain_storage:    [1]cert.Certificate;
+var key:              keys.PrivateKey;
+var identity:         credentials.Identity;
+var generation:       credentials.Generation;
+var store:            credentials.Store;
+var anchor:           cert.Certificate;
+var trust:            cert.TrustStore;
+var versions:         [1]u16;
+var suites:           [1]tls13.CipherSuite;
+var groups:           [1]tls13.NamedGroup;
+var signatures:       [1]tls13.SignatureScheme;
+var protocols:        [1]config.ProtocolName;
+var listener_counter: u8;
+var dialer_counter:   u8;
+var listener_entropy: secret.Entropy;
+var dialer_entropy:   secret.Entropy;
+var listener_config:  config.ServerConfig;
+var dialer_config:    config.ClientConfig;
+var ready:            u8;
+
+var clock: u64;
+
+fun operation_ok(outcome: cancel.Operation) bool {
+    ret sel outcome.ok;
+}
+
+fun endpoint(host: u8, port: u16) ip.Endpoint {
+    var value: ip.Endpoint;
+    value.addr.v4.octets[0] = 192;
+    value.addr.v4.octets[1] = 0;
+    value.addr.v4.octets[2] = 2;
+    value.addr.v4.octets[3] = host;
+    value.port              = port;
+    ret value;
+}
+
+fun dialer_endpoint() ip.Endpoint {
+    ret endpoint(1, 55000);
+}
+
+fun listener_endpoint() ip.Endpoint {
+    ret endpoint(2, 4433);
+}
+
+fun connection_id(data: *u8, length: usize) packet_api.ConnectionId {
+    var value: packet_api.ConnectionId;
+    packet_api.set_connection_id(?value, data, length);
+    ret value;
+}
+
+fun limits() config.Limits {
+    var value: config.Limits = config.production_limits();
+    value.max_peer_handshake_bytes = 8192;
+    value.max_client_hello_bytes   = 8192;
+    value.max_client_flight_bytes  = 8192;
+    value.max_server_flight_bytes  = 8192;
+    value.max_chain_bytes          = 4096;
+    value.max_ticket_bytes         = 4096;
+    ret value;
+}
+
+fun prepare() bool {
+    if (ready == 1) { ret true; }
+    if (ready == 2) { ret false; }
+    ready = 2;
+    owner = secret.system_allocator();
+    if (!test_credentials.load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) {
+        ret false;
+    }
+    generation = credentials.empty_generation();
+    if (credentials.initialize(?generation, ?identity, 1, 0, nil, false) != contracts.OK) {
+        ret false;
+    }
+    store = credentials.empty_store();
+    if (credentials.initialize_store(?store, ?generation) != contracts.OK) { ret false; }
+    if (!supply.make_test_lanes(?chunk_pool, 4096, 0))                     { ret false; }
+    versions[0]   = tls13.VERSION;
+    suites[0]     = tls13.AES_128_GCM_SHA256;
+    groups[0]     = tls13.X25519;
+    signatures[0] = tls13.ED25519;
+    protocols[0]  = config.ProtocolName{data: ?alpn[0], len: 2};
+    anchor        = test_credentials.anchor();
+    trust         = cert.TrustStore{anchors: ?anchor, len: 1};
+
+    listener_entropy = secret.Entropy{context: ?listener_counter, secret_context: nil,
+        fill_fn: test_credentials.deterministic_entropy, initialized: true};
+    listener_config.credentials          = ?store;
+    listener_config.alpn                 = ?protocols[0];
+    listener_config.alpn_len             = 1;
+    listener_config.require_alpn         = true;
+    listener_config.versions             = ?versions[0];
+    listener_config.version_len          = 1;
+    listener_config.suites               = ?suites[0];
+    listener_config.suite_len            = 1;
+    listener_config.groups               = ?groups[0];
+    listener_config.group_len            = 1;
+    listener_config.signatures           = ?signatures[0];
+    listener_config.signature_len        = 1;
+    listener_config.entropy              = ?listener_entropy;
+    listener_config.entropy_context_size = 1;
+    listener_config.limits               = limits();
+    listener_config.clock                = test_credentials.test_clock();
+
+    dialer_entropy = secret.Entropy{context: ?dialer_counter, secret_context: nil,
+        fill_fn: test_credentials.deterministic_entropy, initialized: true};
+    dialer_config.server_name          = contracts.Bytes{data: ?server_name[0], len: 15};
+    dialer_config.alpn                 = ?protocols[0];
+    dialer_config.alpn_len             = 1;
+    dialer_config.trust                = ?trust;
+    dialer_config.versions             = ?versions[0];
+    dialer_config.version_len          = 1;
+    dialer_config.suites               = ?suites[0];
+    dialer_config.suite_len            = 1;
+    dialer_config.groups               = ?groups[0];
+    dialer_config.group_len            = 1;
+    dialer_config.signatures           = ?signatures[0];
+    dialer_config.signature_len        = 1;
+    dialer_config.client_identity      = nil;
+    dialer_config.entropy              = ?dialer_entropy;
+    dialer_config.entropy_context_size = 1;
+    dialer_config.limits               = limits();
+    dialer_config.clock                = test_credentials.test_clock();
+    ready                              = 1;
+    ret true;
+}
+
+# both ends describe the same connection, and only the identity fields differ
+fun connection_config(role: transport.Role) assembly.Config {
+    var value: assembly.Config;
+    if (role == transport.CLIENT) {
+        value                    = assembly.default_config(901, dialer_endpoint(), listener_endpoint());
+        value.local_source       = ?dialer_source[0];
+        value.peer_destination   = ?initial_destination[0];
+        value.server_name        = ?server_name[0];
+        value.server_name_length = 15;
+    }
+    or {
+        value                  = assembly.default_config(902, listener_endpoint(), dialer_endpoint());
+        value.local_source     = ?listener_source[0];
+        value.peer_destination = ?dialer_source[0];
+    }
+    value.local_source_length         = 8;
+    value.peer_destination_length     = 8;
+    value.original_destination        = ?initial_destination[0];
+    value.original_destination_length = 8;
+    value.alpn                        = ?alpn[0];
+    value.alpn_length                 = 2;
+    value.max_udp_payload             = 1200;
+    value.max_idle_timeout            = 30 * duration.SECOND;
+    value.peer_bidirectional_streams  = (assembly.STREAM_CAPACITY -
+        assembly.H3_CRITICAL_STREAMS_PER_PEER * 2)::u64;
+    value.peer_unidirectional_streams = assembly.H3_CRITICAL_STREAMS_PER_PEER::u64;
+    # a connection window below what its streams could take together, so the
+    # connection's limit is one a peer can reach
+    value.receive_max_data    = (assembly.STREAM_STRIDE * 4)::u64;
+    value.receive_stream_data = assembly.STREAM_STRIDE::u64;
+    value.peer_validated      = true;
+    ret value;
+}
+
+fun tick() time.Instant {
+    clock = clock + 1000;
+    ret instants.instant(clock);
+}
+
+# one datagram from source to sink, completed on the sender first
+fun carry(source: *assembly.Connection, sink: *assembly.Connection,
+    source_scope: *cancel.Scope, sink_local: ip.Endpoint, sink_peer: ip.Endpoint) bool {
+    var guard: usize = 0;
+    for (guard < 64) {
+        val generated: transport.Generated = transport.generate[binding.Binding](
+            ?source.driver, source_scope, ?wire[0], WIRE, tick(), 0);
+        if (generated.status == transport.STATUS_EMPTY ||
+            generated.status == transport.STATUS_BLOCKED) { ret true; }
+        if (generated.status != transport.STATUS_OK || generated.count == 0) { ret false; }
+        if (transport.complete_send[binding.Binding](?source.driver, generated.token,
+            transport.SEND_SENT, generated.count, tick()).status != transport.STATUS_OK) {
+            ret false;
+        }
+        var input: transport.Datagram;
+        input.local       = sink_local;
+        input.peer        = sink_peer;
+        input.data        = ?wire[0];
+        input.length      = generated.count;
+        input.received_at = tick();
+        input.ecn         = 0;
+        if (transport.receive_datagram[binding.Binding](?sink.driver, ?input).status !=
+            transport.STATUS_OK) { ret false; }
+        guard = guard + 1;
+    }
+    ret false;
+}
+
+fun round() bool {
+    ret carry(?dialer, ?listener, ?dialer_scope, listener_endpoint(), dialer_endpoint()) &&
+        carry(?listener, ?dialer, ?listener_scope, dialer_endpoint(), listener_endpoint());
+}
+
+# a direct server acceptance with no retry, carried until both ends are
+# active and then until the handshake has settled on both
+fun establish() bool {
+    clock            = 1000;
+    listener_counter = 3;
+    dialer_counter   = 91;
+    var client_config:  assembly.Config = connection_config(transport.CLIENT);
+    val client_encoded: usize           = assembly.encode_parameters(?client_config,
+        transport.CLIENT, ?dialer_parameters[0], 512).count;
+    if (client_encoded == 0 || !client.init(?dialer_tls, ?dialer_config,
+        assembly.tls_lease(?dialer),
+        client.ExtraExtension{kind: client.QUIC_TRANSPORT_PARAMETERS,
+        data: contracts.Bytes{data: ?dialer_parameters[0], len: client_encoded}},
+        client.QUIC_TRANSPORT_PARAMETERS)) { ret false; }
+    if (!operation_ok(cancel.make_root(?listener_scope, opt[time.Instant].none{})) ||
+        !operation_ok(cancel.make_root(?dialer_scope, opt[time.Instant].none{}))) {
+        ret false;
+    }
+    if (!assembly.init_client(?dialer, ?client_config, ?dialer_storage, ?pump_scratch,
+        ?pump_secret, chunk_pool.provider, chunk_pool.secret, ?dialer_tls, ?dialer_scope,
+        instants.instant(clock)).ok) { ret false; }
+    val first: transport.Generated = transport.generate[binding.Binding](?dialer.driver,
+        ?dialer_scope, ?wire[0], WIRE, tick(), 0);
+    if (first.status != transport.STATUS_OK || first.count < 1200 ||
+        transport.complete_send[binding.Binding](?dialer.driver, first.token,
+        transport.SEND_SENT, first.count, tick()).status != transport.STATUS_OK) {
+        ret false;
+    }
+
+    var direct: listener_api.Accepted;
+    direct.action               = listener_api.ACTION_ACCEPT;
+    direct.original_destination = connection_id(?initial_destination[0], 8);
+    direct.initial_destination  = connection_id(?initial_destination[0], 8);
+    direct.initial_source       = connection_id(?dialer_source[0], 8);
+    direct.peer                 = dialer_endpoint();
+    direct.version              = packet_api.VERSION_1;
+    direct.peer_validated       = true;
+    var server_config: assembly.Config = connection_config(transport.SERVER);
+    if (!assembly.apply_server_acceptance(?server_config, ?direct)) { ret false; }
+    val server_encoded: usize = assembly.encode_parameters(?server_config,
+        transport.SERVER, ?listener_parameters[0], 512).count;
+    if (server_encoded == 0 || !server.init(?listener_tls, ?listener_config,
+        assembly.tls_lease(?listener),
+        server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
+        data: contracts.Bytes{data: ?listener_parameters[0], len: server_encoded}},
+        server.QUIC_TRANSPORT_PARAMETERS)) { ret false; }
+    if (!assembly.init_server(?listener, ?server_config, ?listener_storage, ?pump_scratch,
+        ?pump_secret, chunk_pool.provider, chunk_pool.secret, ?listener_tls,
+        ?listener_scope, instants.instant(clock)).ok) { ret false; }
+    var initial: transport.Datagram;
+    initial.local       = listener_endpoint();
+    initial.peer        = dialer_endpoint();
+    initial.data        = ?wire[0];
+    initial.length      = first.count;
+    initial.received_at = tick();
+    initial.ecn         = 0;
+    if (transport.receive_datagram[binding.Binding](?listener.driver, ?initial).status !=
+        transport.STATUS_OK) { ret false; }
+    var rounds: usize = 0;
+    for (rounds < 24) {
+        if (!round()) { ret false; }
+        if (core.poll_handshake(?dialer.core, ?dialer.secrets, clock).status ==
+            transport.STATUS_ERROR ||
+            core.poll_handshake(?listener.core, ?listener.secrets, clock).status ==
+            transport.STATUS_ERROR) { ret false; }
+        if (core.snapshot(?dialer.core).handshake_confirmed &&
+            core.snapshot(?listener.core).handshake_confirmed &&
+            core.snapshot(?dialer.core).state == transport.ACTIVE &&
+            core.snapshot(?listener.core).state == transport.ACTIVE) { brk; }
+        rounds = rounds + 1;
+    }
+    ret rounds < 24 && round() && round();
+}
+
+fun release(c: *assembly.Connection, scope: *cancel.Scope) bool {
+    if (!c.initialized) { ret true; }
+    if (transport.snapshot[binding.Binding](?c.driver).state != transport.CLOSED &&
+        !transport.cancel_connection[binding.Binding](?c.driver)) { ret false; }
+    ret transport.finish_close[binding.Binding](?c.driver).status == transport.STATUS_OK &&
+        assembly.release_closed(c) && operation_ok(cancel.destroy(scope));
+}
+
+# what the server advertised, as the client received it
+rec Advertised {
+    max_data:    u64;
+    bidi_data:   u64;
+    uni_data:    u64;
+    bidi_opened: u64;
+    uni_opened:  u64;
+}
+
+fun advertised() Advertised {
+    val p: *transport_parameters.Parameters = ?dialer.core.peer_parameters;
+    ret Advertised{max_data: p.initial_max_data,
+        bidi_data:   p.initial_max_stream_data_bidi_remote,
+        uni_data:    p.initial_max_stream_data_uni,
+        bidi_opened: p.initial_max_streams_bidi, uni_opened: p.initial_max_streams_uni};
+}
+
+fun stream_data(limits: *Advertised, id: u64) u64 {
+    if ((id & 2) != 0) { ret limits.uni_data; }
+    ret limits.bidi_data;
+}
+
+# the server's live record for a stream, wherever its manager keeps it
+fun stream_at(m: *stream_api.Manager, index: usize) *stream_api.Stream {
+    if (index >= m.storage.stream_capacity) { ret nil; }
+    var value: *stream_api.Stream = nil;
+    if (m.storage.streams != nil) { value = ?m.storage.streams[index]; }
+    or {
+        val block: *u8 = m.record_blocks[index / stream_api.RECORDS_PER_BLOCK].data;
+        if (block == nil) { ret nil; }
+        value = ?(block::*stream_api.Stream)[index % stream_api.RECORDS_PER_BLOCK];
+    }
+    if (!value.active) { ret nil; }
+    ret value;
+}
+
+fun find_stream(m: *stream_api.Manager, id: u64) *stream_api.Stream {
+    var i: usize = 0;
+    for (i < m.storage.stream_capacity) {
+        val value: *stream_api.Stream = stream_at(m, i);
+        if (value != nil && value.id == id) { ret value; }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+# the server never took more than it advertised, and what each stream holds
+# lies inside the window the stream was given
+fun streams_sound(limits: *Advertised) bool {
+    val m: *stream_api.Manager = ?listener.streams;
+    if (!m.valid || m.closing) { ret true; }
+    if (m.peer_bidirectional_opened > limits.bidi_opened ||
+        m.peer_unidirectional_opened > limits.uni_opened ||
+        m.receive_committed > limits.max_data) { ret false; }
+    var committed: u64   = 0;
+    var i:         usize = 0;
+    for (i < m.storage.stream_capacity) {
+        val value: *stream_api.Stream = stream_at(m, i);
+        i = i + 1;
+        if (value == nil || value.local) { cnt; }
+        if (value.receive_highest > stream_data(limits, value.id) ||
+            value.receive_read > value.receive_highest ||
+            (value.final_known && value.receive_highest != value.final_size)) { ret false; }
+        val set: *ranges.RangeSet = ?value.receive.ranges;
+        if (set.count > set.cap) { ret false; }
+        var j: usize = 0;
+        for (j < set.count) {
+            val interval: ranges.Interval = ranges.at(set, j);
+            if (interval.start >= interval.end || interval.end > value.receive_highest) {
+                ret false;
+            }
+            j = j + 1;
+        }
+        committed = committed + value.receive_highest;
+    }
+    ret committed == m.receive_committed;
+}
+
+# codes a server may close with when the peer's input calls for it. an
+# internal error is never what a peer's bytes call for
+fun peer_code(code: u64) bool {
+    if (code >= core.CRYPTO_ERROR_BASE && code < core.CRYPTO_ERROR_BASE + 0x100) { ret true; }
+    ret code == core.FLOW_CONTROL_ERROR || code == core.STREAM_LIMIT_ERROR ||
+        code == core.STREAM_STATE_ERROR || code == core.FINAL_SIZE_ERROR ||
+        code == core.FRAME_ENCODING_ERROR || code == core.CONNECTION_ID_LIMIT_ERROR ||
+        code == core.PROTOCOL_VIOLATION || code == core.CRYPTO_BUFFER_EXCEEDED ||
+        code == core.KEY_UPDATE_ERROR;
+}
+
+fun code_set(code: u64) u64 {
+    if (code > 0x10) { ret 0; }
+    ret 1::u64 << code;
+}
+
+# what rfc 9000 requires of a sealed payload, as far as the frames it names
+# decide it: an empty set when every frame is one this model follows and
+# none breaks a limit, the codes a close may carry when one breaks it, or
+# unknown once a frame the model does not follow is reached
+rec Prediction {
+    known:  bool;
+    codes:  u64;
+    frames: usize;
+}
+
+rec Touched {
+    id:          u64;
+    highest:     u64;
+    final_size:  u64;
+    final_known: bool;
+}
+
+var touched:       [TOUCHED]Touched;
+var touched_count: usize;
+
+fun touch(m: *stream_api.Manager, id: u64) *Touched {
+    var i: usize = 0;
+    for (i < touched_count) {
+        if (touched[i].id == id) { ret ?touched[i]; }
+        i = i + 1;
+    }
+    if (touched_count == TOUCHED) { ret nil; }
+    var value: Touched;
+    value.id = id;
+    val live: *stream_api.Stream = find_stream(m, id);
+    if (live != nil) {
+        value.highest     = live.receive_highest;
+        value.final_size  = live.final_size;
+        value.final_known = live.final_known;
+    }
+    touched[touched_count] = value;
+    touched_count          = touched_count + 1;
+    ret ?touched[touched_count - 1];
+}
+
+fun frame_storage() frame.Storage {
+    var value: frame.Storage;
+    value.ack_ranges   = ?ack_ranges[0];
+    value.ack_capacity = listener.core.storage.frame_ack_capacity;
+    ret value;
+}
+
+fun unknown(frames: usize) Prediction {
+    ret Prediction{known: false, codes: 0, frames: frames};
+}
+
+fun predict(data: *u8, len: usize, limits: *Advertised) Prediction {
+    # every frame is decoded before any is applied, so one that does not
+    # decode refuses the packet whatever came before it
+    var d:      binary.Decoder = binary.decoder(data, len, binary.BIG);
+    var frames: usize          = 0;
+    for (d.pos < d.len) {
+        var value:   frame.Frame;
+        val decoded: frame.DecodeResult = frame.decode(?d, true, frame.default_limits(),
+            frame_storage(), ?value);
+        if (decoded.status != frame.STATUS_DONE) {
+            ret Prediction{known: true, codes: code_set(core.FRAME_ENCODING_ERROR),
+                frames: frames};
+        }
+        frames = frames + 1;
+    }
+    # rfc 9000 12.4: a packet with no frames
+    if (frames == 0) {
+        ret Prediction{known: true, codes: code_set(core.PROTOCOL_VIOLATION), frames: 0};
+    }
+    val m:         *stream_api.Manager = ?listener.streams;
+    var bidi:      u64                 = m.peer_bidirectional_opened;
+    var uni:       u64                 = m.peer_unidirectional_opened;
+    var committed: u64                 = m.receive_committed;
+    touched_count = 0;
+    d             = binary.decoder(data, len, binary.BIG);
+    for (d.pos < d.len) {
+        var value: frame.Frame;
+        frame.decode(?d, true, frame.default_limits(), frame_storage(), ?value);
+        if (value.kind == frame.PADDING || value.kind == frame.PING) { cnt; }
+        # rfc 9000 19.7 and 19.20: frames only a server sends
+        if (value.kind == frame.NEW_TOKEN || value.kind == frame.HANDSHAKE_DONE) {
+            ret Prediction{known: true, codes: code_set(core.PROTOCOL_VIOLATION),
+                frames: frames};
+        }
+        if (!frame.is_stream(value.kind)) { ret unknown(frames); }
+        val id: u64 = value.stream_id;
+        # rfc 9000 19.8: a stream the server would have opened, and it opens none
+        if ((id & 1) != 0) {
+            ret Prediction{known: true, codes: code_set(core.STREAM_STATE_ERROR),
+                frames: frames};
+        }
+        # rfc 9000 4.6: a stream past the count the server allowed
+        var opened:  u64 = bidi;
+        var allowed: u64 = limits.bidi_opened;
+        if ((id & 2) != 0) {
+            opened  = uni;
+            allowed = limits.uni_opened;
+        }
+        if ((id >> 2) >= allowed) {
+            ret Prediction{known: true, codes: code_set(core.STREAM_LIMIT_ERROR),
+                frames: frames};
+        }
+        val state: *Touched = touch(m, id);
+        if (state == nil) { ret unknown(frames); }
+        val ending: u64 = value.offset + value.data.len::u64;
+        var codes:  u64 = 0;
+        # rfc 9000 4.5: a final size never changes and nothing lies past it
+        if (state.final_known && (ending > state.final_size ||
+            (value.fin && ending != state.final_size))) {
+            codes = codes | code_set(core.FINAL_SIZE_ERROR);
+        }
+        if (value.fin && state.highest > ending) {
+            codes = codes | code_set(core.FINAL_SIZE_ERROR);
+        }
+        # rfc 9000 4.1: nothing past the stream's or the connection's window
+        if (ending > stream_data(limits, id)) {
+            codes = codes | code_set(core.FLOW_CONTROL_ERROR);
+        }
+        var delta: u64 = 0;
+        if (ending > state.highest) { delta = ending - state.highest; }
+        if (delta > limits.max_data || committed > limits.max_data - delta) {
+            codes = codes | code_set(core.FLOW_CONTROL_ERROR);
+        }
+        if (codes != 0) { ret Prediction{known: true, codes: codes, frames: frames}; }
+        # bytes over ones already held may conflict with them, which the model
+        # does not follow
+        if (value.data.len != 0 && value.offset < state.highest) { ret unknown(frames); }
+        if ((id >> 2) >= opened) {
+            if ((id & 2) != 0) { uni = (id >> 2) + 1; }
+            or                 { bidi = (id >> 2) + 1; }
+        }
+        state.highest = state.highest + delta;
+        if (value.fin) {
+            state.final_known = true;
+            state.final_size  = ending;
+        }
+        committed = committed + delta;
+    }
+    ret Prediction{known: true, codes: 0, frames: frames};
+}
+
+fun deliver(data: *u8, len: usize) transport.OperationResult {
+    var input: transport.Datagram;
+    input.local       = listener_endpoint();
+    input.peer        = dialer_endpoint();
+    input.data        = data;
+    input.length      = len;
+    input.received_at = tick();
+    input.ecn         = 0;
+    ret transport.receive_datagram[binding.Binding](?listener.driver, ?input);
+}
+
+#[oblivious]
+fun conceal(destination: *^u8, source: *u8, length: usize) {
+    var i: usize = 0;
+    for (i < length) {
+        destination[i] = source[i];
+        i              = i + 1;
+    }
+}
+
+# the payload sealed as the client's next 1-rtt packet to the server's id
+fun seal(data: *u8, len: usize) usize {
+    val keys:   *protection.SendKeys = ?dialer.secrets.application_send;
+    var number: u64                  = 0;
+    if (keys.have_sent) { number = keys.largest_sent + 1; }
+    var header: [HEADER]u8;
+    header[0] = 0x43;
+    if (keys.phase) { header[0] = header[0] | 0x04; }
+    var i: usize = 0;
+    for (i < 8) {
+        header[1 + i] = listener_source[i];
+        i             = i + 1;
+    }
+    header[9]  = (number >> 24)::u8;
+    header[10] = (number >> 16)::u8;
+    header[11] = (number >> 8)::u8;
+    header[12] = number::u8;
+    conceal(?plaintext[0], data, len);
+    val result: protection.Result = protection.seal_send_packet(keys, number,
+        contracts.Bytes{data: ?header[0], len: HEADER}, 9,
+        contracts.SecretBytes{data: ?plaintext[0], len: len},
+        contracts.Buffer{data: ?sealed[0], capacity: WIRE});
+    if (result.error != protection.OK) { ret 0; }
+    ret result.written;
+}
+
+# the server's output, sent and acknowledged as far as the client's keys go
+fun flush() bool {
+    var sent:  usize = 0;
+    var guard: usize = 0;
+    for (guard < 32) {
+        val generated: transport.Generated = transport.generate[binding.Binding](
+            ?listener.driver, ?listener_scope, ?wire[0], WIRE, tick(), 0);
+        if (generated.status != transport.STATUS_OK) { brk; }
+        if (transport.complete_send[binding.Binding](?listener.driver, generated.token,
+            transport.SEND_SENT, generated.count, tick()).status != transport.STATUS_OK) {
+            ret false;
+        }
+        sent  = sent + 1;
+        guard = guard + 1;
+    }
+    val keys: *protection.SendKeys = ?dialer.secrets.application_send;
+    if (sent != 0 && keys.have_sent) { protection.note_acknowledged(keys, keys.largest_sent); }
+    ret true;
+}
+
+fun fire() transport.OperationResult {
+    val armed: transport.Timer = transport.timer[binding.Binding](?listener.driver);
+    var none:  transport.OperationResult;
+    none.status = transport.STATUS_EMPTY;
+    if (!armed.armed) { ret none; }
+    val deadline: u64 = instants.nanos(armed.deadline);
+    if (deadline > clock) { clock = deadline; }
+    ret transport.on_timeout[binding.Binding](?listener.driver, armed, tick());
+}
+
+# a call that failed either closed the connection with the code it reports,
+# or refused as a typed driver error without closing it
+fun typed(result: transport.OperationResult, was_closing: bool) bool {
+    if (result.status != transport.STATUS_ERROR) { ret true; }
+    if (listener.core.closing && !was_closing) {
+        ret result.protocol_error == listener.core.close_error;
+    }
+    ret result.error != transport.ERROR_NONE;
+}
+
+pub fun answer(data: *u8, len: usize) verdict.Verdict {
+    if (!prepare()) { ret verdict.violated("receive: the fixed client and server could not be set up"); }
+    if (!establish()) {
+        release(?dialer, ?dialer_scope);
+        release(?listener, ?listener_scope);
+        ret verdict.violated("receive: the fixed connection could not be established");
+    }
+    val limits: Advertised = advertised();
+    var at:     usize      = 0;
+    var ops:    usize      = 0;
+    var found:  str        = nil;
+    for (at < len && ops < MAX_OPS && found == nil) {
+        val op: u8 = data[at] % OPS;
+        at  = at + 1;
+        ops = ops + 1;
+        var body:   *u8   = nil;
+        var length: usize = 0;
+        if (op == OP_FRAMES || op == OP_DATAGRAM) {
+            if (at + 2 > len) { brk; }
+            length = (data[at]::usize << 8) | data[at + 1]::usize;
+            at     = at + 2;
+            if (length > len - at) { length = len - at; }
+            body = ?data[at];
+            at   = at + length;
+        }
+        val was_closing:    bool  = listener.core.closing;
+        val peer_closed:    bool  = listener.core.peer_close_received;
+        val before_auth:    usize = listener.core.authenticated_packets;
+        val before_refused: u64   = listener.core.refused_packets;
+        var prediction:     Prediction;
+        var result:         transport.OperationResult;
+        result.status = transport.STATUS_EMPTY;
+        if (op == OP_FRAMES) {
+            if (length > MAX_PAYLOAD) { length = MAX_PAYLOAD; }
+            prediction = predict(body, length, ?limits);
+            val count: usize = seal(body, length);
+            if (count != 0) { result = deliver(?sealed[0], count); }
+        }
+        or (op == OP_DATAGRAM) {
+            if (length > WIRE) { length = WIRE; }
+            var i: usize = 0;
+            for (i < length) {
+                wire[i] = body[i];
+                i       = i + 1;
+            }
+            result = deliver(?wire[0], length);
+        }
+        or (op == OP_FLUSH) {
+            if (!flush()) { found = "receive: the server's output could not be completed"; }
+        }
+        or (op == OP_KEY_UPDATE) {
+            protection.initiate_update(?dialer.secrets.application_send);
+        }
+        or                { result = fire(); }
+        if (found != nil) { brk; }
+        val closed_here: bool = listener.core.closing && !was_closing &&
+            !listener.core.peer_close_received;
+        if (!typed(result, was_closing)) {
+            found = "receive: a failed receive neither closed with the code it reports nor refused as a typed error";
+        }
+        or (closed_here && !peer_code(listener.core.close_error)) {
+            found = "receive: the server closed with a code no peer input calls for";
+        }
+        or (listener.core.close_reason_length > listener.core.storage.close_reason_capacity) {
+            found = "receive: the close reason lies outside its storage";
+        }
+        or (!streams_sound(?limits)) {
+            found = "receive: the server holds more than it advertised, or a stream's bytes lie outside its window";
+        }
+        or (op == OP_FRAMES && !was_closing && !peer_closed && prediction.known &&
+            listener.core.refused_packets == before_refused &&
+            (listener.core.authenticated_packets != before_auth || closed_here)) {
+            if (prediction.codes != 0 &&
+                (!closed_here || (prediction.codes & code_set(listener.core.close_error)) == 0)) {
+                found = "receive: a payload that breaks a limit did not close with the code rfc 9000 requires";
+            }
+            or (prediction.codes == 0 && closed_here) {
+                found = "receive: a payload that breaks no rule closed the connection";
+            }
+        }
+        if (op == OP_FRAMES && listener.core.authenticated_packets != before_auth) {
+            verdict.accept();
+        }
+    }
+    # how the script left the connection: open, closed by the server with a
+    # code, or closed by the client, with how far it got there
+    var ending: u64 = 0;
+    if (listener.core.peer_close_received) { ending = 0x200; }
+    or (listener.core.closing)             { ending = 0x100 | (listener.core.close_error & 0xff); }
+    val m:       *stream_api.Manager = ?listener.streams;
+    var outcome: u64                 = verdict.mix(ending, verdict.bucket((m.peer_bidirectional_opened +
+        m.peer_unidirectional_opened)::usize));
+    outcome = verdict.mix(outcome, verdict.bucket(verdict.accepted()));
+    outcome = verdict.mix(outcome, listener.secrets.application_receive.updates);
+    val released: bool = release(?dialer, ?dialer_scope) &&
+        release(?listener, ?listener_scope);
+    if (found != nil) { ret verdict.violated(found); }
+    if (!released) {
+        ret verdict.violated("receive: the connection could not be released after the script");
+    }
+    ret verdict.answered(outcome);
+}
