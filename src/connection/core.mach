@@ -3269,8 +3269,16 @@ fun queue_challenge(core: *Core, value: path_api.Handle, data: [8]u8,
         failed.error  = path_api.ERROR_TIME;
         ret failed;
     }
+    # rfc 9000 8.2.4: the recovery state measures only the selected path, so a
+    # path that is not selected has its pto taken from kInitialRtt
+    var path_pto_ns: u64                 = pto_ns;
+    val selected:    path_api.PathResult = path_api.selected(core.paths);
+    if (selected.status != path_api.STATUS_OK || selected.handle.index != value.index ||
+        selected.handle.generation != value.generation) {
+        path_pto_ns = recovery.initial_pto(?core.recovery_state, true);
+    }
     ret path_api.queue_challenge_scoped(core.paths, core.config.source, value,
-        data, pto_ns, pto_ns, padded, purpose);
+        data, pto_ns, path_pto_ns, padded, purpose);
 }
 
 # the path manager gave up `value` while packets sent on it were in flight.

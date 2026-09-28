@@ -264,6 +264,15 @@ pub fun update_rtt(recovery: *Recovery, latest_ns: u64, ack_delay_ns: u64, sampl
 pub fun current_pto(recovery: *Recovery, application: bool) u64;
 ```
 
+## fun initial_pto
+
+```mach
+pub fun initial_pto(recovery: *Recovery, application: bool) u64;
+```
+
+rfc 9000 8.2.4 and rfc 9002 6.2.2: the pto of a path with no rtt sample yet,
+from kInitialRtt and without backoff
+
 ## fun timer
 
 ```mach

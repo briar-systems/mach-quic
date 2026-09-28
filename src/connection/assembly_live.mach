@@ -3612,3 +3612,76 @@ test assembly__a_client_rebound_three_times_is_answered_at_its_last_port {
     }
     ret 0;
 }
+
+#[testing]
+var slow_held:        [4][1500]u8;
+#[testing]
+var slow_held_length: [4]usize;
+
+# rfc 9000 8.2.4: a client with a sub-millisecond path probes a new port whose
+# answers take 200 ms. the probe's deadline counts the new path's pto under
+# kInitialRtt, so the late response still validates the port
+test assembly__a_probe_answered_after_200_ms_on_a_slower_path_validates {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val port:  ip.Endpoint         = nat_endpoint(1);
+    val first: path_api.PathResult = dialer_probe(port);
+    var data:  [8]u8               = [8]u8{4, 1, 7, 4, 1, 7, 4, 1};
+    if (first.status != path_api.STATUS_OK ||
+        core.queue_path_challenge(?dialer.core, first.handle, data, true,
+        path_api.VALIDATION_PATH).status != path_api.STATUS_OK) { ret report_paths(80); }
+    val probe:    *path_api.Path = ?dialer.storage.path_values[first.handle.index];
+    val start_ns: u64            = clock;
+    var held:     usize          = 0;
+    var guard:    usize          = 0;
+    for (guard < 64) {
+        clock = clock + 1000;
+        val generated: transport.Generated = checked_generate(?dialer, ?dialer_scope,
+            ?wire[0], 1500, instants.instant(clock), 0);
+        if (generated.status == transport.STATUS_EMPTY ||
+            generated.status == transport.STATUS_BLOCKED) { brk; }
+        if (generated.status != transport.STATUS_OK ||
+            transport.complete_send[binding.Binding](?dialer.driver, generated.token,
+            transport.SEND_SENT, generated.count, instants.instant(clock)).status !=
+            transport.STATUS_OK) { ret report_paths(81); }
+        var client: ip.Endpoint = dialer_endpoint();
+        if (generated.local.port == port.port) { client = port; }
+        if (!deliver(?listener, listener_endpoint(), client, ?wire[0], generated.count,
+            clock)) { ret report_paths(82); }
+        guard = guard + 1;
+    }
+    guard = 0;
+    for (guard < 64) {
+        clock = clock + 1000;
+        val generated: transport.Generated = checked_generate(?listener, ?listener_scope,
+            ?wire[0], 1500, instants.instant(clock), 0);
+        if (generated.status == transport.STATUS_EMPTY ||
+            generated.status == transport.STATUS_BLOCKED) { brk; }
+        if (generated.status != transport.STATUS_OK ||
+            transport.complete_send[binding.Binding](?listener.driver, generated.token,
+            transport.SEND_SENT, generated.count, instants.instant(clock)).status !=
+            transport.STATUS_OK) { ret report_paths(83); }
+        if (generated.peer.port == port.port && held < 4) {
+            memory.copy[u8](?slow_held[held][0], ?wire[0], generated.count);
+            slow_held_length[held] = generated.count;
+            held                   = held + 1;
+        }
+        guard = guard + 1;
+    }
+    if (held == 0) { ret report_paths(84); }
+    for (clock < start_ns + 200000000) {
+        if (split_round(port, false, ?clock, ?moved) != 0) { ret report_paths(85); }
+    }
+    var i: usize = 0;
+    for (i < held) {
+        if (!deliver(?dialer, port, listener_endpoint(), ?slow_held[i][0],
+            slow_held_length[i], clock)) { ret report_paths(86); }
+        i = i + 1;
+    }
+    if (!probe.address_validated || probe.state != path_api.PATH_VALIDATED ||
+        dialer.core.close_error != 0 || listener.core.close_error != 0) { ret report_paths(87); }
+    ret 0;
+}
