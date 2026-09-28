@@ -275,14 +275,14 @@ responses, send reservations, and MTU probes remain completion-owned until they
 publish, cancel, or become stale. `finish_close` refuses to invalidate storage
 while any owner remains. Failed paths likewise cannot be released or restarted
 until their owners drain. Restart increments the path generation before accepting
-traffic again. A server that receives a non-probing packet from a failed path's
-address once the handshake is confirmed gives up that path and validates the
-address afresh as it would a new one (RFC 9000 9.3). Only prepared work, a
+traffic again. A server that receives a packet from a failed path's address once
+the handshake is confirmed, probing or not, gives up that path and validates the
+address afresh as it would a new one, answering any challenge the packet carries
+(RFC 9000 8.2.2, 9.1 and 9.3). Only a non-probing packet migrates to it. Only prepared work, a
 prepared challenge or response, a send reservation or an MTU probe, holds it.
 Packets still in flight on it do not, since only the peer's packets from that
 address could settle them: `Observation.released` names the path, and the core
-detaches those packets' owners so they settle without charging any path. A
-probing packet from a failed address is still refused.
+detaches those packets' owners so they settle without charging any path.
 
 A server whose path slots are all held gives up a path the connection no longer
 needs to make room for a peer's new address: one that is not selected, is not
