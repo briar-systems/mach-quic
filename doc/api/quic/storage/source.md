@@ -3,25 +3,31 @@
 ## def Provider
 
 ```mach
-pub def Provider: buffers.Source
+pub def Provider:       buffers.Source
+```
+
+## def SecretProvider
+
+```mach
+pub def SecretProvider: buffers.SecretSource
 ```
 
 ## def Account
 
 ```mach
-pub def Account:  buffers.Account
+pub def Account:        buffers.Account
 ```
 
 ## def Ref
 
 ```mach
-pub def Ref:      buffers.Ref
+pub def Ref:            buffers.Ref
 ```
 
 ## def Chunk
 
 ```mach
-pub def Chunk:    buffers.Chunk
+pub def Chunk:          buffers.Chunk
 ```
 
 ## val BYTES
@@ -79,11 +85,12 @@ pub val MAX_EXTRA_LANES: usize = buffers.MAX_LANES - LANES::usize
 ## val CLASS_COUNT
 
 ```mach
-pub val CLASS_COUNT: usize = 3
+pub val CLASS_COUNT: usize = 4
 ```
 
-the chunk sizes a connection asks a source for: quic's BYTES, and the sizes
-mach-tls requests for handshake messages and records
+the chunk sizes a connection asks a source for: quic's BYTES, the sizes
+mach-tls requests for handshake messages and records, and a secret BYTES
+class for key material
 
 ## val SMALL
 
@@ -105,6 +112,15 @@ pub rec Source;
 
 one connection's view of its provider, charged to one lane
 
+## rec SecretSource
+
+```mach
+pub rec SecretSource;
+```
+
+one connection's view of its provider's secret chunks, charged to one lane
+of the same account
+
 ## rec Taken
 
 ```mach
@@ -117,7 +133,7 @@ pub rec Taken;
 pub fun classes(output: *buffers.ClassConfig, high_water: usize);
 ```
 
-the CLASS_COUNT plain classes a connection asks for, smallest first
+the CLASS_COUNT classes a connection asks for, the plain ones smallest first
 
 output: CLASS_COUNT entries
 high_water: released chunks each class keeps for reuse
@@ -207,6 +223,34 @@ pub fun give(from: *Source, chunk: Chunk) bool;
 
 gives a chunk back. a refused release leaves it held
 
+## fun take_secret
+
+```mach
+pub fun take_secret(from: *SecretSource, bytes: usize) Taken;
+```
+
+a secret chunk of at least `bytes`, registering the account for a wake on
+refusal. its bytes are reached only through the provider's welded view
+
+## fun give_secret
+
+```mach
+pub fun give_secret(from: *SecretSource, chunk: Chunk) bool;
+```
+
+wipes a secret chunk in full and gives it back. a refused release leaves it
+held
+
+## fun view_secret
+
+```mach
+pub fun view_secret[T](from: *SecretSource, chunk: Chunk, count: usize) *T;
+```
+
+a held secret chunk viewed as `count` values of T for the rest of its hold.
+nil for a stale chunk, a shape that does not fit, or a provider without
+typed views
+
 ## fun retain
 
 ```mach
@@ -283,15 +327,6 @@ as make_test, with `extra` caller lanes
 ```mach
 pub fun test_made(fixture: *TestPool) bool;
 ```
-
-## fun end_test
-
-```mach
-pub fun end_test(fixture: *TestPool) bool;
-```
-
-ends a test pool once every account on it is closed, keeping its memory for
-the next make
 
 ## fun misuse
 

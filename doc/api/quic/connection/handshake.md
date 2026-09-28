@@ -790,6 +790,16 @@ pub fun prepare_probe_scoped(adapter: *Adapter, source: u64, level: Level,
 maximum: usize) Prepared;
 ```
 
+## fun peek_scoped
+
+```mach
+pub fun peek_scoped(adapter: *Adapter, source: u64, level: Level,
+maximum: usize, probe: bool) Prepared;
+```
+
+what prepare_scoped, or prepare_probe_scoped when `probe`, would answer at
+`level`, with nothing changed
+
 ## fun cancel_prepared_scoped
 
 ```mach

@@ -320,6 +320,17 @@ pub fun encode(b: *binary.Builder, packet: *Packet, limits: Limits) EncodeResult
 
 encodes one packet as a single builder transaction
 
+## fun protected_header_size
+
+```mach
+pub fun protected_header_size(value: *Packet, ciphertext_length: usize,
+limits: Limits) ProtectedHeaderResult;
+```
+
+the count and packet number offset encode_protected_header gives the same
+arguments, with its refusals, and writes nothing. a full builder is the one
+refusal it cannot see
+
 ## fun encode_protected_header
 
 ```mach

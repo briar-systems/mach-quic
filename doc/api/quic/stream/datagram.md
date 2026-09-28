@@ -250,6 +250,14 @@ pub fun prepare_scoped(queue: *Queue, source: u64,
 with_length: bool) Prepared;
 ```
 
+## fun peek_scoped
+
+```mach
+pub fun peek_scoped(queue: *Queue, source: u64, with_length: bool) Prepared;
+```
+
+what prepare_scoped would answer, with nothing changed
+
 ## fun cancel_prepared_scoped
 
 ```mach
