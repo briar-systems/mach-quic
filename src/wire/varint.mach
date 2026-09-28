@@ -4,7 +4,6 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.result.res;
 use std.types.size.usize;
-use std.types.string.str;
 
 #[testing]
 fun is_err_usize_u8(outcome: res[usize, u8]) bool {

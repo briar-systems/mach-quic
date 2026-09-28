@@ -8,7 +8,6 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.result.res;
 use std.types.size.usize;
-use std.types.string.str;
 
 fun is_err_usize_encode(outcome: res[usize, binary.EncodeError]) bool {
     ret sel outcome.err;
