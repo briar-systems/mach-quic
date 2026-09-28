@@ -3398,10 +3398,10 @@ test assembly__a_port_whose_validation_failed_is_validated_again_when_the_peer_s
 }
 
 # one round in which the dialer sends from both its own port and `probe`, and
-# each datagram of either end reaches the other at the port it was sent to,
-# except that the listener's datagrams to `probe` are lost unless `reach`
+# each datagram of either end reaches the other at the port it was sent to.
+# while the network is not `up`, every datagram either way is lost
 #[testing]
-fun split_round(probe: ip.Endpoint, reach: bool, clock: *u64, moved: *usize) i32 {
+fun split_round(probe: ip.Endpoint, up: bool, clock: *u64, moved: *usize) i32 {
     var guard: usize = 0;
     for (guard < 128) {
         clock[0] = clock[0] + 1000;
@@ -3429,7 +3429,7 @@ fun split_round(probe: ip.Endpoint, reach: bool, clock: *u64, moved: *usize) i32
         if (sink == ?listener && generated.local.port == probe.port) { client = probe; }
         if (sink == ?dialer && generated.peer.port == probe.port)    { client = probe; }
         var delivered: bool = false;
-        if (sink == ?dialer && client.port == probe.port && !reach) {
+        if (!up) {
             delivered = true;
         }
         or (sink == ?listener) {
@@ -3494,6 +3494,20 @@ test assembly__a_probe_from_a_port_whose_validation_failed_is_answered {
     ret 0;
 }
 
+# whether a packet `value` sent still charges its path
+#[testing]
+fun charged(value: *assembly.Connection, path: path_api.Handle) bool {
+    var i: usize = 0;
+    for (i < value.core.owner_capacity) {
+        val owner: *core.Owner = ?value.core.owners[i];
+        if (owner.state == core.OWNER_SENT && owner.path_send.source == path.source &&
+            owner.path_send.path_index == path.index &&
+            owner.path_send.path_generation == path.generation) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
 # the dialer's own path from `local` to the listener
 #[testing]
 fun dialer_probe(local: ip.Endpoint) path_api.PathResult {
@@ -3502,9 +3516,11 @@ fun dialer_probe(local: ip.Endpoint) path_api.PathResult {
         peer: path_api.ipv4(192, 0, 2, 2, listener_endpoint().port)}, false);
 }
 
-# rfc 9000 8.2 and 9.1: every answer to the client's probe from a new port is
-# lost, so its validation of the port fails. once the network recovers, the
-# client probes the port again with fresh challenge data and validates it
+# rfc 9000 8.2, 9.1 and 9.3: the network drops everything while the client
+# probes from a new port, so its validation of the port fails with the probes
+# still in flight. the client probes the port again at once, without waiting
+# for loss detection, and the old probes settle without charging the new path.
+# once the network recovers, the fresh challenge validates the port
 test assembly__a_client_probes_a_port_whose_validation_failed_again {
     var clock:       u64   = 1000;
     var moved:       usize = 0;
@@ -3523,17 +3539,14 @@ test assembly__a_client_probes_a_port_whose_validation_failed_again {
         if (split_round(port, false, ?clock, ?moved) != 0) { ret report_paths(67); }
         rounds = rounds + 1;
     }
-    if (probe.state != path_api.PATH_FAILED) { ret report_paths(68); }
-    var again: path_api.PathResult = dialer_probe(port);
-    rounds = 0;
-    for (again.status == path_api.STATUS_BLOCKED && rounds < 64) {
-        if (split_round(port, true, ?clock, ?moved) != 0) { ret report_paths(69); }
-        again  = dialer_probe(port);
-        rounds = rounds + 1;
-    }
+    if (probe.state != path_api.PATH_FAILED || probe.recovery_owners == 0) { ret report_paths(68); }
+    val again: path_api.PathResult = dialer_probe(port);
     data[0] = 3;
     if (again.status != path_api.STATUS_OK || again.handle.index != first.handle.index ||
         again.handle.generation == first.handle.generation ||
+        again.released.index != first.handle.index ||
+        again.released.generation != first.handle.generation || probe.recovery_owners != 0 ||
+        charged(?dialer, first.handle) ||
         core.queue_path_challenge(?dialer.core, again.handle, data, true,
         path_api.VALIDATION_PATH).status != path_api.STATUS_OK) { ret report_paths(70); }
     rounds = 0;
