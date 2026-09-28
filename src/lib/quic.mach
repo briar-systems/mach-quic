@@ -1,6 +1,4 @@
 use std.runtime;
-use std.types.bool.bool;
-use std.types.size.usize;
 use std.types.string.str;
 
 pub val VERSION: str = $mach.project.version;

@@ -15,7 +15,6 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
-use std.types.string.str_len;
 use tls_buffer:      tls.buffer;
 use tls_cert:        tls.cert;
 use tls_credentials: tls.cert.credentials;
