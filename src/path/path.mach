@@ -691,6 +691,12 @@ fun free_path_index(manager: *Manager) usize {
     ret invalid_index();
 }
 
+# rfc 9000 8.2.4 and 14: a path the connection can fall back to has both its
+# address and its mtu validated
+fun path_viable(path: *Path) bool {
+    ret path.address_validated && path.mtu_validated;
+}
+
 # whether work prepared on the path at `index` is still owned: a prepared
 # challenge or response, a send reservation or an mtu probe. queued and
 # unanswered challenges, queued responses and packets in flight are not, and
@@ -814,7 +820,8 @@ fun activate(manager: *Manager, index: usize, migration: u8) Observation {
         result.previous                                = handle_at(manager, previous_index);
         manager.storage.paths[previous_index].selected = false;
         if (manager.storage.paths[previous_index].address_validated) {
-            if (!manager.storage.paths[index].address_validated) {
+            if (path_viable(?manager.storage.paths[previous_index]) &&
+                !path_viable(?manager.storage.paths[index])) {
                 manager.fallback_index      = previous_index;
                 manager.fallback_generation = manager.storage.paths[previous_index].generation;
             }
@@ -826,7 +833,7 @@ fun activate(manager: *Manager, index: usize, migration: u8) Observation {
     manager.storage.paths[index].selected = true;
     manager.selected_index                = index;
     manager.selected_generation           = manager.storage.paths[index].generation;
-    if (manager.storage.paths[index].address_validated) {
+    if (path_viable(?manager.storage.paths[index])) {
         manager.fallback_index      = index;
         manager.fallback_generation = manager.storage.paths[index].generation;
     }
@@ -1427,7 +1434,7 @@ pub fun receive_response(manager: *Manager, data: [8]u8, now_ns: u64) Validation
             or {
                 result.migration = MIGRATION_PEER;
             }
-            if (manager.storage.paths[index].selected) {
+            if (manager.storage.paths[index].selected && path_viable(?manager.storage.paths[index])) {
                 manager.fallback_index      = index;
                 manager.fallback_generation = generation;
             }
@@ -1864,16 +1871,13 @@ pub fun on_timeout(manager: *Manager, now_ns: u64) TimeoutResult {
     for (i < manager.storage.path_capacity) {
         if (manager.storage.paths[i].valid && manager.storage.paths[i].validation_deadline_ns != 0 &&
             now_ns >= manager.storage.paths[i].validation_deadline_ns) {
-            if (manager.storage.paths[i].validation_purpose == VALIDATION_PATH) {
-                ret timeout_path(manager, i);
-            }
-            val generation: u64 = manager.storage.paths[i].generation;
-            end_validation(?manager.storage.paths[i]);
-            free_path_challenges(manager, i, generation, true);
-            result.status                = STATUS_OK;
-            result.failed                = handle_at(manager, i);
-            result.mtu_validation_failed = true;
-            ret result;
+            # rfc 9000 14: a path that cannot carry 1200-byte datagrams is not
+            # used, so a failed mtu validation fails the path as a failed
+            # address validation does (rfc 9000 8.2.4)
+            val purpose: u8            = manager.storage.paths[i].validation_purpose;
+            var failed:  TimeoutResult = timeout_path(manager, i);
+            failed.mtu_validation_failed = purpose == VALIDATION_MTU;
+            ret failed;
         }
         # rfc 9000 8.2.1 and 9.4: the challenge went unanswered for its wait,
         # so the caller sends one with fresh data
