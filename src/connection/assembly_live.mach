@@ -3352,6 +3352,99 @@ test assembly__a_port_whose_validation_failed_is_validated_again_when_the_peer_s
     ret 0;
 }
 
+# one round in which the dialer sends from both its own port and `probe`, and
+# each datagram of either end reaches the other at the port it was sent to
+#[testing]
+fun split_round(probe: ip.Endpoint, clock: *u64, moved: *usize) i32 {
+    var guard: usize = 0;
+    for (guard < 128) {
+        clock[0] = clock[0] + 1000;
+        var source:    *assembly.Connection = ?dialer;
+        var scope:     *cancel.Scope        = ?dialer_scope;
+        var sink:      *assembly.Connection = ?listener;
+        var generated: transport.Generated  = checked_generate(source, scope, ?wire[0], 1500,
+            instants.instant(clock[0]), 0);
+        if (generated.status == transport.STATUS_EMPTY ||
+            generated.status == transport.STATUS_BLOCKED) {
+            source    = ?listener;
+            scope     = ?listener_scope;
+            sink      = ?dialer;
+            generated = checked_generate(source, scope, ?wire[0], 1500,
+                instants.instant(clock[0]), 0);
+            if (generated.status == transport.STATUS_EMPTY ||
+                generated.status == transport.STATUS_BLOCKED) { brk; }
+        }
+        clock[0] = clock[0] + 1000;
+        if (generated.status != transport.STATUS_OK ||
+            transport.complete_send[binding.Binding](?source.driver, generated.token,
+            transport.SEND_SENT, generated.count, instants.instant(clock[0])).status !=
+            transport.STATUS_OK) { ret 56; }
+        var client: ip.Endpoint = dialer_endpoint();
+        if (sink == ?listener && generated.local.port == probe.port) { client = probe; }
+        if (sink == ?dialer && generated.peer.port == probe.port)    { client = probe; }
+        var delivered: bool = false;
+        if (sink == ?listener) {
+            delivered = deliver(?listener, listener_endpoint(), client, ?wire[0],
+                generated.count, clock[0]);
+        }
+        or {
+            delivered = deliver(?dialer, client, listener_endpoint(), ?wire[0],
+                generated.count, clock[0]);
+        }
+        if (!delivered) { ret 57; }
+        moved[0] = moved[0] + 1;
+        guard    = guard + 1;
+    }
+    clock[0] = next_deadline(clock[0]);
+    if (!fire_due(?dialer, clock[0]) || !fire_due(?listener, clock[0])) { ret 58; }
+    ret 0;
+}
+
+# rfc 9000 8.2.2 and 9.1: once the listener's validation of a port fails, the
+# client probes from that port with a packet carrying only a path challenge.
+# the listener takes the port as a new address and answers the challenge, and
+# the client's probe of the port succeeds without the listener migrating to it
+test assembly__a_probe_from_a_port_whose_validation_failed_is_answered {
+    var clock:       u64   = 1000;
+    var moved:       usize = 0;
+    val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
+    if (established != 0)             { ret established; }
+    if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
+    val bound:   ip.Endpoint = nat_endpoint(1);
+    var request: transport.Stream;
+    val asked:   i32         = request_from(bound, ?request, ?clock, ?moved);
+    if (asked != 0) { ret asked; }
+    var drops:  usize = 1000;
+    var failed: bool  = false;
+    var rounds: usize = 0;
+    for (!failed && rounds < 256) {
+        if (nat_round(bound, dialer_endpoint(), ?drops, ?clock, ?moved) != 0) {
+            ret report_paths(59);
+        }
+        val path: *path_api.Path = listener_path(bound);
+        failed = path != nil && path.state == path_api.PATH_FAILED;
+        rounds = rounds + 1;
+    }
+    if (!failed) { ret report_paths(60); }
+    val probed: path_api.PathResult = core.probe_path(?dialer.core,
+        path_api.Endpoint{local: path_api.ipv4(192, 0, 2, 1, bound.port),
+        peer: path_api.ipv4(192, 0, 2, 2, listener_endpoint().port)}, false);
+    var data: [8]u8 = [8]u8{2, 5, 5, 2, 5, 5, 2, 5};
+    if (probed.status != path_api.STATUS_OK ||
+        core.queue_path_challenge(?dialer.core, probed.handle, data, true,
+        path_api.VALIDATION_PATH).status != path_api.STATUS_OK) { ret report_paths(61); }
+    rounds = 0;
+    val probe: *path_api.Path = ?dialer.storage.path_values[probed.handle.index];
+    for (!probe.address_validated && rounds < 64) {
+        if (split_round(bound, ?clock, ?moved) != 0) { ret report_paths(62); }
+        rounds = rounds + 1;
+    }
+    val path: *path_api.Path = listener_path(bound);
+    if (!probe.address_validated || path == nil || path.state == path_api.PATH_FAILED ||
+        path.selected || listener.core.close_error != 0) { ret report_paths(63); }
+    ret 0;
+}
+
 # rfc 9000 9.3: a client whose nat moves it three times keeps its connection,
 # and each answer reaches it at the port it was last moved to. a request the
 # listener cannot place yet is refused without closing, and the dialer's
