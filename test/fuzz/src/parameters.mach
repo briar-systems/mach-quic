@@ -1,0 +1,114 @@
+# transport parameters: the block a peer sends in its TLS extension
+
+use quic.packet.packet;
+use tp: quic.transport_parameters;
+use std.encoding.binary;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+
+use fuzz.verdict;
+
+val SCRATCH:    usize = 20480;
+val EXTENSIONS: usize = 128;
+val BYTES:      usize = 16384;
+
+var first_pass:        [SCRATCH]u8;
+var second_pass:       [SCRATCH]u8;
+var extensions:        [EXTENSIONS]tp.Parameter;
+var extension_bytes:   [BYTES]u8;
+var second_extensions: [EXTENSIONS]tp.Parameter;
+var second_bytes:      [BYTES]u8;
+
+fun storage(entries: *tp.Parameter, bytes: *u8) tp.Storage {
+    var value: tp.Storage;
+    value.extensions              = entries;
+    value.extension_capacity      = EXTENSIONS;
+    value.extension_bytes         = bytes;
+    value.extension_byte_capacity = BYTES;
+    ret value;
+}
+
+fun same(a: *u8, b: *u8, len: usize) bool {
+    var i: usize = 0;
+    for (i < len) {
+        if (a[i] != b[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# an accepted block names its sender's required parameters, and its unknown
+# extensions are copied into the storage it was given, not borrowed
+fun sound(value: *tp.Parameters, role: u8, entries: *tp.Parameter, bytes: *u8) bool {
+    if (!tp.has(value, tp.INITIAL_SOURCE_CONNECTION_ID) ||
+        (role == tp.ROLE_SERVER && !tp.has(value, tp.ORIGINAL_DESTINATION_CONNECTION_ID)) ||
+        (role == tp.ROLE_CLIENT && (tp.has(value, tp.ORIGINAL_DESTINATION_CONNECTION_ID) ||
+        tp.has(value, tp.STATELESS_RESET_TOKEN) || tp.has(value, tp.PREFERRED_ADDRESS) ||
+        tp.has(value, tp.RETRY_SOURCE_CONNECTION_ID)))) { ret false; }
+    if (value.original_destination_connection_id.len::usize > packet.MAX_CONNECTION_ID ||
+        value.initial_source_connection_id.len::usize > packet.MAX_CONNECTION_ID ||
+        value.retry_source_connection_id.len::usize > packet.MAX_CONNECTION_ID ||
+        value.preferred_address.connection_id.len::usize > packet.MAX_CONNECTION_ID) { ret false; }
+    if (value.extension_count > EXTENSIONS ||
+        (value.extension_count != 0 && value.extensions != entries)) { ret false; }
+    var i: usize = 0;
+    for (i < value.extension_count) {
+        if (!verdict.inside(value.extensions[i].value.data, value.extensions[i].value.len,
+            bytes, BYTES)) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# an accepted block writes back for its sender, and what it writes decodes to
+# a block that writes back to the same bytes
+fun round_trip(value: *tp.Parameters, role: u8) bool {
+    val limits:   tp.Limits       = tp.default_limits();
+    val measured: tp.EncodeResult = tp.encoded_size(value, role, limits);
+    var b:        binary.Builder  = binary.builder(?first_pass[0], SCRATCH, binary.BIG);
+    val encoded:  tp.EncodeResult = tp.encode(?b, value, role, limits);
+    if (!measured.ok || !encoded.ok || measured.count != encoded.count || b.len != encoded.count) {
+        ret false;
+    }
+    var again: tp.Parameters;
+    val read:  tp.DecodeResult = tp.decode(?first_pass[0], encoded.count, true, role, limits,
+        storage(?second_extensions[0], ?second_bytes[0]), ?again);
+    if (read.status != tp.STATUS_DONE || read.consumed != encoded.count ||
+        again.present != value.present || again.extension_count != value.extension_count) {
+        ret false;
+    }
+    var c:      binary.Builder  = binary.builder(?second_pass[0], SCRATCH, binary.BIG);
+    val second: tp.EncodeResult = tp.encode(?c, ?again, role, limits);
+    ret second.ok && second.count == encoded.count &&
+        same(?first_pass[0], ?second_pass[0], encoded.count);
+}
+
+fun decode_one(data: *u8, len: usize, role: u8, outcome: *u64) bool {
+    var value: tp.Parameters;
+    val read:  tp.DecodeResult = tp.decode(data, len, true, role, tp.default_limits(),
+        storage(?extensions[0], ?extension_bytes[0]), ?value);
+    @outcome = verdict.mix(@outcome, (read.status::u64 << 8) | read.error::u64);
+    if (read.status != tp.STATUS_DONE) { ret read.status == tp.STATUS_ERROR; }
+    verdict.accept();
+    var known: usize = 0;
+    var id:    u64   = 0;
+    for (id < 64) {
+        if ((value.present & (1::u64 << id)) != 0) { known = known + 1; }
+        id = id + 1;
+    }
+    @outcome = verdict.mix(verdict.mix(@outcome, verdict.bucket(known)), verdict.bucket(value.extension_count));
+    ret read.consumed == len && sound(?value, role, ?extensions[0], ?extension_bytes[0]) &&
+        round_trip(?value, role);
+}
+
+# the same block read as a client's and as a server's
+pub fun answer(data: *u8, len: usize) verdict.Verdict {
+    var outcome: u64 = 0;
+    if (!decode_one(data, len, tp.ROLE_CLIENT, ?outcome) ||
+        !decode_one(data, len, tp.ROLE_SERVER, ?outcome)) {
+        ret verdict.violated("transport-parameters: an accepted block breaks its sender's rules, borrows its extensions, or does not write back");
+    }
+    ret verdict.answered(outcome);
+}
