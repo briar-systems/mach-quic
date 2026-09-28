@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-28
+
+### Added
+
+- A fuzz lane in `test/fuzz`, on the same driver as mach-tls's (`replay`, `one`, `mutate <boundary|all> <runs> <seed> [--retain]`), with boundaries over every entry point that takes peer bytes: `varint`, `packet`, `frame`, `transport-parameters`, `datagram`, `preflight`, `token`, `version-negotiation`, `retry` and `packet-protection`, and a checked-in corpus. `mach build test/fuzz` runs on every pull request and the replay runs on the heavy tier (#265).
+- A stateful `receive` fuzz boundary that drives a client and server through a real TLS 1.3 handshake and feeds `connection.core.receive` a script of sealed frames, raw datagrams, flushes, key updates and timers (#293).
+- `PathResult.released` names the old generation of a failed path restarted while packets are still in flight on it (#295).
+
+### Changed
+
+- Breaking: dependencies. Requires mach-std 9.4, mach-crypto 0.26.0 and mach-tls 0.16.0, selected by `version = "^9.4"`, `version = "^0.26"` and `version = "^0.16"` with the gitlinks at v9.4.1, v0.26.0 and v0.16.0. Resolution is flat, so a consumer of quic moves to the new std, crypto and tls with it. std 9.4.1 maps a guard page below every linux thread stack, and tls 0.16 borrows its AES-GCM contexts from the caller's secret source. test/fuzz pins `tag/v9.4.1`, `tag/v0.26.0` and `tag/v0.16.0`.
+- Requires mach 6.5 (`mach = "^6.5"`). `VERSION` is `$mach.project.version`, so `mach.toml` is the only place the version lives, and CI seeds mach v6.5.0 (#285).
+- A failed MTU validation fails its path, as a failed address validation does. A selected path reverts to the fallback, and with none the connection closes with NO_VIABLE_PATH. The fallback is the last selected path whose address and MTU are both validated (#254).
+- CI fails when `doc/api` differs from `mach doc` output, and the stale std, crypto and tls pages under `doc/api` are gone (#261).
+
+### Fixed
+
+- A server answers an authenticated probing packet from an address whose validation failed, with a fresh path and validation, so the peer's PATH_CHALLENGE gets its PATH_RESPONSE (#255).
+- A client probing a local address whose validation failed restarts that path instead of staying blocked (#289), and does so at once even while packets are still in flight on it (#295).
+- A packet with no frames is a PROTOCOL_VIOLATION. An empty CRYPTO frame answers nothing and a CRYPTO frame past a level's buffer is CRYPTO_BUFFER_EXCEEDED, where both closed with INTERNAL_ERROR. Frames after one that closed the connection are no longer applied, so a refused STREAM frame cannot overwrite the close code (#293).
+
 ## [0.24.0] - 2026-09-27
 
 ### Changed
