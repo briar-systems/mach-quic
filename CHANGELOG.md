@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-27
+
+### Changed
+
+- Dependencies: requires mach-std 9.3.0, mach-crypto 0.25.0 and mach-tls 0.15.0, selected by `version = "^9.3"`, `version = "^0.25"` and `version = "^0.15"` and committed as gitlinks. Resolution is flat, so a consumer of quic moves to the new std, crypto and tls with it. The public API is unchanged (#281).
+
 ## [0.23.0] - 2026-09-27
 
 A server host can issue its own connection IDs and advertise a stateless reset token for its handshake connection ID (#275, #276).
