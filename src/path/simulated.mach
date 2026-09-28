@@ -373,7 +373,9 @@ test path__validation_timeout_reverts_and_preserves_prepared_token_ownership {
     ret 0;
 }
 
-test path__mtu_only_validation_timeout_does_not_invalidate_an_address {
+# rfc 9000 8.2.4 and 14: a path whose mtu validation fails is failed, and with
+# no validated fallback the connection has no viable path
+test path__a_failed_mtu_validation_fails_the_path {
     var paths:      [2]path.Path;
     var challenges: [2]path.Challenge;
     var responses:  [1]path.Response;
@@ -392,8 +394,9 @@ test path__mtu_only_validation_timeout_does_not_invalidate_an_address {
     path.publish_challenge(?manager, prepared.token, 20);
     val timeout: path.TimeoutResult = path.on_timeout(?manager, 320);
     val state:   path.Snapshot      = path.snapshot(?manager, handle);
-    if (!timeout.mtu_validation_failed || timeout.reverted || state.state != path.PATH_VALIDATED ||
-        !state.address_validated || state.mtu_validated ||
+    if (!timeout.mtu_validation_failed || timeout.reverted || !timeout.connection_lost ||
+        timeout.failed.index != handle.index || state.state != path.PATH_FAILED || state.mtu_validated ||
+        path.selected(?manager).status != path.STATUS_ERROR ||
         path.receive_response(?manager, data, 321).status != path.STATUS_DROPPED) { ret 1; }
     ret 0;
 }
