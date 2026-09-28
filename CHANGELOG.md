@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-09-28
+
+### Fixed
+
+- A server discards accepted 0-RTT receive keys three PTOs after its first authenticated 1-RTT packet, as RFC 9001 4.9.3 requires, where it kept them for the life of the connection. A new core timer fires the discard, and a 0-RTT packet arriving past the deadline meets discarded keys and is dropped (#244).
+- A challenge on a path other than the selected one takes its deadline from that path's own PTO at kInitialRtt, so a new path slower than the selected one is no longer failed before its answer can arrive (#256).
+- The Handshake packet that validates a server's initial path also validates its MTU, since the handshake's Initials are padded to 1200 bytes. A server that accepted a token-less Initial never ran DPLPMTUD on that path, and the path never counted as a fallback (#257).
+
 ## [0.25.0] - 2026-09-28
 
 ### Added

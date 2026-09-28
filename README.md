@@ -230,7 +230,9 @@ challenge below 1200 bytes validates only address ownership. MTU validation need
 a padded challenge. A response that validates a path whose MTU is not yet
 validated sets `ValidationResult.validate_mtu`, and the core then queues a padded
 MTU challenge on that path, which the validated address lets it send at once
-(RFC 9000 8.2.1). A challenge left unanswered for a probe timeout is sent again
+(RFC 9000 8.2.1). On a server, the Handshake packet that validates the client's
+address validates the initial path's MTU as well, since the Initials both ways
+are padded to 1200 bytes (RFC 9000 8.1 and 14.1). A challenge left unanswered for a probe timeout is sent again
 with fresh data, and each later wait doubles, until the validation deadline
 (RFC 9000 8.2.1 and 9.4). `on_timeout` reports the path and purpose in
 `TimeoutResult.resend`. Once every challenge slot is held, a new challenge takes

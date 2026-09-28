@@ -77,6 +77,7 @@ val TIMER_RECOVERY: u8 = 4;
 val TIMER_PATH:     u8 = 5;
 val TIMER_ACK:      u8 = 6;
 val TIMER_PACE:     u8 = 7;
+val TIMER_EARLY:    u8 = 8;
 
 pub val OWNER_FREE:     u8 = 0;
 pub val OWNER_PREPARED: u8 = 1;
@@ -338,6 +339,7 @@ pub rec Core {
     timer_generation:          u64;
     timer_deadline_ns:         u64;
     pace_deadline_ns:          u64;
+    early_discard_ns:          u64;
     timer_recovery_generation: u64;
     timer_kind:                u8;
     state:                     transport_api.ConnectionState;
@@ -2060,6 +2062,24 @@ fun destroy_early_level(core: *Core, secrets: *Secrets) {
     protection.destroy(?secrets.early_send);
     protection.destroy(?secrets.early_receive);
     give_contexts(core, secrets, EARLY_CONTEXTS);
+    core.early_discard_ns = 0;
+    core.timer_cached     = false;
+}
+
+# rfc 9001 4.9.3: a server's first 1-RTT packet starts a window of three times
+# the pto in which reordered 0-RTT packets still open, after which the keys go
+fun arm_early_discard(core: *Core, secrets: *Secrets, now_ns: u64) {
+    if (core.role != transport_api.SERVER || core.early_discard_ns != 0 ||
+        secrets.early_receive.state != protection.STATE_ACTIVE) { ret; }
+    core.early_discard_ns = saturated_add(now_ns, saturated_multiply(
+        recovery.current_pto(?core.recovery_state, true), 3));
+    core.timer_cached = false;
+}
+
+fun expire_early_keys(core: *Core, secrets: *Secrets, now_ns: u64) {
+    if (core.early_discard_ns != 0 && now_ns >= core.early_discard_ns) {
+        destroy_early_level(core, secrets);
+    }
 }
 
 fun destroy_handshake_level(core: *Core, secrets: *Secrets) {
@@ -2929,6 +2949,9 @@ fun receive_protected(core: *Core, secrets: *Secrets,
         opened.generation) != protection.OK) {
         ret fail(core, KEY_UPDATE_ERROR, input.received_at_ns);
     }
+    if (level == handshake_api.APPLICATION) {
+        arm_early_discard(core, secrets, input.received_at_ns);
+    }
     if (core.state == transport_api.CLOSING) {
         core.close_queued = true;
         ret core_result(core, transport_api.STATUS_OK, 0);
@@ -3076,6 +3099,7 @@ fun receive_unsettled(core: *Core, secrets: *Secrets,
     }
     core.last_now_ns = input.received_at_ns;
     wake(core);
+    expire_early_keys(core, secrets, input.received_at_ns);
     var offset: usize = 0;
     for (offset < input.length) {
         val selected: cid_api.Selected = cid_api.current(core.cids, true);
@@ -3269,8 +3293,16 @@ fun queue_challenge(core: *Core, value: path_api.Handle, data: [8]u8,
         failed.error  = path_api.ERROR_TIME;
         ret failed;
     }
+    # rfc 9000 8.2.4: the recovery state measures only the selected path, so a
+    # path that is not selected has its pto taken from kInitialRtt
+    var path_pto_ns: u64                 = pto_ns;
+    val selected:    path_api.PathResult = path_api.selected(core.paths);
+    if (selected.status != path_api.STATUS_OK || selected.handle.index != value.index ||
+        selected.handle.generation != value.generation) {
+        path_pto_ns = recovery.initial_pto(?core.recovery_state, true);
+    }
     ret path_api.queue_challenge_scoped(core.paths, core.config.source, value,
-        data, pto_ns, pto_ns, padded, purpose);
+        data, pto_ns, path_pto_ns, padded, purpose);
 }
 
 # the path manager gave up `value` while packets sent on it were in flight.
@@ -4876,6 +4908,10 @@ fun compute_timer(core: *Core) transport_api.CoreTimer {
             timer_candidate(?armed, ?deadline, ?kind,
                 core.pace_deadline_ns, TIMER_PACE);
         }
+        if (core.early_discard_ns != 0) {
+            timer_candidate(?armed, ?deadline, ?kind,
+                core.early_discard_ns, TIMER_EARLY);
+        }
     }
     var recovery_generation: u64 = 0;
     if (kind == TIMER_RECOVERY) {
@@ -5015,6 +5051,9 @@ fun on_timeout_unsettled(core: *Core, secrets: *Secrets, generation: u64,
     }
     if (fired_kind == TIMER_PACE) {
         core.pace_deadline_ns = 0;
+    }
+    if (fired_kind == TIMER_EARLY) {
+        expire_early_keys(core, secrets, now_ns);
     }
     if (fired_kind == TIMER_PATH) {
         val timed: path_api.TimeoutResult = path_api.on_timeout_scoped(core.paths,

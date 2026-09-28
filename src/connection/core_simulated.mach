@@ -41,6 +41,28 @@ rec Provider {
     fail_start:    bool;
     emit_alert:    u64;
     alert_emitted: bool;
+    # events offered in order after the hello, each once
+    script:       *Scripted;
+    script_count: usize;
+    script_next:  usize;
+}
+
+# a scripted event. a traffic secret is received at `level`, and its bytes are
+# scripted_secret's for that level
+#[testing]
+rec Scripted {
+    kind:        handshake.EventKind;
+    level:       handshake.Level;
+    disposition: u8;
+}
+
+#[testing]
+fun scripted_secret(output: *^u8, level: handshake.Level) {
+    var i: usize = 0;
+    for (i < 32) {
+        output[i] = (level::usize * 0x30 + i)::u8;
+        i         = i + 1;
+    }
 }
 
 #[testing]
@@ -145,6 +167,23 @@ fun provider_next(context: ptr, secret_context: *^u8,
         ret false;
     }
     if (provider.emitted) {
+        if (provider.script_next < provider.script_count) {
+            val scripted: Scripted = provider.script[provider.script_next];
+            output.token       = 0x201 + provider.script_next::u64;
+            output.kind        = scripted.kind;
+            output.level       = scripted.level;
+            output.disposition = scripted.disposition;
+            if (scripted.kind == handshake.EVENT_TRAFFIC_SECRET) {
+                scripted_secret(secret_context, scripted.level);
+                output.direction  = handshake.DIRECTION_RECEIVE;
+                output.algorithm  = protection.AES_128_GCM_SHA256;
+                output.generation = 1;
+                output.secret     = handshake.SecretView{data: secret_context, length: 32};
+            }
+            provider.script_next = provider.script_next + 1;
+            provider.active      = output.token;
+            ret true;
+        }
         if (provider.emit_alert == 0 || provider.alert_emitted) { ret false; }
         output.token           = 0x101 + provider.restarts::u64;
         output.kind            = handshake.EVENT_ALERT;
@@ -1214,5 +1253,133 @@ test core__a_buffer_aliasing_an_owner_table_or_history_taken_after_init_is_refus
     input.data = ?own[0];
     if (core.receive(?fixture.engine, ?fixture.secrets,
         ?input).status == transport.STATUS_ERROR) { ret 5; }
+    ret 0;
+}
+
+# a PING the peer protected with `keys` or `application`, as a 0-RTT packet
+# when `keys` is set and a 1-RTT one otherwise
+#[testing]
+fun ping_packet(fixture: *Fixture, keys: *protection.KeySet,
+    application: *protection.SendKeys, number: u64, output: *u8) usize {
+    var plaintext: [20]^u8;
+    plaintext[0] = frame.PING::u8;
+    var value: packet.Packet;
+    value.header.kind              = packet.PACKET_ONE_RTT;
+    value.header.version           = packet.VERSION_1;
+    value.header.destination       = fixture.engine.config.local_source;
+    value.header.source            = connection_id(21);
+    value.header.packet_number     = number;
+    value.header.packet_number_len = 4;
+    if (keys != nil) { value.header.kind = packet.PACKET_ZERO_RTT; }
+    var builder: binary.Builder               = binary.builder(output, 1200, binary.BIG);
+    val header:  packet.ProtectedHeaderResult = packet.encode_protected_header(
+        ?builder, ?value, 20 + 16, packet.default_limits());
+    if (!header.ok) { ret 0; }
+    var sealed: protection.Result;
+    if (keys != nil) {
+        sealed = protection.seal_packet(keys, number,
+            contracts.Bytes{data: output, len: header.count}, header.packet_number_offset,
+            contracts.SecretBytes{data: ?plaintext[0], len: 20},
+            contracts.Buffer{data: output, capacity: 1200});
+    }
+    or {
+        sealed = protection.seal_send_packet(application, number,
+            contracts.Bytes{data: output, len: header.count}, header.packet_number_offset,
+            contracts.SecretBytes{data: ?plaintext[0], len: 20},
+            contracts.Buffer{data: output, capacity: 1200});
+    }
+    if (sealed.error != protection.OK) { ret 0; }
+    ret sealed.written;
+}
+
+#[testing]
+fun receive_ping(fixture: *Fixture, keys: *protection.KeySet,
+    application: *protection.SendKeys, number: u64, now_ns: u64) bool {
+    var datagram: [1200]u8;
+    val length:   usize               = ping_packet(fixture, keys, application, number, ?datagram[0]);
+    var input:    transport.CoreInput = transport.CoreInput{
+        local: fixture.engine.config.local, peer: fixture.engine.config.peer,
+        data:  ?datagram[0], length: length, received_at_ns: now_ns, ecn: 0
+    };
+    ret length != 0 && core.receive(?fixture.engine, ?fixture.secrets,
+        ?input).status == transport.STATUS_OK;
+}
+
+#[testing]
+fun secret_chunks_live(fixture: *Fixture) usize {
+    var view: buffers.Snapshot;
+    if (!buffers.snapshot(?fixture.chunk_pool.pool, ?view)) { ret 0 - 1::usize; }
+    ret view.classes[3].live;
+}
+
+# rfc 9001 4.9.3: an accepted 0-RTT connection keeps its 0-RTT keys for
+# reordering only three ptos past its first 1-RTT packet
+test core__a_server_discards_accepted_0rtt_keys_three_ptos_after_its_first_1rtt_packet {
+    var fixture: Fixture;
+    if (!initialize(?fixture, transport.SERVER, true, 10)) { ret 1; }
+    # the fixture's 1 ms idle timeout would end the connection long before
+    fixture.engine.idle_timer_enabled = false;
+    var script: [4]Scripted;
+    script[0] = Scripted{kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.EARLY,
+        disposition: 0};
+    script[1] = Scripted{kind: handshake.EVENT_TRAFFIC_SECRET, level: handshake.HANDSHAKE,
+        disposition: 0};
+    script[2] = Scripted{kind: handshake.EVENT_TRAFFIC_SECRET,
+        level: handshake.APPLICATION, disposition: 0};
+    script[3] = Scripted{kind: handshake.EVENT_EARLY_DATA, level: 0,
+        disposition: handshake.EARLY_ACCEPTED};
+    fixture.provider.script       = ?script[0];
+    fixture.provider.script_count = 4;
+    if (core.poll_handshake(?fixture.engine, ?fixture.secrets, 20).status !=
+        transport.STATUS_OK || fixture.provider.script_next != 4 ||
+        core.snapshot(?fixture.engine).early_disposition != handshake.EARLY_ACCEPTED) { ret 2; }
+    # the peer's sides of the keys the server now holds
+    var early_secret:       [32]^u8;
+    var application_secret: [32]^u8;
+    scripted_secret(?early_secret[0], handshake.EARLY);
+    scripted_secret(?application_secret[0], handshake.APPLICATION);
+    var early_contexts: protection.Contexts;
+    var early:          protection.KeySet;
+    var application:    protection.SendKeys;
+    if (protection.bind(?early, ?early_contexts) != protection.OK ||
+        protection.derive_tls(?early, packet.VERSION_1, protection.LEVEL_EARLY,
+        protection.AES_128_GCM_SHA256, contracts.SecretBytes{data: ?early_secret[0],
+        len: 32}) != protection.OK ||
+        protection.init_send(?application, packet.VERSION_1,
+        protection.AES_128_GCM_SHA256, contracts.SecretBytes{
+        data: ?application_secret[0], len: 32
+    }) != protection.OK) { ret 3; }
+    val held: usize = secret_chunks_live(?fixture);
+    if (!receive_ping(?fixture, ?early, nil, 0, 30) ||
+        fixture.engine.authenticated_packets != 1) { ret 4; }
+    # the first 1-RTT packet starts the window, and a 0-RTT packet reordered
+    # behind it still opens inside it
+    val pto: u64 = recovery.current_pto(?fixture.engine.recovery_state, true);
+    if (!receive_ping(?fixture, nil, ?application, 3, 40) ||
+        fixture.engine.authenticated_packets != 2 ||
+        !receive_ping(?fixture, ?early, nil, 1, 50) ||
+        fixture.engine.authenticated_packets != 3 ||
+        secret_chunks_live(?fixture) != held) { ret 5; }
+    # the timer ends the window and gives the level's chunk back
+    val window_end: u64   = 40 + 3 * pto;
+    var fired:      usize = 0;
+    for (fired < 8 && secret_chunks_live(?fixture) == held) {
+        val armed: transport.CoreTimer = core.timer(?fixture.engine);
+        if (!armed.armed || armed.deadline_ns > window_end) { ret 6; }
+        if (core.on_timeout(?fixture.engine, ?fixture.secrets, armed.generation,
+            armed.deadline_ns).status != transport.STATUS_OK) { ret 7; }
+        if (secret_chunks_live(?fixture) != held && armed.deadline_ns != window_end) {
+            ret 8;
+        }
+        fired = fired + 1;
+    }
+    if (secret_chunks_live(?fixture) != held - 1 ||
+        fixture.secrets.early_receive.state == protection.STATE_ACTIVE) { ret 9; }
+    # a 0-RTT packet after the window is dropped as undecryptable
+    if (!receive_ping(?fixture, ?early, nil, 2, window_end + 10) ||
+        fixture.engine.authenticated_packets != 3) { ret 10; }
+    protection.destroy(?early);
+    protection.unbind(?early);
+    protection.destroy_send(?application);
     ret 0;
 }
