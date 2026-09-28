@@ -1,0 +1,72 @@
+# variable-length integers: every read, relaxed and canonical
+
+use quic.wire.varint;
+use std.encoding.binary;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.result.res;
+use std.types.size.usize;
+
+use fuzz.verdict;
+
+# a read that finished is exactly the bytes it names, and a canonical read of
+# the same bytes agrees with it or refuses only the non-minimal encoding
+fun read_one(d: *binary.Decoder, seen: *u64) u8 {
+    val before:  usize          = d.pos;
+    val relaxed: varint.Decoded = varint.read(d, false);
+    if (relaxed.status == varint.STATUS_MORE) {
+        if (d.pos != before) { ret 0; }
+        ret varint.STATUS_MORE;
+    }
+    if (relaxed.status != varint.STATUS_DONE) { ret 0; }
+    val width: usize = relaxed.width::usize;
+    if ((width != 1 && width != 2 && width != 4 && width != 8) || d.pos != before + width ||
+        relaxed.value > varint.MAX) { ret 0; }
+    # the value re-encoded at the width it was read at is the bytes it was read from
+    var encoded: [8]u8;
+    var b:       binary.Builder = binary.builder(?encoded[0], 8, binary.BIG);
+    val written: res[usize, u8] = varint.write(?b, relaxed.value, relaxed.width);
+    if (sel written.err || b.len != width) { ret 0; }
+    var i: usize = 0;
+    for (i < width) {
+        if (encoded[i] != d.data[before + i]) { ret 0; }
+        i = i + 1;
+    }
+    var again:     binary.Decoder = binary.decoder(?d.data[before], width, binary.BIG);
+    val canonical: varint.Decoded = varint.read(?again, true);
+    val minimal:   bool           = varint.width(relaxed.value) == relaxed.width;
+    if (minimal) {
+        if (canonical.status != varint.STATUS_DONE || canonical.value != relaxed.value ||
+            again.pos != width) { ret 0; }
+    }
+    or {
+        if (canonical.status != varint.STATUS_ERROR ||
+            canonical.error != varint.ERROR_NON_MINIMAL || again.pos != 0) { ret 0; }
+    }
+    if (@seen == 0) { @seen = (width::u64 << 1) | minimal::u64; }
+    ret varint.STATUS_DONE;
+}
+
+# read the input as a run of integers until it runs out
+pub fun answer(data: *u8, len: usize) verdict.Verdict {
+    var seen:  u64            = 0;
+    var ended: u64            = 0;
+    var d:     binary.Decoder = binary.decoder(data, len, binary.BIG);
+    var count: usize          = 0;
+    for (d.pos < d.len) {
+        val status: u8 = read_one(?d, ?seen);
+        if (status == 0) {
+            ret verdict.violated("varint: a read published a value its bytes do not encode");
+        }
+        if (status == varint.STATUS_MORE) {
+            ended = 1;
+            brk;
+        }
+        verdict.accept();
+        count = count + 1;
+        if (count > len) { ret verdict.violated("varint: the walk did not advance"); }
+    }
+    # the first integer's width and encoding, and whether the walk ran out mid-integer
+    ret verdict.answered(verdict.mix(seen, ended));
+}
