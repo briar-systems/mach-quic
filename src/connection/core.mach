@@ -2934,6 +2934,8 @@ fun receive_protected(core: *Core, secrets: *Secrets,
     var non_probing:   bool = false;
     if (!scan_plaintext(core, plaintext, opened.written, ?ack_eliciting,
         ?non_probing)) { ret fail(core, FRAME_ENCODING_ERROR, input.received_at_ns); }
+    # rfc 9000 12.4: a packet that carries no frames
+    if (opened.written == 0) { ret fail(core, PROTOCOL_VIOLATION, input.received_at_ns); }
     # the packet is recorded for acknowledgement only once its frames were
     # taken. a packet refused for storage stays unacknowledged, so its sender
     # retransmits what it carried
