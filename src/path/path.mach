@@ -1021,15 +1021,9 @@ pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult
     if (manager.config.role != ROLE_CLIENT)                              { ret path_error(ERROR_MIGRATION_DISABLED); }
     if (!valid_address(endpoint.local) || !valid_address(endpoint.peer)) { ret path_error(ERROR_ADDRESS); }
     val current: PathResult = find(manager, endpoint);
-    if (current.status == STATUS_OK) {
-        if (manager.storage.paths[current.handle.index].state == PATH_FAILED) {
-            var blocked: PathResult;
-            blocked.status = STATUS_BLOCKED;
-            blocked.handle = current.handle;
-            ret blocked;
-        }
-        ret current;
-    }
+    val failed:  bool       = current.status == STATUS_OK &&
+        manager.storage.paths[current.handle.index].state == PATH_FAILED;
+    if (current.status == STATUS_OK && !failed) { ret current; }
     if (!preferred && manager.selected_index < manager.storage.path_capacity &&
         manager.storage.paths[manager.selected_index].valid &&
         !address_equal(endpoint.peer, manager.storage.paths[manager.selected_index].endpoint.peer)) {
@@ -1038,7 +1032,20 @@ pub fun probe(manager: *Manager, endpoint: Endpoint, preferred: bool) PathResult
     if (manager.config.peer_disabled_active_migration && !preferred) {
         ret path_error(ERROR_MIGRATION_DISABLED);
     }
-    ret create_path(manager, endpoint, true, preferred, selected_port_rebinding(manager, endpoint));
+    val rebinding: bool = selected_port_rebinding(manager, endpoint);
+    if (!failed) { ret create_path(manager, endpoint, true, preferred, rebinding); }
+    # rfc 9000 8.2 and 9.1: a local address whose validation failed is probed
+    # afresh, as a new one, once nothing holds the failed path
+    var restarted: PathResult = restart(manager, current.handle);
+    if (restarted.status == STATUS_OK) {
+        manager.storage.paths[restarted.handle.index].locally_created = true;
+        manager.storage.paths[restarted.handle.index].preferred       = preferred;
+        manager.storage.paths[restarted.handle.index].port_rebinding  = rebinding;
+    }
+    or (restarted.status == STATUS_BLOCKED) {
+        restarted.handle = current.handle;
+    }
+    ret restarted;
 }
 
 pub fun migrate(manager: *Manager, value: Handle, preferred: bool,
