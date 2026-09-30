@@ -866,11 +866,12 @@ by their committed gitlinks.
 ```sh
 mach dep pull .
 mach build .
-mach test . --lib tests
+mach test . --all
 ```
 
 mach tests only the selected artifact's closure, and the library does not
-reach every test module, so the test-only `tests` artifact reaches them all.
+reach every test module, so the test-only `tests` artifact reaches them all. `--all` selects every
+artifact, `tests` included.
 `tools/test-selection` fails when a test under `src` is collected on no target.
 
 Build products are written to Mach's default `out/` directory.
