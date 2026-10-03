@@ -10,13 +10,13 @@ use supply: quic.storage.source;
 use crypto.contracts;
 use crypto.encoding.keys;
 use crypto.secret;
+use pki_cert: pki.cert;
 use std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 use tls_buffer:      tls.buffer;
-use tls_cert:        tls.cert;
 use tls_credentials: tls.cert.credentials;
 use tls_client_api:  tls.client;
 use tls_clock:       tls.clock;
@@ -440,13 +440,13 @@ fun generation_record(value: *tls_credentials.Generation) ownership.Range {
         ?value.borrows, $offset_of(tls_credentials.Generation, borrows));
 }
 
-fun trust_record(value: *tls_cert.TrustStore) ownership.Range {
+fun trust_record(value: *pki_cert.TrustStore) ownership.Range {
     if (value == nil) {
         var empty: ownership.Range;
         ret empty;
     }
-    ret ownership.anchored_record[tls_cert.TrustStore, usize](?value.len,
-        $offset_of(tls_cert.TrustStore, len));
+    ret ownership.anchored_record[pki_cert.TrustStore, usize](?value.len,
+        $offset_of(pki_cert.TrustStore, len));
 }
 
 fun entropy_record(value: *secret.Entropy) ownership.Range {
@@ -618,7 +618,7 @@ fun tls_client_context_valid(adapter: *Adapter, storage: Storage,
         value.config.alpn_len, $size_of(tls_config.ProtocolName),
         ownership.ZERO_FORBIDDEN), ?owned[0], 4) ||
         !tls_anchor_disjoint(ownership.array(value.config.trust.anchors::*u8,
-        value.config.trust.len, $size_of(tls_cert.Certificate),
+        value.config.trust.len, $size_of(pki_cert.Certificate),
         ownership.ZERO_FORBIDDEN), ?owned[0], 4) ||
         !tls_anchor_disjoint(ownership.array(value.config.versions::*u8,
         value.config.version_len, $size_of(u16), ownership.ZERO_FORBIDDEN),
@@ -654,7 +654,7 @@ fun tls_client_context_valid(adapter: *Adapter, storage: Storage,
     }
     if (identity != nil) {
         if (!tls_anchor_disjoint(ownership.array(identity.chain.certificates::*u8,
-            identity.chain.len, $size_of(tls_cert.Certificate),
+            identity.chain.len, $size_of(pki_cert.Certificate),
             ownership.ZERO_FORBIDDEN), ?owned[0], 4) ||
             !tls_anchor_disjoint(private_key_record(identity.private_key),
             ?owned[0], 4)) { ret false; }
@@ -740,7 +740,7 @@ fun tls_server_context_valid(adapter: *Adapter, storage: Storage,
             identity.server_name.len, ownership.ZERO_ALLOWED),
             ?owned[0], 4) ||
             !tls_anchor_disjoint(ownership.array(identity.chain.certificates::*u8,
-            identity.chain.len, $size_of(tls_cert.Certificate),
+            identity.chain.len, $size_of(pki_cert.Certificate),
             ownership.ZERO_FORBIDDEN), ?owned[0], 4) ||
             !tls_anchor_disjoint(private_key_record(identity.private_key),
             ?owned[0], 4)) { ret false; }
@@ -754,11 +754,11 @@ fun tls_server_context_valid(adapter: *Adapter, storage: Storage,
         }
         i = i + 1;
     }
-    val client_trust: *tls_cert.TrustStore = generation.client_trust;
+    val client_trust: *pki_cert.TrustStore = generation.client_trust;
     if (client_trust != nil) {
         if (!tls_anchor_disjoint(trust_record(client_trust), ?owned[0], 4) ||
             !tls_anchor_disjoint(ownership.array(client_trust.anchors::*u8,
-            client_trust.len, $size_of(tls_cert.Certificate),
+            client_trust.len, $size_of(pki_cert.Certificate),
             ownership.ZERO_FORBIDDEN), ?owned[0], 4)) { ret false; }
         i = 0;
         for (i < client_trust.len) {

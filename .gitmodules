@@ -7,3 +7,6 @@
 [submodule "dep/tls"]
 	path = dep/tls
 	url = https://github.com/briar-systems/mach-tls
+[submodule "dep/pki"]
+	path = dep/pki
+	url = https://github.com/briar-systems/mach-pki
