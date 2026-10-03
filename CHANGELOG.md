@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-02
+
+### Breaking
+
+- Dependencies: requires mach-tls 0.17 and mach-pki 0.1, selected by `version = "^0.17"` and `version = "^0.1"` with the gitlinks at v0.17.0 and v0.1.0 (#307). Certificate types come from mach-pki: `tls.cert` is now `pki.cert` and `tls.cert.load` is `pki.load`. Resolution is flat, so a consumer of quic moves to tls 0.17 and takes pki with it. test/fuzz pins `tag/v0.17.0` and `tag/v0.1.0`.
+
 ## [0.25.1] - 2026-09-28
 
 ### Fixed
