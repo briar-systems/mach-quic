@@ -1,176 +1,216 @@
+[quic](../README.md) / [storage](README.md) / **ranges**
+
 # quic.storage.ranges
 
-## val INLINE
+a bounded set of byte offsets kept as sorted, disjoint, non-adjacent
+half-open intervals
+
+a few intervals live inline. more spill into one pool chunk, taken from the
+owning account's budget and given back once the set shrinks. every operation
+that could grow the set checks its cap and its storage first and changes
+nothing when either refuses, so a caller can refuse the input that asked
+
+complexity, with n intervals and n at most the cap:
+  locate:           O(log n)
+  insert, remove:   O(log n) search plus an O(n) shift
+  contains, gap:    O(log n)
+  drop_prefix:      O(k) for k intervals removed, plus the shift
+  covered_from:     O(1)
+
+Source: [`src/storage/ranges.mach`](../../../../src/storage/ranges.mach)
+
+Uses types from [`quic.storage.source`](source.md).
+
+| Type | | |
+| :--- | :--- | :--- |
+| [`Interval`](#interval) | `rec` |  |
+| [`Status`](#status) | `def` |  |
+| [`Source`](#source) | `def` | where a set's spill chunk comes from and whose budget it counts against |
+| [`RangeSet`](#rangeset) | `rec` |  |
+
+| On `Status` | |
+| :--- | :--- |
+| [`STATUS_OK`](#status), [`STATUS_FULL`](#status), [`STATUS_BLOCKED`](#status), [`STATUS_ERROR`](#status) | |
+
+| On `RangeSet` | |
+| :--- | :--- |
+| [`make`](#make) | an empty set holding at most `cap` intervals |
+| [`count`](#count), [`empty`](#empty), [`spilled`](#spilled) | |
+| [`index_after`](#index_after) | the position of the first interval that ends beyond `offset` |
+| [`at`](#at) | |
+| [`count_after_insert`](#count_after_insert) | the number of intervals the set would hold after inserting [start, end) |
+| [`insert`](#insert) | adds [start, end) |
+| [`remove`](#remove) | removes [start, end) |
+| [`drop_prefix`](#drop_prefix) | removes every offset below `offset` |
+| [`contains`](#contains) | |
+| [`gap_start`](#gap_start) | the first offset in [from, limit) the set does not hold, or `limit` |
+| [`gap_end`](#gap_end) | where the gap that starts at `from` ends: the next held offset, or `limit` |
+| [`covered_from`](#covered_from) | how far the set holds every offset from `from` on, or `from` itself |
+| [`clear`](#clear) | forgets every interval and gives the spill chunk back |
+
+| Constants | |
+| :--- | :--- |
+| [`INLINE`](#constants), [`SPILL_CAPACITY`](#constants) | |
+
+---
+
+## Interval
 
 ```mach
-pub val INLINE: usize = 4
+pub rec Interval {
+    start: u64;
+    end:   u64;
+}
 ```
 
-## rec Interval
-
-```mach
-pub rec Interval;
-```
-
-## val SPILL_CAPACITY
-
-```mach
-pub val SPILL_CAPACITY: usize = supply.BYTES / 16
-```
-
-## def Status
+## Status
 
 ```mach
 pub def Status: u8
 ```
 
-## val STATUS_OK
+| Name | Value | |
+| :--- | :--- | :--- |
+| `STATUS_OK` | `1` |  |
+| `STATUS_FULL` | `2` |  |
+| `STATUS_BLOCKED` | `3` |  |
+| `STATUS_ERROR` | `4` |  |
+
+## Source
 
 ```mach
-pub val STATUS_OK:      Status = 1
-```
-
-## val STATUS_FULL
-
-```mach
-pub val STATUS_FULL:    Status = 2
-```
-
-## val STATUS_BLOCKED
-
-```mach
-pub val STATUS_BLOCKED: Status = 3
-```
-
-## val STATUS_ERROR
-
-```mach
-pub val STATUS_ERROR:   Status = 4
-```
-
-## def Source
-
-```mach
-pub def Source: supply.Source
+pub def Source: quic.storage.source.Source
 ```
 
 where a set's spill chunk comes from and whose budget it counts against
 
-## rec RangeSet
+## RangeSet
 
 ```mach
-pub rec RangeSet;
+pub rec RangeSet {
+    inline: [INLINE]Interval;
+    spill:  quic.storage.source.Chunk;
+    count:  usize;
+    cap:    usize;
+}
 ```
 
-## fun make
+### make
 
 ```mach
-pub fun make(cap: usize) RangeSet;
+pub fun make(cap: usize) RangeSet
 ```
 
 an empty set holding at most `cap` intervals. a cap above what one spill
 chunk holds is lowered to it
 
-## fun count
+### count
 
 ```mach
-pub fun count(set: *RangeSet) usize;
+pub fun count(set: *RangeSet) usize
 ```
 
-## fun empty
+### empty
 
 ```mach
-pub fun empty(set: *RangeSet) bool;
+pub fun empty(set: *RangeSet) bool
 ```
 
-## fun spilled
+### spilled
 
 ```mach
-pub fun spilled(set: *RangeSet) bool;
+pub fun spilled(set: *RangeSet) bool
 ```
 
-## fun index_after
+### index_after
 
 ```mach
-pub fun index_after(set: *RangeSet, offset: u64) usize;
+pub fun index_after(set: *RangeSet, offset: u64) usize
 ```
 
 the position of the first interval that ends beyond `offset`
 
-## fun at
+### at
 
 ```mach
-pub fun at(set: *RangeSet, index: usize) Interval;
+pub fun at(set: *RangeSet, index: usize) Interval
 ```
 
-## fun count_after_insert
+### count_after_insert
 
 ```mach
-pub fun count_after_insert(set: *RangeSet, start: u64, end: u64) usize;
+pub fun count_after_insert(set: *RangeSet, start: u64, end: u64) usize
 ```
 
 the number of intervals the set would hold after inserting [start, end)
 
-## fun insert
+### insert
 
 ```mach
-pub fun insert(set: *RangeSet, start: u64, end: u64, source: *Source) Status;
+pub fun insert(set: *RangeSet, start: u64, end: u64, source: *Source) Status
 ```
 
 adds [start, end). a refusal changes nothing
 
-## fun remove
+### remove
 
 ```mach
-pub fun remove(set: *RangeSet, start: u64, end: u64, source: *Source) Status;
+pub fun remove(set: *RangeSet, start: u64, end: u64, source: *Source) Status
 ```
 
 removes [start, end). splitting an interval can grow the set, so this can
 refuse too, and a refusal changes nothing
 
-## fun drop_prefix
+### drop_prefix
 
 ```mach
-pub fun drop_prefix(set: *RangeSet, offset: u64, source: *Source);
+pub fun drop_prefix(set: *RangeSet, offset: u64, source: *Source)
 ```
 
 removes every offset below `offset`
 
-## fun contains
+### contains
 
 ```mach
-pub fun contains(set: *RangeSet, start: u64, end: u64) bool;
+pub fun contains(set: *RangeSet, start: u64, end: u64) bool
 ```
 
-## fun gap_start
+### gap_start
 
 ```mach
-pub fun gap_start(set: *RangeSet, from: u64, limit: u64) u64;
+pub fun gap_start(set: *RangeSet, from: u64, limit: u64) u64
 ```
 
 the first offset in [from, limit) the set does not hold, or `limit`
 
-## fun gap_end
+### gap_end
 
 ```mach
-pub fun gap_end(set: *RangeSet, from: u64, limit: u64) u64;
+pub fun gap_end(set: *RangeSet, from: u64, limit: u64) u64
 ```
 
 where the gap that starts at `from` ends: the next held offset, or `limit`
 
-## fun covered_from
+### covered_from
 
 ```mach
-pub fun covered_from(set: *RangeSet, from: u64) u64;
+pub fun covered_from(set: *RangeSet, from: u64) u64
 ```
 
 how far the set holds every offset from `from` on, or `from` itself
 
-## fun clear
+### clear
 
 ```mach
-pub fun clear(set: *RangeSet, source: *Source);
+pub fun clear(set: *RangeSet, source: *Source)
 ```
 
 forgets every interval and gives the spill chunk back
+
+## Constants
+
+| Name | Type | Value | |
+| :--- | :--- | :--- | :--- |
+| `INLINE` | `usize` | `4` |  |
+| `SPILL_CAPACITY` | `usize` | `supply.BYTES / 16` |  |
 

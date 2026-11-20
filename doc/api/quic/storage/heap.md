@@ -1,69 +1,102 @@
+[quic](../README.md) / [storage](README.md) / **heap**
+
 # quic.storage.heap
 
-## rec Node
+growable min-heap of slot indices ordered by a u64 key
+
+each record stores its own heap position, reached through `position`, so a
+record can leave the heap from anywhere in it
+
+Source: [`src/storage/heap.mach`](../../../../src/storage/heap.mach)
+
+Uses types from [`quic.connection.ownership`](../connection/ownership.md), [`quic.storage.slots`](slots.md).
+
+| Type | | |
+| :--- | :--- | :--- |
+| [`Node`](#node) | `rec` |  |
+| [`Heap`](#heap) | `rec` |  |
+
+| On `Heap` | |
+| :--- | :--- |
+| [`empty`](#empty), [`sound`](#sound) | |
+| [`reserve`](#reserve) | makes room for `count` nodes in total |
+| [`push`](#push) | requires a reserve for count + 1 since the last growth |
+| [`remove`](#remove), [`bytes`](#bytes), [`range`](#range) | |
+| [`destroy`](#destroy) | releases the heap |
+
+---
+
+## Node
 
 ```mach
-pub rec Node;
+pub rec Node {
+    key:  u64;
+    slot: usize;
+}
 ```
 
-## rec Heap
+## Heap
 
 ```mach
-pub rec Heap;
+pub rec Heap {
+    nodes:    *Node;
+    capacity: usize;
+    count:    usize;
+}
 ```
 
-## fun empty
+### empty
 
 ```mach
-pub fun empty() Heap;
+pub fun empty() Heap
 ```
 
-## fun sound
+### sound
 
 ```mach
-pub fun sound(heap: *Heap) bool;
+pub fun sound(heap: *Heap) bool
 ```
 
-## fun reserve
+### reserve
 
 ```mach
-pub fun reserve(heap: *Heap, backing: *allocator.Allocator, count: usize) bool;
+pub fun reserve(heap: *Heap, backing: *std.allocator.Allocator, count: usize) bool
 ```
 
 makes room for `count` nodes in total. a refusal leaves the heap as it was
 
-## fun push
+### push
 
 ```mach
-pub fun push[T](heap: *Heap, table: *slots.Slots[T], key: u64, slot: usize,
-position: fun(*T) *usize);
+pub fun push[T](heap: *Heap, table: *quic.storage.slots.Slots[T], key: u64, slot: usize,
+    position: fun(*T) *usize)
 ```
 
 requires a reserve for count + 1 since the last growth
 
-## fun remove
+### remove
 
 ```mach
-pub fun remove[T](heap: *Heap, table: *slots.Slots[T], at: usize,
-position: fun(*T) *usize);
+pub fun remove[T](heap: *Heap, table: *quic.storage.slots.Slots[T], at: usize,
+    position: fun(*T) *usize)
 ```
 
-## fun bytes
+### bytes
 
 ```mach
-pub fun bytes(heap: *Heap) usize;
+pub fun bytes(heap: *Heap) usize
 ```
 
-## fun range
+### range
 
 ```mach
-pub fun range(heap: *Heap) ownership.Range;
+pub fun range(heap: *Heap) quic.connection.ownership.Range
 ```
 
-## fun destroy
+### destroy
 
 ```mach
-pub fun destroy(heap: *Heap, backing: *allocator.Allocator) bool;
+pub fun destroy(heap: *Heap, backing: *std.allocator.Allocator) bool
 ```
 
 releases the heap. a refusal keeps it, so the caller can try again

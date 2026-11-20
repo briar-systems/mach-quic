@@ -1,368 +1,338 @@
+[quic](../README.md) / [connection](README.md) / **token**
+
 # quic.connection.token
 
-## val PURPOSE_RETRY
+authenticated address and retry tokens with owned replay protection
 
-```mach
-pub val PURPOSE_RETRY:   u8 = 1
-```
+consumed retry nonces are remembered until their token could no longer
+authenticate, in storage that grows with what is remembered
 
-## val PURPOSE_ADDRESS
+Source: [`src/connection/token.mach`](../../../../src/connection/token.mach)
 
-```mach
-pub val PURPOSE_ADDRESS: u8 = 2
-```
+Uses types from [`quic.connection.ownership`](ownership.md), [`quic.packet.packet`](../packet/packet.md), [`quic.storage.heap`](../storage/heap.md), [`quic.storage.index`](../storage/index.md), [`quic.storage.slots`](../storage/slots.md).
 
-## val TOKEN_SIZE
+| Type | | |
+| :--- | :--- | :--- |
+| [`Status`](#status) | `def` |  |
+| [`Error`](#error) | `def` |  |
+| [`ReplayState`](#replaystate) | `def` |  |
+| [`ReplaySlot`](#replayslot) | `rec` | an entry leaves the expiry heap and the index once its token has expired, but a reservation's owner still holds it until commit or cancel |
+| [`Config`](#config) | `rec` | max_replay caps remembered nonces by count |
+| [`Manager`](#manager) | `rec` |  |
+| [`Snapshot`](#snapshot-1) | `rec` |  |
+| [`Reservation`](#reservation) | `rec` |  |
+| [`Claims`](#claims) | `rec` |  |
+| [`Result`](#result) | `rec` |  |
 
-```mach
-pub val TOKEN_SIZE: usize = 110
-```
+| On `Status` | |
+| :--- | :--- |
+| [`STATUS_OK`](#status), [`STATUS_STALE`](#status), [`STATUS_BLOCKED`](#status), [`STATUS_ERROR`](#status) | |
 
-## val BODY_SIZE
+| On `Error` | |
+| :--- | :--- |
+| [`ERROR_NONE`](#error), [`ERROR_STATE`](#error), [`ERROR_CONFIG`](#error), [`ERROR_BUFFER`](#error), [`ERROR_FORMAT`](#error), [`ERROR_KEY`](#error), [`ERROR_AUTH`](#error), [`ERROR_EXPIRED`](#error), [`ERROR_ADDRESS`](#error), [`ERROR_REPLAY`](#error), [`ERROR_CAPACITY`](#error), [`ERROR_TOKEN`](#error), [`ERROR_TIME`](#error), [`ERROR_MEMORY`](#error) | |
+| [`ERROR_REPLAY_FULL`](#error) | the replay store is at its bound |
 
-```mach
-pub val BODY_SIZE:  usize = 94
-```
+| On `ReplayState` | |
+| :--- | :--- |
+| [`REPLAY_FREE`](#replaystate), [`REPLAY_RESERVED`](#replaystate), [`REPLAY_CONSUMED`](#replaystate) | |
 
-## val TAG_SIZE
+| On `Manager` | |
+| :--- | :--- |
+| [`ranges`](#ranges) | writes the manager and every directory it owns |
+| [`initialize`](#initialize) | replay storage draws on `backing` for the manager's whole life and is released to it by finish_close |
+| [`lease_listener`](#lease_listener), [`release_listener`](#release_listener), [`rotate`](#rotate), [`rotate_scoped`](#rotate_scoped), [`seal`](#seal), [`seal_scoped`](#seal_scoped), [`open`](#open), [`open_scoped`](#open_scoped), [`commit`](#commit), [`commit_scoped`](#commit_scoped), [`cancel`](#cancel), [`cancel_scoped`](#cancel_scoped), [`begin_close`](#begin_close), [`finish_close`](#finish_close), [`snapshot`](#snapshot) | |
 
-```mach
-pub val TAG_SIZE:   usize = 16
-```
+| Constants | |
+| :--- | :--- |
+| [`PURPOSE_RETRY`](#constants), [`PURPOSE_ADDRESS`](#constants), [`TOKEN_SIZE`](#constants), [`BODY_SIZE`](#constants), [`TAG_SIZE`](#constants), [`KEY_SIZE`](#constants) | |
+| [`RANGE_COUNT`](#constants) | how many ranges `ranges` writes |
 
-## val KEY_SIZE
+---
 
-```mach
-pub val KEY_SIZE:   usize = 32
-```
-
-## def Status
+## Status
 
 ```mach
 pub def Status: u8
 ```
 
-## val STATUS_OK
+| Name | Value | |
+| :--- | :--- | :--- |
+| `STATUS_OK` | `1` |  |
+| `STATUS_STALE` | `2` |  |
+| `STATUS_BLOCKED` | `3` |  |
+| `STATUS_ERROR` | `4` |  |
 
-```mach
-pub val STATUS_OK:      Status = 1
-```
-
-## val STATUS_STALE
-
-```mach
-pub val STATUS_STALE:   Status = 2
-```
-
-## val STATUS_BLOCKED
-
-```mach
-pub val STATUS_BLOCKED: Status = 3
-```
-
-## val STATUS_ERROR
-
-```mach
-pub val STATUS_ERROR:   Status = 4
-```
-
-## def Error
+## Error
 
 ```mach
 pub def Error: u8
 ```
 
-## val ERROR_NONE
+| Name | Value | |
+| :--- | :--- | :--- |
+| `ERROR_NONE` | `0` |  |
+| `ERROR_STATE` | `1` |  |
+| `ERROR_CONFIG` | `2` |  |
+| `ERROR_BUFFER` | `3` |  |
+| `ERROR_FORMAT` | `4` |  |
+| `ERROR_KEY` | `5` |  |
+| `ERROR_AUTH` | `6` |  |
+| `ERROR_EXPIRED` | `7` |  |
+| `ERROR_ADDRESS` | `8` |  |
+| `ERROR_REPLAY` | `9` |  |
+| `ERROR_CAPACITY` | `10` |  |
+| `ERROR_TOKEN` | `11` |  |
+| `ERROR_TIME` | `12` |  |
+| `ERROR_MEMORY` | `13` |  |
+| `ERROR_REPLAY_FULL` | `14` | the replay store is at its bound |
 
-```mach
-pub val ERROR_NONE:     Error = 0
-```
-
-## val ERROR_STATE
-
-```mach
-pub val ERROR_STATE:    Error = 1
-```
-
-## val ERROR_CONFIG
-
-```mach
-pub val ERROR_CONFIG:   Error = 2
-```
-
-## val ERROR_BUFFER
-
-```mach
-pub val ERROR_BUFFER:   Error = 3
-```
-
-## val ERROR_FORMAT
-
-```mach
-pub val ERROR_FORMAT:   Error = 4
-```
-
-## val ERROR_KEY
-
-```mach
-pub val ERROR_KEY:      Error = 5
-```
-
-## val ERROR_AUTH
-
-```mach
-pub val ERROR_AUTH:     Error = 6
-```
-
-## val ERROR_EXPIRED
-
-```mach
-pub val ERROR_EXPIRED:  Error = 7
-```
-
-## val ERROR_ADDRESS
-
-```mach
-pub val ERROR_ADDRESS:  Error = 8
-```
-
-## val ERROR_REPLAY
-
-```mach
-pub val ERROR_REPLAY:   Error = 9
-```
-
-## val ERROR_CAPACITY
-
-```mach
-pub val ERROR_CAPACITY: Error = 10
-```
-
-## val ERROR_TOKEN
-
-```mach
-pub val ERROR_TOKEN:    Error = 11
-```
-
-## val ERROR_TIME
-
-```mach
-pub val ERROR_TIME:     Error = 12
-```
-
-## val ERROR_MEMORY
-
-```mach
-pub val ERROR_MEMORY:   Error = 13
-```
-
-## val ERROR_REPLAY_FULL
-
-```mach
-pub val ERROR_REPLAY_FULL: Error = 14
-```
-
-the replay store is at its bound. the token is refused, never remembered
-over a live nonce, so replay protection holds under a flood
-
-## def ReplayState
+## ReplayState
 
 ```mach
 pub def ReplayState: u8
 ```
 
-## val REPLAY_FREE
+| Name | Value | |
+| :--- | :--- | :--- |
+| `REPLAY_FREE` | `0` |  |
+| `REPLAY_RESERVED` | `1` |  |
+| `REPLAY_CONSUMED` | `2` |  |
+
+## ReplaySlot
 
 ```mach
-pub val REPLAY_FREE:     ReplayState = 0
-```
-
-## val REPLAY_RESERVED
-
-```mach
-pub val REPLAY_RESERVED: ReplayState = 1
-```
-
-## val REPLAY_CONSUMED
-
-```mach
-pub val REPLAY_CONSUMED: ReplayState = 2
-```
-
-## val RANGE_COUNT
-
-```mach
-pub val RANGE_COUNT: usize = 4
-```
-
-how many ranges `ranges` writes
-
-## rec ReplaySlot
-
-```mach
-pub rec ReplaySlot;
+pub rec ReplaySlot {
+    nonce:          u64;
+    key_generation: u64;
+    expires_at_ns:  u64;
+    generation:     u64;
+    hash:           u64;
+    heap_position:  usize;
+    state:          ReplayState;
+}
 ```
 
 an entry leaves the expiry heap and the index once its token has expired,
 but a reservation's owner still holds it until commit or cancel
 
-## rec Config
+## Config
 
 ```mach
-pub rec Config;
+pub rec Config {
+    source:          u64;
+    retry_max_age:   std.chrono.duration.Duration;
+    address_max_age: std.chrono.duration.Duration;
+    max_replay:      usize;
+}
 ```
 
 max_replay caps remembered nonces by count. it is required: a peer that can
 present many valid tokens must not be able to grow the store without limit
 
-## rec Manager
+## Manager
 
 ```mach
-pub rec Manager;
+pub rec Manager {
+    config:              Config;
+    backing:             *std.allocator.Allocator;
+    replay:              quic.storage.slots.Slots[ReplaySlot];
+    replay_index:        quic.storage.index.Index;
+    expiry:              quic.storage.heap.Heap;
+    hash_key:            std.crypto.hash.siphash.Key;
+    current:             [32]^u8;
+    previous:            [32]^u8;
+    current_generation:  u64;
+    previous_generation: u64;
+    reserved:            usize;
+    replay_full:         u64;
+    generation:          u64;
+    listener_lease:      u64;
+    initialized:         bool;
+    closing:             bool;
+}
 ```
 
-## rec Snapshot
+### ranges
 
 ```mach
-pub rec Snapshot;
-```
-
-## rec Reservation
-
-```mach
-pub rec Reservation;
-```
-
-## rec Claims
-
-```mach
-pub rec Claims;
-```
-
-## rec Result
-
-```mach
-pub rec Result;
-```
-
-## fun ranges
-
-```mach
-pub fun ranges(manager: *Manager, output: *ownership.Range);
+pub fun ranges(manager: *Manager, output: *quic.connection.ownership.Range)
 ```
 
 writes the manager and every directory it owns. directories move as they
 grow, so the ranges hold only until the next retry token is opened
 
-## fun initialize
+### initialize
 
 ```mach
 pub fun initialize(manager: *Manager, config: Config,
-backing: *allocator.Allocator, generation: u64,
-key: contracts.SecretBytes) bool;
+    backing: *std.allocator.Allocator, generation: u64,
+    key: crypto.contracts.SecretBytes) bool
 ```
 
 replay storage draws on `backing` for the manager's whole life and is
 released to it by finish_close
 
-## fun lease_listener
+### lease_listener
 
 ```mach
-pub fun lease_listener(manager: *Manager, source: u64) bool;
+pub fun lease_listener(manager: *Manager, source: u64) bool
 ```
 
-## fun release_listener
+### release_listener
 
 ```mach
-pub fun release_listener(manager: *Manager, source: u64) bool;
+pub fun release_listener(manager: *Manager, source: u64) bool
 ```
 
-## fun rotate
+### rotate
 
 ```mach
-pub fun rotate(manager: *Manager, generation: u64, key: contracts.SecretBytes) bool;
+pub fun rotate(manager: *Manager, generation: u64, key: crypto.contracts.SecretBytes) bool
 ```
 
-## fun rotate_scoped
+### rotate_scoped
 
 ```mach
 pub fun rotate_scoped(manager: *Manager, listener_source: u64, generation: u64,
-key: contracts.SecretBytes) bool;
+    key: crypto.contracts.SecretBytes) bool
 ```
 
-## fun seal
+### seal
 
 ```mach
-pub fun seal(manager: *Manager, purpose: u8, peer: ip.Endpoint,
-original_destination: packet.ConnectionId,
-retry_source: packet.ConnectionId, issued_at: time.Instant, nonce: u64,
-output: *u8, capacity: usize) Result;
+pub fun seal(manager: *Manager, purpose: u8, peer: std.net.ip.Endpoint,
+    original_destination: quic.packet.packet.ConnectionId,
+    retry_source: quic.packet.packet.ConnectionId, issued_at: std.chrono.time.Instant, nonce: u64,
+    output: *u8, capacity: usize) Result
 ```
 
-## fun seal_scoped
+### seal_scoped
 
 ```mach
 pub fun seal_scoped(manager: *Manager, listener_source: u64, purpose: u8,
-peer: ip.Endpoint, original_destination: packet.ConnectionId,
-retry_source: packet.ConnectionId, issued_at: time.Instant, nonce: u64,
-output: *u8, capacity: usize) Result;
+    peer: std.net.ip.Endpoint, original_destination: quic.packet.packet.ConnectionId,
+    retry_source: quic.packet.packet.ConnectionId, issued_at: std.chrono.time.Instant, nonce: u64,
+    output: *u8, capacity: usize) Result
 ```
 
-## fun open
+### open
 
 ```mach
 pub fun open(manager: *Manager, input: *u8, length: usize,
-expected_peer: ip.Endpoint, now: time.Instant) Result;
+    expected_peer: std.net.ip.Endpoint, now: std.chrono.time.Instant) Result
 ```
 
-## fun open_scoped
+### open_scoped
 
 ```mach
 pub fun open_scoped(manager: *Manager, listener_source: u64, input: *u8,
-length: usize, expected_peer: ip.Endpoint, now: time.Instant) Result;
+    length: usize, expected_peer: std.net.ip.Endpoint, now: std.chrono.time.Instant) Result
 ```
 
-## fun commit
+### commit
 
 ```mach
-pub fun commit(manager: *Manager, reservation: Reservation) Result;
+pub fun commit(manager: *Manager, reservation: Reservation) Result
 ```
 
-## fun commit_scoped
+### commit_scoped
 
 ```mach
 pub fun commit_scoped(manager: *Manager, listener_source: u64,
-reservation: Reservation) Result;
+    reservation: Reservation) Result
 ```
 
-## fun cancel
+### cancel
 
 ```mach
-pub fun cancel(manager: *Manager, reservation: Reservation) Result;
+pub fun cancel(manager: *Manager, reservation: Reservation) Result
 ```
 
-## fun cancel_scoped
+### cancel_scoped
 
 ```mach
 pub fun cancel_scoped(manager: *Manager, listener_source: u64,
-reservation: Reservation) Result;
+    reservation: Reservation) Result
 ```
 
-## fun begin_close
+### begin_close
 
 ```mach
-pub fun begin_close(manager: *Manager) bool;
+pub fun begin_close(manager: *Manager) bool
 ```
 
-## fun finish_close
+### finish_close
 
 ```mach
-pub fun finish_close(manager: *Manager) bool;
+pub fun finish_close(manager: *Manager) bool
 ```
 
-## fun snapshot
+### snapshot
 
 ```mach
-pub fun snapshot(manager: *Manager) Snapshot;
+pub fun snapshot(manager: *Manager) Snapshot
 ```
+
+## Snapshot
+
+```mach
+pub rec Snapshot {
+    remembered:  usize;
+    reserved:    usize;
+    bytes:       usize;
+    replay_full: u64;
+    initialized: bool;
+    closing:     bool;
+}
+```
+
+## Reservation
+
+```mach
+pub rec Reservation {
+    source:         u64;
+    index:          usize;
+    generation:     u64;
+    nonce:          u64;
+    key_generation: u64;
+}
+```
+
+## Claims
+
+```mach
+pub rec Claims {
+    purpose:              u8;
+    issued_at_ns:         u64;
+    nonce:                u64;
+    peer:                 std.net.ip.Endpoint;
+    original_destination: quic.packet.packet.ConnectionId;
+    retry_source:         quic.packet.packet.ConnectionId;
+    reservation:          Reservation;
+}
+```
+
+## Result
+
+```mach
+pub rec Result {
+    status: Status;
+    error:  Error;
+    count:  usize;
+    claims: Claims;
+}
+```
+
+## Constants
+
+| Name | Type | Value | |
+| :--- | :--- | :--- | :--- |
+| `PURPOSE_RETRY` | `u8` | `1` |  |
+| `PURPOSE_ADDRESS` | `u8` | `2` |  |
+| `TOKEN_SIZE` | `usize` | `110` |  |
+| `BODY_SIZE` | `usize` | `94` |  |
+| `TAG_SIZE` | `usize` | `16` |  |
+| `KEY_SIZE` | `usize` | `32` |  |
+| `RANGE_COUNT` | `usize` | `4` | how many ranges `ranges` writes |
 

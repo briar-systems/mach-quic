@@ -1,76 +1,113 @@
+[quic](../README.md) / [storage](README.md) / **index**
+
 # quic.storage.index
 
-## rec Entry
+open-addressed hash index from a keyed hash to a slot index
+
+entries hold indices, never addresses, so growth rebuilds the index in a
+fresh allocation. load stays at or below one half and deletion shifts the
+cluster back, so a probe always ends at an empty entry and no tombstones
+accumulate
+
+Source: [`src/storage/index.mach`](../../../../src/storage/index.mach)
+
+Uses types from [`quic.connection.ownership`](../connection/ownership.md), [`quic.storage.slots`](slots.md).
+
+| Type | | |
+| :--- | :--- | :--- |
+| [`Entry`](#entry) | `rec` |  |
+| [`Index`](#index) | `rec` |  |
+
+| On `Index` | |
+| :--- | :--- |
+| [`empty`](#empty) | |
+| [`sound`](#sound) | the capacity is a power of two above twice the count, so every probe ends |
+| [`reserve`](#reserve) | makes room for `count` entries in total |
+| [`find`](#find) | |
+| [`insert`](#insert) | requires a reserve for count + 1 since the last growth |
+| [`remove`](#remove), [`bytes`](#bytes), [`range`](#range) | |
+| [`destroy`](#destroy) | releases the index |
+
+---
+
+## Entry
 
 ```mach
-pub rec Entry;
+pub rec Entry {
+    hash: u64;
+    slot: usize;
+}
 ```
 
-## rec Index
+## Index
 
 ```mach
-pub rec Index;
+pub rec Index {
+    entries:  *Entry;
+    capacity: usize;
+    count:    usize;
+}
 ```
 
-## fun empty
+### empty
 
 ```mach
-pub fun empty() Index;
+pub fun empty() Index
 ```
 
-## fun sound
+### sound
 
 ```mach
-pub fun sound(index: *Index) bool;
+pub fun sound(index: *Index) bool
 ```
 
 the capacity is a power of two above twice the count, so every probe ends
 
-## fun reserve
+### reserve
 
 ```mach
-pub fun reserve(index: *Index, backing: *allocator.Allocator, count: usize) bool;
+pub fun reserve(index: *Index, backing: *std.allocator.Allocator, count: usize) bool
 ```
 
 makes room for `count` entries in total. a refusal leaves the index as it was
 
-## fun find
+### find
 
 ```mach
-pub fun find[T, K](index: *Index, table: *slots.Slots[T], hash: u64, key: *K,
-equal: fun(*T, *K) bool) usize;
+pub fun find[T, K](index: *Index, table: *quic.storage.slots.Slots[T], hash: u64, key: *K,
+    equal: fun(*T, *K) bool) usize
 ```
 
-## fun insert
+### insert
 
 ```mach
-pub fun insert(index: *Index, hash: u64, slot: usize);
+pub fun insert(index: *Index, hash: u64, slot: usize)
 ```
 
 requires a reserve for count + 1 since the last growth
 
-## fun remove
+### remove
 
 ```mach
-pub fun remove(index: *Index, hash: u64, slot: usize) bool;
+pub fun remove(index: *Index, hash: u64, slot: usize) bool
 ```
 
-## fun bytes
+### bytes
 
 ```mach
-pub fun bytes(index: *Index) usize;
+pub fun bytes(index: *Index) usize
 ```
 
-## fun range
+### range
 
 ```mach
-pub fun range(index: *Index) ownership.Range;
+pub fun range(index: *Index) quic.connection.ownership.Range
 ```
 
-## fun destroy
+### destroy
 
 ```mach
-pub fun destroy(index: *Index, backing: *allocator.Allocator) bool;
+pub fun destroy(index: *Index, backing: *std.allocator.Allocator) bool
 ```
 
 releases the index. a refusal keeps it, so the caller can try again

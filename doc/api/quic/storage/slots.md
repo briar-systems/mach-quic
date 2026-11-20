@@ -1,88 +1,126 @@
+[quic](../README.md) / [storage](README.md) / **slots**
+
 # quic.storage.slots
 
-## val NONE
+growable index-addressed records with a free list
+
+records move when the directory grows, so only indices may be held across a
+call that can grow it
+
+Source: [`src/storage/slots.mach`](../../../../src/storage/slots.mach)
+
+Uses types from [`quic.connection.ownership`](../connection/ownership.md).
+
+| Type | | |
+| :--- | :--- | :--- |
+| [`Cell`](#cell) | `rec` |  |
+| [`Slots`](#slots) | `rec` |  |
+
+| On `Slots` | |
+| :--- | :--- |
+| [`empty`](#empty) | |
+| [`sound`](#sound) | the counters agree with each other, so no walk can run past the directory |
+| [`reserve`](#reserve) | makes the next `additional` claims succeed without allocating |
+| [`claim`](#claim) | takes the lowest recently freed index, or NONE when reserve was skipped |
+| [`release`](#release) | the caller's own state proves the index is claimed |
+| [`at`](#at), [`bytes`](#bytes), [`range`](#range) | |
+| [`destroy`](#destroy) | releases the directory |
+
+| Constants | |
+| :--- | :--- |
+| [`NONE`](#constants) | an index no directory can reach, whatever its capacity |
+
+---
+
+## Cell
 
 ```mach
-pub val NONE: usize = 0xffffffffffffffff
+pub rec Cell[T] {
+    value:     T;
+    next_free: usize;
+}
 ```
 
-an index no directory can reach, whatever its capacity
-
-## rec Cell
+## Slots
 
 ```mach
-pub rec Cell[T];
+pub rec Slots[T] {
+    items:     *Cell[T];
+    capacity:  usize;
+    live:      usize;
+    free_head: usize;
+}
 ```
 
-## rec Slots
+### empty
 
 ```mach
-pub rec Slots[T];
+pub fun empty[T]() Slots[T]
 ```
 
-## fun empty
+### sound
 
 ```mach
-pub fun empty[T]() Slots[T];
-```
-
-## fun sound
-
-```mach
-pub fun sound[T](slots: *Slots[T]) bool;
+pub fun sound[T](slots: *Slots[T]) bool
 ```
 
 the counters agree with each other, so no walk can run past the directory
 
-## fun reserve
+### reserve
 
 ```mach
-pub fun reserve[T](slots: *Slots[T], backing: *allocator.Allocator,
-additional: usize) bool;
+pub fun reserve[T](slots: *Slots[T], backing: *std.allocator.Allocator,
+    additional: usize) bool
 ```
 
 makes the next `additional` claims succeed without allocating. a refusal
 leaves every record and index where it was
 
-## fun claim
+### claim
 
 ```mach
-pub fun claim[T](slots: *Slots[T]) usize;
+pub fun claim[T](slots: *Slots[T]) usize
 ```
 
 takes the lowest recently freed index, or NONE when reserve was skipped
 
-## fun release
+### release
 
 ```mach
-pub fun release[T](slots: *Slots[T], index: usize);
+pub fun release[T](slots: *Slots[T], index: usize)
 ```
 
 the caller's own state proves the index is claimed
 
-## fun at
+### at
 
 ```mach
-pub fun at[T](slots: *Slots[T], index: usize) *T;
+pub fun at[T](slots: *Slots[T], index: usize) *T
 ```
 
-## fun bytes
+### bytes
 
 ```mach
-pub fun bytes[T](slots: *Slots[T]) usize;
+pub fun bytes[T](slots: *Slots[T]) usize
 ```
 
-## fun range
+### range
 
 ```mach
-pub fun range[T](slots: *Slots[T]) ownership.Range;
+pub fun range[T](slots: *Slots[T]) quic.connection.ownership.Range
 ```
 
-## fun destroy
+### destroy
 
 ```mach
-pub fun destroy[T](slots: *Slots[T], backing: *allocator.Allocator) bool;
+pub fun destroy[T](slots: *Slots[T], backing: *std.allocator.Allocator) bool
 ```
 
 releases the directory. a refusal keeps it, so the caller can try again
+
+## Constants
+
+| Name | Type | Value | |
+| :--- | :--- | :--- | :--- |
+| `NONE` | `usize` | `0xffffffffffffffff` | an index no directory can reach, whatever its capacity |
 
