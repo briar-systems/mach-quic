@@ -136,7 +136,7 @@ pub fun destroy[T](slots: *Slots[T], backing: *allocator.Allocator) bool {
 
 test slots__growth_keeps_records_and_hands_out_every_index_once {
     var state: testing.Testing;
-    val made:  err[allocator.Error] = testing.make(?state);
+    val made:  err[allocator.Error] = testing.init(?state);
     if (sel made.err) { ret 1; }
     val backing: *allocator.Allocator = testing.allocator_of(?state);
     var table:   Slots[Probe]         = empty[Probe]();
@@ -166,7 +166,7 @@ test slots__growth_keeps_records_and_hands_out_every_index_once {
 
 test slots__a_refused_growth_leaves_the_directory_intact {
     var state: testing.Testing;
-    val made:  err[allocator.Error] = testing.make(?state);
+    val made:  err[allocator.Error] = testing.init(?state);
     if (sel made.err) { ret 1; }
     val backing: *allocator.Allocator = testing.allocator_of(?state);
     var table:   Slots[Probe]         = empty[Probe]();

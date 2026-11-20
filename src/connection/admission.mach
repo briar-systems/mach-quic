@@ -145,7 +145,7 @@ fun peer_hash(manager: *Manager, key: *PeerKey) u64 {
     encoded[17] = (key.scope >> 8)::u8;
     encoded[18] = (key.scope >> 16)::u8;
     encoded[19] = (key.scope >> 24)::u8;
-    encoded[20] = key.is_v6;
+    encoded[20] = key.is_v6::u8;
     ret siphash.bytes(manager.hash_key, ?encoded[0], 21);
 }
 

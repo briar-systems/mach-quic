@@ -72,7 +72,7 @@ fun adapter_lease() buffer.Lease {
 var adapter_attempts: [8]handshake_api.Attempt;
 
 #[testing]
-#[oblivious]
+#[constant_time("soft")]
 fun deterministic_entropy(context: ptr, secret_context: *^u8,
     destination: *^u8, length: usize) i64 {
     val counter: *u8   = context::*u8;
@@ -88,7 +88,7 @@ fun deterministic_entropy(context: ptr, secret_context: *^u8,
 test tls_client__exact_client_hello_ownership_survives_loss_and_restarts {
     var entropy_counter: u8             = 1;
     var entropy:         secret.Entropy = secret.Entropy{context: ?entropy_counter,
-        secret_context: nil, fill_fn: deterministic_entropy, initialized: true};
+        secret_context: nil, fn_fill: deterministic_entropy, initialized: true};
     var anchor:    cert.Certificate       = cert.Certificate{der: "x"::*u8, der_len: 1};
     var trust:     cert.TrustStore        = cert.TrustStore{anchors: ?anchor, len: 1};
     var protocols: [1]config.ProtocolName = [1]config.ProtocolName{

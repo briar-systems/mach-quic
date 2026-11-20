@@ -29,6 +29,7 @@ use quic.transport_parameters;
 use crypto.contracts;
 use crypto.encoding.keys;
 use crypto.secret;
+use system_allocator: crypto.system.allocator;
 use pki.cert;
 use std.chrono.duration;
 use std.chrono.time;
@@ -161,7 +162,7 @@ fun prepare() bool {
     if (ready == 1) { ret true; }
     if (ready == 2) { ret false; }
     ready = 2;
-    owner = secret.system_allocator();
+    owner = system_allocator.make();
     if (!test_credentials.load_credentials(?identity, ?chain_storage[0], ?key, ?owner)) {
         ret false;
     }
@@ -181,7 +182,7 @@ fun prepare() bool {
     trust         = cert.TrustStore{anchors: ?anchor, len: 1};
 
     listener_entropy = secret.Entropy{context: ?listener_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true};
+        fn_fill: test_credentials.deterministic_entropy, initialized: true};
     listener_config.credentials          = ?store;
     listener_config.alpn                 = ?protocols[0];
     listener_config.alpn_len             = 1;
@@ -200,7 +201,7 @@ fun prepare() bool {
     listener_config.clock                = test_credentials.test_clock();
 
     dialer_entropy = secret.Entropy{context: ?dialer_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true};
+        fn_fill: test_credentials.deterministic_entropy, initialized: true};
     dialer_config.server_name          = contracts.Bytes{data: ?server_name[0], len: 15};
     dialer_config.alpn                 = ?protocols[0];
     dialer_config.alpn_len             = 1;
@@ -373,7 +374,7 @@ fun release(c: *assembly.Connection, scope: *cancel.Scope) bool {
     if (transport.snapshot[binding.Binding](?c.driver).state != transport.CLOSED &&
         !transport.cancel_connection[binding.Binding](?c.driver)) { ret false; }
     ret transport.finish_close[binding.Binding](?c.driver).status == transport.STATUS_OK &&
-        assembly.release_closed(c) && operation_ok(cancel.destroy(scope));
+        assembly.release_closed(c) && operation_ok(cancel.dnit(scope));
 }
 
 # what the server advertised, as the client received it
@@ -623,7 +624,7 @@ fun deliver(data: *u8, len: usize) transport.OperationResult {
     ret transport.receive_datagram[binding.Binding](?listener.driver, ?input);
 }
 
-#[oblivious]
+#[constant_time("soft")]
 fun conceal(destination: *^u8, source: *u8, length: usize) {
     var i: usize = 0;
     for (i < length) {

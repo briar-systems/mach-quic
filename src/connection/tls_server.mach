@@ -3,6 +3,7 @@
 use crypto.contracts;
 use crypto.encoding.keys;
 use crypto.secret;
+use system_allocator: crypto.system.allocator;
 use pki.cert;
 use test_credentials: quic.connection.credentials_simulated;
 use handshake_api:    quic.connection.handshake;
@@ -242,7 +243,7 @@ fun parameters_match(observed: *Observed, expected: *u8,
 }
 
 test tls_server__a_real_client_and_server_complete_a_quic_handshake_through_the_adapter_pair {
-    var owner:         secret.Allocator = secret.system_allocator();
+    var owner:         secret.Allocator = system_allocator.make();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
     var identity:      credentials.Identity;
@@ -275,7 +276,7 @@ test tls_server__a_real_client_and_server_complete_a_quic_handshake_through_the_
     var listener_counter: u8             = 3;
     var listener_entropy: secret.Entropy = secret.Entropy{
         context: ?listener_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true
+        fn_fill: test_credentials.deterministic_entropy, initialized: true
     };
     var listener_config: config.ServerConfig;
     listener_config.credentials                     = ?store;
@@ -315,7 +316,7 @@ test tls_server__a_real_client_and_server_complete_a_quic_handshake_through_the_
     var dialer_counter: u8             = 91;
     var dialer_entropy: secret.Entropy = secret.Entropy{
         context: ?dialer_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true
+        fn_fill: test_credentials.deterministic_entropy, initialized: true
     };
     var dialer_config: config.ClientConfig;
     dialer_config.server_name = contracts.Bytes{
@@ -453,7 +454,7 @@ test tls_server__a_real_client_and_server_complete_a_quic_handshake_through_the_
         listener_adapter.tls_role != 0) { ret 26; }
     var retired: *credentials.Generation = nil;
     if (credentials.retire_store(?store, ?retired) != contracts.OK) { ret 27; }
-    if (keys.destroy_private(?key) != contracts.OK)                 { ret 28; }
+    if (keys.private_dnit(?key) != contracts.OK)                    { ret 28; }
     ret 0;
 }
 
@@ -466,7 +467,7 @@ var alert_parameters:   [256]u8;
 # a malformed first flight must reach the QUIC layer as the exact TLS alert the
 # engine chose, not as a flattened binding failure
 test tls_server__a_terminal_alert_keeps_its_identity_through_the_server_binding {
-    var owner:         secret.Allocator = secret.system_allocator();
+    var owner:         secret.Allocator = system_allocator.make();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
     var identity:      credentials.Identity;
@@ -490,7 +491,7 @@ test tls_server__a_terminal_alert_keeps_its_identity_through_the_server_binding 
     };
     var counter: u8             = 7;
     var entropy: secret.Entropy = secret.Entropy{context: ?counter,
-        secret_context: nil, fill_fn: test_credentials.deterministic_entropy, initialized: true};
+        secret_context: nil, fn_fill: test_credentials.deterministic_entropy, initialized: true};
     var listener_config: config.ServerConfig;
     listener_config.credentials                     = ?store;
     listener_config.alpn                            = ?protocols[0];
@@ -594,7 +595,7 @@ test tls_server__a_terminal_alert_keeps_its_identity_through_the_server_binding 
     if (!handshake_api.destroy(?adapter) || adapter.tls_role != 0) { ret 11; }
     var retired: *credentials.Generation = nil;
     if (credentials.retire_store(?store, ?retired) != contracts.OK) { ret 12; }
-    if (keys.destroy_private(?key) != contracts.OK)                 { ret 13; }
+    if (keys.private_dnit(?key) != contracts.OK)                    { ret 13; }
     ret 0;
 }
 
@@ -608,7 +609,7 @@ var ranges_parameters:   [256]u8;
 # repoints config at those copies, so reporting them as ranges disjoint from
 # that record makes the whole set overlap and every binding fail
 test tls_server__reported_provider_ranges_are_internally_disjoint {
-    var owner:         secret.Allocator = secret.system_allocator();
+    var owner:         secret.Allocator = system_allocator.make();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
     var identity:      credentials.Identity;
@@ -632,7 +633,7 @@ test tls_server__reported_provider_ranges_are_internally_disjoint {
     };
     var counter: u8             = 11;
     var entropy: secret.Entropy = secret.Entropy{context: ?counter,
-        secret_context: nil, fill_fn: test_credentials.deterministic_entropy, initialized: true};
+        secret_context: nil, fn_fill: test_credentials.deterministic_entropy, initialized: true};
     var listener_config: config.ServerConfig;
     listener_config.credentials                     = ?store;
     listener_config.alpn                            = ?protocols[0];
@@ -713,6 +714,6 @@ test tls_server__reported_provider_ranges_are_internally_disjoint {
     if (!handshake_api.destroy(?adapter)) { ret 13; }
     var retired: *credentials.Generation = nil;
     if (credentials.retire_store(?store, ?retired) != contracts.OK) { ret 14; }
-    if (keys.destroy_private(?key) != contracts.OK)                 { ret 15; }
+    if (keys.private_dnit(?key) != contracts.OK)                    { ret 15; }
     ret 0;
 }

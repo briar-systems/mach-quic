@@ -196,7 +196,7 @@ fun probe_find(index: *Index, table: *slots.Slots[Probe], key: u64) usize {
 
 test index__lookups_stay_exact_across_rehash_and_backward_shift_deletion {
     var state: testing.Testing;
-    val made:  err[allocator.Error] = testing.make(?state);
+    val made:  err[allocator.Error] = testing.init(?state);
     if (sel made.err) { ret 1; }
     val backing: *allocator.Allocator = testing.allocator_of(?state);
     var table:   slots.Slots[Probe]   = slots.empty[Probe]();
@@ -239,7 +239,7 @@ test index__lookups_stay_exact_across_rehash_and_backward_shift_deletion {
 
 test index__a_refused_rehash_keeps_every_entry_reachable {
     var state: testing.Testing;
-    val made:  err[allocator.Error] = testing.make(?state);
+    val made:  err[allocator.Error] = testing.init(?state);
     if (sel made.err) { ret 1; }
     val backing: *allocator.Allocator = testing.allocator_of(?state);
     var table:   slots.Slots[Probe]   = slots.empty[Probe]();

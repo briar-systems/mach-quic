@@ -860,8 +860,9 @@ true from that instant.
 
 ## Development
 
-quic requires mach 6 and mach-std 9. Dependencies are version ranges, pinned
-by their committed gitlinks.
+quic requires mach 7. Until mach-std, mach-crypto, mach-tls and mach-pki
+release on mach 7, each dependency follows its `dev` branch, pinned by its
+committed gitlink.
 
 ```sh
 mach dep pull .

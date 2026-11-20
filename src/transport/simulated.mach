@@ -378,7 +378,7 @@ fun close_fixture(fixture: *Fixture, now_ns: u64) bool {
             transport_api.STATUS_OK) { ret false; }
     }
     if (transport_api.finish_close[Core](?fixture.driver).status != transport_api.STATUS_OK) { ret false; }
-    ret operation_ok(cancel.destroy(?fixture.scope));
+    ret operation_ok(cancel.dnit(?fixture.scope));
 }
 
 test transport__client_and_server_expose_only_application_contracts {
@@ -510,7 +510,7 @@ test transport__terminal_release_preserves_generations_across_record_reuse {
         fixture.sends[first.token.index::usize].token.source != 0 ||
         fixture.sends[first.token.index::usize].packet.buffer != nil ||
         transport_api.release_closed[Core](?fixture.driver).status !=
-        transport_api.STATUS_OK || !operation_ok(cancel.destroy(?fixture.scope))) { ret 4; }
+        transport_api.STATUS_OK || !operation_ok(cancel.dnit(?fixture.scope))) { ret 4; }
     if (!make_fixture(?fixture, 119, stream_api.ROLE_CLIENT)) { ret 5; }
     fixture.core.outbound = 1;
     var second_buffer: [8]u8;
@@ -546,7 +546,7 @@ test transport__malformed_generation_and_scope_inputs_publish_no_owner {
     var unrelated: cancel.Scope;
     if (!operation_ok(cancel.make_root(?unrelated, opt[time.Instant].none{})) ||
         transport_api.generate[Core](?fixture.driver, ?unrelated, ?bytes[0], 8, clock.instant(3), 3).status !=
-        transport_api.STATUS_CANCELLED || !operation_ok(cancel.destroy(?unrelated))) { ret 4; }
+        transport_api.STATUS_CANCELLED || !operation_ok(cancel.dnit(?unrelated))) { ret 4; }
     if (transport_api.cancel_send[Core](?fixture.driver, generated.token, clock.instant(4)).status !=
         transport_api.STATUS_OK || !close_fixture(?fixture, 5)) { ret 5; }
     ret 0;
@@ -605,7 +605,7 @@ test transport__send_completion_and_connection_cancellation_race_exactly_once {
         fixture.core.completed != 1 || fixture.core.active_count != 0 ||
         transport_api.snapshot[Core](?fixture.driver).state != transport_api.DRAINING ||
         transport_api.finish_close[Core](?fixture.driver).status != transport_api.STATUS_OK ||
-        !operation_ok(cancel.destroy(?fixture.scope))) { ret 4; }
+        !operation_ok(cancel.dnit(?fixture.scope))) { ret 4; }
     ret 0;
 }
 
@@ -650,7 +650,7 @@ test transport__cancellation_and_graceful_close_retain_exact_borrowers {
         transport_api.operation_snapshot[Core](?cancelled.driver, pending.token).buffer != ?output[0]) { ret 3; }
     if (transport_api.cancel_send[Core](?cancelled.driver, pending.token, clock.instant(3)).status !=
         transport_api.STATUS_OK || transport_api.finish_close[Core](?cancelled.driver).status !=
-        transport_api.STATUS_OK || !operation_ok(cancel.destroy(?cancelled.scope))) { ret 4; }
+        transport_api.STATUS_OK || !operation_ok(cancel.dnit(?cancelled.scope))) { ret 4; }
 
     var graceful: Fixture;
     if (!make_fixture(?graceful, 106, stream_api.ROLE_CLIENT)) { ret 5; }
@@ -668,7 +668,7 @@ test transport__cancellation_and_graceful_close_retain_exact_borrowers {
         escalated.close_mode != io_lifecycle.ABORTIVE || escalated.application_error != 42) { ret 8; }
     if (transport_api.release_datagram[Core](?graceful.driver, borrowed.token).status !=
         transport_api.STATUS_OK || transport_api.finish_close[Core](?graceful.driver).status !=
-        transport_api.STATUS_OK || !operation_ok(cancel.destroy(?graceful.scope))) { ret 9; }
+        transport_api.STATUS_OK || !operation_ok(cancel.dnit(?graceful.scope))) { ret 9; }
     ret 0;
 }
 
@@ -757,7 +757,7 @@ test transport__a_cancelled_scope_closes_on_the_owners_next_call {
         !(sel state.cancellation_reason.cancelled) ||
         !fixture.core.closing || !fixture.core.abortive) { ret 4; }
     if (transport_api.finish_close[Core](?fixture.driver).status !=
-        transport_api.STATUS_OK || !operation_ok(cancel.destroy(?fixture.scope))) { ret 5; }
+        transport_api.STATUS_OK || !operation_ok(cancel.dnit(?fixture.scope))) { ret 5; }
     ret 0;
 }
 
@@ -800,10 +800,10 @@ test native__a_refused_native_send_batch_fails_only_that_send {
     val made_pages: err[allocator.Error] = page.make(?pages);
     if (sel made_pages.err) { ret 2; }
     var runtime:      io_runtime.Runtime;
-    val made_runtime: err[io_error.Error] = io_runtime.make(?runtime, ?pages, 4);
+    val made_runtime: err[io_error.Error] = io_runtime.init(?runtime, ?pages, 4);
     if (sel made_runtime.err) { ret 2; }
     var network:      net_async.Driver;
-    val made_network: err[io_error.Error] = net_async.make(?network, ?runtime);
+    val made_network: err[io_error.Error] = net_async.init(?network, ?runtime);
     if (sel made_network.err) { ret 3; }
     val bound: res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
     val made:  res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
@@ -855,11 +855,11 @@ test native__a_refused_native_send_batch_fails_only_that_send {
         transport_api.SEND_SENT, retried.count, clock.instant(4)).status != transport_api.STATUS_OK) { ret 11; }
     udp.socket_close(?sender);
     udp.socket_close(?receiver);
-    val destroyed: err[io_error.Error] = net_async.destroy(?network);
+    val destroyed: err[io_error.Error] = net_async.dnit(?network);
     if (sel destroyed.err) { ret 12; }
     val closed: res[bool, io_error.Error] = io_runtime.close(?runtime);
     if (sel closed.err) { ret 13; }
-    val released: err[io_error.Error] = io_runtime.destroy(?runtime);
+    val released: err[io_error.Error] = io_runtime.dnit(?runtime);
     if (sel released.err)            { ret 14; }
     if (!close_fixture(?fixture, 5)) { ret 15; }
     ret 0;
@@ -915,10 +915,10 @@ test native__a_cancelled_send_that_went_out_whole_is_sent {
     val made_pages: err[allocator.Error] = page.make(?pages);
     if (sel made_pages.err) { ret 2; }
     var runtime:      io_runtime.Runtime;
-    val made_runtime: err[io_error.Error] = io_runtime.make(?runtime, ?pages, 4);
+    val made_runtime: err[io_error.Error] = io_runtime.init(?runtime, ?pages, 4);
     if (sel made_runtime.err) { ret 2; }
     var network:      net_async.Driver;
-    val made_network: err[io_error.Error] = net_async.make(?network, ?runtime);
+    val made_network: err[io_error.Error] = net_async.init(?network, ?runtime);
     if (sel made_network.err) { ret 3; }
     val bound: res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
     val made:  res[udp.Socket, io_error.Error] = udp.bind(ip.endpoint(127, 0, 0, 1, 0));
@@ -993,11 +993,11 @@ test native__a_cancelled_send_that_went_out_whole_is_sent {
 
     udp.socket_close(?sender);
     udp.socket_close(?receiver);
-    val destroyed: err[io_error.Error] = net_async.destroy(?network);
+    val destroyed: err[io_error.Error] = net_async.dnit(?network);
     if (sel destroyed.err) { ret 16; }
     val closed: res[bool, io_error.Error] = io_runtime.close(?runtime);
     if (sel closed.err) { ret 17; }
-    val released: err[io_error.Error] = io_runtime.destroy(?runtime);
+    val released: err[io_error.Error] = io_runtime.dnit(?runtime);
     if (sel released.err)             { ret 18; }
     if (!close_fixture(?fixture, 13)) { ret 19; }
     ret 0;
@@ -1045,7 +1045,7 @@ test transport__a_settled_close_answers_closed_to_every_later_call {
         transport_api.STATUS_CLOSED) { ret 8; }
     if (!transport_api.release_ready[Core](?fixture.driver) ||
         transport_api.release_closed[Core](?fixture.driver).status !=
-        transport_api.STATUS_OK || !operation_ok(cancel.destroy(?fixture.scope))) { ret 9; }
+        transport_api.STATUS_OK || !operation_ok(cancel.dnit(?fixture.scope))) { ret 9; }
     ret 0;
 }
 

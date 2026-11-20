@@ -789,7 +789,7 @@ fun retaining_chunks(chunks: *supply.TestPool, account: *supply.Account) bool {
     supply.classes(?chunks.classes[0], 1);
     val bytes: usize = 16 * supply.BYTES;
     if (!limited.make(?chunks.memory, bytes * 2) ||
-        !buffers.make(?chunks.pool, supply.pool_config(?chunks.classes[0],
+        !buffers.init(?chunks.pool, supply.pool_config(?chunks.classes[0],
         supply.CLASS_COUNT, bytes), limited.allocator_of(?chunks.memory))) { ret false; }
     chunks.provider = buffers.source(?chunks.pool);
     ret supply.open(?chunks.provider, account, 1, 16, 16, 0);

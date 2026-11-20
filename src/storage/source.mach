@@ -115,7 +115,7 @@ pub fun open_connection(provider: *Provider, account: *Account, handle: u64,
         budgets.bytes[LANES::usize + i] = extra[i];
         i                               = i + 1;
     }
-    val reason: buffers.Reason = buffers.source_open_account(provider, account, handle,
+    val reason: buffers.Reason = buffers.source_account_init(provider, account, handle,
         budgets, reserve * BYTES);
     ret sel reason.none;
 }
@@ -134,7 +134,7 @@ pub fun source_lanes_of(provider: *Provider) usize {
 }
 
 pub fun close(provider: *Provider, account: *Account) bool {
-    val reason: buffers.Reason = buffers.source_close_account(provider, account);
+    val reason: buffers.Reason = buffers.source_account_dnit(provider, account);
     ret sel reason.none;
 }
 
@@ -231,7 +231,7 @@ pub fun test_pool_lanes(pool: *buffers.Pool, configs: *buffers.ClassConfig,
     if (memory.a.ctx == nil && !limited.make(memory, (bytes + 16 * BYTES) * 2)) {
         ret false;
     }
-    ret buffers.make(pool, pool_config_lanes(configs, CLASS_COUNT, bytes, extra),
+    ret buffers.init(pool, pool_config_lanes(configs, CLASS_COUNT, bytes, extra),
         limited.allocator_of(memory));
 }
 
@@ -265,7 +265,7 @@ pub fun test_made(fixture: *TestPool) bool {
 # the next make
 #[testing]
 pub fun end_test(fixture: *TestPool) bool {
-    if (!test_made(fixture) || !buffers.destroy(?fixture.pool)) { ret false; }
+    if (!test_made(fixture) || !buffers.dnit(?fixture.pool)) { ret false; }
     var none:      Provider;
     var no_secret: SecretProvider;
     fixture.provider = none;
@@ -287,14 +287,14 @@ test source__a_source_with_other_than_three_lanes_opens_no_account {
     if (!limited.make(?wide.memory, 1 << 20)) { ret 1; }
     var config: buffers.Config = pool_config(?configs[0], CLASS_COUNT, 64 * BYTES);
     config.lanes = 5;
-    if (!buffers.make(?wide.pool, config, limited.allocator_of(?wide.memory))) { ret 2; }
+    if (!buffers.init(?wide.pool, config, limited.allocator_of(?wide.memory))) { ret 2; }
     wide.provider = buffers.source(?wide.pool);
     var account: Account;
     if (buffers.source_lanes(?wide.provider) != 5 ||
         open_connection(?wide.provider, ?account, 1, 4, 4, 4096, 0, nil, 0) || account.open) {
         ret 3;
     }
-    if (!buffers.destroy(?wide.pool)) { ret 4; }
+    if (!buffers.dnit(?wide.pool)) { ret 4; }
 
     var fixture: TestPool;
     if (!make_test(?fixture, 16)) { ret 5; }
