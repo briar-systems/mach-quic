@@ -432,10 +432,9 @@ var listener_source:     [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
 var initial_destination: [8]u8 =
     [8]u8{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
 #[testing]
-var alpn:        [2]u8  = [2]u8{'h', '3'};
+var alpn:        [2]u8  = "h3";
 #[testing]
-var server_name: [15]u8 = [15]u8{'a', 'p', 'i', '.', 'e', 'x', 'a', 'm',
-    'p', 'l', 'e', '.', 'c', 'o', 'm'};
+var server_name: [15]u8 = "api.example.com";
 
 # an exit code is one byte, so a refusal reports which side and step refused and
 # what the core said, each clamped rather than truncated into another code's
@@ -1365,7 +1364,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
     if (exchange(?clock, ?moved, 24) != 0)                  { ret refusal(); }
     val reused: transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
-    var reused_bytes: [4]u8 = [4]u8{'n', 'e', 'x', 't'};
+    var reused_bytes: [4]u8 = "next";
     if (reused.status != transport.STATUS_OK ||
         transport.write_stream[binding.Binding](?dialer.driver, reused.stream,
         ?reused_bytes[0], 4).count != 4 ||
@@ -1756,7 +1755,7 @@ fun stream_flow(dialer_payload: usize, listener_payload: usize,
             critical[i], ?response_bytes[0], sizes[i]).count != sizes[i]) { ret 21; }
         i = i + 1;
     }
-    var request_byte: [1]u8                = [1]u8{'q'};
+    var request_byte: [1]u8                = "q";
     val request:      transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
     if (request.status != transport.STATUS_OK ||
@@ -2427,7 +2426,7 @@ fun narrow_nat_round(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize, ceili
 #[testing]
 fun request_from(bound: ip.Endpoint, request: *transport.Stream, clock: *u64,
     moved: *usize) i32 {
-    var request_byte: [1]u8                = [1]u8{'q'};
+    var request_byte: [1]u8                = "q";
     val opened:       transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
     if (opened.status != transport.STATUS_OK ||
@@ -2494,7 +2493,7 @@ test assembly__a_rebound_clients_new_address_is_validated_and_lifts_the_amplific
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
     if (established != 0)             { ret established; }
     if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
-    var request_byte: [1]u8                = [1]u8{'q'};
+    var request_byte: [1]u8                = "q";
     val request:      transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
     if (request.status != transport.STATUS_OK ||
@@ -3593,7 +3592,7 @@ test assembly__a_client_rebound_three_times_is_answered_at_its_last_port {
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
     if (established != 0)             { ret established; }
     if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
-    var request_byte: [1]u8 = [1]u8{'q'};
+    var request_byte: [1]u8 = "q";
     var hops:         u16   = 1;
     for (hops <= 3) {
         val bound:  ip.Endpoint          = nat_endpoint(hops);

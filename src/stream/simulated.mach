@@ -76,13 +76,13 @@ test stream__stream_creation_implicit_peer_streams_and_ordered_delivery {
     if (local_bidi.status != stream.STATUS_OK || local_bidi.handle.id != 0 ||
         local_uni.status != stream.STATUS_OK || local_uni.handle.id != 2) { ret 1; }
 
-    var tail:      [2]u8                = [2]u8{'l', 'o'};
+    var tail:      [2]u8                = "lo";
     val reordered: stream.ReceiveResult = stream.receive_stream(?manager, 5, 3, ?tail[0], 2, false);
     if (!reordered.ok || reordered.new_streams != 2 || manager.active_streams != 4) { ret 1; }
     val first_peer:  stream.CreateResult = stream.accept(?manager);
     val second_peer: stream.CreateResult = stream.accept(?manager);
     if (first_peer.handle.id != 1 || second_peer.handle.id != 5) { ret 1; }
-    var head: [3]u8 = [3]u8{'h', 'e', 'l'};
+    var head: [3]u8 = "hel";
     if (!stream.receive_stream(?manager, 5, 0, ?head[0], 3, false).ok ||
         !stream.receive_stream(?manager, 5, 5, nil, 0, true).ok) { ret 1; }
     var output: [8]u8;

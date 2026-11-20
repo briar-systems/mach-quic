@@ -229,7 +229,7 @@ fun make_fixture(fixture: *Fixture, source: u64) bool {
     if (!handshake.initialize(?fixture.adapter, handshake.Config{source: source,
         max_crypto_per_level: 64, max_event_data: 64, max_peer_identity: 64},
         storage, protocol)) { ret false; }
-    var alpn:       [2]u8 = [2]u8{'h', '3'};
+    var alpn:       [2]u8 = "h3";
     var parameters: [3]u8 = [3]u8{1, 0, 0};
     var start:      handshake.Start;
     start.role                       = handshake.CLIENT;
@@ -379,7 +379,7 @@ test handshake__event_transitions_expose_secrets_and_peer_decisions_serially {
     if (!make_fixture(?fixture, 402)) { ret 1; }
     var secret:     [32]^u8;
     var parameters: [4]u8 = [4]u8{3, 2, 1, 0};
-    var identity:   [3]u8 = [3]u8{'c', 'a', '1'};
+    var identity:   [3]u8 = "ca1";
     if (!queue_event(?fixture.provider, secret_event(1, handshake.HANDSHAKE, handshake.DIRECTION_SEND, protection.AES_128_GCM_SHA256, 1, handshake.SecretView{data: ?secret[0], length: 32})) ||
         !queue_event(?fixture.provider, secret_event(2, handshake.HANDSHAKE, handshake.DIRECTION_RECEIVE, protection.AES_128_GCM_SHA256, 1, handshake.SecretView{data: ?secret[0], length: 32})) ||
         !queue_event(?fixture.provider, parameters_event(3, handshake.View{data: ?parameters[0], length: 4})) ||
@@ -415,7 +415,7 @@ test handshake__event_transitions_expose_secrets_and_peer_decisions_serially {
 test handshake__crypto_output_survives_cancellation_loss_retry_and_ack {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 403)) { ret 1; }
-    var output: [8]u8 = [8]u8{'c', 'l', 'i', 'e', 'n', 't', '-', 'h'};
+    var output: [8]u8 = "client-h";
     if (!queue_event(?fixture.provider, crypto_event(1, handshake.INITIAL, 0, handshake.View{data: ?output[0], length: 8})) ||
         !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 2; }
     output[0] = 'x';
@@ -476,7 +476,7 @@ test handshake__invalid_provider_events_and_rejection_are_terminal {
 test handshake__version_negotiation_replaces_rather_than_retransmits_crypto {
     var fixture: Fixture;
     if (!make_fixture(?fixture, 406)) { ret 1; }
-    var old: [4]u8 = [4]u8{'o', 'l', 'd', '!'};
+    var old: [4]u8 = "old!";
     if (!queue_event(?fixture.provider, crypto_event(1, handshake.INITIAL, 0, handshake.View{data: ?old[0], length: 4})) ||
         !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 2; }
     val sent: handshake.Prepared = handshake.prepare(?fixture.adapter,
@@ -489,7 +489,7 @@ test handshake__version_negotiation_replaces_rather_than_retransmits_crypto {
         handshake.STATUS_OK || fixture.provider.version_restarts != 1 ||
         handshake.prepare(?fixture.adapter, handshake.INITIAL, 4).status !=
         handshake.STATUS_EMPTY) { ret 4; }
-    var fresh: [4]u8 = [4]u8{'n', 'e', 'w', '!'};
+    var fresh: [4]u8 = "new!";
     if (!queue_event(?fixture.provider, crypto_event(2, handshake.INITIAL, 0, handshake.View{data: ?fresh[0], length: 4})) ||
         !accept_next(?fixture.adapter, handshake.EVENT_CRYPTO)) { ret 5; }
     val prepared: handshake.Prepared = handshake.prepare(?fixture.adapter,
