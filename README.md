@@ -875,4 +875,6 @@ reach every test module, so the test-only `tests` artifact reaches them all. `--
 artifact, `tests` included.
 `tools/test-selection` fails when a test under `src` is collected on no target.
 
-Build products are written to Mach's default `out/` directory.
+Build products are written under `out/<target>/<profile>/`, the work
+directory `mach.toml` names. The library is `lib/libquic.a` there
+(`lib/libquic.lib` on windows).
