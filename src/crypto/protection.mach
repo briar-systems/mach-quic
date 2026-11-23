@@ -707,7 +707,7 @@ pub fun header_mask(value: *KeySet, sample: contracts.Bytes,
             contracts.Bytes{data: ?nonce[0], len: 12});
         if (initialized != contracts.OK) { error = map_crypto(initialized); }
         if (error == OK)                 { chacha20.block(?context, counter, ?mask[0]); }
-        chacha20.destroy(?context);
+        chacha20.dnit(?context);
     }
     or { error = UNSUPPORTED_ALGORITHM; }
     if (error != OK) {

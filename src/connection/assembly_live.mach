@@ -26,6 +26,7 @@ use quic.transport.binding;
 use crypto.contracts;
 use crypto.encoding.keys;
 use crypto.secret;
+use system_allocator: crypto.system.allocator;
 use pki.cert;
 use std.allocator;
 use allocator_testing: std.allocator.testing;
@@ -110,7 +111,7 @@ var secret_storage_nonzero_releases: usize;
 fun secret_storage_allocate(context: ptr, secret_context: *^u8, count: usize,
     bytes: usize, alignment: usize,
     output: **assembly.SecretScratch) i64 {
-    ret secret_storage_delegate.allocate_fn(secret_storage_delegate.context,
+    ret secret_storage_delegate.fn_allocate(secret_storage_delegate.context,
         secret_storage_delegate.secret_context, count, bytes, alignment,
         output);
 }
@@ -143,7 +144,7 @@ fun secret_storage_deallocate(context: ptr, secret_context: *^u8,
         data[0].receive_plaintext[0] = 0xCC;
         ret -1;
     }
-    ret secret_storage_delegate.deallocate_fn(secret_storage_delegate.context,
+    ret secret_storage_delegate.fn_deallocate(secret_storage_delegate.context,
         secret_storage_delegate.secret_context, data, count, bytes, alignment);
 }
 
@@ -156,7 +157,7 @@ rec RollbackProbe {
 }
 
 #[testing]
-#[oblivious]
+#[constant_time("soft")]
 fun rollback_entropy(context: ptr, secret_context: *^u8,
     destination: *^u8, length: usize) i64 {
     val probe: *RollbackProbe = context::*RollbackProbe;
@@ -261,7 +262,7 @@ val REFUSAL_CLOSED:         i32 = 98;
 # having happened to it
 #[testing]
 fun refused_start(clock: *u64, length: usize) i32 {
-    val front_made: err[allocator.Error] = allocator_testing.make(?front_memory);
+    val front_made: err[allocator.Error] = allocator_testing.init(?front_memory);
     if (sel front_made.err) { ret 50; }
     var admission_config: admission.Config;
     admission_config.source                   = 921;
@@ -431,10 +432,9 @@ var listener_source:     [8]u8 = [8]u8{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
 var initial_destination: [8]u8 =
     [8]u8{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
 #[testing]
-var alpn:        [2]u8  = [2]u8{'h', '3'};
+var alpn:        [2]u8  = "h3";
 #[testing]
-var server_name: [15]u8 = [15]u8{'a', 'p', 'i', '.', 'e', 'x', 'a', 'm',
-    'p', 'l', 'e', '.', 'c', 'o', 'm'};
+var server_name: [15]u8 = "api.example.com";
 
 # an exit code is one byte, so a refusal reports which side and step refused and
 # what the core said, each clamped rather than truncated into another code's
@@ -771,7 +771,7 @@ fun exchange(clock: *u64, moved: *usize, rounds: usize) i64 {
 }
 
 test assembly__production_h3_capacity_routing_and_close_share_one_binding {
-    var owner:         secret.Allocator = secret.system_allocator();
+    var owner:         secret.Allocator = system_allocator.make();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
     var identity:      credentials.Identity;
@@ -804,7 +804,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
     var listener_counter: u8             = 3;
     var listener_entropy: secret.Entropy = secret.Entropy{
         context: ?listener_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true
+        fn_fill: test_credentials.deterministic_entropy, initialized: true
     };
     var listener_tls_config: config.ServerConfig;
     listener_tls_config.credentials                     = ?store;
@@ -834,7 +834,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
     var dialer_counter: u8               = 91;
     var dialer_entropy: secret.Entropy   = secret.Entropy{
         context: ?dialer_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true
+        fn_fill: test_credentials.deterministic_entropy, initialized: true
     };
     var dialer_tls_config: config.ClientConfig;
     dialer_tls_config.server_name = contracts.Bytes{data: ?server_name[0],
@@ -964,7 +964,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
     admission_config.source                   = 911;
     admission_config.max_connections          = opt[usize].some{2};
     admission_config.max_connections_per_peer = opt[usize].some{2};
-    val admission_made: err[allocator.Error] = allocator_testing.make(?front_memory);
+    val admission_made: err[allocator.Error] = allocator_testing.init(?front_memory);
     if (sel admission_made.err) { ret 8; }
     var admission_manager: admission.Manager;
     if (!admission.initialize(?admission_manager, admission_config,
@@ -1271,7 +1271,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
         listener.initialized || !dialer.released || !listener.released ||
         !assembly.release_closed(?dialer) ||
         !assembly.release_closed(?listener) ||
-        !operation_ok(cancel.destroy(?dialer_scope)) || !operation_ok(cancel.destroy(?listener_scope))) {
+        !operation_ok(cancel.dnit(?dialer_scope)) || !operation_ok(cancel.dnit(?listener_scope))) {
         ret 223;
     }
 
@@ -1333,7 +1333,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
         !assembly.reusable(?listener) ||
         assembly.routing_snapshot(?listener).initialized ||
         !server.destroy(?listener_tls_two) ||
-        !operation_ok(cancel.destroy(?listener_scope)) ||
+        !operation_ok(cancel.dnit(?listener_scope)) ||
         !server.init(?listener_tls_two,
         ?listener_tls_config, assembly.tls_lease(?listener),
         server.ExtraExtension{kind: server.QUIC_TRANSPORT_PARAMETERS,
@@ -1364,7 +1364,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
     if (exchange(?clock, ?moved, 24) != 0)                  { ret refusal(); }
     val reused: transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
-    var reused_bytes: [4]u8 = [4]u8{'n', 'e', 'x', 't'};
+    var reused_bytes: [4]u8 = "next";
     if (reused.status != transport.STATUS_OK ||
         transport.write_stream[binding.Binding](?dialer.driver, reused.stream,
         ?reused_bytes[0], 4).count != 4 ||
@@ -1387,7 +1387,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
         transport.finish_close[binding.Binding](?listener.driver).status !=
         transport.STATUS_OK || !assembly.release_closed(?dialer) ||
         !assembly.release_closed(?listener) ||
-        !operation_ok(cancel.destroy(?dialer_scope)) || !operation_ok(cancel.destroy(?listener_scope))) {
+        !operation_ok(cancel.dnit(?dialer_scope)) || !operation_ok(cancel.dnit(?listener_scope))) {
         ret 233;
     }
 
@@ -1396,7 +1396,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
     rollback_probe.armed         = true;
     var rollback_entropy_source: secret.Entropy = secret.Entropy{
         context: (?rollback_probe)::ptr, secret_context: nil,
-        fill_fn: rollback_entropy, initialized: true
+        fn_fill: rollback_entropy, initialized: true
     };
     var rollback_tls_config: config.ClientConfig = dialer_tls_config;
     rollback_tls_config.entropy              = ?rollback_entropy_source;
@@ -1454,7 +1454,7 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
     }
     if (!assembly.release_closed(?dialer) ||
         dialer_storage.generation != retained_storage_generation ||
-        !client.destroy(?rollback_tls) || !operation_ok(cancel.destroy(?dialer_scope))) {
+        !client.destroy(?rollback_tls) || !operation_ok(cancel.dnit(?dialer_scope))) {
         ret 243;
     }
     ct.zeroize(?token_key[0], 32);
@@ -1463,23 +1463,23 @@ test assembly__production_h3_capacity_routing_and_close_share_one_binding {
 
 test assembly__typed_secret_pools_retain_wiped_deallocation_for_retry {
     var control_owner: secret.ArrayAllocator[assembly.Connection] =
-        secret.system_array_allocator[assembly.Connection]();
+        system_allocator.make_array[assembly.Connection]();
     secret_storage_delegate =
-        secret.system_array_allocator[assembly.SecretScratch]();
+        system_allocator.make_array[assembly.SecretScratch]();
     secret_storage_deallocations    = 0;
     secret_storage_zeroed_releases  = 0;
     secret_storage_nonzero_releases = 0;
     var storage_owner: secret.ArrayAllocator[assembly.SecretScratch] =
         secret.ArrayAllocator[assembly.SecretScratch]{context: nil,
-        secret_context: nil, allocate_fn: secret_storage_allocate,
-        deallocate_fn:  secret_storage_deallocate, initialized: true};
+        secret_context: nil, fn_allocate: secret_storage_allocate,
+        fn_deallocate:  secret_storage_deallocate, initialized: true};
     var controls: secret.SecretArray[assembly.Connection] =
         secret.empty_array[assembly.Connection]();
     var storage: secret.SecretArray[assembly.SecretScratch] =
         secret.empty_array[assembly.SecretScratch]();
-    if (secret.init_array[assembly.Connection](?controls, ?control_owner, 2) !=
+    if (secret.array_init[assembly.Connection](?controls, ?control_owner, 2) !=
         contracts.OK ||
-        secret.init_array[assembly.SecretScratch](?storage, ?storage_owner, 2) !=
+        secret.array_init[assembly.SecretScratch](?storage, ?storage_owner, 2) !=
         contracts.OK) { ret 1; }
     val control_data: *assembly.Connection =
         secret.array_data[assembly.Connection](?controls);
@@ -1491,8 +1491,8 @@ test assembly__typed_secret_pools_retain_wiped_deallocation_for_retry {
     storage_data[0].holder                                       = 41;
     storage_data[0].receive_plaintext[0]                         = 0x5A;
     storage_data[1].send_plaintext[assembly.MAX_UDP_PAYLOAD - 1] = 0xC3;
-    if (secret.destroy_array[assembly.Connection](?controls) != contracts.OK ||
-        secret.destroy_array[assembly.SecretScratch](?storage) !=
+    if (secret.array_dnit[assembly.Connection](?controls) != contracts.OK ||
+        secret.array_dnit[assembly.SecretScratch](?storage) !=
         contracts.DEALLOCATION_FAILED ||
         !secret.array_cleanup_pending[assembly.SecretScratch](?storage) ||
         secret.array_active[assembly.SecretScratch](?storage) ||
@@ -1501,12 +1501,12 @@ test assembly__typed_secret_pools_retain_wiped_deallocation_for_retry {
         secret_storage_deallocations != 1 ||
         secret_storage_zeroed_releases != 1 ||
         secret_storage_nonzero_releases != 0) { ret 3; }
-    if (secret.destroy_array[assembly.SecretScratch](?storage) != contracts.OK ||
+    if (secret.array_dnit[assembly.SecretScratch](?storage) != contracts.OK ||
         secret_storage_deallocations != 2 ||
         secret_storage_zeroed_releases != 2 ||
         secret_storage_nonzero_releases != 0 ||
-        secret.destroy_array[assembly.Connection](?controls) != contracts.OK ||
-        secret.destroy_array[assembly.SecretScratch](?storage) != contracts.OK) {
+        secret.array_dnit[assembly.Connection](?controls) != contracts.OK ||
+        secret.array_dnit[assembly.SecretScratch](?storage) != contracts.OK) {
         ret 4;
     }
     ret 0;
@@ -1522,7 +1522,7 @@ var reply_bytes:    [1400]u8;
 #[testing]
 fun establish_direct(dialer_payload: usize, listener_payload: usize,
     dialer_cid: usize, clock: *u64, moved: *usize) i32 {
-    var owner:         secret.Allocator = secret.system_allocator();
+    var owner:         secret.Allocator = system_allocator.make();
     var chain_storage: [1]cert.Certificate;
     var key:           keys.PrivateKey;
     var identity:      credentials.Identity;
@@ -1555,7 +1555,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     var listener_counter: u8             = 3;
     var listener_entropy: secret.Entropy = secret.Entropy{
         context: ?listener_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true
+        fn_fill: test_credentials.deterministic_entropy, initialized: true
     };
     var listener_tls_config: config.ServerConfig;
     listener_tls_config.credentials                     = ?store;
@@ -1585,7 +1585,7 @@ fun establish_direct(dialer_payload: usize, listener_payload: usize,
     var dialer_counter: u8               = 91;
     var dialer_entropy: secret.Entropy   = secret.Entropy{
         context: ?dialer_counter, secret_context: nil,
-        fill_fn: test_credentials.deterministic_entropy, initialized: true
+        fn_fill: test_credentials.deterministic_entropy, initialized: true
     };
     var dialer_tls_config: config.ClientConfig;
     dialer_tls_config.server_name = contracts.Bytes{data: ?server_name[0],
@@ -1755,7 +1755,7 @@ fun stream_flow(dialer_payload: usize, listener_payload: usize,
             critical[i], ?response_bytes[0], sizes[i]).count != sizes[i]) { ret 21; }
         i = i + 1;
     }
-    var request_byte: [1]u8                = [1]u8{'q'};
+    var request_byte: [1]u8                = "q";
     val request:      transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
     if (request.status != transport.STATUS_OK ||
@@ -2426,7 +2426,7 @@ fun narrow_nat_round(bound: ip.Endpoint, also: ip.Endpoint, drops: *usize, ceili
 #[testing]
 fun request_from(bound: ip.Endpoint, request: *transport.Stream, clock: *u64,
     moved: *usize) i32 {
-    var request_byte: [1]u8                = [1]u8{'q'};
+    var request_byte: [1]u8                = "q";
     val opened:       transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
     if (opened.status != transport.STATUS_OK ||
@@ -2493,7 +2493,7 @@ test assembly__a_rebound_clients_new_address_is_validated_and_lifts_the_amplific
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
     if (established != 0)             { ret established; }
     if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
-    var request_byte: [1]u8                = [1]u8{'q'};
+    var request_byte: [1]u8                = "q";
     val request:      transport.OpenResult = transport.open_stream[binding.Binding](
         ?dialer.driver, transport.BIDIRECTIONAL);
     if (request.status != transport.STATUS_OK ||
@@ -3592,7 +3592,7 @@ test assembly__a_client_rebound_three_times_is_answered_at_its_last_port {
     val established: i32   = establish_direct(1200, 1200, 8, ?clock, ?moved);
     if (established != 0)             { ret established; }
     if (pump(?clock, ?moved, 4) != 0) { ret refusal(); }
-    var request_byte: [1]u8 = [1]u8{'q'};
+    var request_byte: [1]u8 = "q";
     var hops:         u16   = 1;
     for (hops <= 3) {
         val bound:  ip.Endpoint          = nat_endpoint(hops);

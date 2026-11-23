@@ -300,7 +300,7 @@ fun test_pool(fixture: *Fixture) bool {
 #[testing]
 fun test_done(fixture: *Fixture) bool {
     val done: bool = supply.close(?fixture.provider, ?fixture.account) &&
-        buffers.destroy(?fixture.pool) && limited.clean(?fixture.memory);
+        buffers.dnit(?fixture.pool) && limited.clean(?fixture.memory);
     limited.dnit(?fixture.memory);
     ret done;
 }

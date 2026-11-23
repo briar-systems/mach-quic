@@ -860,8 +860,9 @@ true from that instant.
 
 ## Development
 
-quic requires mach 6 and mach-std 9. Dependencies are version ranges, pinned
-by their committed gitlinks.
+quic requires mach 7. Until mach-std, mach-crypto, mach-tls and mach-pki
+release on mach 7, each dependency follows its `dev` branch, pinned by its
+committed gitlink.
 
 ```sh
 mach dep pull .
@@ -874,4 +875,6 @@ reach every test module, so the test-only `tests` artifact reaches them all. `--
 artifact, `tests` included.
 `tools/test-selection` fails when a test under `src` is collected on no target.
 
-Build products are written to Mach's default `out/` directory.
+Build products are written under `out/<target>/<profile>/`, the work
+directory `mach.toml` names. The library is `lib/libquic.a` there
+(`lib/libquic.lib` on windows).

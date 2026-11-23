@@ -718,7 +718,7 @@ pub fun snapshot(manager: *Manager) Snapshot {
 }
 
 #[testing]
-#[oblivious]
+#[constant_time("soft")]
 fun test_key(value: u8) [32]^u8 {
     var key: [32]^u8;
     var i:   usize = 0;

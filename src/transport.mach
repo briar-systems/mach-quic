@@ -899,7 +899,7 @@ fun init_driver[T](driver: *Driver[T], role: Role, config: Config, protocol: Pro
     candidate.cancellation_reason = cancel.Reason.active{};
     candidate.lock                = mutex.make();
     fill_owned[T](?candidate.owned[0], ?protocol, streams, datagrams, scope, ?storage);
-    cancel.init_registration(?candidate.cancellation.registration);
+    cancel.registration_make(?candidate.cancellation.registration);
     candidate.initialized           = true;
     candidate.cancellation.attached = true;
     @driver                         = candidate;

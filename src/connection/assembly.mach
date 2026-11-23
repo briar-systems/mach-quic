@@ -1306,8 +1306,8 @@ test assembly__the_handshake_block_fits_one_pool_chunk {
 
 test assembly__production_profile_encodes_bounded_h3_limits {
     var id:       [8]u8  = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
-    var protocol: [2]u8  = [2]u8{'h', '3'};
-    var name:     [1]u8  = [1]u8{'x'};
+    var protocol: [2]u8  = "h3";
+    var name:     [1]u8  = "x";
     var config:   Config = default_config(991,
         ip.endpoint(192, 0, 2, 1, 4433),
         ip.endpoint(192, 0, 2, 2, 4433));
@@ -1362,7 +1362,7 @@ test assembly__server_acceptance_preserves_three_retry_identities {
     var original_id: [8]u8  = [8]u8{21, 22, 23, 24, 25, 26, 27, 28};
     var retry_id:    [8]u8  = [8]u8{41, 42, 43, 44, 45, 46, 47, 48};
     var peer_id:     [8]u8  = [8]u8{61, 62, 63, 64, 65, 66, 67, 68};
-    var protocol:    [2]u8  = [2]u8{'h', '3'};
+    var protocol:    [2]u8  = "h3";
     var config:      Config = default_config(992,
         ip.endpoint(192, 0, 2, 2, 4433),
         ip.endpoint(192, 0, 2, 1, 55000));

@@ -154,7 +154,7 @@ fun probe_position(value: *Probe) *usize {
 
 test heap__removal_from_anywhere_keeps_order_and_positions_exact {
     var state: testing.Testing;
-    val made:  err[allocator.Error] = testing.make(?state);
+    val made:  err[allocator.Error] = testing.init(?state);
     if (sel made.err) { ret 1; }
     val backing: *allocator.Allocator = testing.allocator_of(?state);
     var table:   slots.Slots[Probe]   = slots.empty[Probe]();

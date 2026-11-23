@@ -64,7 +64,7 @@ fun do_deallocate(ctx: ptr, p: ptr, size: usize, align: usize) i64 {
 # the instance must not move after this, and must outlive what it hands out
 pub fun make(state: *Limited, budget: usize) bool {
     if (state == nil) { ret false; }
-    val made: err[allocator.Error] = testing.make(?state.inner);
+    val made: err[allocator.Error] = testing.init(?state.inner);
     if (sel made.err) { ret false; }
     state.budget          = budget;
     state.live_bytes      = 0;

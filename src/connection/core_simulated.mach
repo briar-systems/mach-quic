@@ -388,7 +388,7 @@ fun initialize_with_fault(fixture: *Fixture, role: u8, validated: bool,
 
     fixture.supported_versions[0] = packet.VERSION_2;
     fixture.supported_versions[1] = packet.VERSION_1;
-    var alpn:       [2]u8                           = [2]u8{'h', '3'};
+    var alpn:       [2]u8                           = "h3";
     var parameters: transport_parameters.Parameters = transport_parameters.defaults();
     parameters.max_idle_timeout                    = 1;
     parameters.max_udp_payload_size                = 1200;
