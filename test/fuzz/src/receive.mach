@@ -355,14 +355,14 @@ fun establish() bool {
     var rounds: usize = 0;
     for (rounds < 24) {
         if (!round()) { ret false; }
-        if (core.poll_handshake(?dialer.core, ?dialer.secrets, clock).status ==
+        if (core.poll_handshake(?dialer.storage.core, ?dialer.secrets, clock).status ==
             transport.STATUS_ERROR ||
-            core.poll_handshake(?listener.core, ?listener.secrets, clock).status ==
+            core.poll_handshake(?listener.storage.core, ?listener.secrets, clock).status ==
             transport.STATUS_ERROR) { ret false; }
-        if (core.snapshot(?dialer.core).handshake_confirmed &&
-            core.snapshot(?listener.core).handshake_confirmed &&
-            core.snapshot(?dialer.core).state == transport.ACTIVE &&
-            core.snapshot(?listener.core).state == transport.ACTIVE) { brk; }
+        if (core.snapshot(?dialer.storage.core).handshake_confirmed &&
+            core.snapshot(?listener.storage.core).handshake_confirmed &&
+            core.snapshot(?dialer.storage.core).state == transport.ACTIVE &&
+            core.snapshot(?listener.storage.core).state == transport.ACTIVE) { brk; }
         rounds = rounds + 1;
     }
     ret rounds < 24 && round() && round();
@@ -386,7 +386,7 @@ rec Advertised {
 }
 
 fun advertised() Advertised {
-    val p: *transport_parameters.Parameters = ?dialer.core.peer_parameters;
+    val p: *transport_parameters.Parameters = ?dialer.storage.core.peer_parameters;
     ret Advertised{max_data: p.initial_max_data,
         bidi_data:   p.initial_max_stream_data_bidi_remote,
         uni_data:    p.initial_max_stream_data_uni,
@@ -425,7 +425,7 @@ fun find_stream(m: *stream_api.Manager, id: u64) *stream_api.Stream {
 # the server never took more than it advertised, and what each stream holds
 # lies inside the window the stream was given
 fun streams_sound(limits: *Advertised) bool {
-    val m: *stream_api.Manager = ?listener.streams;
+    val m: *stream_api.Manager = ?listener.storage.streams;
     if (!m.valid || m.closing) { ret true; }
     if (m.peer_bidirectional_opened > limits.bidi_opened ||
         m.peer_unidirectional_opened > limits.uni_opened ||
@@ -513,7 +513,7 @@ fun touch(m: *stream_api.Manager, id: u64) *Touched {
 fun frame_storage() frame.Storage {
     var value: frame.Storage;
     value.ack_ranges   = ?ack_ranges[0];
-    value.ack_capacity = listener.core.storage.frame_ack_capacity;
+    value.ack_capacity = listener.storage.core.storage.frame_ack_capacity;
     ret value;
 }
 
@@ -540,7 +540,7 @@ fun predict(data: *u8, len: usize, limits: *Advertised) Prediction {
     if (frames == 0) {
         ret Prediction{known: true, codes: code_set(core.PROTOCOL_VIOLATION), frames: 0};
     }
-    val m:         *stream_api.Manager = ?listener.streams;
+    val m:         *stream_api.Manager = ?listener.storage.streams;
     var bidi:      u64                 = m.peer_bidirectional_opened;
     var uni:       u64                 = m.peer_unidirectional_opened;
     var committed: u64                 = m.receive_committed;
@@ -692,8 +692,8 @@ fun fire() transport.OperationResult {
 # or refused as a typed driver error without closing it
 fun typed(result: transport.OperationResult, was_closing: bool) bool {
     if (result.status != transport.STATUS_ERROR) { ret true; }
-    if (listener.core.closing && !was_closing) {
-        ret result.protocol_error == listener.core.close_error;
+    if (listener.storage.core.closing && !was_closing) {
+        ret result.protocol_error == listener.storage.core.close_error;
     }
     ret result.error != transport.ERROR_NONE;
 }
@@ -723,10 +723,10 @@ pub fun answer(data: *u8, len: usize) verdict.Verdict {
             body = ?data[at];
             at   = at + length;
         }
-        val was_closing:    bool  = listener.core.closing;
-        val peer_closed:    bool  = listener.core.peer_close_received;
-        val before_auth:    usize = listener.core.authenticated_packets;
-        val before_refused: u64   = listener.core.refused_packets;
+        val was_closing:    bool  = listener.storage.core.closing;
+        val peer_closed:    bool  = listener.storage.core.peer_close_received;
+        val before_auth:    usize = listener.storage.core.authenticated_packets;
+        val before_refused: u64   = listener.storage.core.refused_packets;
         var prediction:     Prediction;
         var result:         transport.OperationResult;
         result.status = transport.STATUS_EMPTY;
@@ -753,41 +753,41 @@ pub fun answer(data: *u8, len: usize) verdict.Verdict {
         }
         or                { result = fire(); }
         if (found != nil) { brk; }
-        val closed_here: bool = listener.core.closing && !was_closing &&
-            !listener.core.peer_close_received;
+        val closed_here: bool = listener.storage.core.closing && !was_closing &&
+            !listener.storage.core.peer_close_received;
         if (!typed(result, was_closing)) {
             found = "receive: a failed receive neither closed with the code it reports nor refused as a typed error";
         }
-        or (closed_here && !peer_code(listener.core.close_error)) {
+        or (closed_here && !peer_code(listener.storage.core.close_error)) {
             found = "receive: the server closed with a code no peer input calls for";
         }
-        or (listener.core.close_reason_length > listener.core.storage.close_reason_capacity) {
+        or (listener.storage.core.close_reason_length > listener.storage.core.storage.close_reason_capacity) {
             found = "receive: the close reason lies outside its storage";
         }
         or (!streams_sound(?limits)) {
             found = "receive: the server holds more than it advertised, or a stream's bytes lie outside its window";
         }
         or (op == OP_FRAMES && !was_closing && !peer_closed && prediction.known &&
-            listener.core.refused_packets == before_refused &&
-            (listener.core.authenticated_packets != before_auth || closed_here)) {
+            listener.storage.core.refused_packets == before_refused &&
+            (listener.storage.core.authenticated_packets != before_auth || closed_here)) {
             if (prediction.codes != 0 &&
-                (!closed_here || (prediction.codes & code_set(listener.core.close_error)) == 0)) {
+                (!closed_here || (prediction.codes & code_set(listener.storage.core.close_error)) == 0)) {
                 found = "receive: a payload that breaks a limit did not close with the code rfc 9000 requires";
             }
             or (prediction.codes == 0 && closed_here) {
                 found = "receive: a payload that breaks no rule closed the connection";
             }
         }
-        if (op == OP_FRAMES && listener.core.authenticated_packets != before_auth) {
+        if (op == OP_FRAMES && listener.storage.core.authenticated_packets != before_auth) {
             verdict.accept();
         }
     }
     # how the script left the connection: open, closed by the server with a
     # code, or closed by the client, with how far it got there
     var ending: u64 = 0;
-    if (listener.core.peer_close_received) { ending = 0x200; }
-    or (listener.core.closing)             { ending = 0x100 | (listener.core.close_error & 0xff); }
-    val m:       *stream_api.Manager = ?listener.streams;
+    if (listener.storage.core.peer_close_received) { ending = 0x200; }
+    or (listener.storage.core.closing)             { ending = 0x100 | (listener.storage.core.close_error & 0xff); }
+    val m:       *stream_api.Manager = ?listener.storage.streams;
     var outcome: u64                 = verdict.mix(ending, verdict.bucket((m.peer_bidirectional_opened +
         m.peer_unidirectional_opened)::usize));
     outcome = verdict.mix(outcome, verdict.bucket(verdict.accepted()));
