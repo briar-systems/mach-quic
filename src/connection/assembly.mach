@@ -204,8 +204,15 @@ pub fun default_config(source: u64, local: ip.Endpoint,
     ret value;
 }
 
-# fixed arrays make the public backing size part of the type
+# fixed arrays and plain transport state make the public backing size part of the type
 pub rec Storage {
+    core:      core_api.Core;
+    cids:      cid_api.Manager;
+    paths:     path_api.Manager;
+    streams:   stream_api.Manager;
+    datagrams: datagram_api.Queue;
+    # handshake-only state, held until the core confirms the handshake
+    handshake_block:          chunks_api.Block;
     sends:                    [SEND_CAPACITY]transport_api.SendSlot;
     supported_versions:       [2]u32;
     close_reason:             [256]u8;
@@ -231,13 +238,8 @@ pub def Scratch:       scratch_api.Scratch;
 pub def SecretScratch: scratch_api.SecretScratch;
 
 pub rec Connection {
-    core:           core_api.Core;
     secrets:        core_api.Secrets;
     handshake:      handshake_api.Adapter;
-    cids:           cid_api.Manager;
-    paths:          path_api.Manager;
-    streams:        stream_api.Manager;
-    datagrams:      datagram_api.Queue;
     binding:        binding_api.Binding;
     driver:         transport_api.Driver[binding_api.Binding];
     storage:        *Storage;
@@ -248,9 +250,7 @@ pub rec Connection {
     provider: supply.Provider;
     account:  supply.Account;
     # the same account's secret chunks, which hold handshake keys' contexts
-    secret_provider: supply.SecretProvider;
-    # handshake-only state, held until the core confirms the handshake
-    handshake_block:        chunks_api.Block;
+    secret_provider:        supply.SecretProvider;
     storage_generation:     u64;
     local_parameter_length: usize;
     initialized:            bool;
@@ -439,13 +439,13 @@ fun chunk_source(c: *Connection) ranges.Source {
 }
 
 fun local_parameter_bytes(c: *Connection) *u8 {
-    ret ?c.handshake_block.data[LOCAL_PARAMETERS_AT];
+    ret ?c.storage.handshake_block.data[LOCAL_PARAMETERS_AT];
 }
 
 fun public_core_storage(c: *Connection) core_api.Storage {
     val storage: *Storage = c.storage;
     val work:    *Scratch = c.scratch;
-    val block:   *u8      = c.handshake_block.data;
+    val block:   *u8      = storage.handshake_block.data;
     ret core_api.Storage{
         receive_header:           ?work.receive_header[0],
         receive_header_capacity:  MAX_UDP_PAYLOAD,
@@ -485,7 +485,7 @@ fun public_core_storage(c: *Connection) core_api.Storage {
             retry_token_capacity: TOKEN_CAPACITY,
             retry_pseudo:         ?block[RETRY_PSEUDO_AT], retry_pseudo_capacity: RETRY_PSEUDO_CAPACITY
         },
-        handshake_block: ?c.handshake_block,
+        handshake_block: ?storage.handshake_block,
         chunk_source:    chunk_source(c)
     };
 }
@@ -554,7 +554,10 @@ fun secret_scratch_range(value: *SecretScratch) ownership.Range {
 }
 
 fun capacities_valid(storage: *Storage) bool {
-    ret !storage.leased && storage.source == 0;
+    ret !storage.leased && storage.source == 0 &&
+        !storage.core.initialized && !storage.cids.initialized &&
+        !storage.paths.valid && !storage.streams.valid &&
+        !storage.datagrams.valid && storage.handshake_block.data == nil;
 }
 
 fun storage_ranges_valid(c: *Connection, config: *Config, storage: *Storage,
@@ -672,7 +675,7 @@ fun acquire_backing(c: *Connection, config: *Config, storage: *Storage,
         ret false;
     }
     var from: ranges.Source = chunk_source(c);
-    if (!chunks_api.take_block(?from, ?c.handshake_block)) {
+    if (!chunks_api.take_block(?from, ?storage.handshake_block)) {
         supply.close(?c.provider, ?c.account);
         var no_provider:        supply.Provider;
         var no_secret_provider: supply.SecretProvider;
@@ -695,12 +698,12 @@ fun release_backing(c: *Connection) bool {
     if (!backing_lease_valid(c)) { ret false; }
     # a core that never finished still holds its owner and history chunks
     if (c.account.open) {
-        core_api.release_secret_chunks(?c.core, ?c.secrets);
-        core_api.release_chunks(?c.core);
+        core_api.release_secret_chunks(?c.storage.core, ?c.secrets);
+        core_api.release_chunks(?c.storage.core);
     }
     var from: ranges.Source = chunk_source(c);
-    chunks_api.give_block(?from, ?c.handshake_block);
-    if (c.handshake_block.data != nil ||
+    chunks_api.give_block(?from, ?c.storage.handshake_block);
+    if (c.storage.handshake_block.data != nil ||
         (c.account.open && !supply.close(?c.provider, ?c.account))) { ret false; }
     var no_provider:        supply.Provider;
     var no_secret_provider: supply.SecretProvider;
@@ -915,16 +918,16 @@ fun build_managers(c: *Connection, config: *Config,
         config.local_source_length);
     val peer_id: packet.ConnectionId = connection_id(config.peer_destination,
         config.peer_destination_length);
-    if (!stream_api.initialize(?c.streams, stream_configuration(config, role),
+    if (!stream_api.initialize(?c.storage.streams, stream_configuration(config, role),
         public_stream_storage(c))) {
         ret STAGE_STREAMS;
     }
-    if (!cid_api.initialize(?c.cids, cid_api.Config{source: config.source,
+    if (!cid_api.initialize(?c.storage.cids, cid_api.Config{source: config.source,
         local_active_limit: config.active_connection_id_limit::usize,
         peer_active_limit:  config.active_connection_id_limit::usize},
         public_cid_storage(c.storage), local_id, peer_id) ||
         (config.stateless_reset_token_present &&
-        cid_api.install_initial_local_reset_token(?c.cids,
+        cid_api.install_initial_local_reset_token(?c.storage.cids,
         config.stateless_reset_token).status != cid_api.STATUS_OK)) {
         ret STAGE_CONNECTION_IDS;
     }
@@ -934,7 +937,7 @@ fun build_managers(c: *Connection, config: *Config,
         path_role, config.peer_validated);
     # the send ceiling is the send storage; max_udp_payload bounds receipt only
     path_config.maximum_mtu = MAX_UDP_PAYLOAD::u16;
-    if (!path_api.initialize(?c.paths, path_config,
+    if (!path_api.initialize(?c.storage.paths, path_config,
         public_path_storage(c.storage),
         path_api.Endpoint{local: path_address(config.local),
         peer: path_address(config.peer)})) {
@@ -947,7 +950,7 @@ fun build_managers(c: *Connection, config: *Config,
     };
     var storage: datagram_api.Storage = datagram_api.empty_storage();
     if (datagram_config.enabled) { storage = datagram_storage(c); }
-    if (!datagram_api.initialize(?c.datagrams, datagram_config, storage)) {
+    if (!datagram_api.initialize(?c.storage.datagrams, datagram_config, storage)) {
         ret STAGE_DATAGRAMS;
     }
     ret STAGE_OK;
@@ -965,23 +968,23 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
         ret staged(STAGE_SCRATCH);
     }
     if (role == transport_api.CLIENT) {
-        value.core = core_api.init_client_result(?c.core, ?c.secrets,
+        value.core = core_api.init_client_result(?c.storage.core, ?c.secrets,
             core_configuration(c, config, role), core_storage(c),
-            secret_storage(c), ?c.handshake, ?c.cids, ?c.paths, ?c.streams,
-            ?c.datagrams, clock.nanos(now));
+            secret_storage(c), ?c.handshake, ?c.storage.cids, ?c.storage.paths,
+            ?c.storage.streams, ?c.storage.datagrams, clock.nanos(now));
     }
     or {
-        value.core = core_api.init_server_result(?c.core, ?c.secrets,
+        value.core = core_api.init_server_result(?c.storage.core, ?c.secrets,
             core_configuration(c, config, role), core_storage(c),
-            secret_storage(c), ?c.handshake, ?c.cids, ?c.paths, ?c.streams,
-            ?c.datagrams, clock.nanos(now));
+            secret_storage(c), ?c.handshake, ?c.storage.cids, ?c.storage.paths,
+            ?c.storage.streams, ?c.storage.datagrams, clock.nanos(now));
     }
     scratch_api.give_back(c.scratch, c.secret_scratch, config.source);
     if (!value.core.ok) {
         value.stage = STAGE_CORE;
         ret value;
     }
-    if (!binding_api.bind(?c.binding, ?c.core, ?c.secrets, c.scratch,
+    if (!binding_api.bind(?c.binding, ?c.storage.core, ?c.secrets, c.scratch,
         c.secret_scratch) ||
         !binding_api.prepare_initial_route(?c.binding, config.local_source,
         config.local_source_length) ||
@@ -999,13 +1002,13 @@ fun finish(c: *Connection, config: *Config, role: transport_api.Role,
     var started: bool = false;
     if (role == transport_api.CLIENT) {
         started = transport_api.init_client[binding_api.Binding](?c.driver,
-            driver_config, binding_api.protocol(?c.binding), ?c.streams,
-            ?c.datagrams, scope, driver_storage);
+            driver_config, binding_api.protocol(?c.binding), ?c.storage.streams,
+            ?c.storage.datagrams, scope, driver_storage);
     }
     or {
         started = transport_api.init_server[binding_api.Binding](?c.driver,
-            driver_config, binding_api.protocol(?c.binding), ?c.streams,
-            ?c.datagrams, scope, driver_storage);
+            driver_config, binding_api.protocol(?c.binding), ?c.storage.streams,
+            ?c.storage.datagrams, scope, driver_storage);
     }
     if (!started) {
         value.stage = STAGE_DRIVER;
@@ -1024,37 +1027,37 @@ fun abandon_manager_initialization(c: *Connection) bool {
     }
     if (c.binding.initialized &&
         !binding_api.abandon_initialization(?c.binding)) { ret false; }
-    if (c.core.initialized) {
-        val source: u64 = c.core.config.source;
+    if (c.storage.core.initialized) {
+        val source: u64 = c.storage.core.config.source;
         if (!scratch_api.lend(c.scratch, c.secret_scratch, source)) { ret false; }
-        val abandoned: bool = core_api.abandon_initialization(?c.core, ?c.secrets);
+        val abandoned: bool = core_api.abandon_initialization(?c.storage.core, ?c.secrets);
         scratch_api.give_back(c.scratch, c.secret_scratch, source);
         if (!abandoned) { ret false; }
     }
     if (c.handshake.initialized &&
         !handshake_api.abandon_initialization(?c.handshake)) { ret false; }
-    if (c.datagrams.valid) {
-        if (!c.datagrams.closing &&
-            datagram_api.begin_close(?c.datagrams).status !=
+    if (c.storage.datagrams.valid) {
+        if (!c.storage.datagrams.closing &&
+            datagram_api.begin_close(?c.storage.datagrams).status !=
             transport_api.STATUS_OK) { ret false; }
-        if (datagram_api.finish_close(?c.datagrams).status !=
+        if (datagram_api.finish_close(?c.storage.datagrams).status !=
             transport_api.STATUS_OK) { ret false; }
     }
-    if (c.paths.valid) {
-        if (!c.paths.closing && path_api.begin_close(?c.paths).status !=
+    if (c.storage.paths.valid) {
+        if (!c.storage.paths.closing && path_api.begin_close(?c.storage.paths).status !=
             path_api.STATUS_OK) { ret false; }
-        if (path_api.finish_close(?c.paths).status != path_api.STATUS_OK) {
+        if (path_api.finish_close(?c.storage.paths).status != path_api.STATUS_OK) {
             ret false;
         }
     }
-    if (c.cids.initialized) {
-        if (!c.cids.closing && !cid_api.begin_close(?c.cids)) { ret false; }
-        if (!cid_api.finish_close(?c.cids))                   { ret false; }
+    if (c.storage.cids.initialized) {
+        if (!c.storage.cids.closing && !cid_api.begin_close(?c.storage.cids)) { ret false; }
+        if (!cid_api.finish_close(?c.storage.cids))                           { ret false; }
     }
-    if (c.streams.valid) {
-        if (!c.streams.closing && stream_api.begin_close(?c.streams).status !=
+    if (c.storage.streams.valid) {
+        if (!c.storage.streams.closing && stream_api.begin_close(?c.storage.streams).status !=
             stream_api.STATUS_OK) { ret false; }
-        if (stream_api.finish_close(?c.streams).status !=
+        if (stream_api.finish_close(?c.storage.streams).status !=
             stream_api.STATUS_OK) { ret false; }
     }
     ret release_backing(c);
@@ -1108,16 +1111,18 @@ pub fun route_valid(c: *Connection, route: *Route) bool {
 }
 
 fun ids_open(c: *Connection) bool {
-    ret c != nil && c.initialized && c.core.initialized && !c.core.closing &&
-        c.core.peer_parameters_ready && c.cids.initialized && !c.cids.closing;
+    ret c != nil && c.initialized && c.storage != nil &&
+        c.storage.core.initialized && !c.storage.core.closing &&
+        c.storage.core.peer_parameters_ready &&
+        c.storage.cids.initialized && !c.storage.cids.closing;
 }
 
 pub fun connection_ids(c: *Connection) ConnectionIds {
     var value: ConnectionIds;
     if (!ids_open(c)) { ret value; }
-    value.wanted          = cid_api.local_demand(?c.cids);
-    value.next_sequence   = c.cids.local_next_sequence;
-    value.retire_prior_to = c.cids.local_retire_prior_to;
+    value.wanted          = cid_api.local_demand(?c.storage.cids);
+    value.next_sequence   = c.storage.cids.local_next_sequence;
+    value.retire_prior_to = c.storage.cids.local_retire_prior_to;
     ret value;
 }
 
@@ -1129,8 +1134,8 @@ pub fun issue_connection_id(c: *Connection, id: *u8, length: usize,
     var value: IssuedId;
     if (!ids_open(c) || id == nil || length == 0 ||
         length > packet.MAX_CONNECTION_ID ||
-        cid_api.local_demand(?c.cids) == 0) { ret value; }
-    val issued: cid_api.Result = core_api.issue_connection_id(?c.core,
+        cid_api.local_demand(?c.storage.cids) == 0) { ret value; }
+    val issued: cid_api.Result = core_api.issue_connection_id(?c.storage.core,
         connection_id(id, length), reset_token);
     if (issued.status != cid_api.STATUS_OK) { ret value; }
     binding_api.reconcile_routes(?c.binding);
@@ -1144,8 +1149,8 @@ pub fun issue_connection_id(c: *Connection, id: *u8, length: usize,
 # route. the others keep their routes until the peer retires them
 pub fun retire_connection_ids_prior_to(c: *Connection, sequence: u64) bool {
     if (!ids_open(c)) { ret false; }
-    val retired: cid_api.Result = core_api.retire_connection_ids_prior_to(?c.core,
-        sequence);
+    val retired: cid_api.Result = core_api.retire_connection_ids_prior_to(
+        ?c.storage.core, sequence);
     if (retired.status == cid_api.STATUS_ERROR) { ret false; }
     binding_api.reconcile_routes(?c.binding);
     ret true;
@@ -1154,9 +1159,11 @@ pub fun retire_connection_ids_prior_to(c: *Connection, sequence: u64) bool {
 fun release_ready(c: *Connection) bool {
     ret c != nil && c.initialized && backing_lease_valid(c) &&
         c.driver.protocol.context == ?c.binding &&
-        c.binding.core == ?c.core && c.binding.secrets == ?c.secrets &&
-        c.core.cids == ?c.cids && c.core.paths == ?c.paths &&
-        c.core.streams == ?c.streams && c.core.datagrams == ?c.datagrams &&
+        c.binding.core == ?c.storage.core && c.binding.secrets == ?c.secrets &&
+        c.storage.core.cids == ?c.storage.cids &&
+        c.storage.core.paths == ?c.storage.paths &&
+        c.storage.core.streams == ?c.storage.streams &&
+        c.storage.core.datagrams == ?c.storage.datagrams &&
         c.secrets.handshake == ?c.handshake &&
         transport_api.release_ready[binding_api.Binding](?c.driver) &&
         binding_api.release_ready(?c.binding);
@@ -1177,17 +1184,17 @@ pub fun release_closed(c: *Connection) bool {
     if (transport_api.release_closed[binding_api.Binding](?c.driver).status !=
         transport_api.STATUS_OK) { ret false; }
     if (!binding_api.release_closed(?c.binding)) { ret false; }
-    c.core.config.supported_versions                = nil;
-    c.core.config.alpn.data                         = nil;
-    c.core.config.alpn.length                       = 0;
-    c.core.config.server_name.data                  = nil;
-    c.core.config.server_name.length                = 0;
-    c.core.config.local_transport_parameters.data   = nil;
-    c.core.config.local_transport_parameters.length = 0;
-    c.core.initialized                              = false;
-    c.core.destroyed                                = false;
-    c.secrets.initialized                           = false;
-    c.secrets.destroyed                             = false;
+    c.storage.core.config.supported_versions                = nil;
+    c.storage.core.config.alpn.data                         = nil;
+    c.storage.core.config.alpn.length                       = 0;
+    c.storage.core.config.server_name.data                  = nil;
+    c.storage.core.config.server_name.length                = 0;
+    c.storage.core.config.local_transport_parameters.data   = nil;
+    c.storage.core.config.local_transport_parameters.length = 0;
+    c.storage.core.initialized                              = false;
+    c.storage.core.destroyed                                = false;
+    c.secrets.initialized                                   = false;
+    c.secrets.destroyed                                     = false;
     val event_generation: u64 = c.handshake.event_generation;
     var empty_handshake:  handshake_api.Adapter;
     empty_handshake.event_generation = event_generation;
@@ -1208,9 +1215,7 @@ pub fun reusable(c: *Connection) bool {
     ret c != nil && !c.initialized && c.released &&
         c.storage == nil && c.scratch == nil && c.secret_scratch == nil &&
         !c.driver.initialized && !c.binding.initialized &&
-        !c.core.initialized && !c.secrets.initialized &&
-        !c.handshake.initialized && !c.cids.initialized &&
-        !c.paths.valid && !c.streams.valid && !c.datagrams.valid;
+        !c.secrets.initialized && !c.handshake.initialized;
 }
 
 # `tls` must have been initialized with tls_lease(c), and is refused at
@@ -1426,5 +1431,15 @@ test assembly__server_acceptance_preserves_three_retry_identities {
     if (!apply_server_acceptance(?untouched, ?addressed) ||
         untouched.retry_source_present || !untouched.peer_validated ||
         !config_valid(?untouched, transport_api.SERVER)) { ret 6; }
+    ret 0;
+}
+
+test assembly__plain_managers_live_in_storage {
+    # plain transport managers live in Storage rather than welded Connection
+    val plain_managers: usize = $size_of(core_api.Core) +
+        $size_of(cid_api.Manager) + $size_of(path_api.Manager) +
+        $size_of(stream_api.Manager) + $size_of(datagram_api.Queue);
+    if ($size_of(Storage) < plain_managers) { ret 1; }
+    if ($size_of(Connection) >= 13312)      { ret 2; }
     ret 0;
 }
