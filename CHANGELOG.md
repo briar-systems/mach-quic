@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-24
+
+### Changed
+
+- **Breaking:** Moved plain transport managers (`core`, `cids`, `paths`, `streams`, `datagrams`, and `handshake_block`) from secret-welded `assembly.Connection` into plain `assembly.Storage`, shrinking locked memory per QUIC connection from 17,352 to 12,752 bytes while keeping `tls_lease`, `driver`, and `account` on `Connection` (#311).
+- Updated `dep/tls` pin to `mach-tls` v0.18.1.
+
 ## [0.27.0] - 2026-11-23
 
 ### Changed
